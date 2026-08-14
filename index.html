@@ -100,6 +100,9 @@
 
     #viewer-wrap { flex: 1; position: relative; min-width: 0; background: #050505; }
     #three-container, #leaflet-map, #cloud-container { position: absolute; inset: 0; display: none; }
+    /* isolate Leaflet's internal pane z-indexes (200-700) so app UI like the
+       DEM legend (z 120) isn't buried under map tiles */
+    #leaflet-map { z-index: 0; }
     #labels-container { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 60; }
     #three-container canvas { position: absolute; inset: 0; }
     #three-container canvas.measuring {
@@ -311,6 +314,7 @@
           <div class="navhelp">
             <span class="k">Left drag</span><span>Orbit around point under cursor</span>
             <span class="k">Right drag</span><span>Pan / move the map</span>
+            <span class="k">Middle drag</span><span>Slide view any direction</span>
             <span class="k">Scroll</span><span>Zoom toward cursor</span>
             <span class="k">Esc</span><span>Exit measurement tool</span>
           </div>
@@ -372,6 +376,19 @@
              <input type="number" id="dem-max" placeholder="auto">
            </div>
            <div class="slider-row">
+             <span>Color steps</span>
+             <select id="dem-steps">
+               <option value="0" selected>Continuous</option>
+               <option value="4">4 bands</option>
+               <option value="6">6 bands</option>
+               <option value="8">8 bands</option>
+               <option value="12">12 bands</option>
+               <option value="16">16 bands</option>
+               <option value="24">24 bands</option>
+               <option value="32">32 bands</option>
+             </select>
+           </div>
+           <div class="slider-row">
              <span>Opacity</span>
              <input type="range" id="dem-opacity" min="10" max="100" step="5" value="95">
              <span class="val" id="dem-opacity-val">95%</span>
@@ -380,6 +397,46 @@
              <button class="tool-btn" id="dem-apply">Apply</button>
              <button class="tool-btn" id="dem-reset">Reset</button>
            </div>
+           <div class="hint" style="margin-top:10px;">Narrow the Min/Max range to stretch colors over less elevation (more sensitivity). Bands quantize the scale so each color covers a labeled elevation range.</div>
+         </div>
+
+         <div class="panel" id="panel-pc" style="display:none;">
+           <h3><svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="1.6" fill="currentColor"/><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="18" cy="8" r="1.6" fill="currentColor"/><circle cx="8" cy="13" r="1.6" fill="currentColor"/><circle cx="15" cy="14" r="1.6" fill="currentColor"/><circle cx="11" cy="19" r="1.6" fill="currentColor"/></svg> Point Cloud</h3>
+           <div class="slider-row" style="margin-top:0;">
+             <span>Points</span>
+             <input type="range" id="pc2-budget" min="1" max="20" step="0.5" value="10">
+             <span class="val" id="pc2-budget-val">10M</span>
+           </div>
+           <div class="slider-row">
+             <span>Size</span>
+             <input type="range" id="pc2-size" min="0.2" max="3" step="0.1" value="1">
+             <span class="val" id="pc2-size-val">1.0</span>
+           </div>
+           <div class="slider-row">
+             <span>Sizing</span>
+             <select id="pc2-sizing">
+               <option value="adaptive">Adaptive (capped)</option>
+               <option value="attenuated">Attenuated</option>
+               <option value="fixed" selected>Fixed</option>
+             </select>
+           </div>
+           <div class="slider-row">
+             <span>Color</span>
+             <select id="pc2-color">
+               <option value="rgba" selected>RGB</option>
+               <option value="elevation">Elevation</option>
+               <option value="intensity">Intensity</option>
+               <option value="classification">Classification</option>
+             </select>
+           </div>
+           <div class="slider-row">
+             <span>EDL Shading</span>
+             <input type="checkbox" id="pc2-edl" checked style="accent-color:var(--brand-orange);">
+           </div>
+           <div class="tool-grid" style="margin-top:10px;">
+             <button class="tool-btn full" id="pc2-fit">Fit to Screen</button>
+           </div>
+           <div class="hint" style="margin-top:10px;" id="pc2-quality-hint">Auto quality: the point budget tunes itself to keep your device smooth. Raise Points for more detail on strong hardware.</div>
          </div>
       </div>
     </aside>

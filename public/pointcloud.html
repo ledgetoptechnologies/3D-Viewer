@@ -15,26 +15,6 @@
     #potree_render_area { position: absolute; inset: 0; }
     #potree_sidebar_container { display: none; }
 
-    #pc-toolbar {
-      position: absolute; top: 12px; left: 12px; z-index: 50;
-      display: flex; flex-direction: column; gap: 8px;
-      background: rgba(14,14,18,0.94); border: 1px solid rgba(238,80,7,0.28);
-      border-radius: 10px; padding: 12px; color: #f5f5f5; width: 210px;
-      backdrop-filter: blur(8px);
-    }
-    #pc-toolbar h4 { margin: 0 0 4px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #EE5007; }
-    #pc-toolbar .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
-    #pc-toolbar input[type=range] { flex: 1; accent-color: #EE5007; }
-    #pc-toolbar select {
-      background: #1a1a20; color: #eee; border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: inherit;
-    }
-    #pc-toolbar button {
-      background: rgba(238,80,7,0.16); border: 1px solid #EE5007; color: #fff;
-      border-radius: 7px; padding: 6px; font-size: 12px; font-weight: 600;
-      cursor: pointer; font-family: inherit;
-    }
-    #pc-toolbar button:hover { background: rgba(238,80,7,0.32); }
     #pc-status {
       position: absolute; bottom: 10px; left: 12px; z-index: 50;
       color: #999; font-size: 11px; background: rgba(10,10,12,0.85);
@@ -59,33 +39,11 @@
   <div id="potree_render_area"></div>
   <div id="potree_sidebar_container"></div>
 
-  <div id="pc-toolbar">
-    <h4>Point Cloud</h4>
-    <div class="row"><span>Points</span><input type="range" id="pc-budget" min="1" max="10" step="0.5" value="4"><span id="pc-budget-val">4M</span></div>
-    <div class="row"><span>Size</span><input type="range" id="pc-size" min="0.2" max="3" step="0.1" value="1"></div>
-    <div class="row"><span>Sizing</span>
-      <select id="pc-sizing">
-        <option value="adaptive">Adaptive (capped)</option>
-        <option value="attenuated">Attenuated</option>
-        <option value="fixed" selected>Fixed</option>
-      </select>
-    </div>
-    <div class="row"><span>Color</span>
-      <select id="pc-color">
-        <option value="rgba" selected>RGB</option>
-        <option value="elevation">Elevation</option>
-        <option value="intensity">Intensity</option>
-        <option value="classification">Classification</option>
-      </select>
-    </div>
-    <div class="row"><span>EDL</span><input type="checkbox" id="pc-edl" checked style="accent-color:#EE5007;"></div>
-    <button id="pc-fit">Fit to Screen</button>
-  </div>
-
   <div id="pc-status">Loading…</div>
   <div id="pc-loading"><div class="spinner"></div><div>Streaming 428M point EPT cloud…</div></div>
 
   <script src="/potree/libs/jquery.min.js"></script>
+  <script src="/potree/libs/three.js/build/three.min.js"></script>
   <script src="/potree/libs/spectrum/spectrum.js"></script>
   <script src="/potree/libs/jquery-ui/jquery-ui.min.js"></script>
   <script src="/potree/libs/other/BinaryHeap.js"></script>
@@ -105,78 +63,492 @@
     window.viewer = viewer;
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
-    viewer.setPointBudget(4 * 1000 * 1000);
+    viewer.setPointBudget(10_000_000);
+    viewer.setLengthUnit('ft');
     viewer.setBackground('black');
     viewer.setDescription('');
     viewer.loadSettingsFromURL();
 
-    // Earth-style controls to match the main 3D tab
-    viewer.setControls(viewer.earthControls);
-    // Allow looking up from below the cloud (match the main 3D tab's range)
-    viewer.scene.view.minPitch = -Math.PI / 2 + 0.02;
-    viewer.scene.view.maxPitch = Math.PI / 2 - 0.02;
-    document.getElementById('potree_render_area')
-      .addEventListener('contextmenu', (e) => e.preventDefault());
+    const view = viewer.scene.view;
+    view.minPitch = -Math.PI / 2;
+    view.maxPitch = Math.PI / 2;
+    viewer.renderer.domElement.tabIndex = 2222;   // needed for keydown (Esc)
+
+    // --------------------------------------------------------------------
+    // Budget + device-adaptive LOD
+    // --------------------------------------------------------------------
+    let cloudMeta = { total: 0, name: 'EPT' };
+    const budgetState = {
+      target: 10_000_000,     // user-set target (via __pcApi.setBudget only)
+      live: 10_000_000,       // what the viewer actually gets; dropped by auto-LOD
+      auto: false
+    };
+    let fpsEMA = 60, lastFrameT = 0;
+    (function fpsTrack(t){
+      requestAnimationFrame(fpsTrack);
+      if (lastFrameT && t > lastFrameT) {
+        const inst = 1000 / (t - lastFrameT);
+        fpsEMA += (inst - fpsEMA) * 0.1;
+      }
+      lastFrameT = t;
+    })(0);
+    setInterval(() => {
+      if (fpsEMA < 24 && budgetState.live > 1_500_000) {
+        budgetState.live = Math.max(1_500_000, Math.floor(budgetState.live * 0.75));
+        viewer.setPointBudget(budgetState.live);
+        budgetState.auto = budgetState.live < budgetState.target;
+      } else if (fpsEMA > 50 && budgetState.live < budgetState.target) {
+        budgetState.live = Math.min(budgetState.target, Math.floor(budgetState.live * 1.25));
+        viewer.setPointBudget(budgetState.live);
+        budgetState.auto = budgetState.live < budgetState.target;
+      }
+    }, 2000);
+
+    // --------------------------------------------------------------------
+    // Insertion lifecycle tracking shared by the control API and the
+    // custom controls below (right-click completes an active insertion).
+    // --------------------------------------------------------------------
+    const insertionActive = { m: false, v: false };
+    viewer.measuringTool.addEventListener('start_inserting_measurement', () => { insertionActive.m = true; });
+    viewer.measuringTool.addEventListener('end_inserting_measurement', () => { insertionActive.m = false; });
+    viewer.volumeTool.addEventListener('start_inserting_volume', () => { insertionActive.v = true; });
+    viewer.volumeTool.addEventListener('end_inserting_volume', () => { insertionActive.v = false; });
+    viewer.addEventListener('cancel_insertions', () => { insertionActive.m = false; insertionActive.v = false; });
+
+    // When an insertion starts, MeasuringTool/VolumeTool re-enable the input
+    // handler — which would resuscitate earthControls dispatch. Strip
+    // earthControls from the listener list again whenever that happens.
+    let reenablingIH = false;
+    function stripEarthControls() {
+      if (reenablingIH) return;
+      reenablingIH = true;
+      try {
+        const ih = viewer.inputHandler;
+        ih.enabled = true;                       // insertion markers need drags
+        if (ih.inputListeners.includes(viewer.earthControls)) {
+          ih.removeInputListener(viewer.earthControls);
+        }
+      } finally { reenablingIH = false; }
+    }
+    viewer.measuringTool.addEventListener('start_inserting_measurement', stripEarthControls);
+    viewer.measuringTool.addEventListener('end_inserting_measurement', stripEarthControls);
+    viewer.volumeTool.addEventListener('start_inserting_volume', stripEarthControls);
+    viewer.volumeTool.addEventListener('end_inserting_volume', stripEarthControls);
+    viewer.addEventListener('cancel_insertions', stripEarthControls);
+
+    // Live visible-point sample: Potree.numNodesLoading is a non-updating
+    // static export and pc.numVisiblePoints only refreshes during node loads,
+    // so poll it — same cadence as the status line.
+    budgetState.points = 0;
+    setInterval(() => {
+      const pc = viewer.scene.pointclouds[0];
+      if (pc && pc.numVisiblePoints) budgetState.points = pc.numVisiblePoints;
+    }, 500);
+
+    // --------------------------------------------------------------------
+    // Control API consumed by the parent app's sidebar.
+    // --------------------------------------------------------------------
+    function eachMat(fn) { for (const pc of viewer.scene.pointclouds) fn(pc.material); }
+    window.__pcApi = {
+      setBudget(m) {
+        const v = Math.max(1, Math.min(20, Number(m))) * 1e6;
+        budgetState.target = v;
+        budgetState.live = v;
+        viewer.setPointBudget(v);
+        budgetState.auto = false;
+      },
+      setSize(v) { eachMat(mat => { mat.size = parseFloat(v); }); },
+      setSizing(k) {
+        eachMat(mat => {
+          if (k === 'adaptive') {
+            mat.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+            mat.minSize = 1; mat.maxSize = 6;
+          } else if (k === 'attenuated') {
+            mat.pointSizeType = Potree.PointSizeType.ATTENUATED;
+            mat.minSize = 1; mat.maxSize = 12;
+          } else {
+            mat.pointSizeType = Potree.PointSizeType.FIXED;
+            mat.minSize = 0.5; mat.maxSize = 50;
+          }
+        });
+      },
+      setColor(a) { eachMat(mat => { mat.activeAttributeName = a; }); },
+      setEDL(b) { viewer.setEDLEnabled(!!b); },
+      fit() {
+        if (viewer.scene.pointclouds.length) viewer.fitToScreen(0.7);
+      },
+      setTool(t) {
+        // finish/cancel whatever is inserting first, then start the new one
+        viewer.dispatchEvent({ type: 'cancel_insertions' });
+        if (t === 'distance') {
+          viewer.measuringTool.startInsertion({ showDistances: true, showArea: false, closed: false, name: 'Distance' });
+        } else if (t === 'area') {
+          viewer.measuringTool.startInsertion({ showDistances: true, showArea: true, closed: true, name: 'Area' });
+        } else if (t === 'volume') {
+          viewer.volumeTool.startInsertion({ clip: false });
+        }
+        // 'none' => just cancelled
+      },
+      cancel() { viewer.dispatchEvent({ type: 'cancel_insertions' }); },
+      clearMeasurements() {
+        viewer.dispatchEvent({ type: 'cancel_insertions' });
+        // removeAllMeasurements removes measurements + profiles + volumes
+        viewer.scene.removeAllMeasurements();
+      },
+      getStatus() {
+        const pc = viewer.scene.pointclouds[0];
+        return {
+          budgetTarget: budgetState.target,
+          budgetLive: budgetState.live,
+          fps: Math.round(fpsEMA * 10) / 10,
+          points: budgetState.points || (pc ? (pc.numVisiblePoints || 0) : 0),
+          auto: budgetState.auto
+        };
+      }
+    };
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') window.__pcApi.cancel();
+    });
+    // iframe blur (e.g. parent tab switch): end any stuck drag/pinch
+    window.addEventListener('blur', () => { if (pcControls) pcControls._blur(); });
 
     const statusEl = document.getElementById('pc-status');
+    function renderStatus() {
+      if (!cloudMeta.total) return;
+      const pts = cloudMeta.total.toLocaleString('en-US');
+      const vis = budgetState.points
+        ? (budgetState.points >= 1e6
+          ? (budgetState.points / 1e6).toFixed(1) + 'M'
+          : Math.round(budgetState.points / 1000) + 'k')
+        : '—';
+      const budg = (budgetState.live / 1e6).toFixed(1).replace(/\.0$/, '');
+      statusEl.textContent =
+        pts + ' pts · ' + vis + ' visible · budget ' + budg + 'M' +
+        (budgetState.auto ? ' auto' : '') + ' · ' + Math.round(fpsEMA) + ' fps';
+    }
+    setInterval(renderStatus, 500);
 
+    // --------------------------------------------------------------------
     // View sync API for the parent app (UTM coordinates, shared frame).
-    // Sets camera position + look-at target; safe to call any time after load.
+    // --------------------------------------------------------------------
     window.__pcViewReady = false;
     window.__setViewUTM = (camE, camN, camAlt, tgtE, tgtN, tgtAlt) => {
-      const view = viewer.scene.view;
       view.position.set(camE, camN, camAlt);
       view.lookAt(tgtE, tgtN, tgtAlt);
+      if (pcControls) {
+        pcControls.pivot.set(tgtE, tgtN, tgtAlt);
+        pcControls._mode = 'none';
+      }
       window.__pcViewReady = true;
     };
 
-    // Fallback pivot: if the GPU point pick misses on mousedown (sparse area,
-    // sky, or first frames), EarthControls silently ignores the whole drag.
-    // Priority: native GPU pick -> bbox mid-plane ray hit -> current view pivot.
-    const ec = viewer.earthControls;
-    ec.rotationSpeed = 1.5;   // default 10 is far too twitchy in a full-width viewer
+    // --------------------------------------------------------------------
+    // Custom navigation controls — port of the main tab's EarthLikeControls
+    // (earth-controls.js) into Potree's Z-up UTM frame. Replaces
+    // EarthControls entirely: left-drag orbits the surface point under the
+    // cursor, right-drag grabs the ground plane, middle-drag is a free
+    // screen-space pan, wheel zooms toward the cursor and NEVER no-ops
+    // (pick -> bbox mid-plane -> current pivot).
+    // --------------------------------------------------------------------
+    class PCPointerControls {
+      constructor(viewer) {
+        this.viewer = viewer;
+        this.view = viewer.scene.view;
+        this.dom = viewer.renderer.domElement;
+        this.pivot = new THREE.Vector3();
+        this.enabled = true;
 
-    // LEFT = orbit, RIGHT = pan (Potree native is the reverse). EarthControls'
-    // drag handler branches on e.drag.mouse (1=LEFT bit, 2=RIGHT bit), so wrap
-    // its registered 'drag' listener and swap the button bits before calling it.
-    if (ec._listeners && ec._listeners['drag'] && ec._listeners['drag'].length) {
-      const origDrag = ec._listeners['drag'][0];
-      ec._listeners['drag'][0] = (e) => {
-        const d = e.drag;
-        if (d && (d.mouse === 1 || d.mouse === 2)) {
-          const orig = d.mouse;
-          d.mouse = orig === 1 ? 2 : 1;
-          origDrag(e);
-          d.mouse = orig;
-        } else {
-          origDrag(e);
-        }
-      };
-    }
+        this._mode = 'none';            // none | orbit | pan | screenpan
+        this._lastPx = { x: 0, y: 0 };
+        this._downPx = { x: 0, y: 0, t: 0 };
+        this._panStart = new THREE.Vector3();
+        this._panStartPos = new THREE.Vector3();
+        this._panPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        this._screenRef = 100;
+        this._grabDepth = 100;
+        this._pointerId = null;
+        this._touch = {
+          mode: 'none',                 // none | orbit | pinch
+          pts: new Map(),
+          pinchDist: 0,
+          pinchMidPx: { x: 0, y: 0 },
+          pinchPlane: new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
+          pinchStart: new THREE.Vector3()
+        };
 
-    ec.addEventListener('mousedown', (e) => {
-      if (ec.pivot || !e.mouse) return;
-      const cam = viewer.scene.getActiveCamera();
-      const el = viewer.renderer.domElement;
-      let pivot = null;
-      try {
-        const ray = Potree.Utils.mouseToRay(e.mouse, cam, el.clientWidth, el.clientHeight);
-        const pcs = viewer.scene.pointclouds;
+        this._onPointerDown = this._pointerDown.bind(this);
+        this._onPointerMove = this._pointerMove.bind(this);
+        this._onPointerUp = this._pointerUp.bind(this);
+        this._onWheel = this._wheel.bind(this);
+        this.dom.addEventListener('pointerdown', this._onPointerDown);
+        this.dom.addEventListener('pointermove', this._onPointerMove);
+        this.dom.addEventListener('wheel', this._onWheel, { passive: false });
+        window.addEventListener('pointerup', this._onPointerUp);
+        window.addEventListener('pointercancel', this._onPointerUp);
+      }
+
+      _cam() { return this.viewer.scene.getActiveCamera(); }
+      _px(e) { return { x: e.clientX, y: e.clientY }; }   // CSS px, DPR-independent
+      _nms(px) {
+        const r = this.dom.getBoundingClientRect();
+        return { x: px.x - r.left, y: px.y - r.top };
+      }
+      _ndc(px) {
+        const r = this.dom.getBoundingClientRect();
+        return new THREE.Vector2(
+          ((px.x - r.left) / r.width) * 2 - 1,
+          -((px.y - r.top) / r.height) * 2 + 1
+        );
+      }
+      _ray(px) {
+        // three r124 (Potree's bundled lib): setFromCamera returns void —
+        // never chain .ray off it.
+        const rc = new THREE.Raycaster();
+        rc.setFromCamera(this._ndc(px), this._cam());
+        return rc.ray;
+      }
+      _bboxMidZ() {
+        const pcs = this.viewer.scene.pointclouds;
+        if (!pcs.length) return null;
+        const bb = pcs[0].boundingBox.clone().applyMatrix4(pcs[0].matrixWorld);
+        return (bb.min.z + bb.max.z) / 2;
+      }
+      _planeHit(px, plane, minDist) {
+        const ray = this._ray(px);
+        const denom = ray.direction.dot(plane.normal);
+        if (Math.abs(denom) < 0.02) return null;    // ray ~parallel to plane
+        // full point-plane form: t = -(n·o + c)/(n·d). Dropping n·o breaks at
+        // UTM-scale origins (camera sits at ~(367k, 4.76M, 500)).
+        const t = -(ray.origin.dot(plane.normal) + plane.constant) / denom;
+        if (!isFinite(t) || t < (minDist ?? 0.5) || t > 200000) return null;
+        return ray.origin.clone().add(ray.direction.clone().multiplyScalar(t));
+      }
+      // pick chain: GPU point pick -> bbox mid-plane -> current pivot. Never null.
+      _anchor(px) {
+        const pcs = this.viewer.scene.pointclouds;
         if (pcs.length) {
-          const bb = pcs[0].boundingBox.clone().applyMatrix4(pcs[0].matrixWorld);
-          const z = (bb.min.z + bb.max.z) / 2;
-          const t = (z - ray.origin.z) / ray.direction.z;
-          if (isFinite(t) && t > 0 && t < 100000) {
-            pivot = ray.origin.clone().add(ray.direction.clone().multiplyScalar(t));
+          try {
+            const I = Potree.Utils.getMousePointCloudIntersection(
+              this._nms(px), this._cam(), this.viewer, pcs, {});
+            if (I && I.location) return I.location.clone();
+          } catch (err) { /* pick can fail on empty octree regions */ }
+          const mz = this._bboxMidZ();
+          if (mz !== null) {
+            const hit = this._planeHit(px, new THREE.Plane(new THREE.Vector3(0, 0, 1), -mz));
+            if (hit) return hit;
           }
         }
-      } catch (err) { /* fall through */ }
-      if (!pivot) pivot = viewer.scene.view.getPivot();   // always defined
-      ec.pivot = pivot;
-      ec.camStart = cam.clone();
-      ec.pivotIndicator.visible = true;
-      ec.pivotIndicator.position.copy(pivot);
-    });
+        return this.view.getPivot();
+      }
+
+      _pointerDown(e) {
+        if (!this.enabled) return;
+        this.dom.setPointerCapture?.(e.pointerId);
+        this.dom.focus && this.dom.focus();         // keep Esc key delivery
+
+        if (e.pointerType === 'touch') {
+          if (this._touch.pts.size >= 2) return;    // ignore 3rd+ fingers
+          this._touch.pts.set(e.pointerId, this._px(e));
+          if (this._touch.pts.size === 2) {
+            const p = [...this._touch.pts.values()];
+            this._touch.pinchDist = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+            this._touch.pinchMidPx = { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
+            const a = this._anchor(this._touch.pinchMidPx);
+            this._touch.pinchPlane.set(new THREE.Vector3(0, 0, 1), -a.z);
+            const s = this._planeHit(this._touch.pinchMidPx, this._touch.pinchPlane);
+            this._touch.pinchStart.copy(s || a);
+            this._touch.mode = 'pinch';
+          } else {
+            this._touch.mode = 'orbit';
+            this.pivot.copy(this._anchor(this._px(e)));
+          }
+          return;
+        }
+
+        this._pointerId = e.pointerId;
+        this._downPx = { ...this._px(e), t: performance.now() };
+        this._lastPx = this._px(e);
+
+        if (e.button === 0) {
+          this.pivot.copy(this._anchor(this._px(e)));
+          this._mode = 'orbit';
+        } else if (e.button === 2) {
+          if (this._inserting()) return;            // right-click => finish insertion
+          const a = this._anchor(this._px(e));
+          this._panPlane.set(new THREE.Vector3(0, 0, 1), -a.z);
+          const s = this._planeHit(this._px(e), this._panPlane, 0.1);
+          if (!s) { this._mode = 'none'; return; }
+          this._panStart.copy(s);
+          this._panStartPos.copy(this.view.position);
+          this._mode = 'pan';
+          e.preventDefault();
+        } else if (e.button === 1) {
+          if (this._inserting()) return;
+          const a = this._anchor(this._px(e));
+          this._screenRef = Math.max(0.5, this.view.position.distanceTo(a));
+          this._mode = 'screenpan';
+          e.preventDefault();
+        }
+      }
+
+      _pointerMove(e) {
+        if (!this.enabled) return;
+
+        if (e.pointerType === 'touch') {
+          if (!this._touch.pts.has(e.pointerId)) return;
+          this._touch.pts.set(e.pointerId, this._px(e));
+          if (this._touch.mode === 'pinch' && this._touch.pts.size === 2) {
+            const p = [...this._touch.pts.values()];
+            const dist = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+            const mid = { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
+            if (this._touch.pinchDist > 1 && dist > 1) {
+              const target = this._anchor(this._touch.pinchMidPx);
+              this._zoomTowards(target, this._touch.pinchDist / dist);
+            }
+            const cur = this._planeHit(mid, this._touch.pinchPlane, 0.1);
+            if (cur) {
+              const delta = this._touch.pinchStart.clone().sub(cur);
+              if (delta.length() < 1000) this.view.position.add(delta);
+            }
+            this._touch.pinchStart.copy(cur || this._touch.pinchStart);
+            this._touch.pinchDist = dist;
+            this._touch.pinchMidPx = mid;
+          } else if (this._touch.mode === 'orbit' && this._touch.pts.size === 1) {
+            this._orbitDrag(e, 1.0);
+          }
+          return;
+        }
+
+        if (this._mode === 'none' || e.pointerId !== this._pointerId) return;
+        const dx = e.clientX - this._lastPx.x;
+        const dy = e.clientY - this._lastPx.y;
+        this._lastPx = { x: e.clientX, y: e.clientY };
+        if (dx === 0 && dy === 0) return;
+
+        if (this._mode === 'orbit') {
+          this._orbitDrag(e, 1.0, dx, dy);
+        } else if (this._mode === 'pan') {
+          const cur = this._planeHit(this._px(e), this._panPlane, 0.1);
+          if (!cur) return;
+          const delta = this._panStart.clone().sub(cur);
+          const maxStep = Math.max(50, this.view.position.distanceTo(cur) * 2);
+          if (delta.length() > maxStep) delta.setLength(maxStep);
+          this.view.position.copy(this._panStartPos).add(delta);
+        } else if (this._mode === 'screenpan') {
+          const h = this.dom.clientHeight || 800;
+          const fov = this._cam().fov || 60;
+          const wpp = 2 * this._screenRef * Math.tan(THREE.MathUtils.degToRad(fov / 2)) / h;
+          const right = new THREE.Vector3().setFromMatrixColumn(this._cam().matrixWorld, 0);
+          const up = new THREE.Vector3().setFromMatrixColumn(this._cam().matrixWorld, 1);
+          this.view.position.addScaledVector(right, -dx * wpp);
+          this.view.position.addScaledVector(up, dy * wpp);
+        }
+      }
+
+      _orbitDrag(e, gainScale, preDx, preDy) {
+        const now = this._px(e);
+        const dx = preDx !== undefined ? preDx : now.x - this._lastPx.x;
+        const dy = preDy !== undefined ? preDy : now.y - this._lastPx.y;
+        this._lastPx = now;
+        if (dx === 0 && dy === 0) return;
+        // 0.00434 rad/px = 0.249 deg/px — identical to the main 3D mesh tab.
+        // Dragging right pans the view right (yaw +), i.e. the scene appears
+        // to rotate WITH the cursor (EarthLikeControls sign convention).
+        const G = 0.00434 * gainScale;
+        this._applyOrbit(this.pivot, dx * G, dy * G);
+      }
+
+      _applyOrbit(pivot, yawDelta, pitchDelta) {
+        const view = this.view;
+        const offset = new THREE.Vector3().subVectors(view.position, pivot);
+        const r = offset.length();
+        if (r < 1e-6) return;
+
+        // camera-right projected onto the XY plane (Potree world up = +Z)
+        const RIGHT = new THREE.Vector3(
+          Math.cos(view.yaw), Math.sin(view.yaw), 0);
+        const curPitch = view.pitch;
+        let pd = THREE.MathUtils.clamp(
+          pitchDelta,
+          (Math.max(curPitch, -Math.PI / 2) - Math.PI / 2 + 0.03) - curPitch,
+          (Math.min(curPitch, Math.PI / 2) + Math.PI / 2 - 0.03) - curPitch
+        );
+
+        const q = new THREE.Quaternion()
+          .setFromAxisAngle(new THREE.Vector3(0, 0, 1), yawDelta)
+          .multiply(new THREE.Quaternion().setFromAxisAngle(RIGHT, pd));
+        offset.applyQuaternion(q);
+        // lookAt keeps the zero-roll yaw/pitch composition; radius untouched
+        view.position.copy(pivot).add(offset);
+        view.lookAt(pivot);
+      }
+
+      _pointerUp(e) {
+        if (e.pointerType === 'touch') {
+          this._touch.pts.delete(e.pointerId);
+          if (this._touch.pts.size === 0) {
+            this._touch.mode = 'none';
+          } else if (this._touch.pts.size === 1 && this._touch.mode === 'pinch') {
+            this._touch.mode = 'orbit';
+            this.pivot.copy(this._anchor([...this._touch.pts.values()][0]));
+          }
+          return;
+        }
+        if (this._pointerId !== null && e.pointerId !== this._pointerId) return;
+
+        const moved = Math.hypot(e.clientX - this._downPx.x, e.clientY - this._downPx.y);
+        const dt = performance.now() - this._downPx.t;
+        const wasDrag = moved >= 5 || dt >= 400 || this._mode !== 'pan';
+        // right-click WITHOUT drag completes an active measurement/volume
+        if (e.button === 2 && !wasDrag) {
+          window.__pcApi.cancel();
+        }
+        this._mode = 'none';
+        this._pointerId = null;
+      }
+
+      _zoomTowards(target, s) {
+        const view = this.view;
+        const offset = new THREE.Vector3().subVectors(view.position, target);
+        let d = offset.length() * s;
+        d = THREE.MathUtils.clamp(d, 0.1, 100000);
+        // no-op guard: a pure "away" zoom on a degenerate offset is useless
+        if (offset.lengthSq() < 1e-9 && s > 1) return;
+        offset.setLength(d);
+        view.position.copy(target).add(offset);
+        view.lookAt(target);
+      }
+
+      _wheel(e) {
+        if (!this.enabled) return;
+        e.preventDefault();
+        const px = this._px(e);
+        const hit = this._anchor(px);
+        const s = Math.pow(0.9, -e.deltaY / 100);   // 3 x 100 notches => ~0.73x
+        this._zoomTowards(hit, s);
+        this.pivot.copy(hit);                        // follow-up wheel keeps depth
+      }
+
+      _inserting() {
+        return window.__pcApi && (insertionActive.m || insertionActive.v);
+      }
+
+      _blur() {
+        this._mode = 'none';
+        this._pointerId = null;
+        this._touch.pts.clear();
+        this._touch.mode = 'none';
+      }
+    }
+
+    // Replace Potree's EarthControls with our pointer-event controls.
+    // earthControls.update() still runs each frame (pivot indicator, speed
+    // transitions); setControls keeps viewer.controls non-null for any of
+    // Potree's internal getControls() consumers, we just remove its input.
+    viewer.setControls(viewer.earthControls);
+    viewer.inputHandler.removeInputListener(viewer.earthControls);
+    const pcControls = new PCPointerControls(viewer);
 
     Potree.loadPointCloud(EPT_URL, 'Rome Dam', (e) => {
       if (e.type === 'loading_failed') {
@@ -187,8 +559,8 @@
       const pc = e.pointcloud;
       const mat = pc.material;
       mat.size = 1;
-      // Default FIXED sizing (matches the Sizing dropdown) — no giant blobs
-      // at sparse octree edges. Adaptive stays available but capped.
+      // Default FIXED sizing — no giant blobs at sparse octree edges.
+      // Adaptive/attenuated stay available through __pcApi.setSizing().
       mat.pointSizeType = Potree.PointSizeType.FIXED;
       mat.minSize = 0.5;
       mat.maxSize = 50;
@@ -197,42 +569,14 @@
 
       viewer.scene.addPointCloud(pc);
       if (!window.__pcViewReady) viewer.fitToScreen(0.7);   // don't stomp a synced view
+      pcControls.pivot.copy(view.getPivot());
 
       const cam = viewer.scene.getActiveCamera();
       cam.near = 0.1; cam.far = 100000; cam.updateProjectionMatrix();
 
       document.getElementById('pc-loading').classList.add('hidden');
-      statusEl.textContent = '428,498,832 points · EPT (laszip) · UTM 16N';
-
-      // UI wiring
-      document.getElementById('pc-budget').addEventListener('input', (ev) => {
-        const m = parseFloat(ev.target.value);
-        viewer.setPointBudget(m * 1000 * 1000);
-        document.getElementById('pc-budget-val').textContent = m + 'M';
-      });
-      document.getElementById('pc-size').addEventListener('input', (ev) => {
-        mat.size = parseFloat(ev.target.value);
-      });
-      document.getElementById('pc-sizing').addEventListener('change', (ev) => {
-        const v = ev.target.value;
-        if (v === 'adaptive') {
-          mat.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-          mat.minSize = 1; mat.maxSize = 6;
-        } else if (v === 'attenuated') {
-          mat.pointSizeType = Potree.PointSizeType.ATTENUATED;
-          mat.minSize = 1; mat.maxSize = 12;
-        } else {
-          mat.pointSizeType = Potree.PointSizeType.FIXED;
-          mat.minSize = 0.5; mat.maxSize = 50;
-        }
-      });
-      document.getElementById('pc-color').addEventListener('change', (ev) => {
-        mat.activeAttributeName = ev.target.value;
-      });
-      document.getElementById('pc-edl').addEventListener('change', (ev) => {
-        viewer.setEDLEnabled(ev.target.checked);
-      });
-      document.getElementById('pc-fit').addEventListener('click', () => viewer.fitToScreen(0.7));
+      cloudMeta.total = 428498832;
+      renderStatus();
     });
   </script>
 </body>

@@ -91,7 +91,8 @@ const demSettings = {
   cmap: 'viridis',
   shade: 1.0,          // hillshade intensity 0..2
   minFt: null,         // null = auto from data
-  maxFt: null
+  maxFt: null,
+  steps: 0             // 0 = continuous colormap, >0 = N discrete elevation bands
 };
 let geoDatasets = {};        // url -> { tiff, images[], ... }
 let geoPool = null;
@@ -620,6 +621,21 @@ function lineMaterial() {
 }
 
 function setTool(tool) {
+  if (state.activeMode === 'cloud') {
+    // route to the Potree iframe (same buttons drive both viewers)
+    const api = pcApi();
+    if (api) {
+      if (tool === 'clear') { api.clearMeasurements(); tool = 'none'; }
+      else api.setTool(tool);
+    } else if (tool === 'clear') tool = 'none';
+    state.activeTool = tool;
+    document.querySelectorAll('#panel-measure .tool-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tool === tool);
+    });
+    dom.measureOutput.innerHTML = tool === 'none' ? ''
+      : '<div class="hint">Click points on the cloud. Values appear on the model. Esc or right-click to finish.</div>';
+    return;
+  }
   if (tool === 'clear') { clearAllMeasurements(); tool = 'none'; }
   if (state.measure) cancelActiveMeasure();
   state.activeTool = tool;
@@ -953,6 +969,11 @@ function onDoubleClick() {
 function onKeyDown(e) {
   if (e.key === 'Escape') {
     if (dom.photoModal.style.display === 'flex') { closePhoto(); return; }
+    if (state.activeMode === 'cloud') {
+      const api = pcApi(); if (api) api.cancel();
+      setTool('none');
+      return;
+    }
     if (state.activeTool !== 'none') { cancelActiveMeasure(); setTool('none'); }
   } else if (e.key === 'Enter') {
     if (state.measure && state.measure.points.length >= 3) finishMeasure();
@@ -993,14 +1014,23 @@ async function getDataset(url, isDem) {
   const image = images[0];
   const bbox = image.getBoundingBox();
   const [minE, minN, maxE, maxN] = bbox;
-  const sw = utmToLatLon(minE, minN);
-  const ne = utmToLatLon(maxE, maxN);
+  // true lat/lon footprint of the rotated UTM rectangle: warp all 4 corners,
+  // lat/lon bounds = min/max over the warped corners (covers the rotation margin)
+  const cLL = [utmToLatLon(minE, maxN), utmToLatLon(maxE, maxN),
+               utmToLatLon(minE, minN), utmToLatLon(maxE, minN)];
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const c of cLL) {
+    if (c[0] < minLat) minLat = c[0]; if (c[0] > maxLat) maxLat = c[0];
+    if (c[1] < minLon) minLon = c[1]; if (c[1] > maxLon) maxLon = c[1];
+  }
   const ds = {
     tiff, images, isDem,
     W: image.getWidth(), H: image.getHeight(),
     minE, minN, maxE, maxN,
-    llBounds: [[sw[0], sw[1]], [ne[0], ne[1]]],
-    nodata: parseFloat(image.fileDirectory?.GDAL_NODATA ?? 'NaN')
+    llCorners: cLL,                                   // NW, NE, SW, SE in lat/lon (warped)
+    llBounds: [[minLat, minLon], [maxLat, maxLon]],   // encloses all 4 warped corners
+    nodata: parseFloat(image.fileDirectory?.GDAL_NODATA ?? 'NaN'),
+    _ovCache: null                                    // cached overview raster for recolor w/o refetch
   };
   if (isDem) {
     // stats from the smallest overview
@@ -1034,58 +1064,75 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     tile.width = size.x; tile.height = size.y;
     const ds = this.ds;
 
-    const nw = this._map.unproject([coords.x * size.x, coords.y * size.y], coords.z);
-    const se = this._map.unproject([(coords.x + 1) * size.x, (coords.y + 1) * size.y], coords.z);
-    const [minE0, maxN0] = latLonToUtm(nw.lat, nw.lng);
-    const [maxE0, minN0] = latLonToUtm(se.lat, se.lng);
+    // Warp fix: unproject ALL FOUR tile corners (UTM rows are not Mercator rows -
+    // grid convergence rotates the raster ~1.11 deg, so NW/SE alone misses the shear)
+    const pxs = [coords.x * size.x, (coords.x + 1) * size.x];
+    const pys = [coords.y * size.y, (coords.y + 1) * size.y];
+    let minE0 = Infinity, maxE0 = -Infinity, minN0 = Infinity, maxN0 = -Infinity;
+    for (const px of pxs) for (const py of pys) {
+      const ll = this._map.unproject([px, py], coords.z);
+      const en = latLonToUtm(ll.lat, ll.lng);
+      if (en[0] < minE0) minE0 = en[0]; if (en[0] > maxE0) maxE0 = en[0];
+      if (en[1] < minN0) minN0 = en[1]; if (en[1] > maxN0) maxN0 = en[1];
+    }
 
-    // full-res pixel window
-    const pxPerM = ds.W / (ds.maxE - ds.minE);
-    let sx = (minE0 - ds.minE) * pxPerM;
-    let ex = (maxE0 - ds.minE) * pxPerM;
-    let sy = (ds.maxN - maxN0) * (ds.H / (ds.maxN - ds.minN));
-    let ey = (ds.maxN - minN0) * (ds.H / (ds.maxN - ds.minN));
+    // native-resolution read window in source pixel space, padded by 2 source px
+    // (+1 more for DEM hillshade neighbors)
+    const mPerPxX = (ds.maxE - ds.minE) / ds.W, mPerPxY = (ds.maxN - ds.minN) / ds.H;
+    const wMinE = Math.max(ds.minE, minE0) - 2 * mPerPxX;
+    const wMaxE = Math.min(ds.maxE, maxE0) + 2 * mPerPxX;
+    const wMinN = Math.max(ds.minN, minN0) - 2 * mPerPxY;
+    const wMaxN = Math.min(ds.maxN, maxN0) + 2 * mPerPxY;
+    if (wMaxE <= wMinE || wMaxN <= wMinN) { setTimeout(() => done(null, tile), 0); return tile; }
 
-    if (ex <= 0 || ey <= 0 || sx >= ds.W || sy >= ds.H) { setTimeout(() => done(null, tile), 0); return tile; }
-
-    // choose overview level whose window is closest to 256px
-    const winW = ex - sx;
-    let level = Math.max(0, Math.min(ds.images.length - 1, Math.floor(Math.log2(winW / size.x))));
-    const img = ds.images[level];
-    const s = img.getWidth() / ds.W;
-
-    const pad = this.ds.isDem ? 1 / s : 0;   // margin for hillshade neighbors
-    const csx = Math.max(0, sx - pad), csy = Math.max(0, sy - pad);
-    const cex = Math.min(ds.W, ex + pad), cey = Math.min(ds.H, ey + pad);
-
-    const wsx = Math.floor(csx * s), wsy = Math.floor(csy * s);
-    const wex = Math.min(img.getWidth(), Math.ceil(cex * s));
-    const wey = Math.min(img.getHeight(), Math.ceil(cey * s));
+    // full-res px window; native read resolution (no width/height resample),
+    // level chosen so the window is closest to 256px, capped at 640px per axis
+    const winWm = wMaxE - wMinE;
+    const winWf = winWm / mPerPxX, winHf = (wMaxN - wMinN) / mPerPxY;
+    let level = Math.max(0, Math.min(ds.images.length - 1, Math.floor(Math.log2(winWf / size.x))));
+    let img = ds.images[level], s = img.getWidth() / ds.W;
+    const hsPadM = () => (ds.isDem ? mPerPxX / s : 0);
+    while (level < ds.images.length - 1) {
+      const wpx = (winWm + 2 * hsPadM()) / (mPerPxX / s);
+      const hpx = ((wMaxN - wMinN) + 2 * hsPadM()) / (mPerPxY / s);
+      if (Math.max(wpx, hpx) <= 640) break;
+      level++; img = ds.images[level]; s = img.getWidth() / ds.W;
+    }
+    const pad = hsPadM();
+    const iw = img.getWidth(), ih = img.getHeight();
+    const wsx = Math.max(0, Math.floor((wMinE - pad - ds.minE) / mPerPxX * s));
+    const wsy = Math.max(0, Math.floor((ds.maxN - (wMaxN + pad)) / mPerPxY * s));
+    const wex = Math.min(iw, Math.ceil((wMaxE + pad - ds.minE) / mPerPxX * s));
+    const wey = Math.min(ih, Math.ceil((ds.maxN - (wMinN - pad)) / mPerPxY * s));
     if (wex - wsx < 1 || wey - wsy < 1) { setTimeout(() => done(null, tile), 0); return tile; }
-
-    // output raster size proportional to the clamped window
-    const outW = Math.max(1, Math.round(size.x * (cex - csx) / winW));
-    const outH = Math.max(1, Math.round(size.y * (cey - csy) / (ey - sy)));
 
     img.readRasters({
       window: [wsx, wsy, wex, wey],
-      width: outW,
-      height: outH,
       pool: geoPool,
       resampleMethod: ds.isDem ? 'nearest' : 'bilinear',
       interleave: false,
       fillValue: ds.isDem ? (isNaN(ds.nodata) ? -9999 : ds.nodata) : 0
     }).then((raster) => {
       const rw = raster.width, rh = raster.height;
-      const cvs = this.renderFn(raster, rw, rh, ds);
+      // exact UTM span of the read window (pixel corners in level-m space)
+      const mpx = mPerPxX / s, mpy = mPerPxY / s;
+      const winMinE = ds.minE + wsx * mpx;
+      const winMaxE = ds.minE + wex * mpx;
+      const winMaxN = ds.maxN - wsy * mpy;
+      const winMinN = ds.maxN - wey * mpy;
+      // per-pixel inverse warp: lat constant per row, lon linear per column
+      const lats = new Float64Array(size.y), lons = new Float64Array(size.x);
+      const px0 = coords.x * size.x, py0 = coords.y * size.y;
+      for (let y = 0; y < size.y; y++)
+        lats[y] = this._map.unproject([px0, py0 + y + 0.5], coords.z).lat;
+      const llW = this._map.unproject([px0, py0], coords.z);
+      const llE = this._map.unproject([px0 + size.x, py0], coords.z);
+      for (let x = 0; x < size.x; x++)
+        lons[x] = llW.lng + (llE.lng - llW.lng) * (x + 0.5) / size.x;
+      const cvs = this.renderFn(raster, rw, rh, ds, { winMinE, winMaxE, winMinN, winMaxN, lats, lons, outW: size.x, outH: size.y });
       const ctx = tile.getContext('2d');
-      // place the clamped window into the right sub-rect of the tile
-      const dx = ((csx - sx) / winW) * size.x;
-      const dy = ((csy - sy) / (ey - sy)) * size.y;
-      const dw = ((cex - csx) / winW) * size.x;
-      const dh = ((cey - csy) / (ey - sy)) * size.y;
       ctx.imageSmoothingEnabled = !ds.isDem;
-      ctx.drawImage(cvs, dx, dy, dw, dh);
+      ctx.drawImage(cvs, 0, 0);
       done(null, tile);
     }).catch((err) => { done(err, tile); });
 
@@ -1093,7 +1140,82 @@ const GeoTiffGridLayer = L.GridLayer.extend({
   }
 });
 
-function renderOrthoTile(raster, w, h) {
+// Per-pixel inverse-warp sampler shared by warped grid tiles and the warped overview.
+// raster was read at NATIVE level resolution and covers winMinE..winMaxE x winMinN..winMaxN.
+// Every output pixel's lat/lon (precomputed per row/col by the caller) is converted to UTM,
+// mapped to a fractional source pixel in the read window, and sampled:
+// ortho = bilinear RGBA, DEM = nearest elevation value -> (optionally banded) colormap,
+// with hillshade evaluated on the SOURCE grid neighbors (not warped output neighbors).
+function warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, lats, lons, outW, outH, ds) {
+  const invW = rw / ((winMaxE - winMinE) || 1);
+  const invH = rh / ((winMaxN - winMinN) || 1);
+  const sr = raster[0], sg = raster[1] || raster[0], sb = raster[2] || raster[0];
+  const sa = raster.length >= 4 ? raster[3] : null;
+  const cvs = document.createElement('canvas');
+  cvs.width = outW; cvs.height = outH;
+  const ctx = cvs.getContext('2d');
+  const img = ctx.createImageData(outW, outH);
+  const data = img.data;
+  if (!ds.isDem) {
+    for (let y = 0; y < outH; y++) {
+      const lat = lats[y];
+      for (let x = 0; x < outW; x++) {
+        const o = (y * outW + x) * 4;
+        const en = latLonToUtm(lat, lons[x]);
+        const fx = (en[0] - winMinE) * invW - 0.5;
+        const fy = (winMaxN - en[1]) * invH - 0.5;
+        if (fx < -0.5 || fy < -0.5 || fx > rw - 0.5 || fy > rh - 0.5) { data[o+3] = 0; continue; }
+        const x0 = Math.floor(fx), y0 = Math.floor(fy);
+        const tx = fx - x0, ty = fy - y0;
+        const cy0 = Math.max(0, Math.min(rh-1, y0)), cy1 = Math.max(0, Math.min(rh-1, y0+1));
+        const cx0 = Math.max(0, Math.min(rw-1, x0)), cx1 = Math.max(0, Math.min(rw-1, x0+1));
+        const i00 = cy0 * rw + cx0, i01 = cy0 * rw + cx1, i10 = cy1 * rw + cx0, i11 = cy1 * rw + cx1;
+        const w00 = (1-tx)*(1-ty), w01 = tx*(1-ty), w10 = (1-tx)*ty, w11 = tx*ty;
+        data[o]   = sr[i00]*w00 + sr[i01]*w01 + sr[i10]*w10 + sr[i11]*w11;
+        data[o+1] = sg[i00]*w00 + sg[i01]*w01 + sg[i10]*w10 + sg[i11]*w11;
+        data[o+2] = sb[i00]*w00 + sb[i01]*w01 + sb[i10]*w10 + sb[i11]*w11;
+        data[o+3] = sa ? (sa[i00]*w00 + sa[i01]*w01 + sa[i10]*w10 + sa[i11]*w11) : 255;
+      }
+    }
+  } else {
+    const band = raster[0];
+    const nodata = isNaN(ds.nodata) ? -9999 : ds.nodata;
+    const lo = demSettings.minFt != null ? demSettings.minFt / METERS_TO_FT : ds.min;
+    const hi = demSettings.maxFt != null ? demSettings.maxFt / METERS_TO_FT : ds.max;
+    const range = (hi - lo) || 1;
+    const cmap = COLORMAPS[demSettings.cmap] || COLORMAPS.viridis;
+    const steps = demSettings.steps | 0;
+    const shade = demSettings.shade > 0;
+    for (let y = 0; y < outH; y++) {
+      const lat = lats[y];
+      for (let x = 0; x < outW; x++) {
+        const o = (y * outW + x) * 4;
+        const en = latLonToUtm(lat, lons[x]);
+        const px = Math.floor((en[0] - winMinE) * invW);
+        const py = Math.floor((winMaxN - en[1]) * invH);
+        if (px < 0 || py < 0 || px >= rw || py >= rh) { data[o+3] = 0; continue; }
+        const v = band[py * rw + px];
+        const bad = !isFinite(v) || v === nodata || v < -1000;
+        if (bad) { data[o+3] = 0; continue; }
+        let t = (v - lo) / range;
+        if (steps > 0) t = (Math.floor(t * steps) + 0.5) / steps;   // discrete elevation bands
+        const rgb = sampleCmap(cmap, t);
+        const z = (!shade || px === 0 || py === 0 || px === rw-1 || py === rh-1)
+          ? 1 : hillshadeFactor(band, rw, rh, px, py);              // hillshade on source grid
+        data[o]   = Math.min(255, rgb[0] * z);
+        data[o+1] = Math.min(255, rgb[1] * z);
+        data[o+2] = Math.min(255, rgb[2] * z);
+        data[o+3] = 240;
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cvs;
+}
+
+function renderOrthoTile(raster, w, h, ds, warp) {
+  if (warp && warp.lats) return warpedSampleGrid(raster, w, h, warp.winMinE, warp.winMaxE, warp.winMaxN, warp.winMinN, warp.lats, warp.lons, warp.outW, warp.outH, ds);
+  // axis-aligned fallback (unwarped source rect, e.g. legacy call sites)
   const cvs = document.createElement('canvas');
   cvs.width = w; cvs.height = h;
   const ctx = cvs.getContext('2d');
@@ -1108,7 +1230,9 @@ function renderOrthoTile(raster, w, h) {
   return cvs;
 }
 
-function renderDemTile(raster, w, h, ds) {
+function renderDemTile(raster, w, h, ds, warp) {
+  if (warp && warp.lats) return warpedSampleGrid(raster, w, h, warp.winMinE, warp.winMaxE, warp.winMaxN, warp.winMinN, warp.lats, warp.lons, warp.outW, warp.outH, ds);
+  // axis-aligned fallback (unwarped source rect)
   const band = raster[0];
   const nodata = isNaN(ds.nodata) ? -9999 : ds.nodata;
   const cvs = document.createElement('canvas');
@@ -1119,13 +1243,16 @@ function renderDemTile(raster, w, h, ds) {
   const hi = demSettings.maxFt != null ? demSettings.maxFt / METERS_TO_FT : ds.max;
   const range = (hi - lo) || 1;
   const cmap = COLORMAPS[demSettings.cmap] || COLORMAPS.viridis;
+  const steps = demSettings.steps | 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
       const v = band[i];
       const bad = !isFinite(v) || v === nodata || v < -1000;
       if (bad) { img.data[i*4+3] = 0; continue; }
-      const rgb = sampleCmap(cmap, (v - lo) / range);
+      let t = (v - lo) / range;
+      if (steps > 0) t = (Math.floor(t * steps) + 0.5) / steps;
+      const rgb = sampleCmap(cmap, t);
       const z = (demSettings.shade <= 0 || x === 0 || y === 0 || x === w-1 || y === h-1)
         ? 1 : hillshadeFactor(band, w, h, x, y);
       img.data[i*4] = Math.min(255, rgb[0] * z);
@@ -1138,15 +1265,46 @@ function renderDemTile(raster, w, h, ds) {
   return cvs;
 }
 
+// Build a per-pixel WARPED overview canvas covering the true 4-corner lat/lon footprint.
+// The raster is UTM-axis-aligned but the site has -1.11 deg grid convergence, so imageOverlay
+// can only be pixel-accurate if we pre-warp every pixel into Web-Mercator space here.
+// Rows are linear in MERCATOR y (merc(lat) = ln(tan(pi/4 + lat*pi/360))), which is exactly
+// how imageOverlay stretches the image; cols are linear in lon.
 async function overviewCanvas(ds, renderFn, maxDim = 1400) {
+  // source overview selection (+ recolor cache in ds._ovCache so applyDemSettings skips the fetch)
   let idx = ds.images.length - 1;
   for (let i = 0; i < ds.images.length; i++) {
     const im = ds.images[i];
     if (Math.max(im.getWidth(), im.getHeight()) <= maxDim) { idx = i; break; }
   }
-  const im = ds.images[idx];
-  const raster = await im.readRasters({ pool: geoPool, interleave: false });
-  return renderFn(raster, im.getWidth(), im.getHeight(), ds);
+  let raster, rw, rh;
+  if (ds._ovCache) {
+    ({ raster, w: rw, h: rh } = ds._ovCache);
+  } else {
+    const im = ds.images[idx];
+    raster = await im.readRasters({ pool: geoPool, interleave: false });
+    rw = im.getWidth(); rh = im.getHeight();
+    ds._ovCache = { raster, w: rw, h: rh };
+  }
+  // true lat/lon footprint: min/max over the 4 warped UTM corners
+  const c = ds.llCorners;
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const p of c) {
+    if (p[0] < minLat) minLat = p[0]; if (p[0] > maxLat) maxLat = p[0];
+    if (p[1] < minLon) minLon = p[1]; if (p[1] > maxLon) maxLon = p[1];
+  }
+  const merc = (lat) => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+  const invMerc = (m) => (2 * Math.atan(Math.exp(m)) - Math.PI / 2) * 180 / Math.PI;
+  const mTop = merc(maxLat), mBot = merc(minLat);
+  // aspect-true target size: width ~ maxDim, height from mercator/lon ratio
+  const outW = maxDim;
+  const outH = Math.max(16, Math.round(outW * (mTop - mBot) / ((maxLon - minLon) * Math.PI / 180)));
+  const lats = new Float64Array(outH), lons = new Float64Array(outW);
+  for (let y = 0; y < outH; y++) lats[y] = invMerc(mTop - (mTop - mBot) * (y + 0.5) / outH);
+  for (let x = 0; x < outW; x++) lons[x] = minLon + (maxLon - minLon) * (x + 0.5) / outW;
+  const winMinE = ds.minE, winMaxE = ds.maxE, winMinN = ds.minN, winMaxN = ds.maxN;
+  const canvas = warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, lats, lons, outW, outH, ds);
+  return { canvas, bounds: [[minLat, minLon], [maxLat, maxLon]] };
 }
 
 async function showOrtho() {
@@ -1156,7 +1314,7 @@ async function showOrtho() {
       updateLoading('Opening orthophoto (streaming)...', '');
       const ds = await getDataset(ORTHO_URL, false);
       const ov = await overviewCanvas(ds, renderOrthoTile, 3400);
-      const overlay = L.imageOverlay(ov.toDataURL('image/png'), ds.llBounds, { opacity: 1 });
+      const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
       const grid = new GeoTiffGridLayer(ds, renderOrthoTile, {
         tileSize: 256, minZoom: 12, maxZoom: 24, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
       });
@@ -1182,7 +1340,7 @@ async function showDEM(type) {
       updateLoading(`Opening ${type.toUpperCase()} (streaming)...`, '');
       const ds = await getDataset(url, true);
       const ov = await overviewCanvas(ds, renderDemTile, 2048);
-      const overlay = L.imageOverlay(ov.toDataURL('image/png'), ds.llBounds, { opacity: 0.94 });
+      const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 0.94 });
       const grid = new GeoTiffGridLayer(ds, renderDemTile, {
         tileSize: 256, minZoom: 12, maxZoom: 24, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
       });
@@ -1220,7 +1378,7 @@ function rememberMapView(mode) {
 function refreshLegendFor(ds) {
   const lo = demSettings.minFt != null ? demSettings.minFt / METERS_TO_FT : ds.min;
   const hi = demSettings.maxFt != null ? demSettings.maxFt / METERS_TO_FT : ds.max;
-  updateLegend(lo, hi);
+  updateLegend(lo, hi, demSettings.steps | 0);
 }
 
 function applyOrthoOpacity() {
@@ -1243,12 +1401,13 @@ async function applyDemSettings() {
   const mn = dom.demMin.value.trim(), mx = dom.demMax.value.trim();
   demSettings.minFt = mn === '' ? null : parseFloat(mn);
   demSettings.maxFt = mx === '' ? null : parseFloat(mx);
+  demSettings.steps = parseInt(document.getElementById('dem-steps').value, 10) || 0;
 
   for (const t of ['dsm', 'dtm']) {
     const dl = demLayers[t];
     if (!dl) continue;
-    const ov = await overviewCanvas(dl.ds, renderDemTile, 2048);
-    dl.overlay.setUrl(ov.toDataURL('image/png'));
+    const ov = await overviewCanvas(dl.ds, renderDemTile, 2048);   // warped; raster from ds._ovCache
+    dl.overlay.setUrl(ov.canvas.toDataURL('image/png'));
     dl.grid.redraw();
   }
   const active = state.activeMode === 'dtm' ? demLayers.dtm : demLayers.dsm;
@@ -1262,6 +1421,7 @@ function resetDemSettings() {
   document.getElementById('dem-shading-val').textContent = '1.0';
   dom.demMin.value = '';
   dom.demMax.value = '';
+  document.getElementById('dem-steps').value = '0';
   document.getElementById('dem-opacity').value = '95';
   document.getElementById('dem-opacity-val').textContent = '95%';
   applyDemSettings();
@@ -1294,17 +1454,43 @@ function showDemHover(e, layer) {
   }).catch(() => {});
 }
 
-function updateLegend(minM, maxM) {
+// Legend: top = max elevation. Continuous mode (steps=0) draws a smooth gradient with
+// 5 evenly-spaced ft labels; banded mode (steps>0) draws solid color blocks and labels
+// the band BOUNDARIES (steps+1 labels, thinned to every other when steps > 8) so the
+// label count matches the renderer's quantization exactly.
+function updateLegend(minM, maxM, steps) {
   const ctx = dom.legendCanvas.getContext('2d');
-  const H = dom.legendCanvas.height;
-  for (let y = 0; y < H; y++) {
-    const t = 1 - y / H;
-    const rgb = viridis(t);
-    ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-    ctx.fillRect(0, y, dom.legendCanvas.width, 1);
+  const H = dom.legendCanvas.height, W = dom.legendCanvas.width;
+  const cmap = COLORMAPS[demSettings.cmap] || COLORMAPS.viridis;
+  steps = steps | 0;
+  if (steps > 0) {
+    const bandH = H / steps;
+    for (let b = 0; b < steps; b++) {
+      // canvas row order is top=high: band index from top corresponds to high t first
+      const t = ((steps - b) - 0.5) / steps;
+      const rgb = sampleCmap(cmap, t);
+      ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+      ctx.fillRect(0, Math.round(b * bandH), W, Math.ceil(bandH));
+    }
+    const minFt = minM * METERS_TO_FT, maxFt = maxM * METERS_TO_FT;
+    const every = steps > 8 ? 2 : 1;
+    const spans = [];
+    for (let k = steps; k >= 0; k -= 1) {
+      const ft = Math.round(minFt + (maxFt - minFt) * k / steps);
+      spans.push(k % every === 0 || k === 0 ? `<span>${ft}</span>` : '<span>&nbsp;</span>');
+    }
+    dom.demLegendLabels.innerHTML = spans.join('');
+  } else {
+    for (let y = 0; y < H; y++) {
+      const t = 1 - y / H;
+      const rgb = sampleCmap(cmap, t);
+      ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+      ctx.fillRect(0, y, W, 1);
+    }
+    const minFt = Math.round(minM * METERS_TO_FT), maxFt = Math.round(maxM * METERS_TO_FT);
+    const ticks = [1, 0.75, 0.5, 0.25, 0].map((u) => Math.round(minFt + (maxFt - minFt) * u));
+    dom.demLegendLabels.innerHTML = ticks.map((ft) => `<span>${ft}</span>`).join('');
   }
-  const minFt = Math.round(minM * METERS_TO_FT), maxFt = Math.round(maxM * METERS_TO_FT);
-  dom.demLegendLabels.innerHTML = `<span>${maxFt}</span><span>${Math.round((minFt + maxFt) / 2)}</span><span>${minFt}</span>`;
 }
 
 // UTM <-> WGS84 (zone 16N)
@@ -1417,6 +1603,38 @@ function showPointCloud() {
   dom.cloudStatus.textContent = 'Cloud: 428M pts (EPT)';
 }
 
+// Bridge to the Potree iframe's control API (null until the iframe is ready)
+function pcApi() {
+  const f = document.getElementById('pc-iframe');
+  const w = f && f.contentWindow;
+  return (w && w.__pcApi) ? w.__pcApi : null;
+}
+
+function bindPcPanel() {
+  const budget = document.getElementById('pc2-budget');
+  budget.addEventListener('input', (e) => {
+    const m = parseFloat(e.target.value);
+    document.getElementById('pc2-budget-val').textContent = m + 'M';
+    const api = pcApi(); if (api) api.setBudget(m);   // API takes MILLIONS (clamped 1-20)
+  });
+  document.getElementById('pc2-size').addEventListener('input', (e) => {
+    document.getElementById('pc2-size-val').textContent = parseFloat(e.target.value).toFixed(1);
+    const api = pcApi(); if (api) api.setSize(parseFloat(e.target.value));
+  });
+  document.getElementById('pc2-sizing').addEventListener('change', (e) => {
+    const api = pcApi(); if (api) api.setSizing(e.target.value);
+  });
+  document.getElementById('pc2-color').addEventListener('change', (e) => {
+    const api = pcApi(); if (api) api.setColor(e.target.value);
+  });
+  document.getElementById('pc2-edl').addEventListener('change', (e) => {
+    const api = pcApi(); if (api) api.setEDL(e.target.checked);
+  });
+  document.getElementById('pc2-fit').addEventListener('click', () => {
+    const api = pcApi(); if (api) api.fit();
+  });
+}
+
 // ───────────────────────────────────────────────────────────────
 // View sync between 3D mesh tab and Potree point cloud tab
 // (WebODM behavior: switching keeps the exact same camera view)
@@ -1512,6 +1730,7 @@ function bindUI() {
   });
   document.getElementById('dem-apply').addEventListener('click', applyDemSettings);
   document.getElementById('dem-reset').addEventListener('click', resetDemSettings);
+  bindPcPanel();
 
   // LOD detail slider
   document.getElementById('lod-detail').addEventListener('input', (e) => {
@@ -1555,6 +1774,17 @@ function applyMeshLayer() {
 function switchMode(mode) {
   rememberMapView(state.activeMode);   // keep the view of the tab we're leaving
   const prevMode = state.activeMode;
+  // disarm any active measure tool in the tab we're leaving (measurements persist)
+  if (state.activeTool !== 'none') {
+    if (prevMode === 'model') { cancelActiveMeasure(); }
+    else if (prevMode === 'cloud') { const api = pcApi(); if (api) api.cancel(); }
+    state.activeTool = 'none';
+    document.querySelectorAll('#panel-measure .tool-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.tool === 'none');
+    });
+    dom.measureOutput.innerHTML = '';
+    if (renderer) renderer.domElement.classList.remove('measuring');
+  }
   state.activeMode = mode;
   const is3D = mode === 'model';
   const isPC = mode === 'cloud';
@@ -1570,8 +1800,9 @@ function switchMode(mode) {
   const isDem = mode === 'dsm' || mode === 'dtm';
   document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
-  document.getElementById('panel-measure').style.display = is3D ? 'block' : 'none';
+  document.getElementById('panel-measure').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
+  document.getElementById('panel-pc').style.display = isPC ? 'block' : 'none';
   document.getElementById('panel-ortho').style.display = mode === 'ortho' ? 'block' : 'none';
   document.getElementById('panel-dem').style.display = isDem ? 'block' : 'none';
 
@@ -1675,4 +1906,34 @@ function updateStats() {
 
 // expose for debugging/verification
 window.__ltds = { scene: () => scene, camera: () => camera, controls: () => controls,
-  tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon };
+  tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon,
+  // Georeferencing self-test: latlon -> UTM -> source px -> linear window -> UTM -> latlon roundtrip.
+  // Expect maxRoundtripM to be tiny (sub-mm); large values mean the warp mapping drifted.
+  warpSelfTest: (mode) => {
+    const ds = mode === 'ortho' ? geoDatasets[ORTHO_URL]
+             : mode === 'dsm' ? geoDatasets[DSM_URL] : geoDatasets[DTM_URL];
+    if (!ds) return { error: `no cached dataset for ${mode}` };
+    const cornersLL = ds.llCorners.slice();
+    const b = ds.llBounds;
+    const pts = [
+      [(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2],
+      [b[0][0] + (b[1][0] - b[0][0]) * 0.2, b[0][1] + (b[1][1] - b[0][1]) * 0.3],
+      [b[0][0] + (b[1][0] - b[0][0]) * 0.8, b[0][1] + (b[1][1] - b[0][1]) * 0.2],
+      [b[0][0] + (b[1][0] - b[0][0]) * 0.3, b[0][1] + (b[1][1] - b[0][1]) * 0.75],
+      [b[0][0] + (b[1][0] - b[0][0]) * 0.7, b[0][1] + (b[1][1] - b[0][1]) * 0.6]
+    ];
+    let maxRoundtripM = 0;
+    for (const [lat, lon] of pts) {
+      const en = latLonToUtm(lat, lon);
+      const fx = (en[0] - ds.minE) / (ds.maxE - ds.minE) * ds.W;      // fractional source px
+      const fy = (ds.maxN - en[1]) / (ds.maxN - ds.minN) * ds.H;
+      const ex = ds.minE + fx / ds.W * (ds.maxE - ds.minE);           // linear window mapping back
+      const ey = ds.maxN - fy / ds.H * (ds.maxN - ds.minN);
+      const ll = utmToLatLon(ex, ey);
+      const dLatM = (ll[0] - lat) * 111320;
+      const dLonM = (ll[1] - lon) * 111320 * Math.cos(lat * Math.PI / 180);
+      const dM = Math.hypot(dLatM, dLonM);
+      if (dM > maxRoundtripM) maxRoundtripM = dM;
+    }
+    return { maxRoundtripM, cornersLL };
+  } };
