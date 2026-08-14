@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LTDS Point Cloud — Rome Dam</title>
+  <link rel="stylesheet" href="/potree/build/potree/potree.css">
+  <link rel="stylesheet" href="/potree/libs/jquery-ui/jquery-ui.min.css">
+  <link rel="stylesheet" href="/potree/libs/spectrum/spectrum.css">
+  <link rel="stylesheet" href="/potree/libs/jstree/themes/style.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root { --brand-orange: #EE5007; }
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #050505; font-family: 'Outfit', sans-serif; }
+    #potree_render_area { position: absolute; inset: 0; }
+    #potree_sidebar_container { display: none; }
+
+    #pc-toolbar {
+      position: absolute; top: 12px; left: 12px; z-index: 50;
+      display: flex; flex-direction: column; gap: 8px;
+      background: rgba(14,14,18,0.94); border: 1px solid rgba(238,80,7,0.28);
+      border-radius: 10px; padding: 12px; color: #f5f5f5; width: 210px;
+      backdrop-filter: blur(8px);
+    }
+    #pc-toolbar h4 { margin: 0 0 4px 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #EE5007; }
+    #pc-toolbar .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+    #pc-toolbar input[type=range] { flex: 1; accent-color: #EE5007; }
+    #pc-toolbar select {
+      background: #1a1a20; color: #eee; border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px; padding: 3px 6px; font-size: 12px; font-family: inherit;
+    }
+    #pc-toolbar button {
+      background: rgba(238,80,7,0.16); border: 1px solid #EE5007; color: #fff;
+      border-radius: 7px; padding: 6px; font-size: 12px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+    }
+    #pc-toolbar button:hover { background: rgba(238,80,7,0.32); }
+    #pc-status {
+      position: absolute; bottom: 10px; left: 12px; z-index: 50;
+      color: #999; font-size: 11px; background: rgba(10,10,12,0.85);
+      border-radius: 6px; padding: 4px 10px;
+    }
+    #pc-loading {
+      position: absolute; inset: 0; z-index: 100; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      background: rgba(5,5,8,0.94); color: #aaa; font-size: 13px;
+      transition: opacity 0.4s ease; pointer-events: none;
+    }
+    #pc-loading.hidden { opacity: 0; }
+    .spinner {
+      width: 50px; height: 50px; border-radius: 50%;
+      border: 4px solid rgba(238,80,7,0.12); border-top-color: #EE5007;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="potree_render_area"></div>
+  <div id="potree_sidebar_container"></div>
+
+  <div id="pc-toolbar">
+    <h4>Point Cloud</h4>
+    <div class="row"><span>Points</span><input type="range" id="pc-budget" min="1" max="10" step="0.5" value="4"><span id="pc-budget-val">4M</span></div>
+    <div class="row"><span>Size</span><input type="range" id="pc-size" min="0.2" max="3" step="0.1" value="1"></div>
+    <div class="row"><span>Sizing</span>
+      <select id="pc-sizing">
+        <option value="adaptive">Adaptive (capped)</option>
+        <option value="attenuated">Attenuated</option>
+        <option value="fixed" selected>Fixed</option>
+      </select>
+    </div>
+    <div class="row"><span>Color</span>
+      <select id="pc-color">
+        <option value="rgba" selected>RGB</option>
+        <option value="elevation">Elevation</option>
+        <option value="intensity">Intensity</option>
+        <option value="classification">Classification</option>
+      </select>
+    </div>
+    <div class="row"><span>EDL</span><input type="checkbox" id="pc-edl" checked style="accent-color:#EE5007;"></div>
+    <button id="pc-fit">Fit to Screen</button>
+  </div>
+
+  <div id="pc-status">Loading…</div>
+  <div id="pc-loading"><div class="spinner"></div><div>Streaming 428M point EPT cloud…</div></div>
+
+  <script src="/potree/libs/jquery.min.js"></script>
+  <script src="/potree/libs/spectrum/spectrum.js"></script>
+  <script src="/potree/libs/jquery-ui/jquery-ui.min.js"></script>
+  <script src="/potree/libs/other/BinaryHeap.js"></script>
+  <script src="/potree/libs/tween/tween.min.js"></script>
+  <script src="/potree/libs/d3/d3.js"></script>
+  <script src="/potree/libs/proj4/proj4.js"></script>
+  <script src="/potree/libs/openlayers3/ol.js"></script>
+  <script src="/potree/libs/i18next/i18next.js"></script>
+  <script src="/potree/libs/jstree/jstree.js"></script>
+  <script src="/potree/build/potree/potree.js"></script>
+  <script src="/potree/libs/plasio/js/laslaz.js"></script>
+
+  <script>
+    const EPT_URL = 'http://192.168.60.92:8082/entwine_pointcloud/ept.json';
+
+    const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
+    window.viewer = viewer;
+    viewer.setEDLEnabled(true);
+    viewer.setFOV(60);
+    viewer.setPointBudget(4 * 1000 * 1000);
+    viewer.setBackground('black');
+    viewer.setDescription('');
+    viewer.loadSettingsFromURL();
+
+    // Earth-style controls to match the main 3D tab
+    viewer.setControls(viewer.earthControls);
+    // Allow looking up from below the cloud (match the main 3D tab's range)
+    viewer.scene.view.minPitch = -Math.PI / 2 + 0.02;
+    viewer.scene.view.maxPitch = Math.PI / 2 - 0.02;
+    document.getElementById('potree_render_area')
+      .addEventListener('contextmenu', (e) => e.preventDefault());
+
+    const statusEl = document.getElementById('pc-status');
+
+    // View sync API for the parent app (UTM coordinates, shared frame).
+    // Sets camera position + look-at target; safe to call any time after load.
+    window.__pcViewReady = false;
+    window.__setViewUTM = (camE, camN, camAlt, tgtE, tgtN, tgtAlt) => {
+      const view = viewer.scene.view;
+      view.position.set(camE, camN, camAlt);
+      view.lookAt(tgtE, tgtN, tgtAlt);
+      window.__pcViewReady = true;
+    };
+
+    // Fallback pivot: if the GPU point pick misses on mousedown (sparse area,
+    // sky, or first frames), EarthControls silently ignores the whole drag.
+    // Priority: native GPU pick -> bbox mid-plane ray hit -> current view pivot.
+    const ec = viewer.earthControls;
+    ec.rotationSpeed = 1.5;   // default 10 is far too twitchy in a full-width viewer
+
+    // LEFT = orbit, RIGHT = pan (Potree native is the reverse). EarthControls'
+    // drag handler branches on e.drag.mouse (1=LEFT bit, 2=RIGHT bit), so wrap
+    // its registered 'drag' listener and swap the button bits before calling it.
+    if (ec._listeners && ec._listeners['drag'] && ec._listeners['drag'].length) {
+      const origDrag = ec._listeners['drag'][0];
+      ec._listeners['drag'][0] = (e) => {
+        const d = e.drag;
+        if (d && (d.mouse === 1 || d.mouse === 2)) {
+          const orig = d.mouse;
+          d.mouse = orig === 1 ? 2 : 1;
+          origDrag(e);
+          d.mouse = orig;
+        } else {
+          origDrag(e);
+        }
+      };
+    }
+
+    ec.addEventListener('mousedown', (e) => {
+      if (ec.pivot || !e.mouse) return;
+      const cam = viewer.scene.getActiveCamera();
+      const el = viewer.renderer.domElement;
+      let pivot = null;
+      try {
+        const ray = Potree.Utils.mouseToRay(e.mouse, cam, el.clientWidth, el.clientHeight);
+        const pcs = viewer.scene.pointclouds;
+        if (pcs.length) {
+          const bb = pcs[0].boundingBox.clone().applyMatrix4(pcs[0].matrixWorld);
+          const z = (bb.min.z + bb.max.z) / 2;
+          const t = (z - ray.origin.z) / ray.direction.z;
+          if (isFinite(t) && t > 0 && t < 100000) {
+            pivot = ray.origin.clone().add(ray.direction.clone().multiplyScalar(t));
+          }
+        }
+      } catch (err) { /* fall through */ }
+      if (!pivot) pivot = viewer.scene.view.getPivot();   // always defined
+      ec.pivot = pivot;
+      ec.camStart = cam.clone();
+      ec.pivotIndicator.visible = true;
+      ec.pivotIndicator.position.copy(pivot);
+    });
+
+    Potree.loadPointCloud(EPT_URL, 'Rome Dam', (e) => {
+      if (e.type === 'loading_failed') {
+        statusEl.textContent = 'Failed to load EPT point cloud — is the :8082 asset server running?';
+        document.getElementById('pc-loading').classList.add('hidden');
+        return;
+      }
+      const pc = e.pointcloud;
+      const mat = pc.material;
+      mat.size = 1;
+      // Default FIXED sizing (matches the Sizing dropdown) — no giant blobs
+      // at sparse octree edges. Adaptive stays available but capped.
+      mat.pointSizeType = Potree.PointSizeType.FIXED;
+      mat.minSize = 0.5;
+      mat.maxSize = 50;
+      mat.shape = Potree.PointShape.CIRCLE;
+      mat.activeAttributeName = 'rgba';
+
+      viewer.scene.addPointCloud(pc);
+      if (!window.__pcViewReady) viewer.fitToScreen(0.7);   // don't stomp a synced view
+
+      const cam = viewer.scene.getActiveCamera();
+      cam.near = 0.1; cam.far = 100000; cam.updateProjectionMatrix();
+
+      document.getElementById('pc-loading').classList.add('hidden');
+      statusEl.textContent = '428,498,832 points · EPT (laszip) · UTM 16N';
+
+      // UI wiring
+      document.getElementById('pc-budget').addEventListener('input', (ev) => {
+        const m = parseFloat(ev.target.value);
+        viewer.setPointBudget(m * 1000 * 1000);
+        document.getElementById('pc-budget-val').textContent = m + 'M';
+      });
+      document.getElementById('pc-size').addEventListener('input', (ev) => {
+        mat.size = parseFloat(ev.target.value);
+      });
+      document.getElementById('pc-sizing').addEventListener('change', (ev) => {
+        const v = ev.target.value;
+        if (v === 'adaptive') {
+          mat.pointSizeType = Potree.PointSizeType.ADAPTIVE;
+          mat.minSize = 1; mat.maxSize = 6;
+        } else if (v === 'attenuated') {
+          mat.pointSizeType = Potree.PointSizeType.ATTENUATED;
+          mat.minSize = 1; mat.maxSize = 12;
+        } else {
+          mat.pointSizeType = Potree.PointSizeType.FIXED;
+          mat.minSize = 0.5; mat.maxSize = 50;
+        }
+      });
+      document.getElementById('pc-color').addEventListener('change', (ev) => {
+        mat.activeAttributeName = ev.target.value;
+      });
+      document.getElementById('pc-edl').addEventListener('change', (ev) => {
+        viewer.setEDLEnabled(ev.target.checked);
+      });
+      document.getElementById('pc-fit').addEventListener('click', () => viewer.fitToScreen(0.7));
+    });
+  </script>
+</body>
+</html>
