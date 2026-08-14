@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Ledge Top Drone Services — Rome Dam 3D Viewer</title>
+  <title>Ledge Top Drone Services — 3D Viewer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
@@ -41,6 +41,14 @@
     #brand-info { display: flex; flex-direction: column; line-height: 1.15; }
     #brand-info .company { font-weight: 700; font-size: 16px; color: #fff; letter-spacing: 0.3px; }
     #brand-info .project { font-weight: 400; font-size: 12px; color: var(--brand-orange); margin-top: 2px; }
+
+    #project-switcher {
+      margin-left: 6px; background: rgba(255,255,255,0.04); color: #eee;
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 8px;
+      padding: 6px 10px; font-family: var(--font); font-size: 12px; font-weight: 600;
+      cursor: pointer; display: none;
+    }
+    #project-switcher:hover { border-color: var(--brand-orange); }
 
     #view-tabs { display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 4px; }
     .tab-btn {
@@ -261,8 +269,9 @@
       <img src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="LTDS Logo">
       <div id="brand-info">
         <span class="company">Ledge Top Drone Services</span>
-        <span class="project">Rome Dam Project — 3D Photogrammetry Viewer</span>
+        <span class="project" id="brand-project">Loading project…</span>
       </div>
+      <select id="project-switcher" aria-label="Switch project"></select>
     </div>
     <nav id="view-tabs">
       <button class="tab-btn active" data-mode="model" id="tab-model">
@@ -295,7 +304,7 @@
           <h3><svg viewBox="0 0 24 24"><path d="M4 6h16M4 10h16M4 14h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg> Layers</h3>
           <div class="tool-grid">
             <button class="layer-btn full active" data-layer="tiles" id="layer-tiles">Streamed LOD Mesh</button>
-            <button class="layer-btn full" data-layer="glb" id="layer-glb">Full-Res Mesh (898 MB)</button>
+            <button class="layer-btn full" data-layer="glb" id="layer-glb">Full-Res Mesh</button>
             <button class="layer-btn full" data-layer="cameras" id="layer-cameras">Camera Positions</button>
           </div>
           <div class="slider-row" id="cam-size-row" style="display:none;">

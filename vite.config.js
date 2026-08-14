@@ -1,10 +1,17 @@
 import { defineConfig } from 'vite'
+
+// In dev, the backend (server/index.js) runs separately (see README) and
+// serves /api and /assets; Vite proxies those paths to it so `npm run dev`
+// exercises the same code paths as production.
+const BACKEND_PORT = process.env.VIEWER_BACKEND_PORT || 8090
+
 export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 8080,
-    fs: {
-      allow: ['/mnt/Share/Ai_Storage', '/home/bkoltz']
+    proxy: {
+      '/api': `http://127.0.0.1:${BACKEND_PORT}`,
+      '/assets': `http://127.0.0.1:${BACKEND_PORT}`
     }
   },
   build: {

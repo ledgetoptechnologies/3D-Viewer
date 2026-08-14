@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
@@ -11,34 +14,23 @@ THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
-// ───────────────────────────────────────────────────────────────
-// Data endpoints
-// ───────────────────────────────────────────────────────────────
-const LOCAL_BASE = 'http://192.168.60.92:8081';
-const SMB_BASE   = 'http://192.168.60.92:8082';
-const PHOTO_BASE = 'http://192.168.60.92:8083';
-
-const GLB_URL    = `${LOCAL_BASE}/models/odm_textured_model_geo.glb`;
-const TILES_URL  = `${LOCAL_BASE}/3d-tiles/tileset.json`;
-const SHOTS_URL  = `${SMB_BASE}/odm_report/shots.geojson`;
-const ORTHO_URL  = `${SMB_BASE}/odm_orthophoto/odm_orthophoto.tif`;
-const DSM_URL    = `${SMB_BASE}/odm_dem/dsm.tif`;
-const DTM_URL    = `${SMB_BASE}/odm_dem/dtm.tif`;
-
-// ───────────────────────────────────────────────────────────────
-// Georeferencing (WebODM: coords.txt / CESIUM_RTC center)
-// Local model coords are Z-up meters relative to RTC (UTM 16N).
-// ───────────────────────────────────────────────────────────────
-const RTC = { e: 367257, n: 4759982, z: 0 };
-// Center of the local model bounding box (from the OBJ/GLB vertex range)
-const C = {
-  x: (-138.653305 + 116.656517) / 2,   // -10.998394
-  y: (-240.065369 + 178.883759) / 2,   // -30.590805
-  z: (164.319672 + 240.427872) / 2     // 202.373772
-};
+// ────────────────────────────────────────────────
+// Per-project config, fetched from this app's own backend (server/api.js)
+// at startup via bootstrap(). Nothing below is hardcoded to a specific
+// WebODM project any more — see README for the GET /api/models(/:id) shape.
+// ────────────────────────────────────────────────
+let PROJECT = null;
+let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
+let SHOTS_URL = null, PHOTO_BASE = null;
+let ORTHO_URL = null, DSM_URL = null, DTM_URL = null;
+let EPT_URL = null, PLY_URL = null, POINT_COUNT = null;
+// RTC = local-model-origin UTM offset, C = model bbox center (both come from
+// coords.txt / an optional derivatives sidecar; see server/sync.js).
+let RTC = { e: 0, n: 0, z: 0 };
+let C = { x: 0, y: 0, z: 0 };
+let UTM_ZONE_LON0 = 0;
 
 const METERS_TO_FT = 3.28084;
-const UTM_ZONE_LON0 = -87 * Math.PI / 180;   // zone 16N
 
 // world (three.js Y-up, model centered at origin) <-> UTM
 function worldToUtm(p) {
@@ -66,12 +58,17 @@ const dom = {};
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','cam-tooltip','labels-container',
- 'dem-settings','dem-colormap','dem-shading','dem-min','dem-max'
+ 'dem-settings','dem-colormap','dem-shading','dem-min','dem-max',
+ 'brand-project','project-switcher'
 ].forEach(id => { dom[id.replace(/-([a-z])/g, (m,c)=>c.toUpperCase())] = document.getElementById(id); });
 
 const state = {
   activeMode: 'model',
+  meshSource: 'none',       // 'tiles' | 'glb' | 'obj' | 'none' — whichever this project has
+  cloudMode: 'none',        // 'potree' (EPT via iframe) | 'ply' (direct three.js) | 'none'
   glbLoaded: false, glbLoading: false,
+  objLoaded: false, objLoading: false,
+  plyLoaded: false, plyLoading: false,
   camerasLoaded: false, camerasLoading: false, camerasVisible: false,
   activeTool: 'none',
   measure: null,           // in-progress measurement
@@ -81,6 +78,7 @@ const state = {
 
 let scene, camera, renderer, labelRenderer, controls, clock;
 let glbParent, glbOffset, tilesParent;
+let plyParent, plyGroup = null;
 let tilesRenderer = null;
 let camGroupParent, camInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
@@ -100,14 +98,146 @@ let lastFps = performance.now(), frames = 0;
 let bvhQueue = [];
 let homeView = null;
 
-init();
+bootstrap();
+
+// ───────────────────────────────────────────────────────────────
+// Bootstrap: pick a project (via ?project= or the first available one),
+// load its config from this app's backend, then start the app. Replaces
+// the old module-load-time hardcoded constants.
+// ───────────────────────────────────────────────────────────────
+async function bootstrap() {
+  let models = [];
+  try {
+    const res = await fetch('/api/models');
+    if (res.ok) models = await res.json();
+  } catch (err) {
+    console.error('Failed to reach the viewer API', err);
+  }
+
+  populateProjectSwitcher(models);
+
+  if (!models.length) {
+    updateLoading('No projects available yet', 'Waiting for the next WebODM sync — check back shortly.');
+    return;
+  }
+
+  const requested = new URLSearchParams(location.search).get('project');
+  const targetId = (requested && models.some((m) => m.id === requested)) ? requested : models[0].id;
+
+  try {
+    const res = await fetch(`/api/models/${encodeURIComponent(targetId)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    PROJECT = await res.json();
+  } catch (err) {
+    console.error('Failed to load project config', err);
+    updateLoading('Could not load this project', String(err.message || err));
+    return;
+  }
+
+  applyProjectConfig(PROJECT);
+  init();
+}
+
+function populateProjectSwitcher(models) {
+  if (!dom.projectSwitcher) return;
+  dom.projectSwitcher.innerHTML = models.map((m) => `<option value="${m.id}">${m.title}</option>`).join('');
+  dom.projectSwitcher.style.display = models.length > 1 ? '' : 'none';
+  dom.projectSwitcher.addEventListener('change', () => {
+    const url = new URL(location.href);
+    url.searchParams.set('project', dom.projectSwitcher.value);
+    location.href = url.toString();
+  });
+}
+
+function applyProjectConfig(p) {
+  const url = new URL(location.href);
+  url.searchParams.set('project', p.id);
+  history.replaceState(null, '', url.toString());
+
+  document.title = `Ledge Top Drone Services — ${p.title}`;
+  if (dom.brandProject) dom.brandProject.textContent = `${p.title} — 3D Photogrammetry Viewer`;
+  if (dom.projectSwitcher) dom.projectSwitcher.value = p.id;
+  if (dom.loadingText) dom.loadingText.textContent = `Initializing ${p.title} viewer...`;
+
+  GLB_URL = p.assets.glb;
+  TILES_URL = p.assets.tiles;
+  OBJ_URL = p.assets.obj;
+  SHOTS_URL = p.assets.shots;
+  ORTHO_URL = p.assets.ortho;
+  DSM_URL = p.assets.dsm;
+  DTM_URL = p.assets.dtm;
+  EPT_URL = p.assets.ept;
+  PLY_URL = p.assets.ply || null;
+  POINT_COUNT = p.pointCount || null;
+  PHOTO_BASE = null;   // original flight-photo archive isn't wired into auto-sync yet (see README)
+
+  RTC = (p.georef && p.georef.rtc) || { e: 0, n: 0, z: 0 };
+  C = (p.georef && p.georef.bboxCenter) || { x: 0, y: 0, z: 0 };
+  UTM_ZONE_LON0 = (((p.georef && p.georef.utmZoneLon0Deg) ?? -87) * Math.PI) / 180;
+
+  // Pick the best available mesh/point-cloud source for this project.
+  state.meshSource = TILES_URL ? 'tiles' : (GLB_URL ? 'glb' : (OBJ_URL ? 'obj' : 'none'));
+  state.cloudMode = EPT_URL ? 'potree' : (PLY_URL ? 'ply' : 'none');
+}
 
 function init() {
   initThree();
   bindUI();
-  loadTiles();          // LOD tiles are the default mesh
-  loadCameras();        // prepare camera positions (hidden until toggled)
+  applyAvailability();
+  applyMeshLayer();      // loads whichever of tiles/glb/obj this project has
+  loadCameras();         // prepare camera positions (hidden until toggled); no-op if unavailable
   startLoop();
+}
+
+// Hide tabs/buttons for layers this project doesn't have, and make sure the
+// mesh-layer buttons reflect state.meshSource before applyMeshLayer() runs.
+function applyAvailability() {
+  const setVisible = (id, visible) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = visible ? '' : 'none';
+  };
+  setVisible('tab-model', state.meshSource !== 'none');
+  setVisible('tab-cloud', state.cloudMode !== 'none');
+  setVisible('tab-ortho', !!ORTHO_URL);
+  setVisible('tab-dsm', !!DSM_URL);
+  setVisible('tab-dtm', !!DTM_URL);
+  setVisible('layer-cameras', !!SHOTS_URL);
+  setVisible('panel-pc', state.cloudMode === 'potree');   // budget/size/EDL sliders only apply to Potree
+
+  const tilesBtn = document.getElementById('layer-tiles');
+  const glbBtn = document.getElementById('layer-glb');
+  tilesBtn.classList.remove('active');
+  glbBtn.classList.remove('active');
+  if (state.meshSource === 'tiles') {
+    tilesBtn.style.display = '';
+    tilesBtn.textContent = 'Streamed LOD Mesh';
+    tilesBtn.dataset.layer = 'tiles';
+    tilesBtn.classList.add('active');
+    glbBtn.style.display = GLB_URL ? '' : 'none';
+  } else if (state.meshSource === 'obj') {
+    tilesBtn.style.display = '';
+    tilesBtn.textContent = '3D Mesh';
+    tilesBtn.dataset.layer = 'obj';
+    tilesBtn.classList.add('active');
+    glbBtn.style.display = 'none';
+  } else if (state.meshSource === 'glb') {
+    tilesBtn.style.display = 'none';
+    glbBtn.style.display = '';
+    glbBtn.classList.add('active');
+  } else {
+    tilesBtn.style.display = 'none';
+    glbBtn.style.display = 'none';
+  }
+
+  // land on the first available tab if "3D Model" isn't offered
+  if (state.meshSource === 'none') {
+    const fallback = state.cloudMode !== 'none' ? 'cloud'
+      : (ORTHO_URL ? 'ortho' : (DSM_URL ? 'dsm' : (DTM_URL ? 'dtm' : null)));
+    if (fallback) {
+      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === fallback));
+      switchMode(fallback);
+    }
+  }
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -162,6 +292,18 @@ function initThree() {
   tilesParent.rotation.x = Math.PI;
   tilesParent.position.set(-C.x, -C.z, C.y);
   scene.add(tilesParent);
+
+  // Direct-PLY point cloud fallback shares the GLB frame (same WebODM local
+  // coordinate system) but is an independent group so it can be shown/hidden
+  // without affecting mesh visibility.
+  plyParent = new THREE.Group();
+  plyParent.rotation.x = -Math.PI / 2;
+  const plyOffsetGroup = new THREE.Group();
+  plyOffsetGroup.name = 'plyOffset';
+  plyOffsetGroup.position.set(-C.x, -C.y, -C.z);
+  plyParent.add(plyOffsetGroup);
+  plyParent.visible = false;
+  scene.add(plyParent);
 
   // Cameras share the GLB frame
   camGroupParent = new THREE.Group();
@@ -347,7 +489,68 @@ function loadGLB() {
   });
 }
 
-// ───────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────
+// Full-res OBJ (fallback mesh source for projects without pre-built LOD
+// tiles or a converted GLB — loads WebODM's native textured OBJ output
+// directly; see README "Known limitations")
+// ────────────────────────────────────────────────
+function loadObjDirect() {
+  if (state.objLoaded) { glbParent.visible = true; return; }
+  if (state.objLoading || !OBJ_URL) return;
+  state.objLoading = true;
+  updateLoading('Loading textured mesh (OBJ)...', '');
+
+  const mtlUrl = OBJ_URL.replace(/\.obj$/i, '.mtl');
+  const objLoader = new OBJLoader();
+
+  const finishLoad = (materials) => {
+    if (materials) objLoader.setMaterials(materials);
+    objLoader.load(OBJ_URL, (obj) => {
+      obj.traverse((child) => {
+        if (child.isMesh) {
+          child.material.side = THREE.FrontSide;
+          if (child.material.map) child.material.map.colorSpace = THREE.SRGBColorSpace;
+          queueBVH(child);
+        }
+      });
+      glbOffset.add(obj);
+      state.objLoaded = true;
+      state.objLoading = false;
+      frameObjectHome(obj);
+      hideLoading();
+    }, (xhr) => {
+      if (xhr.total) {
+        const pct = ((xhr.loaded / xhr.total) * 100).toFixed(0);
+        updateLoading('Loading textured mesh (OBJ)...', `${pct}%`);
+      }
+    }, (err) => {
+      console.error('OBJ load error', err);
+      state.objLoading = false;
+      hideLoading();
+      showError(`Failed to load mesh from ${OBJ_URL}.`);
+    });
+  };
+
+  new MTLLoader().load(mtlUrl, finishLoad, undefined, () => finishLoad(null));
+}
+
+// Auto-frame the camera on a freshly loaded object whose bounds aren't known
+// ahead of time (the server may not have a pre-computed bbox center for
+// OBJ-only projects — see server/sync.js).
+function frameObjectHome(object3D) {
+  const box = new THREE.Box3().setFromObject(object3D);
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3()).length();
+  const dist = Math.max(20, size * 0.9);
+  homeView = {
+    position: new THREE.Vector3(center.x, center.y + dist * 0.55, center.z + dist * 0.75),
+    lookAt: center
+  };
+  controls.setView(homeView.position, homeView.lookAt);
+}
+
+// ────────────────────────────────────────────────
 // Camera positions (shots.geojson -> instanced frustums)
 // ───────────────────────────────────────────────────────────────
 function buildFrustumGeometry() {
@@ -368,7 +571,7 @@ function buildFrustumGeometry() {
 }
 
 async function loadCameras() {
-  if (state.camerasLoaded || state.camerasLoading) return;
+  if (state.camerasLoaded || state.camerasLoading || !SHOTS_URL) return;
   state.camerasLoading = true;
   try {
     const res = await fetch(SHOTS_URL);
@@ -506,6 +709,7 @@ function resetPhotoView() {
 function openPhoto(idx) {
   const feat = camFeatures[idx];
   if (!feat) return;
+  if (!PHOTO_BASE) return;   // original flight-photo archive isn't wired into auto-sync yet (see README)
   resetPhotoView();
   const fn = feat.properties.filename;
   const url = `${PHOTO_BASE}/${encodeURIComponent(fn)}`;
@@ -1588,19 +1792,50 @@ function hillshadeFactor(values, w, h, x, y) {
   return base + 0.45 * k * Math.max(0, hs);
 }
 
-// ───────────────────────────────────────────────────────────────
-// Point cloud (Potree in an isolated iframe)
-// ───────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────
+// Direct-PLY point cloud fallback (raw georeferenced PLY loaded into the
+// SAME three.js scene/controls as the mesh tab — used when a project has no
+// pre-built Potree EPT dataset yet; see README "Known limitations")
+// ────────────────────────────────────────────────
+function loadPlyDirect() {
+  if (state.plyLoaded || state.plyLoading || !PLY_URL) return;
+  state.plyLoading = true;
+  updateLoading('Loading point cloud (PLY)...', '');
+  new PLYLoader().load(PLY_URL, (geometry) => {
+    geometry.computeBoundingBox();
+    const mat = new THREE.PointsMaterial({ size: 0.03, vertexColors: geometry.hasAttribute('color') });
+    plyGroup = new THREE.Points(geometry, mat);
+    plyParent.getObjectByName('plyOffset').add(plyGroup);
+    state.plyLoaded = true;
+    state.plyLoading = false;
+    hideLoading();
+  }, (xhr) => {
+    if (xhr.total) updateLoading('Loading point cloud (PLY)...', `${((xhr.loaded / xhr.total) * 100).toFixed(0)}%`);
+  }, (err) => {
+    console.error('PLY load error', err);
+    state.plyLoading = false;
+    hideLoading();
+    showError(`Failed to load point cloud from ${PLY_URL}.`);
+  });
+}
+
+// ────────────────────────────────────────────────
+// Point cloud (Potree in an isolated iframe) — used when this project has a
+// pre-built EPT dataset (see server/sync.js). Config is passed via the
+// iframe's query string so pointcloud.html has no hardcoded project data.
+// ────────────────────────────────────────────────
 function showPointCloud() {
   if (!state.pcIframeLoaded) {
     const iframe = document.createElement('iframe');
     iframe.id = 'pc-iframe';
-    iframe.src = '/pointcloud.html';
+    const params = new URLSearchParams({ ept: EPT_URL || '', title: (PROJECT && PROJECT.title) || '' });
+    if (POINT_COUNT) params.set('points', String(POINT_COUNT));
+    iframe.src = `/pointcloud.html?${params.toString()}`;
     iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:#050505;';
     dom.cloudContainer.appendChild(iframe);
     state.pcIframeLoaded = true;
   }
-  dom.cloudStatus.textContent = 'Cloud: 428M pts (EPT)';
+  dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts (EPT)` : 'Cloud: EPT';
 }
 
 // Bridge to the Potree iframe's control API (null until the iframe is ready)
@@ -1690,7 +1925,8 @@ function bindUI() {
     });
   });
 
-  // mesh source: tiles OR full-res GLB (radio behavior)
+  // mesh source: tiles/obj (layer-tiles, repurposed per state.meshSource) OR
+  // full-res GLB (radio behavior) — see applyAvailability()
   document.getElementById('layer-tiles').addEventListener('click', () => {
     document.getElementById('layer-tiles').classList.add('active');
     document.getElementById('layer-glb').classList.remove('active');
@@ -1758,17 +1994,33 @@ function bindUI() {
 }
 
 function applyMeshLayer() {
-  const tilesActive = document.getElementById('layer-tiles').classList.contains('active');
-  tilesParent.visible = tilesActive;
-  if (tilesActive) {
-    glbParent.visible = false;
-    loadTiles();               // rebuild if disposed for the GLB (no-op otherwise)
-  } else if (state.glbLoaded) {
-    disposeTiles();            // GLB is in memory; tile cache is dead weight
+  const tilesBtn = document.getElementById('layer-tiles');
+  const tilesBtnActive = tilesBtn.classList.contains('active') && tilesBtn.style.display !== 'none';
+  const source = tilesBtnActive ? (tilesBtn.dataset.layer || 'tiles') : 'glb';
+  tilesParent.visible = false;
+  glbParent.visible = false;
+  if (source === 'tiles') {
+    tilesParent.visible = true;
+    loadTiles();                // rebuild if disposed for the GLB/OBJ (no-op otherwise)
+  } else if (source === 'obj') {
     glbParent.visible = true;
+    disposeTiles();
+    loadObjDirect();
   } else {
+    glbParent.visible = true;
+    disposeTiles();             // GLB decode is memory-heavy; tile cache is dead weight either way
     loadGLB();
   }
+}
+
+// Restore tiles/glb/obj visibility per the active layer button, without
+// re-triggering a load (used when returning to the model tab from cloud).
+function restoreMeshVisibility() {
+  const tilesBtn = document.getElementById('layer-tiles');
+  const tilesBtnActive = tilesBtn.classList.contains('active') && tilesBtn.style.display !== 'none'
+    && tilesBtn.dataset.layer !== 'obj';
+  tilesParent.visible = !!tilesBtnActive;
+  glbParent.visible = !tilesBtnActive;
 }
 
 function switchMode(mode) {
@@ -1788,9 +2040,11 @@ function switchMode(mode) {
   state.activeMode = mode;
   const is3D = mode === 'model';
   const isPC = mode === 'cloud';
-  dom.threeContainer.style.display = is3D ? 'block' : 'none';
-  dom.labelsContainer.style.display = is3D ? 'block' : 'none';
-  dom.cloudContainer.style.display = isPC ? 'block' : 'none';
+  const isPotreeCloud = isPC && state.cloudMode === 'potree';
+  const isPlyCloud = isPC && state.cloudMode === 'ply';
+  dom.threeContainer.style.display = (is3D || isPlyCloud) ? 'block' : 'none';
+  dom.labelsContainer.style.display = (is3D || isPlyCloud) ? 'block' : 'none';
+  dom.cloudContainer.style.display = isPotreeCloud ? 'block' : 'none';
   dom.leafletMap.style.display = (!is3D && !isPC) ? 'block' : 'none';
   dom.demLegend.style.display = 'none';
   dom.demHover.style.display = 'none';
@@ -1802,18 +2056,27 @@ function switchMode(mode) {
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-measure').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
-  document.getElementById('panel-pc').style.display = isPC ? 'block' : 'none';
+  document.getElementById('panel-pc').style.display = isPotreeCloud ? 'block' : 'none';
   document.getElementById('panel-ortho').style.display = mode === 'ortho' ? 'block' : 'none';
   document.getElementById('panel-dem').style.display = isDem ? 'block' : 'none';
 
   if (is3D) {
     updateStatus('Mode: 3D Model');
-    if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over
+    if (plyParent) plyParent.visible = false;
+    restoreMeshVisibility();
+    if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for ply mode)
     onResize();
-  } else if (isPC) {
+  } else if (isPotreeCloud) {
     updateStatus('Mode: Point Cloud');
     showPointCloud();
     if (prevMode === 'model') pushViewToPointCloud();
+  } else if (isPlyCloud) {
+    updateStatus('Mode: Point Cloud');
+    tilesParent.visible = false;
+    glbParent.visible = false;
+    loadPlyDirect();
+    plyParent.visible = true;
+    onResize();
   } else {
     ensureMap();
     removeMapOverlays();
@@ -1849,7 +2112,8 @@ function startLoop() {
     requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.1);
 
-    if (state.activeMode === 'model') {
+    const renderThree = state.activeMode === 'model' || (state.activeMode === 'cloud' && state.cloudMode === 'ply');
+    if (renderThree) {
       controls.update(dt);
       camera.updateMatrixWorld();
       if (tilesRenderer && tilesParent.visible) tilesRenderer.update();

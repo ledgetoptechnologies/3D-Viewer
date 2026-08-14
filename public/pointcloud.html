@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LTDS Point Cloud — Rome Dam</title>
+  <title>LTDS Point Cloud</title>
   <link rel="stylesheet" href="/potree/build/potree/potree.css">
   <link rel="stylesheet" href="/potree/libs/jquery-ui/jquery-ui.min.css">
   <link rel="stylesheet" href="/potree/libs/spectrum/spectrum.css">
@@ -40,7 +40,7 @@
   <div id="potree_sidebar_container"></div>
 
   <div id="pc-status">Loading…</div>
-  <div id="pc-loading"><div class="spinner"></div><div>Streaming 428M point EPT cloud…</div></div>
+  <div id="pc-loading"><div class="spinner"></div><div id="pc-loading-text">Streaming point cloud…</div></div>
 
   <script src="/potree/libs/jquery.min.js"></script>
   <script src="/potree/libs/three.js/build/three.min.js"></script>
@@ -57,7 +57,15 @@
   <script src="/potree/libs/plasio/js/laslaz.js"></script>
 
   <script>
-    const EPT_URL = 'http://192.168.60.92:8082/entwine_pointcloud/ept.json';
+    // Config comes from the parent app (main.js) via the iframe query string —
+    // this file no longer hardcodes a project's EPT URL/title/point count.
+    const qs = new URLSearchParams(location.search);
+    const EPT_URL = qs.get('ept');
+    const PROJECT_TITLE = qs.get('title') || 'Point Cloud';
+    const POINT_COUNT = qs.get('points') ? parseInt(qs.get('points'), 10) : null;
+    document.title = `LTDS Point Cloud — ${PROJECT_TITLE}`;
+    document.getElementById('pc-loading-text').textContent =
+      (POINT_COUNT ? `Streaming ${(POINT_COUNT / 1e6).toFixed(0)}M point cloud…` : 'Streaming point cloud…');
 
     const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
     window.viewer = viewer;
@@ -215,16 +223,15 @@
 
     const statusEl = document.getElementById('pc-status');
     function renderStatus() {
-      if (!cloudMeta.total) return;
-      const pts = cloudMeta.total.toLocaleString('en-US');
       const vis = budgetState.points
         ? (budgetState.points >= 1e6
           ? (budgetState.points / 1e6).toFixed(1) + 'M'
           : Math.round(budgetState.points / 1000) + 'k')
         : '—';
       const budg = (budgetState.live / 1e6).toFixed(1).replace(/\.0$/, '');
+      const ptsPrefix = cloudMeta.total ? cloudMeta.total.toLocaleString('en-US') + ' pts · ' : '';
       statusEl.textContent =
-        pts + ' pts · ' + vis + ' visible · budget ' + budg + 'M' +
+        ptsPrefix + vis + ' visible · budget ' + budg + 'M' +
         (budgetState.auto ? ' auto' : '') + ' · ' + Math.round(fpsEMA) + ' fps';
     }
     setInterval(renderStatus, 500);
@@ -453,10 +460,12 @@
         this._lastPx = now;
         if (dx === 0 && dy === 0) return;
         // 0.00434 rad/px = 0.249 deg/px — identical to the main 3D mesh tab.
-        // Dragging right pans the view right (yaw +), i.e. the scene appears
-        // to rotate WITH the cursor (EarthLikeControls sign convention).
+        // Deltas are NEGATED to match EarthLikeControls' sign convention
+        // (earth-controls.js _applyOrbit): dragging right orbits the camera
+        // left around the pivot, i.e. the scene appears to rotate WITH the
+        // cursor, matching the mesh tab exactly.
         const G = 0.00434 * gainScale;
-        this._applyOrbit(this.pivot, dx * G, dy * G);
+        this._applyOrbit(this.pivot, -dx * G, -dy * G);
       }
 
       _applyOrbit(pivot, yawDelta, pitchDelta) {
@@ -516,8 +525,12 @@
         // no-op guard: a pure "away" zoom on a degenerate offset is useless
         if (offset.lengthSq() < 1e-9 && s > 1) return;
         offset.setLength(d);
+        // Dolly only: move the camera along the existing view ray without
+        // touching orientation (matches EarthLikeControls._zoomTowards in the
+        // main mesh tab). Calling view.lookAt(target) here previously forced
+        // the camera to snap-reaim at whatever point was under the cursor on
+        // every scroll tick, causing a visible "swim" instead of a smooth zoom.
         view.position.copy(target).add(offset);
-        view.lookAt(target);
       }
 
       _wheel(e) {
@@ -550,9 +563,13 @@
     viewer.inputHandler.removeInputListener(viewer.earthControls);
     const pcControls = new PCPointerControls(viewer);
 
-    Potree.loadPointCloud(EPT_URL, 'Rome Dam', (e) => {
+    if (!EPT_URL) {
+      statusEl.textContent = 'No point cloud configured for this project.';
+      document.getElementById('pc-loading').classList.add('hidden');
+    } else {
+    Potree.loadPointCloud(EPT_URL, PROJECT_TITLE, (e) => {
       if (e.type === 'loading_failed') {
-        statusEl.textContent = 'Failed to load EPT point cloud — is the :8082 asset server running?';
+        statusEl.textContent = 'Failed to load EPT point cloud — check that its asset URL is reachable.';
         document.getElementById('pc-loading').classList.add('hidden');
         return;
       }
@@ -575,9 +592,10 @@
       cam.near = 0.1; cam.far = 100000; cam.updateProjectionMatrix();
 
       document.getElementById('pc-loading').classList.add('hidden');
-      cloudMeta.total = 428498832;
+      if (POINT_COUNT) cloudMeta.total = POINT_COUNT;
       renderStatus();
     });
+    }
   </script>
 </body>
 </html>

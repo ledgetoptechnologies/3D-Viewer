@@ -1,0 +1,33 @@
+services:
+  ltds-viewer:
+    build: .
+    image: ltds-3d-viewer:latest
+    restart: unless-stopped
+    ports:
+      - "${VIEWER_PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      WEBODM_API_URL: ${WEBODM_API_URL}
+      WEBODM_USERNAME: ${WEBODM_USERNAME}
+      WEBODM_PASSWORD: ${WEBODM_PASSWORD}
+      WEBODM_MEDIA_MOUNT: /mnt/webodm
+      DERIVATIVES_MOUNT: /mnt/derivatives
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-10}
+    volumes:
+      # READ-ONLY: WebODM's media/output storage. WebODM runs on a separate
+      # host, so WEBODM_MEDIA_PATH must already be a mounted network share
+      # (NFS/SMB) on THIS Docker host before `docker compose up` — see README.
+      # This container never gets WebODM's Postgres data, secrets, or
+      # application source; only completed task output files, read-only.
+      - ${WEBODM_MEDIA_PATH}:/mnt/webodm:ro
+      # Optional writable cache for pre-built LOD-mesh-tile/EPT derivatives.
+      # Deliberately a SEPARATE path from WebODM's own storage so WebODM
+      # upgrades/cleanup can never touch it. Safe to leave pointed at an
+      # empty directory if you don't have derivatives yet.
+      - ${DERIVATIVES_PATH:-./data/derivatives}:/mnt/derivatives
+      # Viewer's own small JSON metadata store (cached sync results only —
+      # never a copy of WebODM's database).
+      - viewer-data:/app/data
+
+volumes:
+  viewer-data:

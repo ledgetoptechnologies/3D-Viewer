@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+.git
+.vite
+*.log
+.DS_Store
+public/potree
+public/models
+public/3d-tiles

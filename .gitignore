@@ -8,3 +8,7 @@ dist/
 public/models/
 public/3d-tiles/
 public/potree/
+
+# Local server metadata store / derivatives cache and secrets
+data/
+.env
