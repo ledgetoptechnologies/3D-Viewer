@@ -4,6 +4,7 @@ const express = require('express');
 const store = require('./store');
 const sync = require('./sync');
 const { TASK_STATUS } = require('./webodmClient');
+const { requireAdmin } = require('./adminAuth');
 
 const router = express.Router();
 
@@ -34,13 +35,17 @@ function toClientConfig(p) {
       dsm: assetUrl(p.id, a.dsm),
       dtm: assetUrl(p.id, a.dtm),
       shots: assetUrl(p.id, a.shots),
-      ply: assetUrl(p.id, a.ply),
+      pointCloud: assetUrl(p.id, a.pointCloud),
+      pointCloudFormat: a.pointCloud ? a.pointCloud.format : null,
     },
     lastSyncedAt: p.lastSyncedAt,
   };
 }
 
-router.get('/api/models', (req, res) => {
+// These endpoints expose the FULL internal project catalog (working asset
+// URLs, no share token needed) so they are admin-only — the public-facing
+// equivalent is server/shareApi.js's token-gated /api/share/:token.
+router.get('/api/models', requireAdmin, (req, res) => {
   const models = store.getAll()
     .filter((p) => p.available)
     .map(toClientConfig)
@@ -48,13 +53,13 @@ router.get('/api/models', (req, res) => {
   res.json(models);
 });
 
-router.get('/api/models/:id', (req, res) => {
+router.get('/api/models/:id', requireAdmin, (req, res) => {
   const p = store.getById(req.params.id);
   if (!p || !p.available) return res.status(404).json({ error: 'model not found' });
   res.json(toClientConfig(p));
 });
 
-router.post('/api/sync', async (req, res) => {
+router.post('/api/sync', requireAdmin, async (req, res) => {
   try {
     const result = await sync.runSync();
     res.json(result);
@@ -64,3 +69,4 @@ router.post('/api/sync', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.toClientConfig = toClientConfig;

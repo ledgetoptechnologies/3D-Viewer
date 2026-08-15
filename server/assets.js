@@ -6,6 +6,10 @@
 const path = require('path');
 const express = require('express');
 const store = require('./store');
+const shareStore = require('./shareStore');
+const auth = require('./auth');
+const { isAdminRequest } = require('./adminAuth');
+const { SHARE_COOKIE } = require('./shareApi');
 
 const router = express.Router();
 
@@ -17,7 +21,23 @@ function safeResolve(root, relPath) {
   return resolved;
 }
 
+// Authorized if the caller is an admin, OR has a valid share session for
+// THIS exact project. The referenced share is looked up live on every
+// request (cheap in-memory check) so revoking it takes effect immediately
+// instead of waiting out the session cookie's TTL.
+function isAuthorizedForProject(req, projectId) {
+  if (isAdminRequest(req)) return true;
+  const cookieVal = req.cookies && req.cookies[SHARE_COOKIE];
+  const payload = cookieVal ? auth.verify(cookieVal) : null;
+  if (!payload || payload.viewerProjectId !== projectId) return false;
+  const share = shareStore.getById(payload.shareId);
+  return shareStore.isLive(share) && share.viewerProjectId === projectId;
+}
+
 router.get('/assets/:id/:root/*', (req, res) => {
+  if (!isAuthorizedForProject(req, req.params.id)) {
+    return res.status(403).json({ error: 'not authorized' });
+  }
   const project = store.getById(req.params.id);
   if (!project) return res.status(404).json({ error: 'unknown project' });
 

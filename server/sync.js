@@ -87,22 +87,58 @@ function buildRecord(project, task) {
   const assetRoots = { webodm: assetsDir };
   if (derivDir) assetRoots.derivatives = derivDir;
 
+  // Candidate paths cover BOTH the classic nested ODM pipeline layout
+  // (odm_texturing/, odm_orthophoto/, ...) and flat top-level filenames
+  // matching WebODM's `available_assets` names exactly (confirmed against a
+  // live WebODM instance: textured_model.glb, georeferenced_model.laz,
+  // orthophoto.tif, dsm.tif, dtm.tif, shots.geojson) — we don't have
+  // filesystem access to every WebODM version to know which one is on disk,
+  // so we try both rather than guessing a single layout.
   const rel = {
     glbDerivative: firstExisting([derivDir && path.join(derivDir, 'model.glb')].filter(Boolean)),
     tileset: firstExisting([derivDir && path.join(derivDir, 'tileset.json')].filter(Boolean)),
     eptDerivative: firstExisting([derivDir && path.join(derivDir, 'ept', 'ept.json')].filter(Boolean)),
+    // Native WebODM textured mesh — modern WebODM ships a ready-to-use GLB
+    // directly (`textured_model.glb`), which is much simpler/faster to load
+    // than the raw OBJ fallback below.
+    glbNative: firstExisting([
+      path.join(assetsDir, 'textured_model.glb'),
+      path.join(assetsDir, 'odm_texturing', 'textured_model.glb'),
+      path.join(assetsDir, 'odm_texturing', 'odm_textured_model_geo.glb'),
+    ]),
     objModel: firstExisting([
       path.join(assetsDir, 'odm_texturing', 'odm_textured_model_geo.obj'),
       path.join(assetsDir, 'odm_texturing_25d', 'odm_textured_model_geo.obj'),
+      path.join(assetsDir, 'odm_texturing', 'textured_model.obj'),
     ]),
-    ortho: firstExisting([path.join(assetsDir, 'odm_orthophoto', 'odm_orthophoto.tif')]),
-    dsm: firstExisting([path.join(assetsDir, 'odm_dem', 'dsm.tif')]),
-    dtm: firstExisting([path.join(assetsDir, 'odm_dem', 'dtm.tif')]),
-    shots: firstExisting([path.join(assetsDir, 'odm_report', 'shots.geojson')]),
+    ortho: firstExisting([
+      path.join(assetsDir, 'odm_orthophoto', 'odm_orthophoto.tif'),
+      path.join(assetsDir, 'orthophoto.tif'),
+    ]),
+    dsm: firstExisting([
+      path.join(assetsDir, 'odm_dem', 'dsm.tif'),
+      path.join(assetsDir, 'dsm.tif'),
+    ]),
+    dtm: firstExisting([
+      path.join(assetsDir, 'odm_dem', 'dtm.tif'),
+      path.join(assetsDir, 'dtm.tif'),
+    ]),
+    shots: firstExisting([
+      path.join(assetsDir, 'odm_report', 'shots.geojson'),
+      path.join(assetsDir, 'shots.geojson'),
+    ]),
     eptNative: firstExisting([path.join(assetsDir, 'entwine_pointcloud', 'ept.json')]),
+    // LAZ is WebODM's current default point-cloud export (`georeferenced_model.laz`);
+    // PLY is kept as a fallback for older WebODM versions/configurations.
+    lazModel: firstExisting([
+      path.join(assetsDir, 'odm_georeferencing', 'odm_georeferenced_model.laz'),
+      path.join(assetsDir, 'odm_georeferencing', 'georeferenced_model.laz'),
+      path.join(assetsDir, 'georeferenced_model.laz'),
+    ]),
     plyModel: firstExisting([
       path.join(assetsDir, 'odm_georeferencing', 'odm_georeferenced_model.ply'),
       path.join(assetsDir, 'odm_filterpoints', 'point_cloud.ply'),
+      path.join(assetsDir, 'georeferenced_model.ply'),
     ]),
   };
 
@@ -123,7 +159,9 @@ function buildRecord(project, task) {
     // Paths are stored relative to their root so assets.js can safely
     // re-join them without ever exposing the absolute host filesystem path.
     relAssets: {
-      glb: rel.glbDerivative ? { root: 'derivatives', rel: path.relative(derivDir, rel.glbDerivative) } : null,
+      glb: rel.glbDerivative
+        ? { root: 'derivatives', rel: path.relative(derivDir, rel.glbDerivative) }
+        : (rel.glbNative ? { root: 'webodm', rel: path.relative(assetsDir, rel.glbNative) } : null),
       tiles: rel.tileset ? { root: 'derivatives', rel: path.relative(derivDir, rel.tileset) } : null,
       ept: rel.eptDerivative
         ? { root: 'derivatives', rel: path.relative(derivDir, rel.eptDerivative) }
@@ -133,7 +171,12 @@ function buildRecord(project, task) {
       dsm: rel.dsm ? { root: 'webodm', rel: path.relative(assetsDir, rel.dsm) } : null,
       dtm: rel.dtm ? { root: 'webodm', rel: path.relative(assetsDir, rel.dtm) } : null,
       shots: rel.shots ? { root: 'webodm', rel: path.relative(assetsDir, rel.shots) } : null,
-      ply: rel.plyModel ? { root: 'webodm', rel: path.relative(assetsDir, rel.plyModel) } : null,
+      // Direct (non-Potree) point cloud fallback — format tells the client
+      // which loader to use (loaders.gl LASLoader for .laz, three.js PLYLoader
+      // for .ply). Prefers LAZ since that's WebODM's current default export.
+      pointCloud: rel.lazModel
+        ? { root: 'webodm', rel: path.relative(assetsDir, rel.lazModel), format: 'laz' }
+        : (rel.plyModel ? { root: 'webodm', rel: path.relative(assetsDir, rel.plyModel), format: 'ply' } : null),
     },
     lastSyncedAt: new Date().toISOString(),
   };

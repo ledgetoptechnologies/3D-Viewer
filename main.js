@@ -4,6 +4,8 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { load as loadersGlLoad } from '@loaders.gl/core';
+import { LASLoader } from '@loaders.gl/las';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
@@ -23,7 +25,10 @@ let PROJECT = null;
 let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
 let SHOTS_URL = null, PHOTO_BASE = null;
 let ORTHO_URL = null, DSM_URL = null, DTM_URL = null;
-let EPT_URL = null, PLY_URL = null, POINT_COUNT = null;
+let EPT_URL = null, POINT_COUNT = null;
+// Direct (non-Potree) point cloud fallback — format is 'laz' or 'ply',
+// decoded client-side by loadPointCloudDirect() below.
+let POINT_CLOUD_URL = null, POINT_CLOUD_FORMAT = null;
 // RTC = local-model-origin UTM offset, C = model bbox center (both come from
 // coords.txt / an optional derivatives sidecar; see server/sync.js).
 let RTC = { e: 0, n: 0, z: 0 };
@@ -59,16 +64,29 @@ const dom = {};
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','cam-tooltip','labels-container',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max',
- 'brand-project','project-switcher'
+ 'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float',
+ 'share-password-overlay','share-password-input','share-password-error','share-password-submit',
+ 'share-modal','share-modal-close','share-new-password','share-new-expires',
+ 'share-new-perm-measure','share-new-perm-cameras','share-create-btn','share-create-result',
+ 'share-links-list'
 ].forEach(id => { dom[id.replace(/-([a-z])/g, (m,c)=>c.toUpperCase())] = document.getElementById(id); });
+
+// Resolved once at startup from the URL path: 'admin' (internal browsing,
+// requires a server-side admin login — see server/index.js), 'view' (full
+// toolbar via /view/:token), or 'embed' (minimal chrome via /embed/:token).
+const VIEW_MODE = location.pathname.startsWith('/embed/') ? 'embed'
+  : location.pathname.startsWith('/view/') ? 'view' : 'admin';
+const SHARE_TOKEN = VIEW_MODE !== 'admin' ? decodeURIComponent(location.pathname.split('/')[2] || '') : null;
+// What the active share link allows; stays fully-open in admin mode.
+let SHARE_PERMISSIONS = { measure: true, cameras: true };
 
 const state = {
   activeMode: 'model',
   meshSource: 'none',       // 'tiles' | 'glb' | 'obj' | 'none' — whichever this project has
-  cloudMode: 'none',        // 'potree' (EPT via iframe) | 'ply' (direct three.js) | 'none'
+  cloudMode: 'none',        // 'potree' (EPT via iframe) | 'direct' (LAZ/PLY in three.js) | 'none'
   glbLoaded: false, glbLoading: false,
   objLoaded: false, objLoading: false,
-  plyLoaded: false, plyLoading: false,
+  pointCloudLoaded: false, pointCloudLoading: false,
   camerasLoaded: false, camerasLoading: false, camerasVisible: false,
   activeTool: 'none',
   measure: null,           // in-progress measurement
@@ -78,7 +96,7 @@ const state = {
 
 let scene, camera, renderer, labelRenderer, controls, clock;
 let glbParent, glbOffset, tilesParent;
-let plyParent, plyGroup = null;
+let pointCloudParent, pointCloudObject = null;
 let tilesRenderer = null;
 let camGroupParent, camInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
@@ -101,15 +119,23 @@ let homeView = null;
 bootstrap();
 
 // ───────────────────────────────────────────────────────────────
-// Bootstrap: pick a project (via ?project= or the first available one),
-// load its config from this app's backend, then start the app. Replaces
-// the old module-load-time hardcoded constants.
+// Bootstrap: admin mode picks a project (via ?project= or the first
+// available one) from the internal catalog; view/embed mode validates the
+// share token in the URL instead. Replaces the old module-load-time
+// hardcoded constants.
 // ───────────────────────────────────────────────────────────────
 async function bootstrap() {
+  document.body.classList.add(`${VIEW_MODE}-mode`);
+  bindSharePasswordForm();
+  bindAdminControls();
+
+  if (VIEW_MODE !== 'admin') return bootstrapShare();
+
   let models = [];
   try {
     const res = await fetch('/api/models');
     if (res.ok) models = await res.json();
+    else if (res.status === 401) { location.reload(); return; }   // session expired -> show login page
   } catch (err) {
     console.error('Failed to reach the viewer API', err);
   }
@@ -138,6 +164,196 @@ async function bootstrap() {
   init();
 }
 
+// ───────────────────────────────────────────────────────────────
+// Share (view/embed) bootstrap — validates the token in the URL against
+// the backend instead of browsing the internal catalog.
+// ───────────────────────────────────────────────────────────────
+async function bootstrapShare() {
+  if (!SHARE_TOKEN) { updateLoading('Invalid link', 'No share token was found in this URL.'); return; }
+  updateLoading('Loading shared model...', '');
+  try {
+    const res = await fetch(`/api/share/${encodeURIComponent(SHARE_TOKEN)}`);
+    if (res.status === 401) {
+      const body = await res.json().catch(() => ({}));
+      if (body.requiresPassword) { showSharePasswordPrompt(); return; }
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      updateLoading(
+        res.status === 410 ? 'Link expired' : 'Link not found',
+        body.error || 'This share link is no longer valid.'
+      );
+      return;
+    }
+    applyShareResult(await res.json());
+  } catch (err) {
+    console.error('Failed to load shared model', err);
+    updateLoading('Could not load this link', String(err.message || err));
+  }
+}
+
+function showSharePasswordPrompt() {
+  hideLoading();
+  if (dom.sharePasswordOverlay) dom.sharePasswordOverlay.style.display = 'flex';
+  if (dom.sharePasswordInput) { dom.sharePasswordInput.value = ''; dom.sharePasswordInput.focus(); }
+}
+
+function hideSharePasswordPrompt() {
+  if (dom.sharePasswordOverlay) dom.sharePasswordOverlay.style.display = 'none';
+}
+
+function bindSharePasswordForm() {
+  if (!dom.sharePasswordSubmit) return;
+  const submit = async () => {
+    dom.sharePasswordError.textContent = '';
+    dom.sharePasswordSubmit.disabled = true;
+    try {
+      const res = await fetch(`/api/share/${encodeURIComponent(SHARE_TOKEN)}/unlock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: dom.sharePasswordInput.value }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        dom.sharePasswordError.textContent = res.status === 429
+          ? 'Too many attempts — please wait a few minutes.'
+          : (body.error || 'Incorrect password.');
+        dom.sharePasswordSubmit.disabled = false;
+        return;
+      }
+      hideSharePasswordPrompt();
+      applyShareResult(body);
+    } catch (err) {
+      dom.sharePasswordError.textContent = 'Could not reach the server.';
+      dom.sharePasswordSubmit.disabled = false;
+    }
+  };
+  dom.sharePasswordSubmit.addEventListener('click', submit);
+  dom.sharePasswordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+}
+
+function applyShareResult(cfg) {
+  PROJECT = cfg;
+  SHARE_PERMISSIONS = cfg.permissions || { measure: true, cameras: true };
+  applyProjectConfig(cfg);
+  init();
+}
+
+// ───────────────────────────────────────────────────────────────
+// Admin-only controls: Share-link management modal + Log out.
+// Elements exist in the DOM regardless of mode but are only ever shown
+// (via CSS) when VIEW_MODE === 'admin'.
+// ───────────────────────────────────────────────────────────────
+function bindAdminControls() {
+  if (VIEW_MODE !== 'admin') return;
+  if (dom.adminControls) dom.adminControls.style.display = 'flex';
+
+  if (dom.btnLogout) {
+    dom.btnLogout.addEventListener('click', async () => {
+      try { await fetch('/api/admin/logout', { method: 'POST' }); } catch { /* ignore */ }
+      location.href = '/';
+    });
+  }
+  if (dom.btnShare) dom.btnShare.addEventListener('click', openShareModal);
+  if (dom.shareModalClose) dom.shareModalClose.addEventListener('click', closeShareModal);
+  if (dom.shareModal) dom.shareModal.addEventListener('click', (e) => { if (e.target === dom.shareModal) closeShareModal(); });
+  if (dom.shareCreateBtn) dom.shareCreateBtn.addEventListener('click', createShareLink);
+}
+
+function openShareModal() {
+  if (!PROJECT || !dom.shareModal) return;
+  dom.shareCreateResult.style.display = 'none';
+  dom.shareCreateResult.innerHTML = '';
+  dom.shareModal.style.display = 'flex';
+  loadShareLinksList();
+}
+
+function closeShareModal() {
+  if (dom.shareModal) dom.shareModal.style.display = 'none';
+}
+
+async function loadShareLinksList() {
+  dom.shareLinksList.innerHTML = '<div class="hint">Loading…</div>';
+  try {
+    const res = await fetch(`/api/models/${encodeURIComponent(PROJECT.id)}/share-links`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const shares = await res.json();
+    if (!shares.length) {
+      dom.shareLinksList.innerHTML = '<div class="hint">No share links yet for this project.</div>';
+      return;
+    }
+    dom.shareLinksList.innerHTML = shares.map((s) => {
+      const bits = [
+        s.hasPassword ? 'Password-protected' : 'Public',
+        s.expiresAt ? `expires ${new Date(s.expiresAt).toLocaleDateString()}` : 'no expiry',
+        `${s.accessCount || 0} view${s.accessCount === 1 ? '' : 's'}`,
+      ];
+      if (!s.permissions?.measure) bits.push('no measuring');
+      if (!s.permissions?.cameras) bits.push('no cameras');
+      return `<div class="share-link-row${s.active ? '' : ' revoked'}">
+        <div class="meta">
+          <span>${bits.join(' · ')}</span>
+          <span style="color:var(--brand-muted);">created ${new Date(s.createdAt).toLocaleString()}</span>
+        </div>
+        ${s.active ? `<button class="revoke-btn" data-share-id="${s.id}">Revoke</button>` : '<span>Revoked</span>'}
+      </div>`;
+    }).join('');
+    dom.shareLinksList.querySelectorAll('.revoke-btn').forEach((btn) => {
+      btn.addEventListener('click', () => revokeShareLink(btn.dataset.shareId));
+    });
+  } catch (err) {
+    dom.shareLinksList.innerHTML = '<div class="hint">Could not load share links.</div>';
+  }
+}
+
+async function revokeShareLink(id) {
+  try {
+    await fetch(`/api/share-links/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    loadShareLinksList();
+  } catch (err) {
+    console.error('Failed to revoke share link', err);
+  }
+}
+
+async function createShareLink() {
+  dom.shareCreateBtn.disabled = true;
+  try {
+    const body = {
+      password: dom.shareNewPassword.value || undefined,
+      expiresDays: dom.shareNewExpires.value ? Number(dom.shareNewExpires.value) : undefined,
+      permissions: {
+        measure: dom.shareNewPermMeasure.checked,
+        cameras: dom.shareNewPermCameras.checked,
+      },
+    };
+    const res = await fetch(`/api/models/${encodeURIComponent(PROJECT.id)}/share-links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const share = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(share.error || `HTTP ${res.status}`);
+
+    dom.shareCreateResult.style.display = 'block';
+    dom.shareCreateResult.innerHTML = `
+      <div>Link created — copy it now, it won't be shown again.</div>
+      <div class="url-row"><input readonly value="${share.viewUrl}"> <button class="text-btn" data-copy="${share.viewUrl}">Copy View</button></div>
+      <div class="url-row"><input readonly value="${share.embedUrl}"> <button class="text-btn" data-copy="${share.embedUrl}">Copy Embed</button></div>
+    `;
+    dom.shareCreateResult.querySelectorAll('[data-copy]').forEach((btn) => {
+      btn.addEventListener('click', () => navigator.clipboard?.writeText(btn.dataset.copy));
+    });
+    dom.shareNewPassword.value = '';
+    dom.shareNewExpires.value = '';
+    loadShareLinksList();
+  } catch (err) {
+    dom.shareCreateResult.style.display = 'block';
+    dom.shareCreateResult.textContent = `Failed to create link: ${err.message || err}`;
+  } finally {
+    dom.shareCreateBtn.disabled = false;
+  }
+}
+
 function populateProjectSwitcher(models) {
   if (!dom.projectSwitcher) return;
   dom.projectSwitcher.innerHTML = models.map((m) => `<option value="${m.id}">${m.title}</option>`).join('');
@@ -150,13 +366,18 @@ function populateProjectSwitcher(models) {
 }
 
 function applyProjectConfig(p) {
-  const url = new URL(location.href);
-  url.searchParams.set('project', p.id);
-  history.replaceState(null, '', url.toString());
+  if (VIEW_MODE === 'admin') {
+    // Only rewrite the URL / project-switcher selection in admin mode —
+    // in view/embed mode the URL is the share link itself (/view/:token or
+    // /embed/:token) and must never be replaced with the internal project id.
+    const url = new URL(location.href);
+    url.searchParams.set('project', p.id);
+    history.replaceState(null, '', url.toString());
+    if (dom.projectSwitcher) dom.projectSwitcher.value = p.id;
+  }
 
   document.title = `Ledge Top Drone Services — ${p.title}`;
   if (dom.brandProject) dom.brandProject.textContent = `${p.title} — 3D Photogrammetry Viewer`;
-  if (dom.projectSwitcher) dom.projectSwitcher.value = p.id;
   if (dom.loadingText) dom.loadingText.textContent = `Initializing ${p.title} viewer...`;
 
   GLB_URL = p.assets.glb;
@@ -167,7 +388,8 @@ function applyProjectConfig(p) {
   DSM_URL = p.assets.dsm;
   DTM_URL = p.assets.dtm;
   EPT_URL = p.assets.ept;
-  PLY_URL = p.assets.ply || null;
+  POINT_CLOUD_URL = p.assets.pointCloud || null;
+  POINT_CLOUD_FORMAT = p.assets.pointCloudFormat || null;
   POINT_COUNT = p.pointCount || null;
   PHOTO_BASE = null;   // original flight-photo archive isn't wired into auto-sync yet (see README)
 
@@ -177,7 +399,7 @@ function applyProjectConfig(p) {
 
   // Pick the best available mesh/point-cloud source for this project.
   state.meshSource = TILES_URL ? 'tiles' : (GLB_URL ? 'glb' : (OBJ_URL ? 'obj' : 'none'));
-  state.cloudMode = EPT_URL ? 'potree' : (PLY_URL ? 'ply' : 'none');
+  state.cloudMode = EPT_URL ? 'potree' : (POINT_CLOUD_URL ? 'direct' : 'none');
 }
 
 function init() {
@@ -201,8 +423,12 @@ function applyAvailability() {
   setVisible('tab-ortho', !!ORTHO_URL);
   setVisible('tab-dsm', !!DSM_URL);
   setVisible('tab-dtm', !!DTM_URL);
-  setVisible('layer-cameras', !!SHOTS_URL);
+  setVisible('layer-cameras', !!SHOTS_URL && SHARE_PERMISSIONS.cameras);
   setVisible('panel-pc', state.cloudMode === 'potree');   // budget/size/EDL sliders only apply to Potree
+  // A share link can disable measuring entirely (permissions.measure=false).
+  if (dom.btnMeasureFloat) {
+    dom.btnMeasureFloat.style.display = (VIEW_MODE === 'embed' && SHARE_PERMISSIONS.measure && state.meshSource !== 'none') ? 'flex' : 'none';
+  }
 
   const tilesBtn = document.getElementById('layer-tiles');
   const glbBtn = document.getElementById('layer-glb');
@@ -293,17 +519,17 @@ function initThree() {
   tilesParent.position.set(-C.x, -C.z, C.y);
   scene.add(tilesParent);
 
-  // Direct-PLY point cloud fallback shares the GLB frame (same WebODM local
-  // coordinate system) but is an independent group so it can be shown/hidden
-  // without affecting mesh visibility.
-  plyParent = new THREE.Group();
-  plyParent.rotation.x = -Math.PI / 2;
-  const plyOffsetGroup = new THREE.Group();
-  plyOffsetGroup.name = 'plyOffset';
-  plyOffsetGroup.position.set(-C.x, -C.y, -C.z);
-  plyParent.add(plyOffsetGroup);
-  plyParent.visible = false;
-  scene.add(plyParent);
+  // Direct (LAZ/PLY) point cloud fallback shares the GLB frame (same WebODM
+  // local coordinate system) but is an independent group so it can be
+  // shown/hidden without affecting mesh visibility.
+  pointCloudParent = new THREE.Group();
+  pointCloudParent.rotation.x = -Math.PI / 2;
+  const pointCloudOffsetGroup = new THREE.Group();
+  pointCloudOffsetGroup.name = 'pointCloudOffset';
+  pointCloudOffsetGroup.position.set(-C.x, -C.y, -C.z);
+  pointCloudParent.add(pointCloudOffsetGroup);
+  pointCloudParent.visible = false;
+  scene.add(pointCloudParent);
 
   // Cameras share the GLB frame
   camGroupParent = new THREE.Group();
@@ -1793,30 +2019,61 @@ function hillshadeFactor(values, w, h, x, y) {
 }
 
 // ────────────────────────────────────────────────
-// Direct-PLY point cloud fallback (raw georeferenced PLY loaded into the
+// Direct point cloud fallback (raw georeferenced LAZ/PLY loaded into the
 // SAME three.js scene/controls as the mesh tab — used when a project has no
-// pre-built Potree EPT dataset yet; see README "Known limitations")
+// pre-built Potree EPT dataset yet; see README "Known limitations"). LAZ is
+// WebODM's current default point-cloud export and needs loaders.gl's
+// LASLoader (three.js has no built-in LAS/LAZ support); PLY uses three's own
+// PLYLoader. NOTE: @loaders.gl/las only supports LAS/LAZ up to spec v1.3.
 // ────────────────────────────────────────────────
-function loadPlyDirect() {
-  if (state.plyLoaded || state.plyLoading || !PLY_URL) return;
-  state.plyLoading = true;
-  updateLoading('Loading point cloud (PLY)...', '');
-  new PLYLoader().load(PLY_URL, (geometry) => {
+function loadPointCloudDirect() {
+  if (state.pointCloudLoaded || state.pointCloudLoading || !POINT_CLOUD_URL) return;
+  state.pointCloudLoading = true;
+  const isLaz = POINT_CLOUD_FORMAT === 'laz' || /\.la[sz]$/i.test(POINT_CLOUD_URL);
+  const label = isLaz ? 'LAZ' : 'PLY';
+  updateLoading(`Loading point cloud (${label})...`, '');
+
+  const onGeometryReady = (geometry) => {
     geometry.computeBoundingBox();
     const mat = new THREE.PointsMaterial({ size: 0.03, vertexColors: geometry.hasAttribute('color') });
-    plyGroup = new THREE.Points(geometry, mat);
-    plyParent.getObjectByName('plyOffset').add(plyGroup);
-    state.plyLoaded = true;
-    state.plyLoading = false;
+    pointCloudObject = new THREE.Points(geometry, mat);
+    pointCloudParent.getObjectByName('pointCloudOffset').add(pointCloudObject);
+    state.pointCloudLoaded = true;
+    state.pointCloudLoading = false;
     hideLoading();
-  }, (xhr) => {
-    if (xhr.total) updateLoading('Loading point cloud (PLY)...', `${((xhr.loaded / xhr.total) * 100).toFixed(0)}%`);
-  }, (err) => {
-    console.error('PLY load error', err);
-    state.plyLoading = false;
+  };
+  const onFail = (err) => {
+    console.error('Point cloud load error', err);
+    state.pointCloudLoading = false;
     hideLoading();
-    showError(`Failed to load point cloud from ${PLY_URL}.`);
-  });
+    showError(`Failed to load point cloud from ${POINT_CLOUD_URL}.`);
+  };
+
+  if (isLaz) {
+    loadersGlLoad(POINT_CLOUD_URL, LASLoader, { las: { colorDepth: 8 } }).then((data) => {
+      const positions = data.attributes.POSITION && data.attributes.POSITION.value;
+      if (!positions) throw new Error('LAZ/LAS file had no POSITION attribute');
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const colorAttr = data.attributes.COLOR_0 && data.attributes.COLOR_0.value;
+      if (colorAttr && colorAttr.length) {
+        const pointCount = positions.length / 3;
+        const itemSize = colorAttr.length / pointCount;   // 3 (RGB) or 4 (RGBA)
+        const colors = new Float32Array(pointCount * 3);
+        for (let i = 0; i < pointCount; i++) {
+          colors[i * 3] = colorAttr[i * itemSize] / 255;
+          colors[i * 3 + 1] = colorAttr[i * itemSize + 1] / 255;
+          colors[i * 3 + 2] = colorAttr[i * itemSize + 2] / 255;
+        }
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      }
+      onGeometryReady(geometry);
+    }).catch(onFail);
+  } else {
+    new PLYLoader().load(POINT_CLOUD_URL, onGeometryReady, (xhr) => {
+      if (xhr.total) updateLoading(`Loading point cloud (${label})...`, `${((xhr.loaded / xhr.total) * 100).toFixed(0)}%`);
+    }, onFail);
+  }
 }
 
 // ────────────────────────────────────────────────
@@ -1983,6 +2240,11 @@ function bindUI() {
   document.getElementById('btn-fullscreen').addEventListener('click', toggleFullscreen);
   document.getElementById('btn-reset-float').addEventListener('click', resetCamera);
   document.getElementById('btn-fullscreen-float').addEventListener('click', toggleFullscreen);
+  if (dom.btnMeasureFloat) {
+    dom.btnMeasureFloat.addEventListener('click', () => {
+      setTool(state.activeTool === 'none' ? 'distance' : 'none');
+    });
+  }
   document.getElementById('sidebar-toggle').addEventListener('click', () => {
     document.getElementById('sidebar').classList.toggle('collapsed');
     setTimeout(onResize, 300);
@@ -2041,9 +2303,9 @@ function switchMode(mode) {
   const is3D = mode === 'model';
   const isPC = mode === 'cloud';
   const isPotreeCloud = isPC && state.cloudMode === 'potree';
-  const isPlyCloud = isPC && state.cloudMode === 'ply';
-  dom.threeContainer.style.display = (is3D || isPlyCloud) ? 'block' : 'none';
-  dom.labelsContainer.style.display = (is3D || isPlyCloud) ? 'block' : 'none';
+  const isDirectCloud = isPC && state.cloudMode === 'direct';
+  dom.threeContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
+  dom.labelsContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.cloudContainer.style.display = isPotreeCloud ? 'block' : 'none';
   dom.leafletMap.style.display = (!is3D && !isPC) ? 'block' : 'none';
   dom.demLegend.style.display = 'none';
@@ -2054,7 +2316,7 @@ function switchMode(mode) {
   const isDem = mode === 'dsm' || mode === 'dtm';
   document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
-  document.getElementById('panel-measure').style.display = (is3D || isPC) ? 'block' : 'none';
+  document.getElementById('panel-measure').style.display = (is3D || isPC) && SHARE_PERMISSIONS.measure ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-pc').style.display = isPotreeCloud ? 'block' : 'none';
   document.getElementById('panel-ortho').style.display = mode === 'ortho' ? 'block' : 'none';
@@ -2062,20 +2324,20 @@ function switchMode(mode) {
 
   if (is3D) {
     updateStatus('Mode: 3D Model');
-    if (plyParent) plyParent.visible = false;
+    if (pointCloudParent) pointCloudParent.visible = false;
     restoreMeshVisibility();
-    if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for ply mode)
+    if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for direct-cloud mode)
     onResize();
   } else if (isPotreeCloud) {
     updateStatus('Mode: Point Cloud');
     showPointCloud();
     if (prevMode === 'model') pushViewToPointCloud();
-  } else if (isPlyCloud) {
+  } else if (isDirectCloud) {
     updateStatus('Mode: Point Cloud');
     tilesParent.visible = false;
     glbParent.visible = false;
-    loadPlyDirect();
-    plyParent.visible = true;
+    loadPointCloudDirect();
+    pointCloudParent.visible = true;
     onResize();
   } else {
     ensureMap();
@@ -2112,7 +2374,7 @@ function startLoop() {
     requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.1);
 
-    const renderThree = state.activeMode === 'model' || (state.activeMode === 'cloud' && state.cloudMode === 'ply');
+    const renderThree = state.activeMode === 'model' || (state.activeMode === 'cloud' && state.cloudMode === 'direct');
     if (renderThree) {
       controls.update(dt);
       camera.updateMatrixWorld();

@@ -3,6 +3,7 @@
 // the rest of the server can be tested/reasoned about without env leakage.
 'use strict';
 
+const crypto = require('crypto');
 const path = require('path');
 
 function bool(v, def) {
@@ -10,8 +11,24 @@ function bool(v, def) {
   return /^(1|true|yes|on)$/i.test(v);
 }
 
+// If SESSION_SECRET isn't set, generate a random one for this process so
+// local/dev still works — but every restart invalidates existing sessions,
+// so production deployments should set it explicitly (see .env.example).
+let sessionSecret = process.env.SESSION_SECRET || '';
+let sessionSecretGenerated = false;
+if (!sessionSecret) {
+  sessionSecret = crypto.randomBytes(32).toString('hex');
+  sessionSecretGenerated = true;
+}
+
 const config = {
   port: parseInt(process.env.PORT || '8080', 10),
+
+  // Admin login (single shared password — gates the internal/admin viewer UI
+  // and share-link management; see server/auth.js).
+  adminPassword: process.env.ADMIN_PASSWORD || '',
+  sessionSecret,
+  sessionSecretGenerated,
 
   // WebODM REST API (metadata only — never the WebODM Postgres DB directly).
   webodmApiUrl: (process.env.WEBODM_API_URL || '').replace(/\/+$/, ''),
@@ -46,6 +63,7 @@ function validate() {
   if (!config.webodmUsername) problems.push('WEBODM_USERNAME is required (use a dedicated read-only WebODM account)');
   if (!config.webodmPassword) problems.push('WEBODM_PASSWORD is required');
   if (!config.webodmMediaMount) problems.push('WEBODM_MEDIA_MOUNT is required (read-only bind mount of WebODM media/output storage)');
+  if (!config.adminPassword) problems.push('ADMIN_PASSWORD is required (protects the internal viewer + share-link management)');
   return problems;
 }
 

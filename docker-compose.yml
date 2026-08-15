@@ -13,10 +13,23 @@ services:
       WEBODM_MEDIA_MOUNT: /mnt/webodm
       DERIVATIVES_MOUNT: /mnt/derivatives
       SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-10}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET}
     volumes:
-      # READ-ONLY: WebODM's media/output storage. WebODM runs on a separate
-      # host, so WEBODM_MEDIA_PATH must already be a mounted network share
-      # (NFS/SMB) on THIS Docker host before `docker compose up` — see README.
+      # READ-ONLY: WebODM's media/output storage.
+      #
+      # WEBODM_MEDIA_PATH must be the SAME underlying directory that WebODM's
+      # own docker-compose.yml bind-mounts as `${WO_MEDIA_DIR}:/webodm/app/media`
+      # into its webapp/worker containers (i.e. WebODM's Django MEDIA_ROOT,
+      # NOT the unused `appmedia` named volume some WebODM compose files
+      # declare but never actually use). Find the real value by running, on
+      # the WebODM host, in the directory containing WebODM's docker-compose.yml:
+      #   grep WO_MEDIA_DIR .env
+      # WebODM runs on a separate host from this viewer, so that directory
+      # (or the TrueNAS export it's itself mounted from) must be re-exported
+      # (NFS/SMB) and mounted onto THIS Docker host before `docker compose up`
+      # — see README "Read-only WebODM access". Never mount WO_DB_DIR (Postgres
+      # data) or anything else from WebODM's compose file.
       # This container never gets WebODM's Postgres data, secrets, or
       # application source; only completed task output files, read-only.
       - ${WEBODM_MEDIA_PATH}:/mnt/webodm:ro

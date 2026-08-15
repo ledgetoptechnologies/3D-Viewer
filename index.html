@@ -247,6 +247,82 @@
       box-shadow: 0 4px 14px rgba(0,0,0,0.6);
     }
 
+    /* Admin-only topbar controls (Share / Log out) — hidden by default,
+       shown by main.js only in admin mode. */
+    #admin-controls { display: none; align-items: center; gap: 8px; }
+    .text-btn {
+      padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04); color: #ddd; font-family: var(--font); font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.18s ease;
+    }
+    .text-btn:hover { border-color: var(--brand-orange); color: var(--brand-orange); background: var(--panel-hover); }
+    .text-btn.primary { background: linear-gradient(135deg, var(--brand-orange), #c73a0a); border-color: transparent; color: #fff; }
+
+    /* Embed mode: minimal chrome — just the 3D viewport + floating controls */
+    body.embed-mode #topbar, body.embed-mode #sidebar, body.embed-mode #sidebar-toggle,
+    body.embed-mode #statusbar { display: none !important; }
+    body.view-mode #project-switcher, body.view-mode #admin-controls,
+    body.embed-mode #project-switcher, body.embed-mode #admin-controls { display: none !important; }
+
+    /* Share password prompt (view/embed modes) */
+    #share-password-overlay {
+      position: fixed; inset: 0; z-index: 500; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(5,5,8,0.94); backdrop-filter: blur(8px);
+    }
+    #share-password-box {
+      width: 320px; max-width: 90vw; padding: 26px; text-align: center;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+    }
+    #share-password-box h2 { font-size: 15px; color: #fff; margin-bottom: 6px; }
+    #share-password-box p { font-size: 12px; color: var(--brand-muted); margin-bottom: 16px; }
+    #share-password-input {
+      width: 100%; padding: 9px 12px; margin-bottom: 10px;
+      background: #1a1a20; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px;
+      color: #eee; font-size: 13px; font-family: var(--font);
+    }
+    #share-password-error { min-height: 16px; font-size: 11px; color: #ff8080; margin-bottom: 8px; }
+
+    /* Share management modal (admin mode) */
+    #share-modal {
+      position: fixed; inset: 0; z-index: 400; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.72); backdrop-filter: blur(4px);
+    }
+    #share-modal-box {
+      width: 480px; max-width: 92vw; max-height: 86vh; overflow-y: auto;
+      background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px;
+      position: relative;
+    }
+    #share-modal-close {
+      position: absolute; top: 14px; right: 14px; background: none; border: none;
+      color: #999; font-size: 20px; cursor: pointer; line-height: 1;
+    }
+    #share-modal-box h2 { font-size: 15px; color: #fff; margin-bottom: 14px; }
+    #share-modal-box .panel { margin-bottom: 14px; }
+    #share-create-result {
+      display: none; margin-top: 12px; padding: 10px; border-radius: 8px;
+      background: rgba(74,222,128,0.1); border: 1px solid rgba(74,222,128,0.35); font-size: 12px;
+    }
+    #share-create-result .url-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    #share-create-result input {
+      flex: 1; background: #10120f; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+      color: #cde; font-size: 11px; padding: 5px 7px; font-family: ui-monospace, monospace;
+    }
+    #share-links-list { display: flex; flex-direction: column; gap: 8px; }
+    .share-link-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 9px 10px; border-radius: 8px; background: rgba(255,255,255,0.03); font-size: 11px; color: #ccc;
+    }
+    .share-link-row.revoked { opacity: 0.45; }
+    .share-link-row .meta { display: flex; flex-direction: column; gap: 2px; }
+    .share-link-row .revoke-btn {
+      background: none; border: 1px solid rgba(255,80,80,0.4); color: #ff8080;
+      border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer;
+    }
+
     @media (max-width: 1024px) {
       #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: 300px; }
       #sidebar-toggle { display: flex; }
@@ -295,6 +371,10 @@
         <span>DTM</span>
       </button>
     </nav>
+    <div id="admin-controls">
+      <button class="text-btn primary" id="btn-share">Share</button>
+      <button class="text-btn" id="btn-logout">Log out</button>
+    </div>
   </header>
 
   <div id="main">
@@ -458,6 +538,7 @@
       <div id="cloud-container"></div>
 
       <div id="floating-controls">
+        <button class="icon-btn" id="btn-measure-float" title="Toggle distance measurement" style="display:none;"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-reset-float" title="Reset camera"><svg viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-fullscreen-float" title="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
       </div>
@@ -465,7 +546,7 @@
       <div id="loading-overlay">
         <div class="brand-loader">
           <div class="spinner"></div>
-          <div id="loading-text">Initializing Rome Dam viewer...</div>
+          <div id="loading-text">Loading viewer...</div>
           <div id="loading-progress"></div>
         </div>
       </div>
@@ -517,6 +598,50 @@
     <div id="photo-actions">
       <a id="photo-download" href="#" download>Download Original</a>
        <span class="hint">Scroll to zoom · drag to pan · double-click resets · Esc closes</span>
+    </div>
+  </div>
+</div>
+
+<div id="share-password-overlay">
+  <div id="share-password-box">
+    <h2>Password required</h2>
+    <p>This shared link is password-protected.</p>
+    <input type="password" id="share-password-input" placeholder="Password" autocomplete="off">
+    <div id="share-password-error"></div>
+    <button class="text-btn primary" id="share-password-submit" style="width:100%;">Unlock</button>
+  </div>
+</div>
+
+<div id="share-modal">
+  <div id="share-modal-box">
+    <button id="share-modal-close" aria-label="Close">&times;</button>
+    <h2>Share links</h2>
+    <div class="panel">
+      <h3>Create new link</h3>
+      <div class="slider-row" style="margin-top:0;">
+        <span>Password</span>
+        <input type="text" id="share-new-password" placeholder="Leave blank for none">
+      </div>
+      <div class="slider-row">
+        <span>Expires in (days)</span>
+        <input type="number" id="share-new-expires" placeholder="Never" min="1">
+      </div>
+      <div class="slider-row">
+        <span>Allow measuring</span>
+        <input type="checkbox" id="share-new-perm-measure" checked style="accent-color:var(--brand-orange);">
+      </div>
+      <div class="slider-row">
+        <span>Show camera positions</span>
+        <input type="checkbox" id="share-new-perm-cameras" checked style="accent-color:var(--brand-orange);">
+      </div>
+      <div class="tool-grid" style="margin-top:10px;">
+        <button class="tool-btn full" id="share-create-btn">Create Link</button>
+      </div>
+      <div id="share-create-result"></div>
+    </div>
+    <div class="panel">
+      <h3>Existing links</h3>
+      <div id="share-links-list"><div class="hint">No share links yet for this project.</div></div>
     </div>
   </div>
 </div>
