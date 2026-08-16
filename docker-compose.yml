@@ -1,8 +1,15 @@
 services:
   ltds-viewer:
-    build: .
     image: ${VIEWER_IMAGE:-ghcr.io/ledgetoptechnologies/3d-viewer:latest}
+    pull_policy: always
     restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     ports:
       - "${VIEWER_PORT:-8088}:8088"
     environment:
@@ -52,3 +59,10 @@ services:
       - /mnt/Plugins/App_Data/Model-Viewer/Derivatives:/mnt/derivatives:ro
       # SQLite registry, sessions, shares, imports, and migration state.
       - /mnt/Plugins/App_Data/Model-Viewer/Data:/app/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

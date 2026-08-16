@@ -41,7 +41,9 @@ See `server/config.js` for all environment variables.
    mount paths already have safe defaults in `docker-compose.yml`.
 3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
    that has `read:packages`, then run `docker compose pull` and
-   `docker compose up -d`.
+   `docker compose up -d`. The production Compose profile always pulls the
+   configured registry image; local source builds remain explicit with
+   `docker build` and cannot silently replace the reviewed production image.
 4. Route `viewer.ledgetopdroneservices.com` through cloudflared to this service
    on port `8088`. The bare Viewer URL redirects to LTDS Ops; there is no local
    password-admin login in the production Compose profile.
@@ -50,6 +52,13 @@ The Viewer syncs on startup and every `SYNC_INTERVAL_MINUTES`. Ops can request
 a provider rescan through the signed v1 API. `GET /api/v1/health` is the
 liveness probe and `GET /api/v1/ready` verifies the database and WebODM mount;
 Docker Compose uses readiness for its health check.
+
+The production container runs as unprivileged UID/GID `1000:1000`, drops all
+Linux capabilities, prevents privilege escalation, limits process creation,
+and has a read-only root filesystem. Only `/app/data` is persistent and
+writable; `/tmp` is a bounded, non-executable in-memory filesystem. Container
+JSON logs rotate at 10 MiB with three files so an unattended Viewer cannot
+consume the TrueNAS application dataset.
 
 After the container is healthy, run the production readiness check inside it:
 

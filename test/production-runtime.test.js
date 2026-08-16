@@ -20,6 +20,15 @@ test('production Compose pins the approved TrueNAS storage layout', () => {
   assert.match(compose, /WEBODM_API_URL:\s*\$\{WEBODM_API_URL:-http:\/\/192\.168\.50\.80:30048\}/);
   assert.match(compose, /WEBODM_USERNAME:\s*\$\{WEBODM_USERNAME:-Model-Viewer\}/);
   assert.match(compose, /WEBODM_PASSWORD:\s*\$\{WEBODM_PASSWORD:\?/);
+  assert.doesNotMatch(compose, /^\s+build:/m);
+  assert.match(compose, /pull_policy:\s*always/);
+  assert.match(compose, /read_only:\s*true/);
+  assert.match(compose, /cap_drop:\s*\n\s+- ALL/);
+  assert.match(compose, /no-new-privileges:true/);
+  assert.match(compose, /pids_limit:\s*256/);
+  assert.match(compose, /\/tmp:rw,noexec,nosuid,nodev,size=64m/);
+  assert.match(compose, /max-size:\s*10m/);
+  assert.match(compose, /max-file:\s*"3"/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/WebODM\/Media:\/mnt\/webodm:ro/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Derivatives:\/mnt\/derivatives:ro/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Data:\/app\/data/);
