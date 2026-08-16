@@ -51,6 +51,23 @@ a provider rescan through the signed v1 API. `GET /api/v1/health` is the
 liveness probe and `GET /api/v1/ready` verifies the database and WebODM mount;
 Docker Compose uses readiness for its health check.
 
+After the container is healthy, run the production readiness check inside it:
+
+```bash
+docker compose exec -T ltds-viewer \
+  node scripts/production-readiness.mjs \
+  --verify-mount-options --require-models --require-point-cloud
+```
+
+The command validates production configuration without printing secret values,
+checks that WebODM/derivatives are read-only and Viewer data is writable, checks
+the public health/ready probes, exact host redirect, disabled legacy admin API,
+and the HMAC-authenticated model catalog. It prints only counts and mount paths.
+Add `--model webodm-PROJECTID-TASKID` to require one exact synced task. Add
+`--require-lod` only after its derivative directory contains `tileset.json`, a
+full `model.glb`, and conversion-generated `lod-provenance.json`; this makes the
+deployment check fail closed when full-quality LOD provenance is absent.
+
 The container only ever receives network access to your WebODM instance's
 HTTP(S) API and a **read-only** bind mount of WebODM's media/output storage.
 It never gets WebODM's Postgres data, Redis/broker data, application source,

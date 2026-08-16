@@ -51,6 +51,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY server ./server
+COPY scripts/production-readiness.mjs ./scripts/production-readiness.mjs
 COPY --from=build /app/dist ./dist
 RUN mkdir -p /app/data && chown -R node:node /app/data
 
