@@ -83,6 +83,7 @@
     const EPT_URL = qs.get('ept');
     const PROJECT_TITLE = qs.get('title') || 'Point Cloud';
     const POINT_COUNT = qs.get('points') ? parseInt(qs.get('points'), 10) : null;
+    const DISPLAY_UNITS = qs.get('units') === 'metric' ? 'm' : 'ft';
     document.title = `LTDS Point Cloud — ${PROJECT_TITLE}`;
     document.getElementById('pc-loading-text').textContent =
       (POINT_COUNT ? `Streaming ${(POINT_COUNT / 1e6).toFixed(0)}M point cloud…` : 'Streaming point cloud…');
@@ -95,7 +96,7 @@
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
     viewer.setPointBudget(10_000_000);
-    viewer.setLengthUnit('ft');
+    viewer.setLengthUnit(DISPLAY_UNITS);
     viewer.setBackground('black');
     viewer.setDescription('');
     viewer.loadSettingsFromURL();

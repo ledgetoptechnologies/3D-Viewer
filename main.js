@@ -23,6 +23,7 @@ import {
 } from './lod-policy.mjs';
 import { EarthLikeControls } from './earth-controls.js';
 import { hasMeshSource, localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
+import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -50,6 +51,9 @@ let C = { x: 0, y: 0, z: 0 };
 let UTM_ZONE_LON0 = 0;
 
 const METERS_TO_FT = 3.28084;
+let DISPLAY_UNITS = 'imperial';
+function setDisplayUnits(value){DISPLAY_UNITS=normalizeUnits(value);const suffix=DISPLAY_UNITS==='metric'?'m':'ft';if(dom.demMinLabel)dom.demMinLabel.textContent=`Min ${suffix}`;if(dom.demMaxLabel)dom.demMaxLabel.textContent=`Max ${suffix}`;if(dom.demLegendUnit)dom.demLegendUnit.textContent=`Elevation (${suffix})`;}
+function elevationInputMeters(value){return DISPLAY_UNITS==='metric'?value:value/METERS_TO_FT;}
 
 // world (three.js Y-up, model centered at origin) <-> UTM
 function worldToUtm(p) {
@@ -77,7 +81,7 @@ const dom = {};
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','cam-tooltip','labels-container',
- 'dem-settings','dem-colormap','dem-shading','dem-min','dem-max',
+ 'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
  'share-modal','share-modal-close','share-new-password','share-new-expires',
@@ -258,6 +262,7 @@ function bindSharePasswordForm() {
 }
 
 function applyShareResult(cfg) {
+  setDisplayUnits(cfg.displayUnits);
   PROJECT = cfg;
   SHARE_PERMISSIONS = cfg.permissions || { measure: true, cameras: true };
   applyProjectConfig(cfg);
@@ -391,6 +396,7 @@ function populateProjectSwitcher(models) {
 }
 
 function applyProjectConfig(p) {
+  setDisplayUnits(p.displayUnits || DISPLAY_UNITS);
   if (VIEW_MODE === 'admin') {
     // Only rewrite the URL / project-switcher selection in admin mode —
     // in view/embed mode the URL is the share link itself (/view/:token or
@@ -744,6 +750,7 @@ function scheduleSessionRenewal(session) {
 }
 
 function applyViewerSession(session, { initialize = false } = {}) {
+  setDisplayUnits(session.displayUnits);
   if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
   if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
   sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
@@ -1126,12 +1133,12 @@ function openPhoto(idx) {
   resetPhotoView();
   const fn = feat.properties.filename;
   const url = `${PHOTO_BASE}/${encodeURIComponent(fn)}`;
-  const altFt = Math.round((feat.geometry?.coordinates?.[2] || 0) * METERS_TO_FT);
+  const altitude = formatElevation(feat.geometry?.coordinates?.[2] || 0, DISPLAY_UNITS);
   const time = feat.properties.capture_time
     ? new Date(feat.properties.capture_time * 1000).toLocaleString()
     : '';
   dom.photoTitle.textContent = fn;
-  dom.photoMeta.textContent = `Altitude ${altFt} ft MSL${time ? '  ·  ' + time : ''}`;
+  dom.photoMeta.textContent = `Altitude ${altitude} MSL${time ? '  ·  ' + time : ''}`;
   dom.photoSpinner.style.display = 'block';
   dom.photoImg.style.opacity = '0';
   dom.photoImg.onload = () => {
@@ -1330,8 +1337,7 @@ function redrawActiveMeasure(cursorPoint = null) {
     m.previewLine.computeLineDistances();
     m.previewLine.renderOrder = 998;
     m.group.add(m.previewLine);
-    const segFt = last.distanceTo(cursorPoint) * METERS_TO_FT;
-    m.previewLabel = makeLabel(formatFtIn(segFt), 'mlabel preview');
+    m.previewLabel = makeLabel(formatLength(last.distanceTo(cursorPoint), DISPLAY_UNITS), 'mlabel preview');
     m.previewLabel.position.copy(new THREE.Vector3().addVectors(last, cursorPoint).multiplyScalar(0.5));
     m.group.add(m.previewLabel);
   }
@@ -1348,20 +1354,20 @@ function finishMeasure() {
 
   if (m.tool === 'distance') {
     const [a, b] = m.points;
-    const distFt = a.distanceTo(b) * METERS_TO_FT;
-    const horizFt = Math.hypot(a.x - b.x, a.z - b.z) * METERS_TO_FT;
-    const vertFt = Math.abs(a.y - b.y) * METERS_TO_FT;
+    const distanceM = a.distanceTo(b);
+    const horizontalM = Math.hypot(a.x - b.x, a.z - b.z);
+    const verticalM = Math.abs(a.y - b.y);
     const g = new THREE.BufferGeometry().setFromPoints([a, b]);
     const line = new THREE.Line(g, lineMaterial());
     line.renderOrder = 998;
     m.group.add(line);
-    const label = makeLabel(formatFtIn(distFt));
-    label.element.title = `Horizontal ${formatFtIn(horizFt)} · Vertical ${formatFtIn(vertFt)}`;
+    const label = makeLabel(formatLength(distanceM, DISPLAY_UNITS));
+    label.element.title = `Horizontal ${formatLength(horizontalM, DISPLAY_UNITS)} · Vertical ${formatLength(verticalM, DISPLAY_UNITS)}`;
     label.position.copy(new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5));
     m.group.add(label);
     m.labels.push(label);
     dom.measureOutput.innerHTML =
-      `<b>Distance:</b> ${formatFtIn(distFt)}<br><span class="sub">Horizontal ${formatFtIn(horizFt)} · Vertical ${formatFtIn(vertFt)}</span>`;
+      `<b>Distance:</b> ${formatLength(distanceM, DISPLAY_UNITS)}<br><span class="sub">Horizontal ${formatLength(horizontalM, DISPLAY_UNITS)} · Vertical ${formatLength(verticalM, DISPLAY_UNITS)}</span>`;
   } else {
     // close the loop
     if (m.line) { m.group.remove(m.line); m.line.geometry.dispose(); m.line = null; }
@@ -1381,25 +1387,23 @@ function finishMeasure() {
     }
     const centroid = m.points.reduce((acc, p) => acc.add(p), new THREE.Vector3()).divideScalar(m.points.length);
     const areaM2 = polygonArea3D(m.points);
-    const areaSqFt = areaM2 * METERS_TO_FT * METERS_TO_FT;
 
     if (m.tool === 'area') {
-      const label = makeLabel(formatSqFt(areaSqFt));
+      const label = makeLabel(formatArea(areaM2, DISPLAY_UNITS));
       label.position.copy(centroid);
       m.group.add(label);
       m.labels.push(label);
-      dom.measureOutput.innerHTML = `<b>Area:</b> ${formatSqFt(areaSqFt)}`;
+      dom.measureOutput.innerHTML = `<b>Area:</b> ${formatArea(areaM2, DISPLAY_UNITS)}`;
     } else {
       const ys = m.points.map(p => p.y);
       const depthM = Math.max(...ys) - Math.min(...ys);
-      const volCuFt = areaM2 * depthM * Math.pow(METERS_TO_FT, 3);
-      const volCuYd = volCuFt / 27;
-      const label = makeLabel(`≈ ${Math.round(volCuYd).toLocaleString()} cu yd`);
+      const volumeM3 = areaM2 * depthM;
+      const label = makeLabel(formatVolume(volumeM3, DISPLAY_UNITS));
       label.position.copy(centroid);
       m.group.add(label);
       m.labels.push(label);
       dom.measureOutput.innerHTML =
-        `<b>Volume (prism approx):</b> ≈ ${Math.round(volCuYd).toLocaleString()} cu yd<br><span class="sub">${Math.round(volCuFt).toLocaleString()} cu ft · base ${formatSqFt(areaSqFt)} · depth ${formatFtIn(depthM * METERS_TO_FT)}</span>`;
+        `<b>Volume (prism approx):</b> ${formatVolume(volumeM3, DISPLAY_UNITS)}<br><span class="sub">${formatVolumeDetail(volumeM3, areaM2, depthM, DISPLAY_UNITS)}</span>`;
     }
   }
 
@@ -1497,17 +1501,6 @@ function polygonArea3D(points) {
   return Math.abs(area2) * 0.5;
 }
 
-function formatFtIn(totalFeet) {
-  const totalInches = Math.round(totalFeet * 12);
-  const ft = Math.floor(totalInches / 12);
-  const inch = totalInches % 12;
-  return `${ft}' ${inch}"`;
-}
-function formatSqFt(sqft) {
-  if (sqft >= 43560) return `${(sqft / 43560).toFixed(2)} acres`;
-  return `${Math.round(sqft).toLocaleString()} sq ft`;
-}
-
 // ───────────────────────────────────────────────────────────────
 // Pointer routing (placement, camera clicks, hover)
 // ───────────────────────────────────────────────────────────────
@@ -1556,7 +1549,7 @@ function onPointerMove(e) {
   const surf = (state.measure) ? null : pickSurface(ndc);
   if (surf) {
     const u = worldToUtm(surf);
-    dom.coords.textContent = `E ${u.e.toFixed(1)}  N ${u.n.toFixed(1)}  El ${Math.round(u.alt * METERS_TO_FT)} ft`;
+    dom.coords.textContent = `E ${u.e.toFixed(1)}  N ${u.n.toFixed(1)}  El ${formatElevation(u.alt, DISPLAY_UNITS)}`;
   }
 
   // camera hover
@@ -1796,8 +1789,8 @@ function warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, la
   } else {
     const band = raster[0];
     const nodata = isNaN(ds.nodata) ? -9999 : ds.nodata;
-    const lo = demSettings.minFt != null ? demSettings.minFt / METERS_TO_FT : ds.min;
-    const hi = demSettings.maxFt != null ? demSettings.maxFt / METERS_TO_FT : ds.max;
+    const lo = demSettings.minFt != null ? elevationInputMeters(demSettings.minFt) : ds.min;
+    const hi = demSettings.maxFt != null ? elevationInputMeters(demSettings.maxFt) : ds.max;
     const range = (hi - lo) || 1;
     const cmap = COLORMAPS[demSettings.cmap] || COLORMAPS.viridis;
     const steps = demSettings.steps | 0;
@@ -1855,8 +1848,8 @@ function renderDemTile(raster, w, h, ds, warp) {
   cvs.width = w; cvs.height = h;
   const ctx = cvs.getContext('2d');
   const img = ctx.createImageData(w, h);
-  const lo = demSettings.minFt != null ? demSettings.minFt / METERS_TO_FT : ds.min;
-  const hi = demSettings.maxFt != null ? demSettings.maxFt / METERS_TO_FT : ds.max;
+  const lo = demSettings.minFt != null ? elevationInputMeters(demSettings.minFt) : ds.min;
+  const hi = demSettings.maxFt != null ? elevationInputMeters(demSettings.maxFt) : ds.max;
   const range = (hi - lo) || 1;
   const cmap = COLORMAPS[demSettings.cmap] || COLORMAPS.viridis;
   const steps = demSettings.steps | 0;
@@ -1992,8 +1985,8 @@ function rememberMapView(mode) {
 }
 
 function refreshLegendFor(ds) {
-  const lo = demSettings.minFt != null ? demSettings.minFt / METERS_TO_FT : ds.min;
-  const hi = demSettings.maxFt != null ? demSettings.maxFt / METERS_TO_FT : ds.max;
+  const lo = demSettings.minFt != null ? elevationInputMeters(demSettings.minFt) : ds.min;
+  const hi = demSettings.maxFt != null ? elevationInputMeters(demSettings.maxFt) : ds.max;
   updateLegend(lo, hi, demSettings.steps | 0);
 }
 
@@ -2064,7 +2057,7 @@ function showDemHover(e, layer) {
   img.readRasters({ window: [px, py, px + 1, py + 1], pool: geoPool }).then((r) => {
     const v = r[0][0];
     if (isFinite(v) && v > -1000 && v !== ds.nodata) {
-      dom.demHover.textContent = `Elevation: ${Math.round(v * METERS_TO_FT)} ft`;
+      dom.demHover.textContent = `Elevation: ${formatElevation(v, DISPLAY_UNITS)}`;
       dom.demHover.style.display = 'block';
     } else dom.demHover.style.display = 'none';
   }).catch(() => {});
@@ -2088,12 +2081,11 @@ function updateLegend(minM, maxM, steps) {
       ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
       ctx.fillRect(0, Math.round(b * bandH), W, Math.ceil(bandH));
     }
-    const minFt = minM * METERS_TO_FT, maxFt = maxM * METERS_TO_FT;
     const every = steps > 8 ? 2 : 1;
     const spans = [];
     for (let k = steps; k >= 0; k -= 1) {
-      const ft = Math.round(minFt + (maxFt - minFt) * k / steps);
-      spans.push(k % every === 0 || k === 0 ? `<span>${ft}</span>` : '<span>&nbsp;</span>');
+      const elevation = minM + (maxM - minM) * k / steps;
+      spans.push(k % every === 0 || k === 0 ? `<span>${formatElevation(elevation, DISPLAY_UNITS)}</span>` : '<span>&nbsp;</span>');
     }
     dom.demLegendLabels.innerHTML = spans.join('');
   } else {
@@ -2103,9 +2095,8 @@ function updateLegend(minM, maxM, steps) {
       ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
       ctx.fillRect(0, y, W, 1);
     }
-    const minFt = Math.round(minM * METERS_TO_FT), maxFt = Math.round(maxM * METERS_TO_FT);
-    const ticks = [1, 0.75, 0.5, 0.25, 0].map((u) => Math.round(minFt + (maxFt - minFt) * u));
-    dom.demLegendLabels.innerHTML = ticks.map((ft) => `<span>${ft}</span>`).join('');
+    const ticks = [1, 0.75, 0.5, 0.25, 0].map((u) => minM + (maxM - minM) * u);
+    dom.demLegendLabels.innerHTML = ticks.map((elevation) => `<span>${formatElevation(elevation, DISPLAY_UNITS)}</span>`).join('');
   }
 }
 
@@ -2315,6 +2306,7 @@ function showPointCloud() {
     const iframe = document.createElement('iframe');
     iframe.id = 'pc-iframe';
     const params = new URLSearchParams({ ept: EPT_URL || '', title: (PROJECT && PROJECT.title) || '' });
+    params.set('units', DISPLAY_UNITS);
     if (POINT_COUNT) params.set('points', String(POINT_COUNT));
     iframe.src = `/pointcloud.html?${params.toString()}`;
     iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:#050505;';

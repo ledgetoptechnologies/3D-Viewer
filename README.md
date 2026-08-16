@@ -26,6 +26,11 @@ completed WebODM projects via WebODM's REST API.
 
 See `server/config.js` for all environment variables.
 
+The optional direct-upload and ODM processing subsystem is documented in
+[`docs/PROCESSING_PLATFORM.md`](docs/PROCESSING_PLATFORM.md). It is disabled
+by default; enabling it does not make provider availability a dependency of
+already-published viewing.
+
 ## Running with Docker (production)
 
 1. Create the fixed TrueNAS directories and make the database directory
@@ -36,9 +41,12 @@ See `server/config.js` for all environment variables.
    chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Data
    ```
 2. Copy `.env.example` to `.env`. Set independent 32+ character
-   `SERVICE_AUTH_SECRET` and `SESSION_SECRET` values and the dedicated WebODM
-   API URL/credentials. The production Viewer/Ops/client hostnames and TrueNAS
-   mount paths already have safe defaults in `docker-compose.yml`.
+   `SERVICE_AUTH_SECRET` and `SESSION_SECRET` values. WebODM API discovery is
+   disabled by default, so credentials are not required for direct read-only
+   media imports or the processing platform. Configure the dedicated WebODM
+   API user only if `WEBODM_ENABLED=true`. The production Viewer/Ops/client
+   hostnames and TrueNAS mount paths already have safe defaults in
+   `docker-compose.yml`.
 3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
    that has `read:packages`, then run `docker compose pull` and
    `docker compose up -d`. The production Compose profile always pulls the
@@ -48,8 +56,8 @@ See `server/config.js` for all environment variables.
    on port `8088`. The bare Viewer URL redirects to LTDS Ops; there is no local
    password-admin login in the production Compose profile.
 
-The Viewer syncs on startup and every `SYNC_INTERVAL_MINUTES`. Ops can request
-a provider rescan through the signed v1 API. `GET /api/v1/health` is the
+When WebODM discovery is enabled, the Viewer syncs on startup and every
+`SYNC_INTERVAL_MINUTES`. Ops can request a provider rescan through the signed v1 API. `GET /api/v1/health` is the
 liveness probe and `GET /api/v1/ready` verifies the database and WebODM mount;
 Docker Compose uses readiness for its health check.
 

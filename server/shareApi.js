@@ -136,7 +136,7 @@ router.get('/api/share/:token', (req, res) => {
   else shareStore.recordAccess(share.id);
   issueShareSession(req, res, share);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, shareExpiresAt: share.expiresAt || null });
+  res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, displayUnits: share.displayUnits || config.defaultUnits, shareExpiresAt: share.expiresAt || null });
 });
 
 router.post('/api/share/:token/unlock', async (req, res) => {
@@ -162,7 +162,7 @@ router.post('/api/share/:token/unlock', async (req, res) => {
   else shareStore.recordAccess(share.id);
   issueShareSession(req, res, share);
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, shareExpiresAt: share.expiresAt || null });
+  res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, displayUnits: share.displayUnits || config.defaultUnits, shareExpiresAt: share.expiresAt || null });
 });
 
 module.exports = router;

@@ -15,6 +15,10 @@ const { openDatabase } = require('./database');
 const { ViewerRepository } = require('./repository');
 const { migrateLegacyJson } = require('./legacyMigration');
 const { createApiV1 } = require('./apiV1');
+const { ProcessingRepository } = require('./processingRepository');
+const { StorageManager } = require('./storageManager');
+const { createProcessingApi } = require('./processingApi');
+const { sanitizeLogMessage } = require('./processingSecurity');
 
 const problems = validate();
 if (problems.length) {
@@ -37,9 +41,16 @@ try {
 
 let database;
 let repository;
+let processingRepository;
+let storageManager;
 try {
   database = openDatabase(config.databasePath);
   repository = new ViewerRepository(database);
+  if (config.processingPlatformEnabled) {
+    processingRepository = new ProcessingRepository(database, { logMaxBytes: config.processingLogMaxBytes });
+    storageManager = new StorageManager(config);
+    storageManager.initialize();
+  }
   const migration = migrateLegacyJson(repository, config.dataDir);
   if (!migration.skipped && (migration.models || migration.shares)) {
     console.log('[migration] imported legacy registry:', JSON.stringify(migration));
@@ -116,11 +127,18 @@ app.get('/api/v1/ready', (_req, res) => {
       missing.push('WebODM media mount');
     }
   }
+  if (config.processingPlatformEnabled) {
+    for (const [name, directory] of [['datasets', config.datasetsMount], ['models', config.modelsMount], ['cache', config.cacheMount], ['trash', config.trashMount]]) {
+      try { fs.accessSync(directory, fs.constants.R_OK | fs.constants.W_OK); } catch { missing.push(`${name} storage`); }
+    }
+  }
   res.status(missing.length ? 503 : 200).json({ ok: missing.length === 0, missing });
 });
 
 app.use(express.json({
-  limit: '100kb',
+  // Processing upload manifests are separately validated and capped. Keep the
+  // legacy surface small when the processing feature is disabled.
+  limit: config.processingPlatformEnabled ? config.uploadMaxManifestBytes : '100kb',
   verify(req, _res, buffer) {
     // HMAC verification must hash the exact octets Ops sent, not a
     // re-serialized JavaScript object.
@@ -135,6 +153,7 @@ app.use((req, res, next) => {
 app.use(adminAuth.router);
 app.use(shareApi);
 app.use(createApiV1(repository));
+if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager }));
 app.use(apiRouter);
 app.use(assetsRouter);
 
@@ -172,6 +191,13 @@ app.get('*', (req, res, next) => {
   res.sendFile(path.join(config.distDir, 'index.html'), (err) => { if (err) next(err); });
 });
 
+app.use((error, _req, res, _next) => {
+  const safeMessage=sanitizeLogMessage(error.message || 'request failed').slice(0,240);
+  console.error('[request-error]', error.code || error.name || 'error', safeMessage);
+  if (res.headersSent) return;
+  res.status(error.status || 500).json({ error: error.status && error.status < 500 ? safeMessage : 'request failed', code: error.code || 'request_failed' });
+});
+
 startScheduler();
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -183,7 +209,6 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 app.listen(config.port, () => {
   console.log(`LTDS 3D Viewer server listening on :${config.port}`);
-  console.log(`WebODM API: ${config.webodmApiUrl}`);
-  console.log(`WebODM media mount: ${config.webodmMediaMount}`);
+  console.log(`WebODM integration: ${config.webodmEnabled ? 'enabled' : 'disabled'}`);
   if (config.derivativesMount) console.log(`Derivatives mount: ${config.derivativesMount}`);
 });

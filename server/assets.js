@@ -4,6 +4,8 @@
 'use strict';
 
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const store = require('./store');
 const shareStore = require('./shareStore');
@@ -63,6 +65,25 @@ function isAuthorizedForProject(req, projectId) {
   return shareStore.isLive(legacyShare) && legacyShare.viewerProjectId === projectId;
 }
 
+function safeExistingFile(root, relPath) {
+  const lexical = safeResolve(root, relPath);
+  if (!lexical) return null;
+  let realRoot;
+  try { realRoot = fs.realpathSync(root); } catch { return null; }
+  const relative = path.relative(path.resolve(root), lexical);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  let cursor = realRoot;
+  try {
+    for (const segment of relative.split(path.sep)) {
+      cursor = path.join(cursor, segment);
+      if (fs.lstatSync(cursor).isSymbolicLink()) return null;
+    }
+    const real = fs.realpathSync(cursor);
+    if (!real.startsWith(`${realRoot}${path.sep}`) || !fs.statSync(real).isFile()) return null;
+    return real;
+  } catch { return null; }
+}
+
 function canonicalAssetRoot(model, rootKey) {
   const source = model && model.activeVersion && model.activeVersion.sourceLocator || {};
   const legacyRoot = source.legacyAssetRoots && source.legacyAssetRoots[rootKey];
@@ -75,6 +96,7 @@ function canonicalAssetRoot(model, rootKey) {
       return path.join(config.derivativesMount, `${source.projectId}-${source.taskId}`);
     }
   }
+  if (model.provider === 'ltds-processing' && rootKey === 'models') return config.modelsMount;
   return null;
 }
 
@@ -85,6 +107,27 @@ function resolveProject(projectId, rootKey) {
   const model = canonicalRepository.getModel(projectId);
   return { project: model, rootPath: canonicalAssetRoot(model, rootKey) };
 }
+
+// A scoped Viewer capability is authorization for one published model version,
+// not for an entire storage mount. Metadata files for EPT and 3D Tiles are
+// roots for their relative child requests; every other asset is a single file.
+function publishedAssetMatch(model, rootKey, relPath) {
+  if (!model?.activeVersion || model.status !== 'ready') return false;
+  const requested = String(relPath || '').replaceAll('\\', '/');
+  const hierarchical = new Set(['ept', 'tiles']);
+  return model.activeVersion.assets.find((asset) => {
+    if (!asset.published || asset.rootKey !== rootKey) return false;
+    const published = String(asset.relativePath || '').replaceAll('\\', '/');
+    if (requested === published) return true;
+    if (!hierarchical.has(asset.kind)) return false;
+    const directory = path.posix.dirname(published);
+    return directory !== '.' && requested.startsWith(`${directory}/`);
+  });
+}
+function publishedAssetAllows(model, rootKey, relPath) { return Boolean(publishedAssetMatch(model,rootKey,relPath)); }
+
+function sha256File(filePath) { return new Promise((resolve,reject)=>{const hash=crypto.createHash('sha256'),stream=fs.createReadStream(filePath);stream.on('data',(chunk)=>hash.update(chunk));stream.on('error',reject);stream.on('end',()=>resolve(hash.digest('hex')));}); }
+async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs){if(project.provider!=='ltds-processing')return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null;if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=fs.statSync(abs);return stat.size===expected.byteSize&&await sha256File(abs)===expected.sha256;}
 
 function pathTokenAuthorized(req, projectId) {
   if (!canonicalRepository) return false;
@@ -122,6 +165,7 @@ function xAccelLocation(abs) {
     ['webodm', config.webodmMediaMount],
     ['derivatives', config.derivativesMount],
     ['terra', config.terraImportMount],
+    ['models', config.modelsMount],
   ];
   for (const [name, root] of roots) {
     if (!root) continue;
@@ -134,14 +178,22 @@ function xAccelLocation(abs) {
   return null;
 }
 
-function sendAsset(req, res) {
+async function sendAsset(req, res) {
   const { project, rootPath } = resolveProject(req.params.id, req.params.root);
   if (!project) return res.status(404).json({ error: 'unknown project' });
   if (!rootPath) return res.status(404).json({ error: 'unknown asset root' });
 
   const rel = req.params[0] || '';
-  const abs = safeResolve(rootPath, rel);
-  if (!abs) return res.status(400).json({ error: 'invalid path' });
+  const publishedAsset = project.activeVersion ? publishedAssetMatch(project, req.params.root, rel) : null;
+  if (project.activeVersion && !publishedAsset) {
+    return res.status(404).json({ error: 'asset not found' });
+  }
+  const abs = safeExistingFile(rootPath, rel);
+  if (!abs) return res.status(404).json({ error: 'asset not found' });
+  if (project.provider === 'ltds-processing') {
+    const requested=String(rel).replaceAll('\\','/'),published=String(publishedAsset.relativePath).replaceAll('\\','/');
+    if (!await publishedAssetIntegrityAllows(canonicalRepository,project,publishedAsset,requested,abs))return res.status(404).json({ error: 'asset not found' });
+  }
 
   // Authorization/revocation is evaluated for every request. Prevent an
   // intermediary or browser cache from serving a previously authorized URL
@@ -160,23 +212,27 @@ function sendAsset(req, res) {
   });
 }
 
-router.get('/assets/:id/:root/*', (req, res) => {
+router.get('/assets/:id/:root/*', (req, res, next) => {
   if (!isAuthorizedForProject(req, req.params.id)) {
     return res.status(403).json({ error: 'not authorized' });
   }
-  return sendAsset(req, res);
+  return sendAsset(req, res).catch(next);
 });
 
 // Capability URL used by embedded Viewer sessions and public shares. Keeping
 // the scoped browser credential in the asset URL makes iframe delivery work
 // even when the browser blocks third-party cookies. Relative 3D Tiles/EPT
 // children inherit this path prefix automatically.
-router.get('/session-assets/:token/:id/:root/*', (req, res) => {
+router.get('/session-assets/:token/:id/:root/*', (req, res, next) => {
   if (!pathTokenAuthorized(req, req.params.id)) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res);
+  return sendAsset(req, res).catch(next);
 });
 
 module.exports = router;
 module.exports.setRepository = setRepository;
 module.exports.safeResolve = safeResolve;
+module.exports.safeExistingFile = safeExistingFile;
 module.exports.xAccelLocation = xAccelLocation;
+module.exports.publishedAssetAllows = publishedAssetAllows;
+module.exports.publishedAssetMatch = publishedAssetMatch;
+module.exports.publishedAssetIntegrityAllows = publishedAssetIntegrityAllows;

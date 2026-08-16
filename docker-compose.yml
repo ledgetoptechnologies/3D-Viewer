@@ -1,68 +1,110 @@
+x-runtime: &runtime
+  image: ${VIEWER_IMAGE:-ghcr.io/ledgetoptechnologies/3d-viewer:latest}
+  pull_policy: always
+  restart: unless-stopped
+  init: true
+  read_only: true
+  user: "1000:1000"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  tmpfs:
+    - "/tmp:rw,noexec,nosuid,nodev,size=256m"
+  logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
+  environment: &runtime-env
+    PORT: 8088
+    PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://viewer.ledgetopdroneservices.com}
+    EXPECTED_HOST: ${EXPECTED_HOST:-viewer.ledgetopdroneservices.com}
+    OPS_BASE_URL: ${OPS_BASE_URL:-https://ops.ledgetopdroneservices.com}
+    ALLOWED_EMBED_ORIGINS: ${ALLOWED_EMBED_ORIGINS:-https://ops.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com}
+    TRUST_PROXY_HOPS: "2"
+    SERVICE_AUTH_KEY_ID: ${SERVICE_AUTH_KEY_ID:-ops-v1}
+    SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?set SERVICE_AUTH_SECRET}
+    SERVICE_AUTH_KEYS_JSON: ${SERVICE_AUTH_KEYS_JSON:-}
+    SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+    EMERGENCY_ADMIN_ENABLED: "false"
+    WEBODM_ENABLED: "false"
+    WEBODM_API_URL: ${WEBODM_API_URL:-http://192.168.50.80:30048}
+    WEBODM_USERNAME: ${WEBODM_USERNAME:-Model-Viewer}
+    WEBODM_PASSWORD: ${WEBODM_PASSWORD:-}
+    PROCESSING_PLATFORM_ENABLED: ${PROCESSING_PLATFORM_ENABLED:-false}
+    LOCAL_DERIVATIVES_ENABLED: "false"
+    PROCESSING_PROVIDER_ORIGINS: ${PROCESSING_PROVIDER_ORIGINS:-http://192.168.50.80:30048}
+    PROCESSING_PROVIDER_TOKENS_JSON: ${PROCESSING_PROVIDER_TOKENS_JSON:-{}}
+    VIEWER_EVENT_URL: ${VIEWER_EVENT_URL:-}
+    VIEWER_EVENT_KEY_ID: ${VIEWER_EVENT_KEY_ID:-viewer-v1}
+    VIEWER_EVENT_SECRET: ${VIEWER_EVENT_SECRET:-}
+    DATABASE_PATH: /app/data/viewer.sqlite
+    DATASETS_MOUNT: /app/datasets
+    MODELS_MOUNT: /app/models
+    CACHE_MOUNT: /app/cache
+    TRASH_MOUNT: /app/trash
+    DATASET_IMPORT_MOUNT: /imports/datasets
+    TERRA_IMPORT_MOUNT: /imports/terra
+    WEBODM_MEDIA_MOUNT: /imports/webodm
+    DERIVATIVES_MOUNT: /imports/legacy-derivatives
+    DEFAULT_UNITS: ${DEFAULT_UNITS:-imperial}
+    X_ACCEL_REDIRECT_PREFIX: /internal-assets
+  volumes: &runtime-volumes
+    - /mnt/Plugins/App_Data/Model-Viewer/Data:/app/data
+    - /mnt/Plugins/App_Data/Model-Viewer/Datasets:/app/datasets
+    - /mnt/Plugins/App_Data/Model-Viewer/Models:/app/models
+    - /mnt/Plugins/App_Data/Model-Viewer/Cache:/app/cache
+    - /mnt/Plugins/App_Data/Model-Viewer/Trash:/app/trash
+    - /mnt/Plugins/App_Data/Model-Viewer/Import/Datasets:/imports/datasets
+    - /mnt/Plugins/App_Data/Model-Viewer/Import/Terra:/imports/terra
+    - /mnt/Plugins/App_Data/WebODM/Media:/imports/webodm:ro
+    - /mnt/Plugins/App_Data/Model-Viewer/Derivatives:/imports/legacy-derivatives:ro
+
 services:
-  ltds-viewer:
-    image: ${VIEWER_IMAGE:-ghcr.io/ledgetoptechnologies/3d-viewer:latest}
-    pull_policy: always
+  gateway:
+    image: nginx:1.27.5-alpine
     restart: unless-stopped
-    init: true
     read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 256
-    ports:
-      - "${VIEWER_PORT:-8088}:8088"
-    environment:
-      PORT: 8088
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://viewer.ledgetopdroneservices.com}
-      EXPECTED_HOST: ${EXPECTED_HOST:-viewer.ledgetopdroneservices.com}
-      OPS_BASE_URL: ${OPS_BASE_URL:-https://ops.ledgetopdroneservices.com}
-      ALLOWED_EMBED_ORIGINS: ${ALLOWED_EMBED_ORIGINS:-https://ops.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com}
-      # cloudflared -> container is one trusted proxy. Use 2 only if Nginx is
-      # deliberately inserted between cloudflared and this container.
-      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
-      SERVICE_AUTH_KEY_ID: ${SERVICE_AUTH_KEY_ID:-ops-v1}
-      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?set a random SERVICE_AUTH_SECRET of at least 32 characters}
-      SERVICE_AUTH_KEYS_JSON: ${SERVICE_AUTH_KEYS_JSON:-}
-      SERVICE_AUTH_PREVIOUS_KEY_ID: ${SERVICE_AUTH_PREVIOUS_KEY_ID:-}
-      SERVICE_AUTH_PREVIOUS_SECRET: ${SERVICE_AUTH_PREVIOUS_SECRET:-}
-      # Administration is owned by LTDS Ops. The legacy local password shell
-      # is intentionally unavailable in this deployment profile.
-      EMERGENCY_ADMIN_ENABLED: "false"
-      # Prefer the LAN endpoint so discovery traffic stays local. Override
-      # with https://webodm.ledgetopdroneservices.com only when the container
-      # cannot route to the WebODM host.
-      WEBODM_API_URL: ${WEBODM_API_URL:-http://192.168.50.80:30048}
-      WEBODM_USERNAME: ${WEBODM_USERNAME:-Model-Viewer}
-      WEBODM_PASSWORD: ${WEBODM_PASSWORD:?set the dedicated Model-Viewer WebODM password}
-      WEBODM_ENABLED: ${WEBODM_ENABLED:-true}
-      WEBODM_MEDIA_MOUNT: /mnt/webodm
-      DERIVATIVES_MOUNT: /mnt/derivatives
-      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-10}
-      SESSION_SECRET: ${SESSION_SECRET:?set a random SESSION_SECRET of at least 32 characters}
-      DATABASE_PATH: /app/data/viewer.sqlite
-      VIEWER_SESSION_TTL_SECONDS: ${VIEWER_SESSION_TTL_SECONDS:-1800}
-      SESSION_GRANT_TTL_SECONDS: ${SESSION_GRANT_TTL_SECONDS:-60}
-      X_ACCEL_REDIRECT_PREFIX: ${X_ACCEL_REDIRECT_PREFIX:-}
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, CHOWN, SETUID, SETGID]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    ports: ["${VIEWER_PORT:-8088}:8088"]
+    volumes:
+      - ./deploy/nginx-viewer.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/viewer-proxy-headers.conf:/etc/nginx/viewer-proxy-headers.conf:ro
+      - /mnt/Plugins/App_Data/Model-Viewer/Models:/srv/models:ro
+      - /mnt/Plugins/App_Data/WebODM/Media:/srv/webodm:ro
+      - /mnt/Plugins/App_Data/Model-Viewer/Derivatives:/srv/derivatives:ro
+      - /mnt/Plugins/App_Data/Model-Viewer/Import/Terra:/srv/terra:ro
+    tmpfs:
+      - "/var/cache/nginx:rw,nosuid,nodev,size=16m"
+      - "/var/run:rw,nosuid,nodev,size=1m"
+      - "/tmp:rw,noexec,nosuid,nodev,size=16m"
+    depends_on: {viewer-api: {condition: service_healthy}}
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8088/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:8088/api/v1/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
+
+  viewer-api:
+    <<: *runtime
+    expose: ["8088"]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8088/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
-    volumes:
-      # READ-ONLY: WebODM's media/output storage.
-      #
-      # TrueNAS host paths are fixed for this internal application. WebODM
-      # output and prebuilt derivatives are always read-only to the Viewer.
-      - /mnt/Plugins/App_Data/WebODM/Media:/mnt/webodm:ro
-      - /mnt/Plugins/App_Data/Model-Viewer/Derivatives:/mnt/derivatives:ro
-      # SQLite registry, sessions, shares, imports, and migration state.
-      - /mnt/Plugins/App_Data/Model-Viewer/Data:/app/data
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: "3"
+
+  viewer-worker:
+    <<: *runtime
+    profiles: [processing]
+    command: [node, server/worker.js]
+    environment:
+      <<: *runtime-env
+      PROCESSING_PLATFORM_ENABLED: "true"
+    healthcheck:
+      test: [CMD, node, -e, "const {config}=require('./server/config');const {openDatabase}=require('./server/database');const db=openDatabase(config.databasePath);const row=db.prepare(\"SELECT value FROM app_state WHERE key='processing_worker_heartbeat'\").get();db.close();const value=row&&JSON.parse(row.value);if(!value||Date.parse(value.at)<=Date.now()-30000)process.exit(1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

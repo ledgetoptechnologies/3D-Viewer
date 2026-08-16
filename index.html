@@ -455,9 +455,9 @@
              <span class="val" id="dem-shading-val">1.0</span>
            </div>
            <div class="slider-row">
-             <span>Min ft</span>
+             <span id="dem-min-label">Min ft</span>
              <input type="number" id="dem-min" placeholder="auto">
-             <span>Max ft</span>
+             <span id="dem-max-label">Max ft</span>
              <input type="number" id="dem-max" placeholder="auto">
            </div>
            <div class="slider-row">
@@ -557,9 +557,9 @@
           <canvas id="legend-canvas" width="20" height="160"></canvas>
           <div id="dem-legend-labels"></div>
         </div>
-        <div style="font-size:10px;color:#aaa;text-align:center;margin-top:4px;">Elevation (ft)</div>
+        <div id="dem-legend-unit" style="font-size:10px;color:#aaa;text-align:center;margin-top:4px;">Elevation (ft)</div>
       </div>
-      <div id="dem-hover">Elevation: — ft</div>
+      <div id="dem-hover">Elevation: —</div>
     </div>
   </div>
 

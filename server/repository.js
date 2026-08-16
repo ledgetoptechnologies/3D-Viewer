@@ -42,6 +42,10 @@ function asModel(row, version, assets = []) {
         format: asset.format,
         contentType: asset.content_type,
         byteSize: asset.byte_size,
+        sha256: asset.sha256,
+        manifestSha256: asset.manifest_sha256,
+        storageMode: asset.storage_mode,
+        published: Boolean(asset.published),
       })),
     } : null,
   };
@@ -91,7 +95,7 @@ class ViewerRepository {
       ? this.database.prepare('SELECT * FROM model_versions WHERE id=? AND model_id=?').get(row.active_version_id, row.id)
       : null;
     const assets = version
-      ? this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(version.id)
+      ? this.database.prepare('SELECT * FROM model_assets WHERE version_id=? AND published=1 ORDER BY kind').all(version.id)
       : [];
     return asModel(row, version, assets);
   }
@@ -101,6 +105,36 @@ class ViewerRepository {
       `SELECT id FROM models ${includeUnregistered ? '' : "WHERE status<>'unregistered'"} ORDER BY display_name COLLATE NOCASE`,
     ).all();
     return rows.map((row) => this.getModel(row.id)).filter(Boolean);
+  }
+
+  getModelVersion(modelId, versionId) {
+    const model = this.database.prepare('SELECT * FROM models WHERE id=?').get(modelId);
+    const version = this.database.prepare('SELECT * FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
+    if (!model || !version) return null;
+    const assets = this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(versionId);
+    return asModel(model, version, assets);
+  }
+
+  getModelAssetFile(assetId, relativePath) {
+    const row = this.database.prepare('SELECT relative_path,byte_size,sha256 FROM model_asset_files WHERE asset_id=? AND relative_path=?').get(assetId, relativePath);
+    return row ? { relativePath: row.relative_path, byteSize: row.byte_size, sha256: row.sha256 } : null;
+  }
+
+  publishModelVersion(modelId, versionId, selectedKinds) {
+    const allowed = new Set(selectedKinds);
+    const timestamp = now();
+    return this.transaction(() => {
+      const version = this.database.prepare('SELECT id FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
+      if (!version) return null;
+      const modelRow=this.database.prepare('SELECT provider FROM models WHERE id=?').get(modelId);
+      if(modelRow?.provider==='ltds-processing'){for(const kind of allowed){const asset=this.database.prepare('SELECT * FROM model_assets WHERE version_id=? AND kind=?').get(versionId,kind);if(!asset?.sha256)return null;if(['ept','tiles'].includes(kind)&&(!asset.manifest_sha256||!this.database.prepare('SELECT 1 FROM model_asset_files WHERE asset_id=? LIMIT 1').get(asset.id)))return null;}}
+      this.database.prepare('UPDATE model_assets SET published=0 WHERE version_id=?').run(versionId);
+      const update = this.database.prepare('UPDATE model_assets SET published=1 WHERE version_id=? AND kind=?');
+      for (const kind of allowed) update.run(versionId, kind);
+      this.database.prepare("UPDATE model_versions SET status='ready',updated_at=? WHERE id=?").run(timestamp, versionId);
+      this.database.prepare("UPDATE models SET active_version_id=?,status='ready',updated_at=? WHERE id=?").run(versionId, timestamp, modelId);
+      return this.getModel(modelId);
+    });
   }
 
   upsertModelVersion(input) {
@@ -170,11 +204,13 @@ class ViewerRepository {
       }
 
       const insertAsset = this.database.prepare(`INSERT INTO model_assets(
-        id,version_id,kind,root_key,relative_path,format,content_type,byte_size,created_at
-      ) VALUES (?,?,?,?,?,?,?,?,?)`);
+        id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insertAssetFile = this.database.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)');
       for (const asset of input.assets || []) {
+        const assetId = crypto.randomUUID();
         insertAsset.run(
-          crypto.randomUUID(),
+          assetId,
           versionId,
           asset.kind,
           asset.rootKey,
@@ -182,8 +218,14 @@ class ViewerRepository {
           asset.format || null,
           asset.contentType || null,
           asset.byteSize ?? null,
+          asset.storageMode || 'external_reference',
+          asset.published === false ? 0 : 1,
+          asset.sourceAttemptId || null,
+          asset.sha256 || null,
+          asset.manifestSha256 || null,
           timestamp,
         );
+        for (const file of asset.manifestFiles || asset.files || []) insertAssetFile.run(assetId, file.relativePath, file.byteSize, file.sha256);
       }
 
       if (input.aliasId) {
@@ -292,8 +334,8 @@ class ViewerRepository {
     const timestamp = now();
     this.database.prepare(`INSERT INTO public_shares(
       id,model_id,version_policy,model_version_id,public_id_hash,password_hash,permissions_json,label,created_by,
-      created_at,updated_at,expires_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      created_at,updated_at,expires_at,display_units
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       id,
       input.modelId,
       input.versionPolicy || 'latest',
@@ -306,6 +348,7 @@ class ViewerRepository {
       timestamp,
       timestamp,
       input.expiresAt || null,
+      input.displayUnits || null,
     );
     return this.getPublicShare(id);
   }
@@ -351,6 +394,7 @@ class ViewerRepository {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       expiresAt: row.expires_at,
+      displayUnits: row.display_units,
       revokedAt: row.revoked_at,
       revokedBy: row.revoked_by,
       revokeReason: row.revoke_reason,
@@ -392,16 +436,16 @@ class ViewerRepository {
     ).run(timestamp, timestamp, id);
   }
 
-  createSessionGrant({ modelId, subject, audience, permissions, expiresAt }) {
+  createSessionGrant({ modelId, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     this.pruneAuthState();
     const id = crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO session_grants(
-      id,model_id,subject,audience,permissions_json,expires_at,created_at
-    ) VALUES (?,?,?,?,?,?,?)`).run(
-      id, modelId, subject, audience, JSON.stringify(permissions || {}), expiresAt, timestamp,
+      id,model_id,subject,audience,permissions_json,display_units,expires_at,created_at
+    ) VALUES (?,?,?,?,?,?,?,?)`).run(
+      id, modelId, subject, audience, JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp,
     );
-    return { id, modelId, subject, audience, permissions, expiresAt, createdAt: timestamp };
+    return { id, modelId, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
   }
 
   redeemSessionGrant(id, at = Date.now()) {
@@ -419,6 +463,7 @@ class ViewerRepository {
         subject: row.subject,
         audience: row.audience,
         permissions: parseJson(row.permissions_json, {}),
+        displayUnits: row.display_units,
         expiresAt: row.expires_at,
       };
     });
@@ -434,6 +479,7 @@ class ViewerRepository {
       subject: row.subject,
       audience: row.audience,
       permissions: parseJson(row.permissions_json, {}),
+      displayUnits: row.display_units,
       expiresAt: row.expires_at,
       revokedAt: row.revoked_at,
       createdAt: row.created_at,
@@ -441,14 +487,14 @@ class ViewerRepository {
     };
   }
 
-  createViewerSession({ tokenHash, modelId, modelVersionId, subject, audience, permissions, expiresAt }) {
+  createViewerSession({ tokenHash, modelId, modelVersionId, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     const id = crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO viewer_sessions(
-      id,token_hash,model_id,model_version_id,subject,audience,permissions_json,expires_at,created_at,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+      id,token_hash,model_id,model_version_id,subject,audience,permissions_json,display_units,expires_at,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
       id, tokenHash, modelId, modelVersionId, subject, audience,
-      JSON.stringify(permissions || {}), expiresAt, timestamp, timestamp,
+      JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp, timestamp,
     );
     return this.getViewerSessionByHash(tokenHash);
   }
@@ -461,11 +507,11 @@ class ViewerRepository {
     return Boolean(session && !session.revokedAt && Date.parse(session.expiresAt) > at);
   }
 
-  renewViewerSession(id, { permissions, expiresAt }) {
+  renewViewerSession(id, { permissions, displayUnits = 'imperial', expiresAt }) {
     const timestamp = now();
     const result = this.database.prepare(`UPDATE viewer_sessions SET
-      permissions_json=?,expires_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL`
-    ).run(JSON.stringify(permissions || {}), expiresAt, timestamp, id);
+      permissions_json=?,display_units=?,expires_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL`
+    ).run(JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp, id);
     if (result.changes !== 1) return null;
     return this.viewerSession(this.database.prepare('SELECT * FROM viewer_sessions WHERE id=?').get(id));
   }

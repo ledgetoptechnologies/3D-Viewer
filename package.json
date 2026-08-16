@@ -22,16 +22,17 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "3d-tiles-renderer": "^0.5.1",
     "@loaders.gl/core": "^4.3.4",
     "@loaders.gl/las": "^4.3.4",
+    "3d-tiles-renderer": "^0.5.1",
     "cookie": "^0.7.1",
     "draco3d": "^1.5.7",
     "express": "^4.19.2",
     "geotiff": "^3.0.5",
     "leaflet": "^1.9.4",
     "three": "^0.185.1",
-    "three-mesh-bvh": "^0.9.14"
+    "three-mesh-bvh": "^0.9.14",
+    "unzipper": "^0.12.3"
   },
   "devDependencies": {
     "vite": "^8.2.1"

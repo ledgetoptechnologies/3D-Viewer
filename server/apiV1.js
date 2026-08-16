@@ -71,6 +71,7 @@ function publicShareSummary(share) {
     createdAt: share.createdAt,
     updatedAt: share.updatedAt,
     expiresAt: share.expiresAt,
+    displayUnits: share.displayUnits || config.defaultUnits,
     revokedAt: share.revokedAt,
     revokedBy: share.revokedBy,
     revokeReason: share.revokeReason,
@@ -170,6 +171,7 @@ function createApiV1(repository) {
       subject: session.subject,
       audience: session.audience,
       expiresAt: session.expiresAt,
+      displayUnits: session.displayUnits || config.defaultUnits,
       accessToken,
       allowedEmbedOrigins: config.allowedEmbedOrigins,
     });
@@ -208,7 +210,7 @@ function createApiV1(repository) {
       && existing.session.audience === grant.audience;
     if (canRenew) {
       accessToken = existing.token;
-      session = repository.renewViewerSession(existing.session.id, { permissions: grantedPermissions, expiresAt });
+      session = repository.renewViewerSession(existing.session.id, { permissions: grantedPermissions, displayUnits: grant.displayUnits || config.defaultUnits, expiresAt });
     } else {
       accessToken = crypto.randomBytes(32).toString('base64url');
       session = repository.createViewerSession({
@@ -218,6 +220,7 @@ function createApiV1(repository) {
         subject: grant.subject,
         audience: grant.audience,
         permissions: grantedPermissions,
+        displayUnits: grant.displayUnits || config.defaultUnits,
         expiresAt,
       });
     }
@@ -258,6 +261,8 @@ function createApiV1(repository) {
       return res.status(400).json({ error: 'audience must be ops or client' });
     const grantedPermissions = permissions(body.permissions);
     if (!grantedPermissions.view) return res.status(400).json({ error: 'view permission is required' });
+    if (body.displayUnits !== undefined && body.displayUnits !== 'imperial' && body.displayUnits !== 'metric')
+      return res.status(400).json({ error: 'displayUnits must be imperial or metric' });
     if (!body.authorizationExpiresAt) return res.status(400).json({ error: 'authorizationExpiresAt is required' });
     const requestedAuthorizationExpiry = Date.parse(body.authorizationExpiresAt);
     if (!Number.isFinite(requestedAuthorizationExpiry) || requestedAuthorizationExpiry <= Date.now())
@@ -279,6 +284,7 @@ function createApiV1(repository) {
         __authorizedUntil: authorizedUntil,
         __versionId: model.activeVersionId,
       },
+      displayUnits: body.displayUnits || config.defaultUnits,
       expiresAt: grantExpiresAt,
     });
     repository.audit({ actorType: 'service', actorId: req.servicePrincipal.keyId, action: 'session.created', entityType: 'model', entityId: model.id, details: { audience: body.audience, subject: body.subject } });
@@ -321,6 +327,8 @@ function createApiV1(repository) {
         expiresAt = new Date(parsed).toISOString();
       }
       const { token, tokenHash } = auth.newShareToken();
+      if (body.displayUnits !== undefined && body.displayUnits !== 'imperial' && body.displayUnits !== 'metric')
+        return res.status(400).json({ error: 'displayUnits must be imperial or metric' });
       const share = repository.createPublicShare({
         modelId: model.id,
         versionPolicy: 'latest',
@@ -331,6 +339,7 @@ function createApiV1(repository) {
         label: body.label ? String(body.label).slice(0, 120) : null,
         createdBy: body.createdBy ? String(body.createdBy).slice(0, 200) : req.servicePrincipal.keyId,
         expiresAt,
+        displayUnits: body.displayUnits || config.defaultUnits,
       });
       repository.audit({ actorType: 'service', actorId: req.servicePrincipal.keyId, action: 'share.created', entityType: 'share', entityId: share.id, details: { modelId: model.id } });
       const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;

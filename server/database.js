@@ -73,6 +73,8 @@ const MIGRATIONS = [
         attempt_count INTEGER NOT NULL DEFAULT 0,
         error_code TEXT,
         error_message TEXT,
+        result_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+        result_model_version_id TEXT REFERENCES model_versions(id) ON DELETE SET NULL,
         model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
         created_by TEXT,
         created_at TEXT NOT NULL,
@@ -192,6 +194,369 @@ const MIGRATIONS = [
         PRIMARY KEY(key_id, idempotency_key)
       );
       CREATE INDEX service_idempotency_expiry_idx ON service_idempotency(expires_at);
+    `,
+  },
+  {
+    version: 5,
+    name: 'processing_platform',
+    sql: `
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        description TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        default_units TEXT NOT NULL DEFAULT 'imperial' CHECK(default_units IN ('imperial','metric')),
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT
+      );
+      CREATE INDEX projects_page_idx ON projects(created_at DESC,id DESC);
+
+      CREATE TABLE datasets (
+        id TEXT PRIMARY KEY,
+        project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        display_name TEXT NOT NULL,
+        description TEXT,
+        source_type TEXT NOT NULL DEFAULT 'upload',
+        storage_mode TEXT NOT NULL CHECK(storage_mode IN ('managed','adopted','external_reference')),
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('draft','finalizing','finalized','archived','trashed')),
+        manifest_sha256 TEXT,
+        file_count INTEGER NOT NULL DEFAULT 0,
+        byte_size INTEGER NOT NULL DEFAULT 0,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        finalized_at TEXT,
+        archived_at TEXT,
+        trashed_at TEXT,
+        UNIQUE(root_key, relative_path)
+      );
+      CREATE INDEX datasets_project_idx ON datasets(project_id, status, created_at DESC);
+      CREATE INDEX datasets_page_idx ON datasets(created_at DESC,id DESC);
+      CREATE INDEX datasets_project_page_idx ON datasets(project_id,created_at DESC,id DESC);
+
+      CREATE TABLE dataset_files (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+        relative_path TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        content_type TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        UNIQUE(dataset_id, relative_path)
+      );
+      CREATE INDEX dataset_files_dataset_idx ON dataset_files(dataset_id, relative_path);
+
+      CREATE TABLE upload_sessions (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        subject TEXT NOT NULL,
+        expected_manifest_json TEXT NOT NULL,
+        chunk_size INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('open','finalizing','complete','expired','cancelled')),
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX upload_sessions_expiry_idx ON upload_sessions(status, expires_at);
+
+      CREATE TABLE upload_chunks (
+        upload_id TEXT NOT NULL REFERENCES upload_sessions(id) ON DELETE CASCADE,
+        file_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        byte_size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(upload_id, file_id, chunk_index)
+      );
+
+      CREATE TABLE processing_providers (
+        id TEXT PRIMARY KEY,
+        provider_type TEXT NOT NULL CHECK(provider_type IN ('nodeodm','clusterodm')),
+        display_name TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        auth_env_key TEXT,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+        admission_limit INTEGER NOT NULL DEFAULT 1 CHECK(admission_limit > 0),
+        capabilities_json TEXT NOT NULL DEFAULT '{}',
+        capability_fingerprint TEXT,
+        last_health TEXT,
+        last_health_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX processing_providers_page_idx ON processing_providers(created_at DESC,id DESC);
+
+      CREATE TABLE processing_presets (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        options_json TEXT NOT NULL,
+        provider_type TEXT,
+        capability_fingerprint TEXT,
+        built_in INTEGER NOT NULL DEFAULT 0 CHECK(built_in IN (0,1)),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE processing_tasks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+        display_name TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL CHECK(status IN ('draft','queued','processing','ready_for_review','published','failed','cancelled','archived')),
+        active_attempt_id TEXT,
+        published_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT
+      );
+      CREATE INDEX processing_tasks_project_idx ON processing_tasks(project_id, status, created_at DESC);
+      CREATE INDEX processing_tasks_page_idx ON processing_tasks(created_at DESC,id DESC);
+      CREATE INDEX processing_tasks_project_page_idx ON processing_tasks(project_id,created_at DESC,id DESC);
+
+      CREATE TABLE processing_attempts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        attempt_number INTEGER NOT NULL,
+        provider_id TEXT REFERENCES processing_providers(id) ON DELETE SET NULL,
+        provider_task_id TEXT,
+        preset_id TEXT REFERENCES processing_presets(id) ON DELETE SET NULL,
+        options_json TEXT NOT NULL,
+        capability_fingerprint TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting','derivatives','ready_for_review','published','failed','cancelled')),
+        progress REAL NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 1),
+        provider_output_cursor INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT,
+        error_message TEXT,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        upstream_completed_at TEXT,
+        ingested_at TEXT,
+        completed_at TEXT,
+        UNIQUE(task_id, attempt_number),
+        UNIQUE(provider_id, provider_task_id)
+      );
+      CREATE INDEX processing_attempts_queue_idx ON processing_attempts(status, created_at);
+
+      CREATE TABLE processing_jobs (
+        id TEXT PRIMARY KEY,
+        attempt_id TEXT NOT NULL REFERENCES processing_attempts(id) ON DELETE CASCADE,
+        job_type TEXT NOT NULL CHECK(job_type IN ('submit','reconcile','ingest')),
+        status TEXT NOT NULL CHECK(status IN ('pending','leased','complete','failed','cancelled')),
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX processing_jobs_claim_idx ON processing_jobs(status, available_at, lease_expires_at);
+
+      CREATE TABLE processing_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        attempt_id TEXT NOT NULL REFERENCES processing_attempts(id) ON DELETE CASCADE,
+        level TEXT NOT NULL,
+        message TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX processing_logs_attempt_idx ON processing_logs(attempt_id, created_at);
+
+      CREATE TABLE derivative_jobs (
+        id TEXT PRIMARY KEY,
+        attempt_id TEXT NOT NULL REFERENCES processing_attempts(id) ON DELETE CASCADE,
+        derivative_type TEXT NOT NULL CHECK(derivative_type IN ('ept','mesh_tiles','lod_audit')),
+        status TEXT NOT NULL CHECK(status IN ('pending','leased','complete','failed','cancelled')),
+        request_json TEXT NOT NULL DEFAULT '{}',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+
+      CREATE TABLE admin_grants (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        subject TEXT NOT NULL,
+        permissions_json TEXT NOT NULL,
+        display_units TEXT NOT NULL DEFAULT 'imperial' CHECK(display_units IN ('imperial','metric')),
+        expires_at TEXT NOT NULL,
+        authorization_expires_at TEXT NOT NULL,
+        redeemed_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX admin_grants_expiry_idx ON admin_grants(expires_at);
+
+      CREATE TABLE admin_sessions (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        subject TEXT NOT NULL,
+        permissions_json TEXT NOT NULL,
+        display_units TEXT NOT NULL DEFAULT 'imperial' CHECK(display_units IN ('imperial','metric')),
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX admin_sessions_expiry_idx ON admin_sessions(expires_at);
+
+      CREATE TABLE abuse_windows (
+        bucket_key TEXT PRIMARY KEY,
+        window_started_at TEXT NOT NULL,
+        hit_count INTEGER NOT NULL,
+        blocked_until TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE admin_idempotency (
+        session_id TEXT NOT NULL REFERENCES admin_sessions(id) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        response_status INTEGER,
+        response_json TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY(session_id, idempotency_key)
+      );
+      CREATE INDEX admin_idempotency_expiry_idx ON admin_idempotency(expires_at);
+
+      CREATE TABLE dataset_import_previews (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        request_json TEXT NOT NULL,
+        preview_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        claimed_at TEXT,
+        claim_id TEXT,
+        consumed_at TEXT,
+        created_by TEXT,
+        created_session_id TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE event_outbox (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered','failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        lease_expires_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        delivered_at TEXT
+      );
+      CREATE INDEX event_outbox_claim_idx ON event_outbox(status, available_at, lease_expires_at);
+
+      CREATE TABLE storage_trash (
+        id TEXT PRIMARY KEY,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        byte_size INTEGER NOT NULL DEFAULT 0,
+        purge_after TEXT NOT NULL,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        permanently_deleted_at TEXT
+      );
+      CREATE INDEX storage_trash_page_idx ON storage_trash(permanently_deleted_at,created_at DESC,id DESC);
+      CREATE INDEX storage_trash_purge_idx ON storage_trash(purge_after, permanently_deleted_at);
+
+      ALTER TABLE public_shares ADD COLUMN display_units TEXT CHECK(display_units IN ('imperial','metric'));
+      ALTER TABLE session_grants ADD COLUMN display_units TEXT NOT NULL DEFAULT 'imperial' CHECK(display_units IN ('imperial','metric'));
+      ALTER TABLE viewer_sessions ADD COLUMN display_units TEXT NOT NULL DEFAULT 'imperial' CHECK(display_units IN ('imperial','metric'));
+      ALTER TABLE model_assets ADD COLUMN storage_mode TEXT NOT NULL DEFAULT 'external_reference'
+        CHECK(storage_mode IN ('managed','adopted','external_reference'));
+      ALTER TABLE model_assets ADD COLUMN published INTEGER NOT NULL DEFAULT 1 CHECK(published IN (0,1));
+      ALTER TABLE model_assets ADD COLUMN source_attempt_id TEXT REFERENCES processing_attempts(id) ON DELETE SET NULL;
+    `,
+  },
+  {
+    version: 6,
+    name: 'durable_dataset_operations',
+    sql: `
+      CREATE TABLE dataset_operations (
+        id TEXT PRIMARY KEY,
+        operation_type TEXT NOT NULL CHECK(operation_type IN ('upload_finalize','import_adopt')),
+        subject TEXT NOT NULL,
+        session_id TEXT,
+        dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+        upload_id TEXT REFERENCES upload_sessions(id) ON DELETE SET NULL,
+        import_preview_id TEXT REFERENCES dataset_import_previews(id) ON DELETE SET NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN ('queued','leased','succeeded','failed','cancelled')),
+        progress REAL NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 1),
+        result_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX dataset_operations_claim_idx
+        ON dataset_operations(status,available_at,lease_expires_at,created_at);
+      CREATE INDEX dataset_operations_subject_idx
+        ON dataset_operations(subject,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX dataset_operations_active_upload_idx
+        ON dataset_operations(upload_id)
+        WHERE upload_id IS NOT NULL AND status IN ('queued','leased','succeeded');
+      CREATE UNIQUE INDEX dataset_operations_active_preview_idx
+        ON dataset_operations(import_preview_id)
+        WHERE import_preview_id IS NOT NULL AND status IN ('queued','leased','succeeded');
+    `,
+  },
+  {
+    version: 7,
+    name: 'immutable_model_asset_manifests',
+    sql: `
+      ALTER TABLE model_assets ADD COLUMN sha256 TEXT;
+      ALTER TABLE model_assets ADD COLUMN manifest_sha256 TEXT;
+      CREATE TABLE model_asset_files (
+        asset_id TEXT NOT NULL REFERENCES model_assets(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        PRIMARY KEY(asset_id,relative_path)
+      );
+      CREATE INDEX model_asset_files_asset_idx ON model_asset_files(asset_id,relative_path);
+    `,
+  },
+  {
+    version: 8,
+    name: 'idempotent_derivative_jobs',
+    sql: `
+      DELETE FROM derivative_jobs
+      WHERE rowid NOT IN (SELECT MIN(rowid) FROM derivative_jobs GROUP BY attempt_id,derivative_type);
+      CREATE UNIQUE INDEX derivative_jobs_attempt_type_idx ON derivative_jobs(attempt_id,derivative_type);
     `,
   },
 ];

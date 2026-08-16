@@ -1,0 +1,91 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pipeline } = require('node:stream/promises');
+const { safeRelativePath } = require('./processingSecurity');
+
+function hashFile(filePath,{signal=null}={}) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    const abort=()=>stream.destroy(Object.assign(new Error('file operation cancelled'),{code:'lease_lost'}));if(signal?.aborted){abort();return;}signal?.addEventListener('abort',abort,{once:true});stream.on('data',(chunk)=>hash.update(chunk));stream.on('error',(error)=>{signal?.removeEventListener('abort',abort);reject(error);});stream.on('end',()=>{signal?.removeEventListener('abort',abort);resolve(hash.digest('hex'));});
+  });
+}
+
+async function hashTree(root,{signal=null}={}) {
+  const files=[];const walk=(directory,relative='')=>{if(signal?.aborted)throw Object.assign(new Error('file operation cancelled'),{code:'lease_lost'});for(const entry of fs.readdirSync(directory,{withFileTypes:true})){const absolute=path.join(directory,entry.name),rel=relative?`${relative}/${entry.name}`:entry.name,stat=fs.lstatSync(absolute);if(stat.isSymbolicLink())throw Object.assign(new Error('asset tree contains a symbolic link'),{code:'invalid_asset_tree'});if(entry.isDirectory())walk(absolute,rel);else if(entry.isFile())files.push({absolutePath:absolute,relativePath:rel,byteSize:stat.size});else throw Object.assign(new Error('asset tree contains a special file'),{code:'invalid_asset_tree'});}};walk(root);files.sort((a,b)=>a.relativePath.localeCompare(b.relativePath));for(const file of files)file.sha256=await hashFile(file.absolutePath,{signal});const manifestSha256=crypto.createHash('sha256').update(JSON.stringify(files.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256})))).digest('hex');return{files:files.map(({absolutePath,...file})=>file),manifestSha256};
+}
+
+function readHead(filePath,maxBytes=256*1024) { const fd=fs.openSync(filePath,'r');try{const stat=fs.fstatSync(fd),buffer=Buffer.allocUnsafe(Math.min(maxBytes,stat.size));const bytes=fs.readSync(fd,buffer,0,buffer.length,0);return buffer.subarray(0,bytes);}finally{fs.closeSync(fd);} }
+
+function jpegMetadata(buffer) {
+  const result = {};
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4 || buffer.readUInt16BE(0) !== 0xffd8) return result;
+  let offset = 2;
+  while (offset + 4 <= buffer.length) {
+    if (buffer[offset] !== 0xff) break;
+    const marker = buffer[offset + 1], length = buffer.readUInt16BE(offset + 2);
+    if (length < 2 || offset + 2 + length > buffer.length) break;
+    if ([0xc0,0xc1,0xc2,0xc3,0xc5,0xc6,0xc7,0xc9,0xca,0xcb,0xcd,0xce,0xcf].includes(marker) && length >= 7) {
+      result.height = buffer.readUInt16BE(offset + 5); result.width = buffer.readUInt16BE(offset + 7);
+    }
+    if (marker === 0xe1 && buffer.toString('ascii', offset + 4, offset + 10) === 'Exif\0\0') {
+      try { Object.assign(result, parseExif(buffer.subarray(offset + 10, offset + 2 + length))); } catch { /* best effort */ }
+    }
+    offset += 2 + length;
+  }
+  return result;
+}
+
+function parseExif(tiff) {
+  const little = tiff.toString('ascii',0,2)==='II'; const u16=(o)=>little?tiff.readUInt16LE(o):tiff.readUInt16BE(o); const u32=(o)=>little?tiff.readUInt32LE(o):tiff.readUInt32BE(o);
+  if (u16(2)!==42) return {}; const first=u32(4); const out={}; let gpsOffset=null;
+  function entries(at, callback) { if(at<0||at+2>tiff.length)return; const count=u16(at); for(let i=0;i<count;i++){const p=at+2+i*12;if(p+12>tiff.length)break; callback(u16(p),u16(p+2),u32(p+4),p+8,u32(p+8));} }
+  function ascii(type,count,valuePos,raw){ if(type!==2)return null; const p=count<=4?valuePos:raw; return p+count<=tiff.length?tiff.toString('ascii',p,p+count).replace(/\0+$/,''):null; }
+  entries(first,(tag,type,count,pos,raw)=>{ if(tag===0x0110)out.cameraModel=ascii(type,count,pos,raw); if(tag===0x0132)out.capturedAt=ascii(type,count,pos,raw); if(tag===0x8769){const exif=raw;entries(exif,(t,ty,c,p,r)=>{if(t===0x9003)out.capturedAt=ascii(ty,c,p,r);});} if(tag===0x8825)gpsOffset=raw; });
+  if(gpsOffset){let latRef,lonRef,lat,lon; const rational=(p)=>u32(p)/u32(p+4); const triplet=(p)=>rational(p)+rational(p+8)/60+rational(p+16)/3600;
+    entries(gpsOffset,(tag,type,count,pos,raw)=>{ if(tag===1)latRef=ascii(type,count,pos,raw); if(tag===2&&type===5)lat=triplet(raw); if(tag===3)lonRef=ascii(type,count,pos,raw); if(tag===4&&type===5)lon=triplet(raw); });
+    if(Number.isFinite(lat)&&Number.isFinite(lon)){out.gps={latitude:latRef==='S'?-lat:lat,longitude:lonRef==='W'?-lon:lon};}
+  }
+  return out;
+}
+
+class StorageManager {
+  constructor(config) {
+    this.config=config;
+    this.roots={datasets:config.datasetsMount,models:config.modelsMount,cache:config.cacheMount,trash:config.trashMount};
+    if(config.datasetImportMount)this.roots.dataset_import=config.datasetImportMount;
+    if(config.webodmMediaMount)this.roots.webodm=config.webodmMediaMount;
+    if(config.terraImportMount)this.roots.terra_import=config.terraImportMount;
+  }
+  initialize() { for(const key of ['datasets','models','cache','trash']) fs.mkdirSync(this.roots[key],{recursive:true}); }
+  resolve(rootKey,relativePath,{mustExist=false}={}) {
+    const root=this.roots[rootKey], rel=safeRelativePath(relativePath); if(!root||!rel)throw Object.assign(new Error('invalid storage location'),{code:'invalid_storage_location'});
+    const resolvedRoot=fs.realpathSync.native(root), candidate=path.resolve(resolvedRoot,...rel.split('/'));
+    if(candidate!==resolvedRoot&&!candidate.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('path escapes configured root'),{code:'invalid_storage_location'});
+    if(mustExist){const real=fs.realpathSync.native(candidate);if(real!==resolvedRoot&&!real.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('symlink escapes configured root'),{code:'invalid_storage_location'});return real;}
+    let parent=path.dirname(candidate);while(!fs.existsSync(parent)&&parent!==resolvedRoot)parent=path.dirname(parent);const realParent=fs.realpathSync.native(parent);if(realParent!==resolvedRoot&&!realParent.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('parent symlink escapes configured root'),{code:'invalid_storage_location'});return candidate;
+  }
+  space(rootKey,requiredBytes=0) { const root=this.roots[rootKey]; const stat=fs.statfsSync(root); const available=Number(stat.bavail)*Number(stat.bsize); const total=Number(stat.blocks)*Number(stat.bsize); const reserve=Math.max(this.config.storageReserveBytes,Math.ceil(total*this.config.storageReservePercent/100)); return {available,total,reserve,required:requiredBytes,ok:available-requiredBytes>=reserve}; }
+  requireSpace(rootKey,bytes) { const result=this.space(rootKey,bytes);if(!result.ok)throw Object.assign(new Error('insufficient storage headroom'),{code:'insufficient_storage',details:result});return result; }
+  sameFilesystem(left,right){return fs.statSync(this.roots[left]).dev===fs.statSync(this.roots[right]).dev;}
+  chunkPath(uploadId,fileId,index) { return this.resolve('cache',`uploads/${uploadId}/${fileId}/${index}.part`); }
+  writeChunk(uploadId,fileId,index,body,expectedSha) { const actual=crypto.createHash('sha256').update(body).digest('hex');if(actual!==expectedSha)throw Object.assign(new Error('chunk checksum mismatch'),{code:'checksum_mismatch'});this.requireSpace('cache',body.length);const target=this.chunkPath(uploadId,fileId,index);fs.mkdirSync(path.dirname(target),{recursive:true});if(fs.existsSync(target)){const existing=fs.readFileSync(target);const old=crypto.createHash('sha256').update(existing).digest('hex');if(old!==actual)throw Object.assign(new Error('chunk conflict'),{code:'chunk_conflict'});return {sha256:actual,byteSize:body.length,replayed:true};}const temp=`${target}.${crypto.randomUUID()}.tmp`;fs.writeFileSync(temp,body,{flag:'wx'});fs.renameSync(temp,target);return {sha256:actual,byteSize:body.length,replayed:false}; }
+  cleanupUpload(uploadId){fs.rmSync(this.resolve('cache',`uploads/${uploadId}`),{recursive:true,force:true});}
+  async assembleFile(upload,fileSpec,chunks,datasetRelative) { const output=this.resolve('datasets',`${datasetRelative}/${fileSpec.relativePath}`);fs.mkdirSync(path.dirname(output),{recursive:true});if(fs.existsSync(output)){const stat=fs.statSync(output),sha=await hashFile(output);if(stat.size!==fileSpec.byteSize||sha!==fileSpec.sha256)throw Object.assign(new Error('existing finalized file conflicts with manifest'),{code:'manifest_mismatch'});return{id:fileSpec.id,relativePath:fileSpec.relativePath,byteSize:stat.size,sha256:sha,contentType:fileSpec.contentType||null,metadata:jpegMetadata(readHead(output))};}const temp=`${output}.${crypto.randomUUID()}.incomplete`;try{const out=fs.createWriteStream(temp,{flags:'wx'});for(const chunk of chunks)await pipeline(fs.createReadStream(this.chunkPath(upload.id,fileSpec.id,chunk.chunk_index)),out,{end:false});out.end();await new Promise((resolve,reject)=>{out.on('finish',resolve);out.on('error',reject);});const stat=fs.statSync(temp);const sha=await hashFile(temp);if(stat.size!==fileSpec.byteSize||sha!==fileSpec.sha256)throw Object.assign(new Error('assembled file does not match manifest'),{code:'manifest_mismatch'});fs.renameSync(temp,output);return {id:fileSpec.id,relativePath:fileSpec.relativePath,byteSize:stat.size,sha256:sha,contentType:fileSpec.contentType||null,metadata:jpegMetadata(readHead(output))};}catch(error){fs.rmSync(temp,{force:true});throw error;} }
+  scanTree(rootKey,relativePath,{maxFiles=100000}={}) { const root=this.resolve(rootKey,relativePath,{mustExist:true});const stat=fs.lstatSync(root);if(!stat.isDirectory())throw new Error('import source must be a directory');const files=[];let bytes=0;const walk=(dir,rel='')=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(files.length>=maxFiles)throw new Error('import contains too many files');const childRel=rel?`${rel}/${entry.name}`:entry.name;const child=path.join(dir,entry.name);const childStat=fs.lstatSync(child);if(childStat.isSymbolicLink())throw new Error('import may not contain symbolic links');if(entry.isDirectory())walk(child,childRel);else if(entry.isFile()){files.push({relativePath:childRel,byteSize:childStat.size,mtimeMs:Math.trunc(childStat.mtimeMs),ctimeMs:Math.trunc(childStat.ctimeMs),absolutePath:child});bytes+=childStat.size;}else throw new Error('import contains unsupported special files');}};walk(root);files.sort((a,b)=>a.relativePath.localeCompare(b.relativePath));return {root,files,byteSize:bytes}; }
+  treeFingerprint(scan){const hash=crypto.createHash('sha256');for(const file of scan.files)hash.update(`${file.relativePath}\0${file.byteSize}\0${file.mtimeMs}\0${file.ctimeMs}\n`);return hash.digest('hex');}
+  previewImport(rootKey,relativePath,{maxFiles=100000}={}) { const scan=this.scanTree(rootKey,relativePath,{maxFiles});const destinationSpace=this.space('datasets',scan.byteSize);return {rootKey,relativePath:safeRelativePath(relativePath),fileCount:scan.files.length,byteSize:scan.byteSize,treeFingerprint:this.treeFingerprint(scan),files:scan.files.slice(0,1000).map(({absolutePath,...file})=>file),truncated:scan.files.length>1000,sameFilesystem:fs.statSync(scan.root).dev===fs.statSync(this.roots.datasets).dev,destinationSpace}; }
+  async adoptImport(rootKey,relativePath,datasetRelative,{externalReference=false,expectedFingerprint=null,onProgress=()=>{}}={}) { const before=this.scanTree(rootKey,relativePath);if(expectedFingerprint&&this.treeFingerprint(before)!==expectedFingerprint)throw Object.assign(new Error('import source changed after preview'),{code:'import_changed'});let completed=0;for(const file of before.files){file.sha256=await hashFile(file.absolutePath);file.metadata=jpegMetadata(readHead(file.absolutePath));completed+=1;await onProgress(0.45*completed/Math.max(1,before.files.length));}if(expectedFingerprint&&this.treeFingerprint(this.scanTree(rootKey,relativePath))!==expectedFingerprint)throw Object.assign(new Error('import source changed during verification'),{code:'import_changed'});if(externalReference)return{rootKey,relativePath:safeRelativePath(relativePath),scan:before,sourceToRemove:null};this.requireSpace('datasets',before.byteSize);const source=before.root,destination=this.resolve('datasets',datasetRelative),incomplete=`${destination}.incomplete`;fs.mkdirSync(path.dirname(destination),{recursive:true});const expected=new Map(before.files.map((f)=>[f.relativePath,f]));const verifyDestination=async()=>{const copied=this.scanAbsolute(destination);if(copied.files.length!==before.files.length)throw Object.assign(new Error('existing import destination conflicts with manifest'),{code:'manifest_mismatch'});for(let index=0;index<copied.files.length;index+=1){const file=copied.files[index],match=expected.get(file.relativePath);if(!match||match.byteSize!==file.byteSize||match.sha256!==await hashFile(file.absolutePath))throw Object.assign(new Error('existing import destination conflicts with manifest'),{code:'manifest_mismatch'});await onProgress(0.8+0.15*(index+1)/Math.max(1,copied.files.length));}};if(fs.existsSync(destination)){await verifyDestination();}else{fs.rmSync(incomplete,{recursive:true,force:true});try{for(let index=0;index<before.files.length;index+=1){const file=before.files[index],target=path.join(incomplete,...file.relativePath.split('/'));fs.mkdirSync(path.dirname(target),{recursive:true});await pipeline(fs.createReadStream(file.absolutePath),fs.createWriteStream(target,{flags:'wx'}));await onProgress(0.45+0.35*(index+1)/Math.max(1,before.files.length));}const copied=this.scanAbsolute(incomplete);if(copied.files.length!==before.files.length)throw new Error('copied import file count mismatch');for(let index=0;index<copied.files.length;index+=1){const file=copied.files[index],match=expected.get(file.relativePath);if(!match||match.byteSize!==file.byteSize||match.sha256!==await hashFile(file.absolutePath))throw new Error('copied import verification failed');await onProgress(0.8+0.15*(index+1)/Math.max(1,copied.files.length));}fs.renameSync(incomplete,destination);}catch(error){fs.rmSync(incomplete,{recursive:true,force:true});throw error;}}const scan=this.scanTree('datasets',datasetRelative);for(const file of scan.files){const original=expected.get(file.relativePath);file.sha256=original.sha256;file.metadata=original.metadata;}await onProgress(0.98);return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:source}; }
+  scanAbsolute(root,{maxFiles=100000}={}) { const files=[];let byteSize=0;const walk=(dir,rel='')=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if(files.length>=maxFiles)throw new Error('too many files');const p=path.join(dir,entry.name),r=rel?`${rel}/${entry.name}`:entry.name,s=fs.lstatSync(p);if(s.isSymbolicLink())throw new Error('symbolic links are forbidden');if(s.isDirectory())walk(p,r);else if(s.isFile()){files.push({absolutePath:p,relativePath:r,byteSize:s.size,mtimeMs:Math.trunc(s.mtimeMs),ctimeMs:Math.trunc(s.ctimeMs)});byteSize+=s.size;}else throw new Error('special files are forbidden');}};walk(root);files.sort((a,b)=>a.relativePath.localeCompare(b.relativePath));return{files,byteSize}; }
+  removeAdoptedSource(absolutePath){if(!absolutePath)return;const resolved=path.resolve(absolutePath);const allowed=Object.entries(this.roots).some(([key,root])=>['dataset_import','terra_import'].includes(key)&&root&&(resolved===path.resolve(root)||resolved.startsWith(`${path.resolve(root)}${path.sep}`)));if(!allowed)throw new Error('import cleanup path is outside an adoptable root');fs.rmSync(resolved,{recursive:true,force:true});}
+  moveToTrash(rootKey,relativePath,entityType,entityId){if(rootKey!=='datasets'&&rootKey!=='models')throw Object.assign(new Error('only Viewer-managed assets can be trashed'),{code:'external_reference'});const source=this.resolve(rootKey,relativePath,{mustExist:true}),trashRelative=`${entityType}/${entityId}-${crypto.randomUUID()}`,destination=this.resolve('trash',trashRelative);fs.mkdirSync(path.dirname(destination),{recursive:true});if(fs.statSync(source).dev!==fs.statSync(this.roots.trash).dev)throw new Error('trash must be on the same filesystem');fs.renameSync(source,destination);return{rootKey,relativePath,trashRelative};}
+  pathExists(rootKey,relativePath){try{return fs.existsSync(this.resolve(rootKey,relativePath));}catch{return false;}}
+  trashExists(relativePath){return Boolean(relativePath)&&this.pathExists('trash',relativePath);}
+  restoreFromTrash(trashRelative,rootKey,relativePath){const source=this.resolve('trash',trashRelative,{mustExist:true}),destination=this.resolve(rootKey,relativePath);if(fs.existsSync(destination))throw Object.assign(new Error('restore destination exists'),{code:'restore_conflict'});fs.mkdirSync(path.dirname(destination),{recursive:true});fs.renameSync(source,destination);}
+  purgeTrash(trashRelative){const target=this.resolve('trash',trashRelative);if(!fs.existsSync(target))return false;fs.rmSync(target,{recursive:true,force:false});return true;}
+}
+
+module.exports={StorageManager,hashFile,hashTree,jpegMetadata,parseExif,readHead};

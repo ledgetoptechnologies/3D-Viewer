@@ -1,0 +1,104 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
+
+async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
+async function boundedJson(response,maxBytes=1024*1024){if(!String(response.headers.get('content-type')||'').includes('json'))throw new Error('provider returned an unexpected content type');return JSON.parse(await boundedText(response,maxBytes));}
+
+function optionArray(options) {
+  return Object.entries(options || {}).map(([name, value]) => ({ name, value }));
+}
+function typedDefault(type,value){if(type==='bool'&&typeof value==='string')return value.toLowerCase()==='true';if(type==='int'){const n=Number(value);return Number.isInteger(n)?n:value;}if(type==='float'){const n=Number(value);return Number.isFinite(n)?n:value;}return value;}
+
+class NodeOdmProvider {
+  constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = 'nodeodm' }) {
+    const url = new URL(endpoint);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid provider endpoint');
+    this.endpoint = url.toString().replace(/\/$/, '');
+    this.token = token;
+    this.fetch = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.transferTimeoutMs = transferTimeoutMs;
+    this.providerType = providerType;
+  }
+
+  url(route, query = {}) {
+    const result = new URL(`${this.endpoint}${route}`);
+    if (this.token) result.searchParams.set('token', this.token);
+    for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== null) result.searchParams.set(key, String(value));
+    return result;
+  }
+
+  async request(route, init = {}, query = {}, { timeoutMs=this.timeoutMs, signal=null } = {}) {
+    const timeout=AbortSignal.timeout(timeoutMs),combined=signal?AbortSignal.any([timeout,signal]):timeout;
+    const response = await this.fetch(this.url(route, query), { ...init, redirect:'error', signal:combined });
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch { /* best effort */ }
+      const error = new Error(`ODM request failed with HTTP ${response.status}`);
+      error.code = response.status === 404 ? 'provider_task_not_found' : 'provider_request_failed';
+      error.status = response.status; throw error;
+    }
+    return response;
+  }
+
+  async capabilities() {
+    const [infoResponse, optionsResponse] = await Promise.all([this.request('/info'), this.request('/options')]);
+    if (!String(infoResponse.headers.get('content-type')||'').includes('json') || !String(optionsResponse.headers.get('content-type')||'').includes('json')) throw new Error('provider returned an unexpected content type');
+    const info = JSON.parse(await boundedText(infoResponse,1024*1024)); const options = JSON.parse(await boundedText(optionsResponse,4*1024*1024));
+    if (!info || typeof info.version !== 'string' || !Array.isArray(options)) throw new Error('provider returned an incompatible capability response');
+    const normalizedOptions = options.slice(0,1000).map((item) => {const type=String(item.type||'string');return { name:String(item.name).slice(0,120),type,domain:item.domain??null,help:String(item.help||'').slice(0,4000),value:typedDefault(type,item.value),rawDefault:item.value };});
+    const capabilities = {
+      apiVersion: info.version, engine: info.engine, engineVersion: info.engineVersion,
+      maxImages: info.maxImages ?? null, maxParallelTasks: info.maxParallelTasks ?? null,
+      taskQueueCount: Number(info.taskQueueCount || 0), totalMemory: info.totalMemory ?? null,
+      availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
+      providerType: this.providerType, options: normalizedOptions,
+      testedBaseline: this.providerType === 'clusterodm' ? '1.5.5' : '2.2.3',
+      compatibilityWarning: this.providerType === 'nodeodm' && !String(info.version).startsWith('2.')
+        ? `NodeODM API ${info.version} is outside the tested 2.x range`
+        : (this.providerType === 'clusterodm' && !String(info.version).startsWith('1.') ? `ClusterODM API ${info.version} is outside the tested 1.x range` : null),
+    };
+    return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(capabilities)).digest('hex') };
+  }
+
+  async initialize({ uuid, name, options, outputs }, { signal=null } = {}) {
+    const body = new FormData();
+    if (name) body.set('name', name);
+    body.set('options', JSON.stringify(optionArray(options)));
+    if (outputs) body.set('outputs', JSON.stringify(outputs));
+    const response = await this.request('/task/new/init', { method:'POST', headers:{ 'set-uuid': uuid }, body }, {}, {signal});
+    const result = await boundedJson(response);
+    if (!result.uuid || result.uuid !== uuid) throw new Error('provider did not honor the assigned task UUID');
+    return result;
+  }
+
+  async upload(uuid, files, { signal=null } = {}) {
+    const basenames = new Set();
+    for (const file of files) { const name=path.basename(file.relativePath||file.absolutePath).toLowerCase(); if(basenames.has(name)) throw Object.assign(new Error('dataset contains duplicate source basenames'),{code:'duplicate_source_basename'}); basenames.add(name); }
+    const body = new FormData();
+    for (const file of files) {
+      const blob = await fs.openAsBlob(file.absolutePath);
+      body.append('images', blob, path.basename(file.relativePath || file.absolutePath));
+    }
+    await this.request(`/task/new/upload/${encodeURIComponent(uuid)}`, { method:'POST', body }, {}, {timeoutMs:this.transferTimeoutMs,signal});
+  }
+
+  async commit(uuid,{signal=null}={}) { return boundedJson(await this.request(`/task/new/commit/${encodeURIComponent(uuid)}`, { method:'POST' },{}, {signal})); }
+  async status(uuid,{signal=null}={}) {
+    const info = await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/info`,{}, {}, {signal}),1024*1024);
+    return { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code),
+      progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount };
+  }
+  async output(uuid, fromLine = 0,{signal=null}={}) { const value=await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/output`, {}, { line:fromLine },{signal}),4*1024*1024);const lines=String(value||'').split(/\r?\n/).filter(Boolean);return{lines,nextLine:fromLine+lines.length}; }
+  async cancel(uuid) {
+    const body = new URLSearchParams({ uuid });
+    return boundedJson(await this.request('/task/cancel', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body }));
+  }
+  async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
+}
+
+module.exports = { NodeOdmProvider, STATUS, boundedJson, boundedText, optionArray, typedDefault };

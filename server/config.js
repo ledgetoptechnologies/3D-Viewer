@@ -41,6 +41,7 @@ if (!sessionSecret && !production) {
 }
 
 const dataDir = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const processingRoot = process.env.PROCESSING_ROOT || path.join(dataDir, 'processing');
 const publicBaseUrl = normalizedOrigin(process.env.PUBLIC_BASE_URL || '');
 let serviceAuthKeys = null;
 let serviceAuthKeysError = null;
@@ -54,6 +55,10 @@ if (process.env.SERVICE_AUTH_KEYS_JSON) {
     serviceAuthKeys = {};
   }
 }
+let processingProviderTokens = {};
+let processingProviderTokensError = null;
+try { processingProviderTokens = JSON.parse(process.env.PROCESSING_PROVIDER_TOKENS_JSON || '{}'); if(!processingProviderTokens||Array.isArray(processingProviderTokens)||typeof processingProviderTokens!=='object'||Object.values(processingProviderTokens).some((v)=>typeof v!=='string'))throw new Error('must be a JSON object of string values'); }
+catch (error) { processingProviderTokens = {}; processingProviderTokensError=error.message; }
 const previousServiceKeyId = String(process.env.SERVICE_AUTH_PREVIOUS_KEY_ID || '').trim();
 const previousServiceSecret = process.env.SERVICE_AUTH_PREVIOUS_SECRET || '';
 if (!serviceAuthKeys && (previousServiceKeyId || previousServiceSecret)) {
@@ -81,6 +86,7 @@ const config = {
   sessionSecretGenerated,
   viewerSessionTtlSeconds: Math.min(positiveInteger(process.env.VIEWER_SESSION_TTL_SECONDS, 1800), 3600),
   sessionGrantTtlSeconds: Math.min(positiveInteger(process.env.SESSION_GRANT_TTL_SECONDS, 60), 300),
+  adminSessionTtlSeconds: Math.min(positiveInteger(process.env.ADMIN_SESSION_TTL_SECONDS, 1800), 3600),
 
   serviceAuthKeyId: String(process.env.SERVICE_AUTH_KEY_ID || 'ops-v1').trim(),
   serviceAuthSecret: process.env.SERVICE_AUTH_SECRET || '',
@@ -93,7 +99,7 @@ const config = {
   emergencyAdminEnabled: bool(process.env.EMERGENCY_ADMIN_ENABLED, !production),
   adminPassword: process.env.ADMIN_PASSWORD || '',
 
-  webodmEnabled: bool(process.env.WEBODM_ENABLED, true),
+  webodmEnabled: bool(process.env.WEBODM_ENABLED, false),
   webodmApiUrl: (process.env.WEBODM_API_URL || '').replace(/\/+$/, ''),
   webodmUsername: process.env.WEBODM_USERNAME || '',
   webodmPassword: process.env.WEBODM_PASSWORD || '',
@@ -108,6 +114,32 @@ const config = {
   // X-Accel-Redirect. When absent, Express sendFile remains available for
   // local development and tests.
   xAccelRedirectPrefix: String(process.env.X_ACCEL_REDIRECT_PREFIX || '').replace(/\/+$/, ''),
+
+  processingPlatformEnabled: bool(process.env.PROCESSING_PLATFORM_ENABLED, false),
+  processingWorkerEnabled: bool(process.env.PROCESSING_WORKER_ENABLED, false),
+  processingRoot,
+  datasetsMount: process.env.DATASETS_MOUNT || path.join(processingRoot, 'datasets'),
+  modelsMount: process.env.MODELS_MOUNT || path.join(processingRoot, 'models'),
+  cacheMount: process.env.CACHE_MOUNT || path.join(processingRoot, 'cache'),
+  trashMount: process.env.TRASH_MOUNT || path.join(processingRoot, 'trash'),
+  datasetImportMount: process.env.DATASET_IMPORT_MOUNT || '',
+  uploadChunkBytes: Math.min(positiveInteger(process.env.UPLOAD_CHUNK_BYTES, 16 * 1024 * 1024), 32 * 1024 * 1024),
+  uploadMaxFiles: Math.min(positiveInteger(process.env.UPLOAD_MAX_FILES, 20000), 100000),
+  uploadMaxManifestBytes: Math.min(positiveInteger(process.env.UPLOAD_MAX_MANIFEST_BYTES, 2 * 1024 * 1024), 5 * 1024 * 1024),
+  storageReserveBytes: positiveInteger(process.env.STORAGE_RESERVE_BYTES, 20 * 1024 * 1024 * 1024),
+  storageReservePercent: Math.min(positiveInteger(process.env.STORAGE_RESERVE_PERCENT, 10), 50),
+  processingLogMaxBytes: Math.min(positiveInteger(process.env.PROCESSING_LOG_MAX_BYTES, 10 * 1024 * 1024), 50 * 1024 * 1024),
+  processingLogRetentionDays: Math.min(positiveInteger(process.env.PROCESSING_LOG_RETENTION_DAYS, 30), 365),
+  processingProviderTransferTimeoutMs: Math.min(positiveInteger(process.env.PROCESSING_PROVIDER_TRANSFER_TIMEOUT_MS, 6*3600_000), 24*3600_000),
+  processingProviderOrigins: csv(process.env.PROCESSING_PROVIDER_ORIGINS),
+  processingProviderTokens,
+  defaultUnits: /^(imperial|metric)$/.test(process.env.DEFAULT_UNITS || '') ? process.env.DEFAULT_UNITS : 'imperial',
+  viewerEventUrl: String(process.env.VIEWER_EVENT_URL || '').trim(),
+  viewerEventKeyId: String(process.env.VIEWER_EVENT_KEY_ID || 'viewer-v1').trim(),
+  viewerEventSecret: process.env.VIEWER_EVENT_SECRET || '',
+  entwineBin: process.env.ENTWINE_BIN || 'entwine',
+  obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
+  localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
 };
 
 function validate() {
@@ -144,6 +176,22 @@ function validate() {
     if (!config.webodmUsername) problems.push('WEBODM_USERNAME is required when WEBODM_ENABLED=true');
     if (!config.webodmPassword) problems.push('WEBODM_PASSWORD is required when WEBODM_ENABLED=true');
     if (!config.webodmMediaMount) problems.push('WEBODM_MEDIA_MOUNT is required when WEBODM_ENABLED=true');
+  }
+  if (config.processingPlatformEnabled) {
+    for (const [name, value] of [['DATASETS_MOUNT', config.datasetsMount], ['MODELS_MOUNT', config.modelsMount], ['CACHE_MOUNT', config.cacheMount], ['TRASH_MOUNT', config.trashMount]]) {
+      if (!path.isAbsolute(value)) problems.push(`${name} must be an absolute path`);
+    }
+    if (config.viewerEventUrl) {
+      try { const eventUrl=new URL(config.viewerEventUrl);if(eventUrl.protocol!=='https:'||eventUrl.username||eventUrl.password||eventUrl.search||eventUrl.hash||eventUrl.pathname!=='/api/viewer/events'||eventUrl.origin!==config.opsBaseUrl)throw new Error(); }
+      catch { problems.push('VIEWER_EVENT_URL must be the exact Ops HTTPS /api/viewer/events endpoint without credentials, query, or fragment'); }
+    }
+    if (config.viewerEventUrl && config.viewerEventSecret.length < 32)
+      problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when callbacks are enabled');
+    if (processingProviderTokensError) problems.push(`PROCESSING_PROVIDER_TOKENS_JSON ${processingProviderTokensError}`);
+    for (const origin of config.processingProviderOrigins) {
+      try { const u=new URL(origin);if(u.origin!==origin||u.username||u.password||!['http:','https:'].includes(u.protocol))throw new Error(); }
+      catch { problems.push(`PROCESSING_PROVIDER_ORIGINS contains invalid exact origin: ${origin}`); }
+    }
   }
   return problems;
 }
