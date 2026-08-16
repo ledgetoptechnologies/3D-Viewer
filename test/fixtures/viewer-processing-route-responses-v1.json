@@ -1,5 +1,17 @@
 {
   "schemaVersion": 1,
+  "processingEvent": {
+    "schemaVersion": 1,
+    "eventId": "event-ready-0001",
+    "type": "processing.ready_for_review",
+    "occurredAt": "2027-01-15T08:01:00.000Z",
+    "projectId": "project-one",
+    "taskId": "task-one",
+    "attemptId": "attempt-one",
+    "requestedBySubject": "ops:staff-one",
+    "status": "ready_for_review",
+    "reviewUrl": "https://ops.example.test/operations/processing?attemptId=attempt-one"
+  },
   "projects": {
     "projects": [{
       "id": "project-one", "displayName": "North site", "description": null,

@@ -1,10 +1,11 @@
 # LTDS 3D Viewer
 
-Client-facing photogrammetry viewer for self-hosted WebODM outputs. Three.js
-(npm) app with Earth-style navigation, streamed LOD mesh, camera-position
-photo browsing, labeled measurements, Potree point cloud, and streamed
-GeoTIFF map layers — packaged as a single Docker container that auto-discovers
-completed WebODM projects via WebODM's REST API.
+Client-facing photogrammetry viewer and optional self-hosted processing
+platform. The Three.js app provides Earth-style navigation, verified streamed
+LOD with a full-detail fallback, camera-position browsing, measurements,
+Potree EPT point clouds, and streamed GeoTIFF layers. It can display legacy
+WebODM media in place or manage immutable uploaded/imported datasets and send
+them to NodeODM/ClusterODM for native EPT, 3D Tiles, and GLB production.
 
 ## Architecture
 
@@ -12,17 +13,21 @@ completed WebODM projects via WebODM's REST API.
   `public/pointcloud.html`) — the three.js/Potree viewer. Loads no
   project-specific data at build time; everything comes from `GET /api/models`
   at runtime.
-- **Backend** (`server/`) — a small Node/Express service that:
-  - Authenticates to WebODM's REST API (`POST /api/token-auth/`) and lists
-    projects/tasks. **It never queries WebODM's Postgres database directly.**
+- **Backend** (`server/`) — a Node/Express API plus a durable worker that:
+  - Optionally authenticates to WebODM's REST API and reconciles its catalog
+    when `WEBODM_ENABLED=true`. Direct read-only media import and the processing
+    platform do not require WebODM credentials. **It never queries WebODM's
+    Postgres database directly.**
   - Verifies which output files actually exist on the read-only WebODM media
     mount and registers canonical models, versions, assets, imports, shares,
     and browser sessions in `data/viewer.sqlite`. Legacy JSON is migrated once
     and retained only for old admin/share route compatibility.
-  - Serves the built frontend, the versioned `/api/v1` Ops API, legacy
-    `/api/models` routes, and a
-    `/assets/:id/...` route that streams the real files without ever
-    exposing filesystem paths to the client.
+  - Manages immutable dataset manifests, durable upload/import operations,
+    processing attempts, native derivatives, review/publish state, lifecycle
+    journals, callbacks, shares, and scoped browser sessions in SQLite.
+  - Serves the built frontend, versioned `/api/v1` Ops API, legacy
+    `/api/models` compatibility routes, and protected assets without exposing
+    server paths. Published viewing remains available during provider outages.
 
 See `server/config.js` for all environment variables.
 
@@ -33,12 +38,15 @@ already-published viewing.
 
 ## Running with Docker (production)
 
-1. Create the fixed TrueNAS directories and make the database directory
-   writable by container UID/GID `1000:1000`:
+1. Create the fixed TrueNAS directories and make the managed storage and import
+   drop directories writable by container UID/GID `1000:1000`:
    ```bash
-   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Data
+   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/{Data,Datasets,Models,Cache,Trash}
+   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Import/{Datasets,Terra}
    mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Derivatives
    chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Data
+   chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/{Datasets,Models,Cache,Trash}
+   chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Import/{Datasets,Terra}
    ```
 2. Copy `.env.example` to `.env`. Set independent 32+ character
    `SERVICE_AUTH_SECRET` and `SESSION_SECRET` values. WebODM API discovery is
@@ -48,30 +56,58 @@ already-published viewing.
    hostnames and TrueNAS mount paths already have safe defaults in
    `docker-compose.yml`.
 3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
-   that has `read:packages`, then run `docker compose pull` and
-   `docker compose up -d`. The production Compose profile always pulls the
-   configured registry image; local source builds remain explicit with
-   `docker build` and cannot silently replace the reviewed production image.
+   that has `read:packages`, then run `docker compose pull`. For view-only or
+   legacy WebODM compatibility, keep `PROCESSING_PLATFORM_ENABLED=false` and
+   run `docker compose up -d`; this intentionally does not start the profiled
+   worker. To activate processing, set `PROCESSING_PLATFORM_ENABLED=true`, the
+   exact NodeODM/ClusterODM `PROCESSING_PROVIDER_ORIGINS`,
+   `PROCESSING_PROVIDER_TOKENS_JSON`, and
+   matching `VIEWER_EVENT_URL`/key/secret in `.env`, then run:
+
+   ```bash
+   docker compose --profile processing up -d
+   docker compose --profile processing ps
+   ```
+
+   The API must receive `PROCESSING_PLATFORM_ENABLED=true` through the shared
+   environment; the profiled worker explicitly fixes it true. The platform is
+   not active unless both `viewer-api` and `viewer-worker` are healthy. The
+   production Compose profile always pulls the configured registry image;
+   local source builds remain explicit with `docker build` and cannot silently
+   replace the reviewed production image.
+
+   `PROCESSING_PROVIDER_ORIGINS` must name the actual NodeODM or ClusterODM
+   service origin, not the WebODM application URL. For a token-protected
+   provider, create it disabled (or preassign its stable UUID), add that UUID
+   and token to `PROCESSING_PROVIDER_TOKENS_JSON`, restart the API and worker,
+   then probe capabilities and enable it in Ops. This order keeps provider
+   credentials out of the catalog and avoids a probe that cannot authenticate.
 4. Route `viewer.ledgetopdroneservices.com` through cloudflared to this service
    on port `8088`. The bare Viewer URL redirects to LTDS Ops; there is no local
    password-admin login in the production Compose profile.
 
 When WebODM discovery is enabled, the Viewer syncs on startup and every
-`SYNC_INTERVAL_MINUTES`. Ops can request a provider rescan through the signed v1 API. `GET /api/v1/health` is the
-liveness probe and `GET /api/v1/ready` verifies the database and WebODM mount;
-Docker Compose uses readiness for its health check.
+`SYNC_INTERVAL_MINUTES`; Ops can request a provider rescan through the signed
+v1 API. `GET /api/v1/health` is liveness and `GET /api/v1/ready` verifies the
+database and required mounts. The authenticated
+`GET /api/v1/processing/ready` separately reports the durable worker and
+lifecycle journal, so provider failure never makes published viewing unhealthy.
 
-The production container runs as unprivileged UID/GID `1000:1000`, drops all
-Linux capabilities, prevents privilege escalation, limits process creation,
-and has a read-only root filesystem. Only `/app/data` is persistent and
-writable; `/tmp` is a bounded, non-executable in-memory filesystem. Container
-JSON logs rotate at 10 MiB with three files so an unattended Viewer cannot
-consume the TrueNAS application dataset.
+The API and worker run as unprivileged UID/GID `1000:1000`, drop all Linux
+capabilities, prevent privilege escalation, limit process creation, and use a
+read-only container root. The explicit Data, Datasets, Models, Cache, Trash,
+and two Import drop-directory mounts are persistent and writable; `/tmp` is
+bounded in-memory storage. The WebODM Media and legacy Derivatives mounts stay
+read-only. An `adopted` import consumes its verified source from the drop
+directory after durable promotion, while `external_reference` never moves or
+deletes the external source bytes.
+Nginx is the only host-published service on port `8088`. Container JSON logs
+rotate at 10 MiB with three files.
 
 After the container is healthy, run the production readiness check inside it:
 
 ```bash
-docker compose exec -T ltds-viewer \
+docker compose exec -T viewer-api \
   node scripts/production-readiness.mjs \
   --verify-mount-options --require-models --require-point-cloud
 ```
@@ -87,11 +123,25 @@ deployment check fail closed when full-quality LOD provenance is absent.
 `--require-point-cloud` accepts either streamed EPT or a whole-file LAS/LAZ/PLY
 fallback. For a browser-scalable production cloud, also pass `--require-ept`.
 
+After configuring and enabling a provider in Ops, verify the processing mounts,
+worker heartbeat, provider capability fingerprint/native outputs, disk reserve,
+dataset-operation leases, and lifecycle-journal reconciliation:
+
+```bash
+docker compose exec -T viewer-api \
+  node scripts/production-readiness.mjs \
+  --verify-mount-options --require-processing
+```
+
+Do not submit a production dataset until this check is green. Provider health
+is deliberately excluded from public `/api/v1/health`, so already-published
+models remain viewable if NodeODM/ClusterODM later becomes unavailable.
+
 After the Tunnel is live, exercise that exact model's real protected browser
 path as well:
 
 ```bash
-docker compose exec -T ltds-viewer \
+docker compose exec -T viewer-api \
   node scripts/production-readiness.mjs \
   --base-url https://viewer.ledgetopdroneservices.com \
   --model webodm-PROJECTID-TASKID \
@@ -112,23 +162,25 @@ grant/session are the only writes. Override the lifetime, if necessary, with
 `--capability-ttl-seconds 30` through `600`. Output and errors redact the
 service/session credentials, one-use grant, and browser capability.
 
-The container only ever receives network access to your WebODM instance's
-HTTP(S) API and a **read-only** bind mount of WebODM's media/output storage.
-It never gets WebODM's Postgres data, Redis/broker data, application source,
-secrets, worker configuration, or the Docker socket.
+The Viewer receives only the explicitly configured provider network access and
+storage mounts. WebODM media is always **read-only**. It never mounts WebODM's
+Postgres data, Redis/broker data, application source, worker configuration, or
+the Docker socket.
 
 ### Read-only WebODM access
 
 The Viewer uses the fixed host path
 `/mnt/Plugins/App_Data/WebODM/Media`, mounted read-only inside the container as
-`/mnt/webodm`. It must contain WebODM's Django media tree
+`/imports/webodm`. It must contain WebODM's Django media tree
 `project/{id}/task/{id}/assets/...` and must not be the WebODM Postgres path.
 
 In addition to the media mount:
 
-- **API**: create a dedicated, least-privilege WebODM user (view-only
-  permission on the projects you want exposed) and put its credentials in
-  `.env`. Do not use an admin account. The LTDS production default is
+- **Optional API discovery**: only when `WEBODM_ENABLED=true`, create a
+  dedicated, least-privilege WebODM user (view-only permission on the projects
+  you want reconciled) and put its credentials in `.env`. Do not use an admin
+  account. The production Compose file deliberately pins discovery false, so
+  enabling it also requires a reviewed Compose override. The LTDS API default is
   `http://192.168.50.80:30048` with username `Model-Viewer`, keeping discovery
   traffic on the LAN. If that address is not routable from the Viewer
   container, set `WEBODM_API_URL=https://webodm.ledgetopdroneservices.com`.
@@ -241,52 +293,42 @@ change the proxy count to `2` only when deploying the supplied Nginx layer.
 
 ## Known limitations (by design, for this iteration)
 
-- **No direct WebODM DB access, ever.** Metadata comes only from WebODM's
-  REST API, per the original architecture handoff — this trades a little
-  latency (polling/interval sync) for zero coupling to WebODM's schema.
-- **LOD mesh tiles and the Potree EPT point cloud are NOT native WebODM
-  outputs.** They're produced by a one-time external pipeline (Obj2Tiles +
-  Entwine) that this iteration does not automate. A project only gets the
-  fast streamed-LOD "3D Model" tab and the Potree "Point Cloud" tab if those
-  derivatives already exist under
-  `/mnt/Plugins/App_Data/Model-Viewer/Derivatives/{projectId}-{taskId}/`
-  (`tileset.json` / `model.glb` / `ept/ept.json`, plus an optional
-  `viewer.json` with `{ "bboxCenter": {x,y,z}, "pointCount": N }` for precise
-  centering). The Viewer mounts that tree read-only; a separate trusted
-  conversion job must populate it. Automating that conversion pipeline is
-  future work.
-- **Without derivatives**, newly auto-synced projects still work: the "3D
-  Model" tab prefers WebODM's native `textured_model.glb` when present
-  (confirmed available on current WebODM versions) and falls back to the raw
-  textured OBJ otherwise; the "Point Cloud" tab loads WebODM's raw
-  georeferenced point cloud directly into the same three.js scene —
-  `.laz`/`.las` via `@loaders.gl/las` (WebODM's current default point-cloud
-  export; **note: only LAS/LAZ spec up to v1.3 is supported**, no Potree
-  streaming so budget it for smaller clouds). Georeferenced positions are
-  decoded as Float64 and rebased against `coords.txt` before conversion to the
-  GPU's Float32 buffers, preserving local detail at UTM-scale coordinates.
-  `.ply` remains an older-WebODM fallback. The orthophoto/DSM/DTM tabs always
-  work as-is since those come straight from WebODM's own GeoTIFF outputs.
-- **Exact on-disk asset paths are still a best-effort guess.** `server/sync.js`
-  tries both the classic nested ODM pipeline layout (`odm_texturing/`,
-  `odm_orthophoto/`, ...) and flat filenames matching WebODM's
-  `available_assets` names (confirmed against a live instance:
-  `textured_model.glb`, `georeferenced_model.laz`, `orthophoto.tif`,
-  `dsm.tif`, `dtm.tif`, `shots.geojson`), but the read-only mount is WebODM's
-  actual persistent media volume, so it's worth spot-checking
-  `data/viewer-projects.json` after the first sync against a real project to
-  confirm the right files were found.
+- **Processing is opt-in.** `PROCESSING_PLATFORM_ENABLED` defaults to false.
+  Enabling it requires the durable worker, writable Datasets/Models/Cache/Trash
+  mounts, disk reserve, and an explicitly allowlisted NodeODM or ClusterODM
+  provider. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines; other
+  compatible versions are capability-probed and warned, not silently trusted.
+- **Production derivatives come from ODM's native stages.** Provider
+  capabilities must include `pc-ept`, `3d-tiles`, and `gltf`; the Viewer
+  requests those outputs and verifies their manifests before review/publish.
+  `LOCAL_DERIVATIVES_ENABLED` remains false because the stock image does not
+  ship Entwine or Obj2Tiles. If explicitly enabled in a custom image, startup
+  fails unless compatible executables are present.
+- **Native 3D Tiles do not automatically prove lossless full detail.** The
+  schema-v2 LOD audit must bind the exact full GLB, leaf geometry, material
+  state, and texture bytes. If upstream tiling decimates, retriangulates, or
+  repacks textures, the LOD claim fails closed and the full GLB remains the
+  published close-range fallback.
+- **WebODM release-one import is reference-only.** Direct WebODM media import
+  reads the mounted tree without credentials and never moves or deletes it.
+  Optional API discovery can reconcile legacy WebODM projects when enabled.
+  The Terra drop folder supports explicit preview/adoption, but an automatic
+  Terra catalog importer is deferred.
+- **Legacy WebODM compatibility remains best-effort.** `server/sync.js` still
+  recognizes classic nested and flat WebODM output layouts and may use direct
+  LAS/LAZ/PLY or the read-only Derivatives tree for already-existing models.
+  Direct LAS/LAZ fallback loads the complete file and supports LAS through 1.3,
+  so large field clouds should use EPT. These compatibility paths do not weaken
+  the immutable manifest and publication rules for newly processed models.
 - **Original flight photos** (opening the full-res JPG behind a camera
   marker) aren't wired into auto-sync yet — camera positions still show from
   `shots.geojson` when present, but clicking one is a no-op until a photo
   archive location is configured per project.
-- The canonical registry uses SQLite WAL mode and versioned startup
-  migrations. Legacy JSON stores remain temporarily so the standalone admin
-  UI and previously issued share links continue to work during transition.
-- Event imports currently implement the `webodm` provider. `POST
-  /api/v1/imports` queues non-blocking reconciliation; Terra receives an
-  explicit unsupported-provider response until its importer exists. A queued
-  `/api/v1/imports/rescan` recovery path is available.
+- Raw imagery, GCP files, provider archives, logs, and processing internals are
+  administrative assets and are never client-shareable by default.
+- Annotations and source-file download controls are not implemented. Legacy
+  JSON and legacy Viewer routes remain only for compatibility while SQLite is
+  the canonical registry.
 
 ## Versioned LTDS Ops API
 
@@ -307,6 +349,16 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
 - `POST /api/v1/models/:id/sessions`
 - `GET|POST /api/v1/models/:id/shares`; `DELETE /api/v1/shares/:id`
 - `POST /api/v1/imports`; `POST /api/v1/imports/rescan`; `GET /api/v1/imports`
+- Admin sessions: `POST /api/v1/admin-grants`; `POST /api/v1/admin-sessions/redeem`
+- Catalog: `/api/v1/projects`, `/api/v1/datasets`, and `/api/v1/tasks`
+- Resumable upload/finalize: `/api/v1/admin/uploads/...`; durable operation
+  polling: `GET /api/v1/operations/:id`
+- Server import: `/api/v1/dataset-imports/preview` and
+  `/api/v1/dataset-imports/adopt`
+- Processing: `/api/v1/processing/providers`, `/presets`, task/attempt detail,
+  cancel, retry, and publish routes
+- Storage accounting/recovery: `/api/v1/storage`, `/storage/trash/...`, and
+  `/storage/mutations/...`
 - Browser: `POST /api/v1/sessions/redeem`; `GET /api/v1/sessions/current`
 - Public probes: `GET /api/v1/health`; `GET /api/v1/ready`
 
@@ -319,12 +371,12 @@ version silently following a newly activated version. Iframe messages use
 
 ## Local development
 
-Run the backend and the Vite dev server side by side:
+Run the backend and the Vite dev server side by side. WebODM variables are
+optional unless API discovery is enabled:
 
 ```bash
 # terminal 1 — backend (reads server/config.js env vars)
-WEBODM_API_URL=... WEBODM_USERNAME=... WEBODM_PASSWORD=... \
-WEBODM_MEDIA_MOUNT=/path/to/webodm/media \
+WEBODM_ENABLED=false WEBODM_MEDIA_MOUNT=/path/to/webodm/media \
 EMERGENCY_ADMIN_ENABLED=true ADMIN_PASSWORD=dev-only-password \
 PORT=8090 npm run server
 
@@ -357,10 +409,11 @@ debugging.
 - `public/pointcloud.html` — isolated Potree 1.8 iframe (EPT, EarthControls with
   the same left/right swap, EDL, budget/size/color toolbar); config (EPT URL,
   title, point count) comes from its query string, set by `main.js`.
-- `server/` — backend: WebODM provider/sync, SQLite registry/migrations,
-  signed v1 API, legacy compatibility, session/share authorization, protected
-  asset delivery, legacy development login, and auth primitives (`auth.js` — capabilities,
-  hashing, share tokens). See `server/config.js` for env vars.
+- `server/` — API and durable worker: optional WebODM sync, dataset/import
+  manifests, NodeODM/ClusterODM processing, derivative/review publication,
+  lifecycle recovery, SQLite migrations, signed v1/legacy compatibility,
+  session/share authorization, protected asset delivery, and auth primitives.
+  See `server/config.js` for environment variables.
 - `public/admin-login.html` — legacy local-development login shell; production
   redirects standalone administration to LTDS Ops.
 - `serve-all.sh` — legacy local-dev-only asset server startup (see above).
@@ -445,9 +498,11 @@ WGS84 UTM 16N
 - **Camera positions**: one `InstancedMesh` of view-frustum pyramids, gold
   highlight on hover, tooltip with filename. Size slider.
 - **Measurements**: distance / area / volume with CSS2D labels pinned to the
-  geometry (ft-in, sq ft / acres, cu yd). Esc cancels, right-click or Enter or
-  double-click finishes polygons, tool auto-disarms after each measurement,
-  finished measurements persist until Clear.
+  geometry. Imperial is the default; project/session/share state can select
+  metric, and distance, elevation, area, and volume use one consistent unit
+  formatter. Esc cancels, right-click or Enter or double-click finishes
+  polygons, the tool auto-disarms, and finished measurements persist until
+  Clear.
 - **Ortho/DSM/DTM**: `GeoTIFF.fromUrl` HTTP range reads against the BigTIFF
   overview pyramid. A Leaflet `GridLayer` subclass reads windows per tile at
   the right overview level. Map auto-fits to the raster bounds over Esri World
@@ -464,9 +519,11 @@ Run `npm run check` before building an image. The suite covers direct LAS
 Float64 decoding before UTM rebasing, point-cloud-only initialization, protected
 EPT metadata/nodes with HTTP range and HEAD behavior, live share revocation,
 LOD hierarchy/provenance/fallback policy, production health/readiness, the
-model registry migration, and service-request replay protection. The Docker
-build additionally asserts the exact Potree, jQuery, Three.js, and LAS/LAZ
-runtime files requested by `pointcloud.html`.
+model registry migration, service-request replay protection, resumable durable
+dataset operations, provider fencing, asset manifests, and crash-consistent
+trash/restore/purge recovery. The Docker build additionally asserts the exact
+Potree, jQuery, Three.js, and LAS/LAZ runtime files requested by
+`pointcloud.html`.
 
 Before promoting a new project, stage it with the real mounted assets and
 verify both the EPT view and close-range LOD frontier on representative desktop
