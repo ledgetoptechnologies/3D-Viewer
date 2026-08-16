@@ -1,0 +1,558 @@
+'use strict';
+
+const crypto = require('crypto');
+
+function now() {
+  return new Date().toISOString();
+}
+
+function parseJson(value, fallback) {
+  if (typeof value !== 'string') return fallback;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function asModel(row, version, assets = []) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    provider: row.provider,
+    providerModelId: row.provider_model_id,
+    displayName: row.display_name,
+    status: row.status,
+    activeVersionId: row.active_version_id,
+    metadata: parseJson(row.metadata_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    unregisteredAt: row.unregistered_at,
+    activeVersion: version ? {
+      id: version.id,
+      providerVersionId: version.provider_version_id,
+      sourceLocator: parseJson(version.source_locator_json, {}),
+      status: version.status,
+      metadata: parseJson(version.metadata_json, {}),
+      georef: parseJson(version.georef_json, {}),
+      pointCount: version.point_count,
+      createdAt: version.created_at,
+      updatedAt: version.updated_at,
+      assets: assets.map((asset) => ({
+        id: asset.id,
+        kind: asset.kind,
+        rootKey: asset.root_key,
+        relativePath: asset.relative_path,
+        format: asset.format,
+        contentType: asset.content_type,
+        byteSize: asset.byte_size,
+      })),
+    } : null,
+  };
+}
+
+class ViewerRepository {
+  constructor(database) {
+    this.database = database;
+  }
+
+  transaction(callback) {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = callback();
+      this.database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  getState(key) {
+    const row = this.database.prepare('SELECT value FROM app_state WHERE key=?').get(key);
+    return row ? row.value : null;
+  }
+
+  setState(key, value) {
+    this.database.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`
+    ).run(key, String(value), now());
+  }
+
+  resolveModelId(id) {
+    const direct = this.database.prepare('SELECT id FROM models WHERE id=?').get(id);
+    if (direct) return direct.id;
+    const alias = this.database.prepare('SELECT model_id FROM model_aliases WHERE alias_id=?').get(id);
+    return alias ? alias.model_id : null;
+  }
+
+  getModel(id) {
+    const resolved = this.resolveModelId(id);
+    if (!resolved) return null;
+    const row = this.database.prepare('SELECT * FROM models WHERE id=?').get(resolved);
+    if (!row) return null;
+    const version = row.active_version_id
+      ? this.database.prepare('SELECT * FROM model_versions WHERE id=? AND model_id=?').get(row.active_version_id, row.id)
+      : null;
+    const assets = version
+      ? this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(version.id)
+      : [];
+    return asModel(row, version, assets);
+  }
+
+  listModels({ includeUnregistered = false } = {}) {
+    const rows = this.database.prepare(
+      `SELECT id FROM models ${includeUnregistered ? '' : "WHERE status<>'unregistered'"} ORDER BY display_name COLLATE NOCASE`,
+    ).all();
+    return rows.map((row) => this.getModel(row.id)).filter(Boolean);
+  }
+
+  upsertModelVersion(input) {
+    const timestamp = now();
+    return this.transaction(() => {
+      let model = this.database.prepare(
+        'SELECT * FROM models WHERE provider=? AND provider_model_id=?',
+      ).get(input.provider, input.providerModelId);
+      const modelId = model ? model.id : (input.modelId || crypto.randomUUID());
+      if (!model) {
+        this.database.prepare(`INSERT INTO models(
+          id,provider,provider_model_id,display_name,status,metadata_json,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?)`).run(
+          modelId,
+          input.provider,
+          input.providerModelId,
+          input.displayName,
+          input.status || 'ready',
+          JSON.stringify(input.metadata || {}),
+          timestamp,
+          timestamp,
+        );
+      } else {
+        this.database.prepare(`UPDATE models SET
+          display_name=?,status=?,metadata_json=?,updated_at=?,unregistered_at=NULL
+          WHERE id=?`).run(
+          input.displayName,
+          input.status || 'ready',
+          JSON.stringify(input.metadata || {}),
+          timestamp,
+          modelId,
+        );
+      }
+
+      let version = this.database.prepare(
+        'SELECT * FROM model_versions WHERE model_id=? AND provider_version_id=?',
+      ).get(modelId, input.providerVersionId);
+      const versionId = version ? version.id : (input.versionId || crypto.randomUUID());
+      if (!version) {
+        this.database.prepare(`INSERT INTO model_versions(
+          id,model_id,provider_version_id,source_locator_json,status,metadata_json,georef_json,point_count,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+          versionId,
+          modelId,
+          input.providerVersionId,
+          JSON.stringify(input.sourceLocator || {}),
+          input.status || 'ready',
+          JSON.stringify(input.versionMetadata || {}),
+          JSON.stringify(input.georef || {}),
+          input.pointCount ?? null,
+          timestamp,
+          timestamp,
+        );
+      } else {
+        this.database.prepare(`UPDATE model_versions SET
+          source_locator_json=?,status=?,metadata_json=?,georef_json=?,point_count=?,updated_at=?
+          WHERE id=?`).run(
+          JSON.stringify(input.sourceLocator || {}),
+          input.status || 'ready',
+          JSON.stringify(input.versionMetadata || {}),
+          JSON.stringify(input.georef || {}),
+          input.pointCount ?? null,
+          timestamp,
+          versionId,
+        );
+        this.database.prepare('DELETE FROM model_assets WHERE version_id=?').run(versionId);
+      }
+
+      const insertAsset = this.database.prepare(`INSERT INTO model_assets(
+        id,version_id,kind,root_key,relative_path,format,content_type,byte_size,created_at
+      ) VALUES (?,?,?,?,?,?,?,?,?)`);
+      for (const asset of input.assets || []) {
+        insertAsset.run(
+          crypto.randomUUID(),
+          versionId,
+          asset.kind,
+          asset.rootKey,
+          asset.relativePath,
+          asset.format || null,
+          asset.contentType || null,
+          asset.byteSize ?? null,
+          timestamp,
+        );
+      }
+
+      if (input.aliasId) {
+        this.database.prepare(
+          'INSERT INTO model_aliases(alias_id,model_id,created_at) VALUES (?,?,?) ON CONFLICT(alias_id) DO UPDATE SET model_id=excluded.model_id',
+        ).run(input.aliasId, modelId, timestamp);
+      }
+      if (input.makeActive !== false && (input.status || 'ready') === 'ready') {
+        this.database.prepare('UPDATE models SET active_version_id=?,status=?,updated_at=? WHERE id=?')
+          .run(versionId, 'ready', timestamp, modelId);
+      }
+      return this.getModel(modelId);
+    });
+  }
+
+  unregisterModel(id) {
+    const modelId = this.resolveModelId(id);
+    if (!modelId) return false;
+    const timestamp = now();
+    const result = this.database.prepare(
+      "UPDATE models SET status='unregistered',unregistered_at=?,updated_at=? WHERE id=? AND status<>'unregistered'",
+    ).run(timestamp, timestamp, modelId);
+    return result.changes === 1;
+  }
+
+  createImportJob({ provider, identifier, request, createdBy = null }) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO import_jobs(
+      id,provider,identifier,request_json,status,created_by,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?)`).run(
+      id, provider, identifier, JSON.stringify(request || {}), 'pending', createdBy, timestamp, timestamp,
+    );
+    return this.getImportJob(id);
+  }
+
+  getImportJob(id) {
+    const row = this.database.prepare('SELECT * FROM import_jobs WHERE id=?').get(id);
+    return row ? this.importJob(row) : null;
+  }
+
+  listImportJobs(limit = 100) {
+    return this.database.prepare('SELECT * FROM import_jobs ORDER BY created_at DESC LIMIT ?')
+      .all(Math.max(1, Math.min(Number(limit) || 100, 500))).map((row) => this.importJob(row));
+  }
+
+  claimPendingImport() {
+    return this.transaction(() => {
+      const row = this.database.prepare(
+        "SELECT * FROM import_jobs WHERE status='pending' ORDER BY created_at LIMIT 1",
+      ).get();
+      if (!row) return null;
+      const timestamp = now();
+      this.database.prepare(`UPDATE import_jobs SET
+        status='importing',attempt_count=attempt_count+1,started_at=COALESCE(started_at,?),updated_at=?
+        WHERE id=? AND status='pending'`).run(timestamp, timestamp, row.id);
+      return this.getImportJob(row.id);
+    });
+  }
+
+  requeueInterruptedImports() {
+    const timestamp = now();
+    return this.database.prepare(`UPDATE import_jobs SET
+      status='pending',error_code='worker_restarted',error_message='Import was resumed after Viewer restart',updated_at=?
+      WHERE status='importing'`
+    ).run(timestamp).changes;
+  }
+
+  completeImport(id, modelId) {
+    const timestamp = now();
+    this.database.prepare(`UPDATE import_jobs SET
+      status='ready',model_id=?,error_code=NULL,error_message=NULL,completed_at=?,updated_at=? WHERE id=?`
+    ).run(modelId, timestamp, timestamp, id);
+    return this.getImportJob(id);
+  }
+
+  failImport(id, code, message) {
+    const timestamp = now();
+    this.database.prepare(`UPDATE import_jobs SET
+      status='failed',error_code=?,error_message=?,completed_at=?,updated_at=? WHERE id=?`
+    ).run(String(code || 'import_failed').slice(0, 80), String(message || 'Import failed').slice(0, 1000), timestamp, timestamp, id);
+    return this.getImportJob(id);
+  }
+
+  importJob(row) {
+    return {
+      id: row.id,
+      provider: row.provider,
+      identifier: row.identifier,
+      request: parseJson(row.request_json, {}),
+      status: row.status,
+      attemptCount: row.attempt_count,
+      errorCode: row.error_code,
+      errorMessage: row.error_message,
+      modelId: row.model_id,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+    };
+  }
+
+  createPublicShare(input) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO public_shares(
+      id,model_id,version_policy,model_version_id,public_id_hash,password_hash,permissions_json,label,created_by,
+      created_at,updated_at,expires_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id,
+      input.modelId,
+      input.versionPolicy || 'latest',
+      input.modelVersionId || null,
+      input.publicIdHash,
+      input.passwordHash || null,
+      JSON.stringify(input.permissions || {}),
+      input.label || null,
+      input.createdBy || null,
+      timestamp,
+      timestamp,
+      input.expiresAt || null,
+    );
+    return this.getPublicShare(id);
+  }
+
+  importLegacyPublicShare(input) {
+    const timestamp = input.createdAt || now();
+    this.database.prepare(`INSERT OR IGNORE INTO public_shares(
+      id,model_id,version_policy,model_version_id,public_id_hash,password_hash,permissions_json,label,created_by,
+      created_at,updated_at,expires_at,revoked_at,revoke_reason,access_count,last_accessed_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      input.id || crypto.randomUUID(),
+      input.modelId,
+      input.versionPolicy || 'latest',
+      input.modelVersionId || null,
+      input.publicIdHash,
+      input.passwordHash || null,
+      JSON.stringify(input.permissions || {}),
+      input.label || null,
+      input.createdBy || 'legacy-import',
+      timestamp,
+      input.updatedAt || timestamp,
+      input.expiresAt || null,
+      input.revokedAt || null,
+      input.revokedAt ? (input.revokeReason || 'legacy-revoked') : null,
+      Number.isInteger(input.accessCount) ? input.accessCount : 0,
+      input.lastAccessedAt || null,
+    );
+  }
+
+  publicShare(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      modelId: row.model_id,
+      versionPolicy: row.version_policy,
+      modelVersionId: row.model_version_id,
+      publicIdHash: row.public_id_hash,
+      hasPassword: Boolean(row.password_hash),
+      passwordHash: row.password_hash,
+      permissions: parseJson(row.permissions_json, {}),
+      label: row.label,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      revokedBy: row.revoked_by,
+      revokeReason: row.revoke_reason,
+      accessCount: row.access_count,
+      lastAccessedAt: row.last_accessed_at,
+    };
+  }
+
+  getPublicShare(id) {
+    return this.publicShare(this.database.prepare('SELECT * FROM public_shares WHERE id=?').get(id));
+  }
+
+  getPublicShareByHash(hash) {
+    return this.publicShare(this.database.prepare('SELECT * FROM public_shares WHERE public_id_hash=?').get(hash));
+  }
+
+  listPublicShares(modelId) {
+    return this.database.prepare('SELECT * FROM public_shares WHERE model_id=? ORDER BY created_at DESC')
+      .all(modelId).map((row) => this.publicShare(row));
+  }
+
+  revokePublicShare(id, { actorId = null, reason = 'revoked' } = {}) {
+    const timestamp = now();
+    const result = this.database.prepare(`UPDATE public_shares SET
+      revoked_at=COALESCE(revoked_at,?),revoked_by=COALESCE(revoked_by,?),revoke_reason=COALESCE(revoke_reason,?),updated_at=?
+      WHERE id=?`).run(timestamp, actorId, String(reason).slice(0, 240), timestamp, id);
+    return result.changes === 1 ? this.getPublicShare(id) : null;
+  }
+
+  publicShareLive(share, at = Date.now()) {
+    if (!share || share.revokedAt) return false;
+    return !share.expiresAt || Date.parse(share.expiresAt) > at;
+  }
+
+  recordPublicShareAccess(id) {
+    const timestamp = now();
+    this.database.prepare(`UPDATE public_shares SET
+      access_count=access_count+1,last_accessed_at=?,updated_at=? WHERE id=?`
+    ).run(timestamp, timestamp, id);
+  }
+
+  createSessionGrant({ modelId, subject, audience, permissions, expiresAt }) {
+    this.pruneAuthState();
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO session_grants(
+      id,model_id,subject,audience,permissions_json,expires_at,created_at
+    ) VALUES (?,?,?,?,?,?,?)`).run(
+      id, modelId, subject, audience, JSON.stringify(permissions || {}), expiresAt, timestamp,
+    );
+    return { id, modelId, subject, audience, permissions, expiresAt, createdAt: timestamp };
+  }
+
+  redeemSessionGrant(id, at = Date.now()) {
+    return this.transaction(() => {
+      const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
+      if (!row || row.redeemed_at || Date.parse(row.expires_at) <= at) return null;
+      const timestamp = new Date(at).toISOString();
+      const updated = this.database.prepare(
+        'UPDATE session_grants SET redeemed_at=? WHERE id=? AND redeemed_at IS NULL',
+      ).run(timestamp, id);
+      if (updated.changes !== 1) return null;
+      return {
+        id: row.id,
+        modelId: row.model_id,
+        subject: row.subject,
+        audience: row.audience,
+        permissions: parseJson(row.permissions_json, {}),
+        expiresAt: row.expires_at,
+      };
+    });
+  }
+
+  viewerSession(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      tokenHash: row.token_hash,
+      modelId: row.model_id,
+      modelVersionId: row.model_version_id,
+      subject: row.subject,
+      audience: row.audience,
+      permissions: parseJson(row.permissions_json, {}),
+      expiresAt: row.expires_at,
+      revokedAt: row.revoked_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  createViewerSession({ tokenHash, modelId, modelVersionId, subject, audience, permissions, expiresAt }) {
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO viewer_sessions(
+      id,token_hash,model_id,model_version_id,subject,audience,permissions_json,expires_at,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+      id, tokenHash, modelId, modelVersionId, subject, audience,
+      JSON.stringify(permissions || {}), expiresAt, timestamp, timestamp,
+    );
+    return this.getViewerSessionByHash(tokenHash);
+  }
+
+  getViewerSessionByHash(tokenHash) {
+    return this.viewerSession(this.database.prepare('SELECT * FROM viewer_sessions WHERE token_hash=?').get(tokenHash));
+  }
+
+  viewerSessionLive(session, at = Date.now()) {
+    return Boolean(session && !session.revokedAt && Date.parse(session.expiresAt) > at);
+  }
+
+  renewViewerSession(id, { permissions, expiresAt }) {
+    const timestamp = now();
+    const result = this.database.prepare(`UPDATE viewer_sessions SET
+      permissions_json=?,expires_at=?,updated_at=? WHERE id=? AND revoked_at IS NULL`
+    ).run(JSON.stringify(permissions || {}), expiresAt, timestamp, id);
+    if (result.changes !== 1) return null;
+    return this.viewerSession(this.database.prepare('SELECT * FROM viewer_sessions WHERE id=?').get(id));
+  }
+
+  revokeViewerSession(id) {
+    const timestamp = now();
+    const result = this.database.prepare(
+      'UPDATE viewer_sessions SET revoked_at=COALESCE(revoked_at,?),updated_at=? WHERE id=?',
+    ).run(timestamp, timestamp, id);
+    return result.changes === 1;
+  }
+
+  pruneAuthState(at = Date.now()) {
+    const timestamp = new Date(at).toISOString();
+    const grants = this.database.prepare(
+      'DELETE FROM session_grants WHERE expires_at<=? OR redeemed_at IS NOT NULL',
+    ).run(timestamp).changes;
+    const sessions = this.database.prepare(
+      'DELETE FROM viewer_sessions WHERE expires_at<=? OR revoked_at IS NOT NULL',
+    ).run(timestamp).changes;
+    // Nonces normally prune on every signed request. This also bounds them
+    // after a long idle period before the next request arrives.
+    const nonces = this.database.prepare('DELETE FROM service_nonces WHERE created_at<?')
+      .run(new Date(at - 24 * 60 * 60 * 1000).toISOString()).changes;
+    const idempotency = this.database.prepare('DELETE FROM service_idempotency WHERE expires_at<=?')
+      .run(timestamp).changes;
+    return { grants, sessions, nonces, idempotency };
+  }
+
+  reserveIdempotency({ keyId, idempotencyKey, method, path, requestHash, expiresAt }) {
+    const existing = this.database.prepare(
+      'SELECT * FROM service_idempotency WHERE key_id=? AND idempotency_key=?',
+    ).get(keyId, idempotencyKey);
+    if (existing) return { created: false, record: existing };
+    try {
+      this.database.prepare(`INSERT INTO service_idempotency(
+        key_id,idempotency_key,method,path,request_hash,created_at,expires_at
+      ) VALUES (?,?,?,?,?,?,?)`).run(
+        keyId, idempotencyKey, method, path, requestHash, now(), expiresAt,
+      );
+      return { created: true, record: null };
+    } catch (error) {
+      if (!String(error && error.message).includes('UNIQUE constraint failed')) throw error;
+      return {
+        created: false,
+        record: this.database.prepare(
+          'SELECT * FROM service_idempotency WHERE key_id=? AND idempotency_key=?',
+        ).get(keyId, idempotencyKey),
+      };
+    }
+  }
+
+  completeIdempotency(keyId, idempotencyKey, status, ciphertext) {
+    this.database.prepare(`UPDATE service_idempotency SET
+      response_status=?,response_ciphertext=? WHERE key_id=? AND idempotency_key=?`
+    ).run(status, ciphertext, keyId, idempotencyKey);
+  }
+
+  releaseIdempotency(keyId, idempotencyKey) {
+    this.database.prepare(
+      'DELETE FROM service_idempotency WHERE key_id=? AND idempotency_key=? AND response_status IS NULL',
+    ).run(keyId, idempotencyKey);
+  }
+
+  consumeServiceNonce(keyId, nonce, cutoffIso, createdAtIso = now()) {
+    return this.transaction(() => {
+      this.database.prepare('DELETE FROM service_nonces WHERE created_at<?').run(cutoffIso);
+      try {
+        this.database.prepare('INSERT INTO service_nonces(key_id,nonce,created_at) VALUES (?,?,?)')
+          .run(keyId, nonce, createdAtIso);
+        return true;
+      } catch (error) {
+        if (String(error && error.message).includes('UNIQUE constraint failed')) return false;
+        throw error;
+      }
+    });
+  }
+
+  audit({ actorType, actorId = null, action, entityType, entityId = null, details = {} }) {
+    const id = crypto.randomUUID();
+    this.database.prepare(`INSERT INTO audit_events(
+      id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at
+    ) VALUES (?,?,?,?,?,?,?,?)`).run(
+      id, actorType, actorId, action, entityType, entityId, JSON.stringify(details), now(),
+    );
+    return id;
+  }
+}
+
+module.exports = { ViewerRepository, asModel, parseJson };

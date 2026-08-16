@@ -6,10 +6,23 @@ import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { load as loadersGlLoad } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import {
+  configureLodRenderer,
+  decideLodStartup,
+  detailToErrorTarget,
+  inspectLodProvenance,
+  inspectLodTileset,
+  refreshLodResolution,
+  visibleLodFrontier,
+} from './lod-policy.mjs';
 import { EarthLikeControls } from './earth-controls.js';
+import { hasMeshSource, localizePointPositions } from './point-cloud-utils.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -23,6 +36,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 // ────────────────────────────────────────────────
 let PROJECT = null;
 let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
+let LOD_PROVENANCE = null;
 let SHOTS_URL = null, PHOTO_BASE = null;
 let ORTHO_URL = null, DSM_URL = null, DTM_URL = null;
 let EPT_URL = null, POINT_COUNT = null;
@@ -75,8 +89,17 @@ const dom = {};
 // requires a server-side admin login — see server/index.js), 'view' (full
 // toolbar via /view/:token), or 'embed' (minimal chrome via /embed/:token).
 const VIEW_MODE = location.pathname.startsWith('/embed/') ? 'embed'
-  : location.pathname.startsWith('/view/') ? 'view' : 'admin';
-const SHARE_TOKEN = VIEW_MODE !== 'admin' ? decodeURIComponent(location.pathname.split('/')[2] || '') : null;
+  : location.pathname.startsWith('/view/') ? 'view'
+  : location.pathname.startsWith('/session') ? 'session' : 'admin';
+const SHARE_TOKEN = VIEW_MODE === 'view' || VIEW_MODE === 'embed'
+  ? decodeURIComponent(location.pathname.split('/')[2] || '') : null;
+const SESSION_PATH_PARTS = location.pathname.split('/');
+const ACTIVE_SESSION_ID = VIEW_MODE === 'session' && SESSION_PATH_PARTS[2] === 'active'
+  ? decodeURIComponent(SESSION_PATH_PARTS[3] || '') : null;
+const SESSION_GRANT = VIEW_MODE === 'session' && !ACTIVE_SESSION_ID
+  ? decodeURIComponent(SESSION_PATH_PARTS[2] || '') : null;
+const SESSION_STORAGE_PREFIX = 'ltds-viewer-access-token:';
+let sessionStorageKey = ACTIVE_SESSION_ID ? `${SESSION_STORAGE_PREFIX}${ACTIVE_SESSION_ID}` : null;
 // What the active share link allows; stays fully-open in admin mode.
 let SHARE_PERMISSIONS = { measure: true, cameras: true };
 
@@ -96,7 +119,8 @@ const state = {
 
 let scene, camera, renderer, labelRenderer, controls, clock;
 let glbParent, glbOffset, tilesParent;
-let pointCloudParent, pointCloudObject = null;
+let pointCloudParent, pointCloudOffset, pointCloudObject = null;
+let lodFailureHandled = false;
 let tilesRenderer = null;
 let camGroupParent, camInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
@@ -125,10 +149,11 @@ bootstrap();
 // hardcoded constants.
 // ───────────────────────────────────────────────────────────────
 async function bootstrap() {
-  document.body.classList.add(`${VIEW_MODE}-mode`);
+  document.body.classList.add(`${VIEW_MODE === 'session' ? 'embed' : VIEW_MODE}-mode`);
   bindSharePasswordForm();
   bindAdminControls();
 
+  if (VIEW_MODE === 'session') return bootstrapSession();
   if (VIEW_MODE !== 'admin') return bootstrapShare();
 
   let models = [];
@@ -382,6 +407,7 @@ function applyProjectConfig(p) {
 
   GLB_URL = p.assets.glb;
   TILES_URL = p.assets.tiles;
+  LOD_PROVENANCE = p.lodProvenance || null;
   OBJ_URL = p.assets.obj;
   SHOTS_URL = p.assets.shots;
   ORTHO_URL = p.assets.ortho;
@@ -406,7 +432,9 @@ function init() {
   initThree();
   bindUI();
   applyAvailability();
-  applyMeshLayer();      // loads whichever of tiles/glb/obj this project has
+  // applyAvailability() already selects the point-cloud/map fallback when a
+  // project has no mesh. Do not then start a bogus GLB request with a null URL.
+  if (hasMeshSource(state.meshSource)) applyMeshLayer();
   loadCameras();         // prepare camera positions (hidden until toggled); no-op if unavailable
   startLoop();
 }
@@ -475,6 +503,7 @@ function initThree() {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x050505);
+  scene.add(measureRoot);
 
   camera = new THREE.PerspectiveCamera(60, rect.width / rect.height, 0.05, 60000);
   camera.position.set(0, 260, 320);
@@ -524,10 +553,9 @@ function initThree() {
   // shown/hidden without affecting mesh visibility.
   pointCloudParent = new THREE.Group();
   pointCloudParent.rotation.x = -Math.PI / 2;
-  const pointCloudOffsetGroup = new THREE.Group();
-  pointCloudOffsetGroup.name = 'pointCloudOffset';
-  pointCloudOffsetGroup.position.set(-C.x, -C.y, -C.z);
-  pointCloudParent.add(pointCloudOffsetGroup);
+  pointCloudOffset = new THREE.Group();
+  pointCloudOffset.position.set(-C.x, -C.y, -C.z);
+  pointCloudParent.add(pointCloudOffset);
   pointCloudParent.visible = false;
   scene.add(pointCloudParent);
 
@@ -565,6 +593,7 @@ function onResize() {
     camera.updateProjectionMatrix();
     renderer.setSize(rect.width, rect.height);
     labelRenderer.setSize(rect.width, rect.height);
+    refreshLodResolution(tilesRenderer, camera, renderer);
   }
   if (map) setTimeout(() => map.invalidateSize(), 80);
 }
@@ -599,22 +628,38 @@ function loadTiles() {
   if (tilesRenderer) return;
   updateLoading('Streaming LOD tiles...', '');
   tilesRenderer = new TilesRenderer(TILES_URL);
-  tilesRenderer.setCamera(camera);
-  tilesRenderer.setResolutionFromRenderer(camera, renderer);
   const detailSlider = document.getElementById('lod-detail');
-  tilesRenderer.errorTarget = detailSlider ? 26 - parseInt(detailSlider.value, 10) : 6;
-  // REPLACE refinement stalls if the byte cache can't hold parent + all
-  // children simultaneously (16 x ~25MB decoded textures > default 0.4GB).
-  tilesRenderer.lruCache.minBytesSize = 1.5 * 1024 * 1024 * 1024;
-  tilesRenderer.lruCache.maxBytesSize = 2.5 * 1024 * 1024 * 1024;
-  tilesRenderer.lruCache.minSize = 600;
-  tilesRenderer.lruCache.maxSize = 800;
+  configureLodRenderer(tilesRenderer, {
+    camera,
+    renderer,
+    detail: detailSlider?.value,
+    deviceMemoryGiB: navigator.deviceMemory
+      ?? (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ? 4 : 8),
+  });
+  lodFailureHandled = false;
 
-  tilesRenderer.addEventListener('load-tileset', () => {
+  tilesRenderer.addEventListener('load-root-tileset', (ev) => {
+    const report = inspectLodTileset(ev.tileset);
+    const provenance = inspectLodProvenance(LOD_PROVENANCE, GLB_URL || OBJ_URL);
+    state.lodManifestReport = { ...report, provenance };
+    const decision = decideLodStartup(report, provenance, Boolean(GLB_URL || OBJ_URL));
+    if (decision.action !== 'stream-lod') {
+      failLod(decision.reason);
+      return;
+    }
+    if (!report.canConvergeToZeroError) {
+      console.warn('LOD root delegates to external tilesets; validate each child manifest.', report);
+    }
     hideLoading();
     if (!homeView) {
       setHomeView();
       controls.setView(homeView.position, homeView.lookAt);
+    }
+  });
+  tilesRenderer.addEventListener('load-tileset', (ev) => {
+    const report = inspectLodTileset(ev.tileset);
+    if (!report.valid) {
+      failLod(`LOD child manifest cannot reach a valid full-detail frontier: ${report.errors[0]}`);
     }
   });
   tilesRenderer.addEventListener('load-model', (ev) => {
@@ -636,6 +681,7 @@ function loadTiles() {
   });
   tilesRenderer.addEventListener('load-error', (ev) => {
     console.error('Tiles load error', ev);
+    failLod('A required LOD tile failed to load.');
   });
   tilesParent.add(tilesRenderer.group);
 }
@@ -647,6 +693,145 @@ function disposeTiles() {
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
   tilesRenderer = null;
+  bvhQueue.length = 0;
+}
+
+let sessionRenewalTimer = null;
+let sessionAllowedOrigins = [];
+
+async function redeemViewerGrant(grant) {
+  const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
+  const res = await fetch('/api/v1/sessions/redeem', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify({ grant }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+async function currentViewerSession() {
+  const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
+  const res = await fetch('/api/v1/sessions/current', {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+function postToAllowedParent(message) {
+  if (window.parent === window) return;
+  for (const origin of sessionAllowedOrigins) window.parent.postMessage(message, origin);
+}
+
+function scheduleSessionRenewal(session) {
+  if (sessionRenewalTimer) clearTimeout(sessionRenewalTimer);
+  const expiresAtMs = Date.parse(session.expiresAt);
+  const delay = Math.max(1000, expiresAtMs - Date.now() - 5 * 60 * 1000);
+  sessionRenewalTimer = setTimeout(() => {
+    postToAllowedParent({
+      version: 1,
+      type: 'ltds-viewer:session-expiring',
+      modelId: session.model.id,
+      expiresAt: session.expiresAt,
+    });
+  }, delay);
+}
+
+function applyViewerSession(session, { initialize = false } = {}) {
+  if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
+  if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
+  sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
+  SHARE_PERMISSIONS = session.permissions || { measure: true, cameras: true };
+  if (initialize) {
+    PROJECT = session.model;
+    applyProjectConfig(PROJECT);
+    init();
+    postToAllowedParent({
+      version: 1,
+      type: 'ltds-viewer:ready',
+      modelId: session.model.id,
+      expiresAt: session.expiresAt,
+    });
+  } else if (PROJECT && session.model.id === PROJECT.id) {
+    // Refresh the credential-bearing asset roots without disturbing camera,
+    // visibility, measurements, or already-loaded render resources.
+    PROJECT = session.model;
+    applyProjectConfig(PROJECT);
+  }
+  scheduleSessionRenewal(session);
+}
+
+async function bootstrapSession() {
+  updateLoading('Starting secure viewer session...', '');
+  try {
+    const session = SESSION_GRANT
+      ? await redeemViewerGrant(SESSION_GRANT)
+      : await currentViewerSession();
+    if (SESSION_GRANT) history.replaceState(null, '', `/session/active/${encodeURIComponent(session.sessionId)}`);
+    applyViewerSession(session, { initialize: true });
+  } catch (error) {
+    if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey);
+    updateLoading('Viewer session unavailable', String(error.message || error));
+  }
+}
+
+window.addEventListener('message', async (event) => {
+  if (VIEW_MODE !== 'session' || event.source !== window.parent || !sessionAllowedOrigins.includes(event.origin)) return;
+  if (!event.data || event.data.version !== 1 || event.data.type !== 'ltds-viewer:renew-session') return;
+  const grant = event.data.grant;
+  if (typeof grant !== 'string' || !/^[0-9a-f-]{36}$/i.test(grant)) return;
+  try {
+    const session = await redeemViewerGrant(grant);
+    if (!PROJECT || session.model.id !== PROJECT.id) throw new Error('renewal grant is scoped to a different model');
+    applyViewerSession(session);
+    postToAllowedParent({
+      version: 1,
+      type: 'ltds-viewer:session-renewed',
+      modelId: session.model.id,
+      expiresAt: session.expiresAt,
+    });
+  } catch (error) {
+    // Keep the still-live capability and credential-bearing loader URLs.
+    // The parent can issue another one-time grant and retry in place.
+    postToAllowedParent({
+      version: 1,
+      type: 'ltds-viewer:session-renewal-failed',
+      modelId: PROJECT && PROJECT.id,
+      error: String(error.message || error),
+      retryable: true,
+    });
+  }
+});
+
+function failLod(message) {
+  if (lodFailureHandled) return;
+  lodFailureHandled = true;
+  showError(message);
+  setTimeout(() => {
+    if (!GLB_URL && !OBJ_URL) {
+      tilesParent.visible = false;
+      disposeTiles();
+      return;
+    }
+    if (!GLB_URL && OBJ_URL) {
+      const tilesBtn = document.getElementById('layer-tiles');
+      tilesBtn.dataset.layer = 'obj';
+      tilesBtn.textContent = 'Full-Resolution Mesh';
+      tilesBtn.classList.add('active');
+      document.getElementById('layer-glb').classList.remove('active');
+      applyMeshLayer();
+      return;
+    }
+    document.getElementById('layer-glb').classList.add('active');
+    document.getElementById('layer-tiles').classList.remove('active');
+    applyMeshLayer();
+  }, 0);
 }
 
 function setHomeView() {
@@ -699,6 +884,7 @@ function loadGLB() {
     state.glbLoading = false;
     applyMeshLayer();
     hideLoading();
+    draco.dispose();
   }, (xhr) => {
     if (xhr.total) {
       const pct = ((xhr.loaded / xhr.total) * 100).toFixed(0);
@@ -707,6 +893,7 @@ function loadGLB() {
   }, (err) => {
     console.error('GLB load error', err);
     state.glbLoading = false;
+    draco.dispose();
     hideLoading();
     showError(`Failed to load full-res mesh from ${GLB_URL}.`);
     document.getElementById('layer-glb').classList.remove('active');
@@ -1009,10 +1196,12 @@ function bindPhotoViewer() {
     photoView.ty = photoView.sty + dy;
     applyPhotoTransform();
   });
-  window.addEventListener('pointerup', () => {
+  const stopPhotoDrag = () => {
     photoView.dragging = false;
     dom.photoImg.style.cursor = '';
-  });
+  };
+  window.addEventListener('pointerup', stopPhotoDrag);
+  window.addEventListener('pointercancel', stopPhotoDrag);
   wrap.addEventListener('dblclick', (e) => {
     e.preventDefault();
     resetPhotoView();
@@ -1023,9 +1212,6 @@ function bindPhotoViewer() {
 // Measurements (labels + escape + persistence)
 // ───────────────────────────────────────────────────────────────
 const measureRoot = new THREE.Group();
-
-function initMeasureRoot() { scene.add(measureRoot); }
-initMeasureRoot();
 
 function makeLabel(text, cls = 'mlabel') {
   const div = document.createElement('div');
@@ -1436,8 +1622,8 @@ function ensureMap() {
 
 async function getDataset(url, isDem) {
   if (geoDatasets[url]) return geoDatasets[url];
-  if (!geoPool) geoPool = new GeoTIFF.Pool(Math.min(4, navigator.hardwareConcurrency || 2));
-  const tiff = await GeoTIFF.fromUrl(url, { allowFullFile: false, blockSize: 262144, cacheSize: 128 });
+  if (!geoPool) geoPool = new GeoTiffPool(Math.min(4, navigator.hardwareConcurrency || 2));
+  const tiff = await openGeoTiff(url, { allowFullFile: false, blockSize: 262144, cacheSize: 128 });
   const count = await tiff.getImageCount();
   const images = [];
   for (let i = 0; i < count; i++) images.push(await tiff.getImage(i));
@@ -2033,28 +2219,47 @@ function loadPointCloudDirect() {
   const label = isLaz ? 'LAZ' : 'PLY';
   updateLoading(`Loading point cloud (${label})...`, '');
 
-  const onGeometryReady = (geometry) => {
-    geometry.computeBoundingBox();
-    const mat = new THREE.PointsMaterial({ size: 0.03, vertexColors: geometry.hasAttribute('color') });
-    pointCloudObject = new THREE.Points(geometry, mat);
-    pointCloudParent.getObjectByName('pointCloudOffset').add(pointCloudObject);
-    state.pointCloudLoaded = true;
-    state.pointCloudLoading = false;
-    hideLoading();
-  };
   const onFail = (err) => {
     console.error('Point cloud load error', err);
     state.pointCloudLoading = false;
     hideLoading();
     showError(`Failed to load point cloud from ${POINT_CLOUD_URL}.`);
   };
+  const onGeometryReady = (geometry) => {
+    try {
+      const sourcePositions = geometry.getAttribute('position')?.array;
+      if (!sourcePositions) throw new Error(`${label} file had no POSITION attribute`);
+      if (!geometry.userData.pointPositionsLocalized) {
+        const localized = localizePointPositions(sourcePositions, RTC);
+        geometry.setAttribute('position', new THREE.BufferAttribute(localized.positions, 3));
+      }
+      geometry.computeBoundingBox();
+      const mat = new THREE.PointsMaterial({ size: 0.03, vertexColors: geometry.hasAttribute('color') });
+      pointCloudObject = new THREE.Points(geometry, mat);
+      // Keep the offset group as an explicit reference. A production-browser
+      // smoke test caught the name lookup returning undefined during the async
+      // PLY completion callback, leaving the loading overlay stuck at 100%.
+      pointCloudOffset.add(pointCloudObject);
+      state.pointCloudLoaded = true;
+      state.pointCloudLoading = false;
+      hideLoading();
+    } catch (err) {
+      onFail(err);
+    }
+  };
 
   if (isLaz) {
-    loadersGlLoad(POINT_CLOUD_URL, LASLoader, { las: { colorDepth: 8 } }).then((data) => {
+    loadersGlLoad(POINT_CLOUD_URL, LASLoader, {
+      // Preserve the absolute UTM values until they have been rebased to the
+      // local RTC frame. Decoding straight to Float32 loses fine detail at
+      // multi-million-metre northings before the GPU ever sees the points.
+      las: { colorDepth: 8, fp64: true },
+    }).then((data) => {
       const positions = data.attributes.POSITION && data.attributes.POSITION.value;
       if (!positions) throw new Error('LAZ/LAS file had no POSITION attribute');
       const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const localized = localizePointPositions(positions, RTC);
+      geometry.setAttribute('position', new THREE.BufferAttribute(localized.positions, 3));
       const colorAttr = data.attributes.COLOR_0 && data.attributes.COLOR_0.value;
       if (colorAttr && colorAttr.length) {
         const pointCount = positions.length / 3;
@@ -2067,6 +2272,9 @@ function loadPointCloudDirect() {
         }
         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
       }
+      // Already localized above while the decoder's Float64 precision was
+      // still available. Avoid running the heuristic a second time.
+      geometry.userData.pointPositionsLocalized = true;
       onGeometryReady(geometry);
     }).catch(onFail);
   } else {
@@ -2227,7 +2435,7 @@ function bindUI() {
 
   // LOD detail slider
   document.getElementById('lod-detail').addEventListener('input', (e) => {
-    if (tilesRenderer) tilesRenderer.errorTarget = 26 - parseInt(e.target.value, 10);
+    if (tilesRenderer) tilesRenderer.errorTarget = detailToErrorTarget(e.target.value);
   });
 
   document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach((btn) => {
@@ -2245,8 +2453,15 @@ function bindUI() {
       setTool(state.activeTool === 'none' ? 'distance' : 'none');
     });
   }
-  document.getElementById('sidebar-toggle').addEventListener('click', () => {
-    document.getElementById('sidebar').classList.toggle('collapsed');
+  const sidebar = document.getElementById('sidebar');
+  const sidebarToggle = document.getElementById('sidebar-toggle');
+  if (window.matchMedia('(max-width: 1024px)').matches) {
+    sidebar.classList.add('collapsed');
+    sidebarToggle.setAttribute('aria-expanded', 'false');
+  }
+  sidebarToggle.addEventListener('click', () => {
+    const collapsed = sidebar.classList.toggle('collapsed');
+    sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
     setTimeout(onResize, 300);
   });
 
@@ -2419,8 +2634,10 @@ function updateStats() {
       for (const c of obj.children) countVisible(c);
     };
     countVisible(tilesRenderer.group);
-    const vis = tilesRenderer.stats ? tilesRenderer.stats.visible : 0;
-    dom.lodStatus.textContent = `LOD: ${vis} tile${vis === 1 ? '' : 's'}`;
+    const frontier = visibleLodFrontier(tilesRenderer.root);
+    const vis = frontier.visibleCount || (tilesRenderer.stats ? tilesRenderer.stats.visible : 0);
+    const quality = frontier.fullDetail ? 'full-detail' : 'streaming';
+    dom.lodStatus.textContent = `LOD: ${quality} (${vis} tile${vis === 1 ? '' : 's'})`;
   } else if (glbParent.visible) {
     glbOffset.traverse((o) => {
       if (o.isMesh && o.geometry) tris += o.geometry.index ? o.geometry.index.count / 3 : (o.geometry.attributes.position?.count || 0) / 3;

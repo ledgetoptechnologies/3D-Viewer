@@ -26,6 +26,7 @@ function toClientConfig(p) {
     available: p.available,
     georef: p.georef,
     pointCount: p.pointCount,
+    lodProvenance: p.lodProvenance || null,
     assets: {
       glb: assetUrl(p.id, a.glb),
       tiles: assetUrl(p.id, a.tiles),

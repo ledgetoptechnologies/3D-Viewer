@@ -1,20 +1,41 @@
 services:
   ltds-viewer:
     build: .
-    image: ltds-3d-viewer:latest
+    image: ${VIEWER_IMAGE:-ltds-3d-viewer:latest}
     restart: unless-stopped
     ports:
       - "${VIEWER_PORT:-8080}:8080"
     environment:
       PORT: 8080
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL to the public HTTPS viewer origin}
+      EXPECTED_HOST: ${EXPECTED_HOST:?set EXPECTED_HOST to the public viewer hostname}
+      ALLOWED_EMBED_ORIGINS: ${ALLOWED_EMBED_ORIGINS:-}
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-2}
+      SERVICE_AUTH_KEY_ID: ${SERVICE_AUTH_KEY_ID:-ops-v1}
+      SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET:?set a random SERVICE_AUTH_SECRET of at least 32 characters}
+      SERVICE_AUTH_KEYS_JSON: ${SERVICE_AUTH_KEYS_JSON:-}
+      SERVICE_AUTH_PREVIOUS_KEY_ID: ${SERVICE_AUTH_PREVIOUS_KEY_ID:-}
+      SERVICE_AUTH_PREVIOUS_SECRET: ${SERVICE_AUTH_PREVIOUS_SECRET:-}
+      EMERGENCY_ADMIN_ENABLED: ${EMERGENCY_ADMIN_ENABLED:-false}
       WEBODM_API_URL: ${WEBODM_API_URL}
       WEBODM_USERNAME: ${WEBODM_USERNAME}
       WEBODM_PASSWORD: ${WEBODM_PASSWORD}
+      WEBODM_ENABLED: ${WEBODM_ENABLED:-true}
       WEBODM_MEDIA_MOUNT: /mnt/webodm
       DERIVATIVES_MOUNT: /mnt/derivatives
       SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-10}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      SESSION_SECRET: ${SESSION_SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_SECRET: ${SESSION_SECRET:?set a random SESSION_SECRET of at least 32 characters}
+      DATABASE_PATH: /app/data/viewer.sqlite
+      VIEWER_SESSION_TTL_SECONDS: ${VIEWER_SESSION_TTL_SECONDS:-1800}
+      SESSION_GRANT_TTL_SECONDS: ${SESSION_GRANT_TTL_SECONDS:-60}
+      X_ACCEL_REDIRECT_PREFIX: ${X_ACCEL_REDIRECT_PREFIX:-}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     volumes:
       # READ-ONLY: WebODM's media/output storage.
       #
@@ -33,11 +54,11 @@ services:
       # This container never gets WebODM's Postgres data, secrets, or
       # application source; only completed task output files, read-only.
       - ${WEBODM_MEDIA_PATH}:/mnt/webodm:ro
-      # Optional writable cache for pre-built LOD-mesh-tile/EPT derivatives.
+      # Optional read-only mount for pre-built LOD-mesh-tile/EPT derivatives.
       # Deliberately a SEPARATE path from WebODM's own storage so WebODM
       # upgrades/cleanup can never touch it. Safe to leave pointed at an
       # empty directory if you don't have derivatives yet.
-      - ${DERIVATIVES_PATH:-./data/derivatives}:/mnt/derivatives
+      - ${DERIVATIVES_PATH:-./data/derivatives}:/mnt/derivatives:ro
       # Viewer's own small JSON metadata store (cached sync results only —
       # never a copy of WebODM's database).
       - viewer-data:/app/data

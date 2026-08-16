@@ -3,12 +3,17 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test",
     "dev": "vite --host 0.0.0.0 --port 8080",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 8080",
     "server": "node server/index.js",
+    "check": "npm test && npm run build",
+    "validate:lod": "node scripts/validate-lod.mjs",
     "start": "npm run build && npm run server"
   },
   "keywords": [],

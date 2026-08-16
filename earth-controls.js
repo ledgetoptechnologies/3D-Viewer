@@ -60,6 +60,7 @@ export class EarthLikeControls {
     domElement.addEventListener('pointerdown', this._onPointerDown);
     domElement.addEventListener('pointermove', this._onPointerMove);
     window.addEventListener('pointerup', this._onPointerUp);
+    window.addEventListener('pointercancel', this._onPointerUp);
     domElement.addEventListener('wheel', this._onWheel, { passive: false });
     domElement.addEventListener('contextmenu', this._onContext);
   }
@@ -363,6 +364,7 @@ export class EarthLikeControls {
     this.dom.removeEventListener('pointerdown', this._onPointerDown);
     this.dom.removeEventListener('pointermove', this._onPointerMove);
     window.removeEventListener('pointerup', this._onPointerUp);
+    window.removeEventListener('pointercancel', this._onPointerUp);
     this.dom.removeEventListener('wheel', this._onWheel);
     this.dom.removeEventListener('contextmenu', this._onContext);
   }

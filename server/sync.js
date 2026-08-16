@@ -9,6 +9,14 @@ const path = require('path');
 const webodm = require('./webodmClient');
 const store = require('./store');
 const { config } = require('./config');
+const { verifyLodProvenance } = require('./lodProvenance');
+const { legacyModelInput } = require('./legacyMigration');
+
+let canonicalRepository = null;
+
+function setRepository(repository) {
+  canonicalRepository = repository;
+}
 
 // Standard ODM output, e.g.:
 //   WGS84 UTM 16N
@@ -52,7 +60,7 @@ function derivativesDir(projectId, taskId) {
 }
 
 // Resolve everything we know how to display for one completed WebODM task.
-function buildRecord(project, task) {
+async function buildRecord(project, task) {
   const id = `webodm-${project.id}-${task.id}`;
   const assetsDir = webodmAssetsDir(project.id, task.id);
   const derivDir = derivativesDir(project.id, task.id);
@@ -142,6 +150,14 @@ function buildRecord(project, task) {
     ]),
   };
 
+  const selectedFullMesh = rel.glbDerivative || rel.glbNative || rel.objModel;
+  const lodProvenancePath = derivDir && firstExisting([path.join(derivDir, 'lod-provenance.json')]);
+  let lodProvenance = null;
+  if (lodProvenancePath && selectedFullMesh) {
+    const verification = await verifyLodProvenance(lodProvenancePath, selectedFullMesh);
+    if (verification.verified) lodProvenance = verification.provenance;
+  }
+
   // Present = at least the orthophoto or a mesh/point-cloud is viewable.
   const hasAnyAsset = Object.values(rel).some(Boolean);
 
@@ -155,6 +171,7 @@ function buildRecord(project, task) {
     available: hasAnyAsset,
     georef: { ...georef, bboxCenter },
     pointCount,
+    lodProvenance,
     assetRoots,
     // Paths are stored relative to their root so assets.js can safely
     // re-join them without ever exposing the absolute host filesystem path.
@@ -205,8 +222,9 @@ async function runSync() {
         if (task.status !== webodm.TASK_STATUS.COMPLETED) continue;
         result.completed += 1;
         try {
-          const record = buildRecord(project, task);
+          const record = await buildRecord(project, task);
           store.upsert(record);
+          if (canonicalRepository) canonicalRepository.upsertModelVersion(legacyModelInput(record));
           keepIds.push(record.id);
         } catch (err) {
           result.errors.push(`task ${project.id}/${task.id}: ${err.message}`);
@@ -223,6 +241,10 @@ async function runSync() {
 }
 
 function startScheduler() {
+  if (!config.webodmEnabled) {
+    console.log('[sync] WebODM synchronization disabled');
+    return;
+  }
   if (config.syncOnStartup) {
     runSync().then((r) => console.log('[sync] startup sync:', JSON.stringify(r)));
   }
@@ -232,4 +254,4 @@ function startScheduler() {
   }, intervalMs);
 }
 
-module.exports = { runSync, startScheduler, parseCoordsTxt };
+module.exports = { buildRecord, runSync, setRepository, startScheduler, parseCoordsTxt };

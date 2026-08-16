@@ -6,11 +6,18 @@ const shareStore = require('./shareStore');
 const auth = require('./auth');
 const { requireAdmin } = require('./adminAuth');
 const { toClientConfig } = require('./api');
+const { config } = require('./config');
+const { toViewerConfig } = require('./apiV1');
 
 const SHARE_COOKIE = 'ltds_share';
 const SHARE_SESSION_TTL_MS = 60 * 60 * 1000; // 60 minutes; revocation is still checked live (see below)
 
 const router = express.Router();
+let canonicalRepository = null;
+
+function setRepository(repository) {
+  canonicalRepository = repository;
+}
 
 function shareSummary(s) {
   return {
@@ -26,7 +33,10 @@ function shareSummary(s) {
 }
 
 function issueShareSession(req, res, share) {
-  const cookieVal = auth.sign({ shareId: share.id, viewerProjectId: share.viewerProjectId }, SHARE_SESSION_TTL_MS);
+  const cookieVal = auth.sign({
+    shareId: share.id,
+    ...(share.modelId ? { modelId: share.modelId } : { viewerProjectId: share.viewerProjectId }),
+  }, SHARE_SESSION_TTL_MS);
   res.cookie(SHARE_COOKIE, cookieVal, auth.cookieAttrs(req, { maxAge: SHARE_SESSION_TTL_MS }));
 }
 
@@ -34,6 +44,23 @@ function hasUnlockedSession(req, share) {
   const cookieVal = req.cookies && req.cookies[SHARE_COOKIE];
   const payload = cookieVal ? auth.verify(cookieVal) : null;
   return !!(payload && payload.shareId === share.id);
+}
+
+function sharedViewerConfig(project, share) {
+  const assetToken = auth.sign({
+    kind: 'share-asset',
+    shareId: share.id,
+    ...(share.modelId ? { modelId: share.modelId } : { viewerProjectId: share.viewerProjectId }),
+  }, SHARE_SESSION_TTL_MS);
+  if (share.modelId) return toViewerConfig(project, { assetToken });
+  const result = toClientConfig(project);
+  const prefix = `/session-assets/${encodeURIComponent(assetToken)}`;
+  for (const [kind, value] of Object.entries(result.assets || {})) {
+    if (kind !== 'pointCloudFormat' && typeof value === 'string' && value.startsWith('/assets/')) {
+      result.assets[kind] = `${prefix}${value.slice('/assets'.length)}`;
+    }
+  }
+  return result;
 }
 
 // ── Admin: create / list / revoke share links for a project ──────────────
@@ -62,7 +89,8 @@ router.post('/api/models/:id/share-links', requireAdmin, async (req, res) => {
   };
 
   const share = shareStore.create({ viewerProjectId: project.id, tokenHash, passwordHash, expiresAt, permissions });
-  const base = `${req.protocol}://${req.get('host')}`;
+  const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
     ...shareSummary(share),
     // The raw token is only ever returned here, at creation time.
@@ -88,41 +116,56 @@ router.delete('/api/share-links/:id', requireAdmin, (req, res) => {
 
 // ── Public: validate a token / unlock a password-protected one ───────────
 router.get('/api/share/:token', (req, res) => {
-  const share = shareStore.getByTokenHash(auth.hashToken(req.params.token));
+  const tokenHash = auth.hashToken(req.params.token);
+  const legacyShare = shareStore.getByTokenHash(tokenHash);
+  const share = legacyShare || (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash));
   if (!share) return res.status(404).json({ error: 'link not found' });
-  if (!shareStore.isLive(share)) return res.status(410).json({ error: 'link expired or revoked' });
+  const live = share.modelId ? canonicalRepository.publicShareLive(share) : shareStore.isLive(share);
+  if (!live) return res.status(410).json({ error: 'link expired or revoked' });
 
-  const project = store.getById(share.viewerProjectId);
-  if (!project || !project.available) return res.status(404).json({ error: 'model not found' });
+  const project = share.modelId ? canonicalRepository.getModel(share.modelId) : store.getById(share.viewerProjectId);
+  const available = share.modelId ? project && project.status === 'ready' : project && project.available;
+  if (!available) return res.status(404).json({ error: 'model not found' });
 
   if (share.passwordHash && !hasUnlockedSession(req, share)) {
+    res.setHeader('Cache-Control', 'no-store');
     return res.status(401).json({ requiresPassword: true });
   }
 
-  shareStore.recordAccess(share.id);
+  if (share.modelId) canonicalRepository.recordPublicShareAccess(share.id);
+  else shareStore.recordAccess(share.id);
   issueShareSession(req, res, share);
-  res.json({ ...toClientConfig(project), permissions: share.permissions, shareExpiresAt: share.expiresAt || null });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, shareExpiresAt: share.expiresAt || null });
 });
 
 router.post('/api/share/:token/unlock', async (req, res) => {
   if (auth.rateLimited(`share-unlock:${req.params.token}:${req.ip}`, 8, 5 * 60 * 1000)) {
     return res.status(429).json({ error: 'too many attempts, try again later' });
   }
-  const share = shareStore.getByTokenHash(auth.hashToken(req.params.token));
+  const tokenHash = auth.hashToken(req.params.token);
+  const legacyShare = shareStore.getByTokenHash(tokenHash);
+  const share = legacyShare || (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash));
   if (!share) return res.status(404).json({ error: 'link not found' });
-  if (!shareStore.isLive(share)) return res.status(410).json({ error: 'link expired or revoked' });
+  const live = share.modelId ? canonicalRepository.publicShareLive(share) : shareStore.isLive(share);
+  if (!live) return res.status(410).json({ error: 'link expired or revoked' });
   if (!share.passwordHash) return res.status(400).json({ error: 'this link does not require a password' });
 
   const ok = await auth.verifyPassword(String((req.body && req.body.password) || ''), share.passwordHash);
   if (!ok) return res.status(401).json({ error: 'incorrect password' });
 
-  const project = store.getById(share.viewerProjectId);
-  if (!project || !project.available) return res.status(404).json({ error: 'model not found' });
+  const project = share.modelId ? canonicalRepository.getModel(share.modelId) : store.getById(share.viewerProjectId);
+  const available = share.modelId ? project && project.status === 'ready' : project && project.available;
+  if (!available) return res.status(404).json({ error: 'model not found' });
 
-  shareStore.recordAccess(share.id);
+  if (share.modelId) canonicalRepository.recordPublicShareAccess(share.id);
+  else shareStore.recordAccess(share.id);
   issueShareSession(req, res, share);
-  res.json({ ...toClientConfig(project), permissions: share.permissions, shareExpiresAt: share.expiresAt || null });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, shareExpiresAt: share.expiresAt || null });
 });
 
 module.exports = router;
 module.exports.SHARE_COOKIE = SHARE_COOKIE;
+module.exports.setRepository = setRepository;
+module.exports.sharedViewerConfig = sharedViewerConfig;
