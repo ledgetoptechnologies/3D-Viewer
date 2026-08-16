@@ -43,7 +43,7 @@ See `server/config.js` for all environment variables.
    that has `read:packages`, then run `docker compose pull` and
    `docker compose up -d`.
 4. Route `viewer.ledgetopdroneservices.com` through cloudflared to this service
-   on port `8080`. The bare Viewer URL redirects to LTDS Ops; there is no local
+   on port `8088`. The bare Viewer URL redirects to LTDS Ops; there is no local
    password-admin login in the production Compose profile.
 
 The Viewer syncs on startup and every `SYNC_INTERVAL_MINUTES`. Ops can request
@@ -67,6 +67,33 @@ Add `--model webodm-PROJECTID-TASKID` to require one exact synced task. Add
 `--require-lod` only after its derivative directory contains `tileset.json`, a
 full `model.glb`, and conversion-generated `lod-provenance.json`; this makes the
 deployment check fail closed when full-quality LOD provenance is absent.
+`--require-point-cloud` accepts either streamed EPT or a whole-file LAS/LAZ/PLY
+fallback. For a browser-scalable production cloud, also pass `--require-ept`.
+
+After the Tunnel is live, exercise that exact model's real protected browser
+path as well:
+
+```bash
+docker compose exec -T ltds-viewer \
+  node scripts/production-readiness.mjs \
+  --base-url https://viewer.ledgetopdroneservices.com \
+  --model webodm-PROJECTID-TASKID \
+  --verify-mount-options --require-models --require-ept --require-lod \
+  --live-capability
+```
+
+`--live-capability` is deliberately opt-in and requires `--model`. It creates
+one short-lived Ops grant/session (120 seconds by default), repeats the signed
+creation with the same idempotency key, redeems the grant once, checks the
+current session, and downloads only representative one-byte ranges. When
+present, it also reads the protected 3D Tiles manifest/child and EPT manifest,
+nested JSON hierarchy, and root data node. Unsigned creation, missing browser
+authorization, grant reuse, an unscoped asset path, cross-model use, and a
+tampered capability must all fail closed. It does not create, alter, or revoke
+a model or public share; normal audit/idempotency rows and the expiring
+grant/session are the only writes. Override the lifetime, if necessary, with
+`--capability-ttl-seconds 30` through `600`. Output and errors redact the
+service/session credentials, one-use grant, and browser capability.
 
 The container only ever receives network access to your WebODM instance's
 HTTP(S) API and a **read-only** bind mount of WebODM's media/output storage.
@@ -84,7 +111,12 @@ In addition to the media mount:
 
 - **API**: create a dedicated, least-privilege WebODM user (view-only
   permission on the projects you want exposed) and put its credentials in
-  `.env`. Do not use an admin account.
+  `.env`. Do not use an admin account. The LTDS production default is
+  `http://192.168.50.80:30048` with username `Model-Viewer`, keeping discovery
+  traffic on the LAN. If that address is not routable from the Viewer
+  container, set `WEBODM_API_URL=https://webodm.ledgetopdroneservices.com`.
+  Supply the password only through `.env`/TrueNAS secret configuration; it is
+  intentionally not present in this repository.
 - **Storage**: WebODM's own application must use that same dataset as its media
   root:
   ```yaml
@@ -171,7 +203,7 @@ must also load the Viewer shell, hashed static bundles, public-share API, and
 capability-protected model assets. Instead:
 
 1. Publish the Viewer only through Cloudflare Tunnel; do not port-forward
-   container port `8080` from the Internet.
+   container port `8088` from the Internet.
 2. Keep the Viewer hostname Cloudflare-proxied and apply normal zone WAF/rate
    limiting. There is no public administrator UI at that hostname.
 3. Staff authorization flows from Access-protected Ops through HMAC-signed
@@ -356,25 +388,43 @@ WGS84 UTM 16N
   `tileset.json`. Without a valid record, the viewer safely switches to the
   actual full mesh (or disables the invalid LOD layer if no full mesh exists):
 
+  Generate the record with the offline equivalence audit; never hand-author it:
+
+  ```bash
+  npm run audit:lod -- /path/to/derivatives/project-task /path/to/derivatives/project-task/model.glb
+  npm run validate:lod -- /path/to/derivatives/project-task /path/to/derivatives/project-task/model.glb
+  ```
+
+  The generated evidence has this versioned shape (artifact list abbreviated):
+
   ```json
   {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "sourceAsset": "model.glb",
     "sourceSha256": "<64 lowercase hex characters>",
-    "geometry": "preserved",
-    "textures": "preserved",
-    "leafGeometricError": 0
+    "geometry": "bounded-triangle-equivalence",
+    "textures": "byte-identical-material-equivalence",
+    "leafGeometricError": 0,
+    "audit": {
+      "algorithm": "ltds-glb-leaf-equivalence-v1",
+      "coordinateTolerance": 0.000001,
+      "maxNumericDelta": 0,
+      "triangleCount": 123456,
+      "equivalenceSha256": "<64 lowercase hex characters>",
+      "artifacts": ["<tileset, leaf, and external-texture digest records>"]
+    }
   }
   ```
 
-  This is a conversion-pipeline attestation, not a file to hand-author. The
-  trusted conversion job must only write `geometry: "preserved"` and
-  `textures: "preserved"` after its LOD-0 audit succeeds. At sync time the
-  Viewer streams and SHA-256 hashes the selected full GLB/OBJ and exposes the
-  attestation only when `sourceAsset` and `sourceSha256` match that exact file.
-  Otherwise the client automatically loads the actual full mesh. The zoomed-in
-  quality claim therefore fails closed instead of trusting a filename or
-  `geometricError: 0` by itself.
+  The generator parses the source GLB and all zero-error GLB/B3DM leaves,
+  applies node/tile/JSON-RTC transforms, and compares winding-preserving
+  triangles, vertex attributes, render material state, samplers, and exact
+  texture bytes. It binds every tileset, leaf, and external texture by digest.
+  At sync time the Viewer re-hashes the selected full GLB and every bound
+  artifact before exposing the evidence. Otherwise the client automatically
+  loads the actual full mesh. See [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
+  for the intentionally fail-closed supported subset and why a tiler that clips
+  or retriangulates partition boundaries cannot receive an exact v1 proof.
 - **Camera positions**: one `InstancedMesh` of view-frustum pyramids, gold
   highlight on hover, tooltip with filename. Size slider.
 - **Measurements**: distance / area / volume with CSS2D labels pinned to the

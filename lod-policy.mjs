@@ -70,13 +70,37 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
     return { verified: false, errors: ['lod-provenance.json is required'] };
   }
 
-  if (provenance.schemaVersion !== 1) errors.push('schemaVersion must be 1');
+  if (provenance.schemaVersion !== 2) errors.push('schemaVersion must be 2 (audited leaf equivalence)');
   if (!/^[a-f0-9]{64}$/i.test(String(provenance.sourceSha256 || ''))) {
     errors.push('sourceSha256 must be a SHA-256 digest');
   }
-  if (provenance.geometry !== 'preserved') errors.push('geometry must be preserved');
-  if (provenance.textures !== 'preserved') errors.push('textures must be preserved');
+  if (provenance.geometry !== 'bounded-triangle-equivalence') {
+    errors.push('geometry must be bounded-triangle-equivalence');
+  }
+  if (provenance.textures !== 'byte-identical-material-equivalence') {
+    errors.push('textures must be byte-identical-material-equivalence');
+  }
   if (provenance.leafGeometricError !== 0) errors.push('leafGeometricError must be 0');
+  if (provenance.audit?.algorithm !== 'ltds-glb-leaf-equivalence-v1') {
+    errors.push('recognized LOD equivalence audit evidence is required');
+  }
+  if (!Number.isInteger(provenance.audit?.triangleCount) || provenance.audit.triangleCount < 1) {
+    errors.push('audit triangleCount must be a positive integer');
+  }
+  if (!/^[a-f0-9]{64}$/i.test(String(provenance.audit?.equivalenceSha256 || ''))) {
+    errors.push('audit equivalenceSha256 must be a SHA-256 digest');
+  }
+  const tolerance = provenance.audit?.coordinateTolerance;
+  const maxDelta = provenance.audit?.maxNumericDelta;
+  if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 1e-3) {
+    errors.push('audit coordinateTolerance must be between 0 and 0.001');
+  }
+  if (!Number.isFinite(maxDelta) || maxDelta < 0 || maxDelta > tolerance) {
+    errors.push('audit maxNumericDelta must not exceed coordinateTolerance');
+  }
+  if (!Number.isInteger(provenance.audit?.artifactCount) || provenance.audit.artifactCount < 2) {
+    errors.push('audit artifactCount must bind the tileset and leaf artifacts');
+  }
 
   let expectedSource = '';
   try {
@@ -86,6 +110,9 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
   }
   if (!expectedSource || provenance.sourceAsset !== expectedSource) {
     errors.push('sourceAsset must name the active full-resolution mesh');
+  }
+  if (!/\.glb$/i.test(String(provenance.sourceAsset || ''))) {
+    errors.push('audited sourceAsset must be a GLB');
   }
 
   return { verified: errors.length === 0, errors };

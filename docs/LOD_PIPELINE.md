@@ -29,24 +29,68 @@ the error target again, after which inactive detailed children can be evicted.
 
 ## Full-quality attestation
 
-The trusted conversion job writes `lod-provenance.json` beside `tileset.json`:
+The conversion job must run the repository audit; it must not hand-author a
+preservation assertion:
+
+```bash
+npm run audit:lod -- /path/to/derivatives/project-task /path/to/derivatives/project-task/model.glb
+```
+
+Only after the audit has parsed and compared the source GLB with the aggregate
+zero-error leaf frontier does it atomically write `lod-provenance.json` beside
+`tileset.json`:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sourceAsset": "model.glb",
   "sourceSha256": "<sha256 of the exact full mesh>",
-  "geometry": "preserved",
-  "textures": "preserved",
-  "leafGeometricError": 0
+  "geometry": "bounded-triangle-equivalence",
+  "textures": "byte-identical-material-equivalence",
+  "leafGeometricError": 0,
+  "audit": {
+    "algorithm": "ltds-glb-leaf-equivalence-v1",
+    "coordinateTolerance": 0.000001,
+    "maxNumericDelta": 0,
+    "triangleCount": 123456,
+    "equivalenceSha256": "<sha256 of canonical source triangles/materials>",
+    "artifacts": [
+      { "uri": "tileset.json", "sha256": "<sha256>", "byteLength": 1234 },
+      { "uri": "tiles/leaf-0.b3dm", "sha256": "<sha256>", "byteLength": 5678 }
+    ]
+  }
 }
 ```
 
-Do not hand-author `geometry: "preserved"` or `textures: "preserved"`. The
-conversion job must set them only after checking the aggregate LOD-0 output
-against the source. The Viewer independently hashes the selected full mesh. A
-missing, stale, renamed, or unverified attestation causes a safe fallback to the
-actual GLB/OBJ instead of making a false full-quality claim.
+The audit compares canonical, winding-preserving triangle streams after GLB
+node transforms, 3D Tiles transforms, JSON `RTC_CENTER`, and `CESIUM_RTC`. It
+compares every vertex attribute used by each primitive, render-affecting
+material state, sampler state, and the exact bytes of every used texture. It
+also records a SHA-256 and byte length for every tileset, leaf, and external
+texture dependency. At model discovery the Viewer independently re-hashes the
+selected source and all recorded artifacts. A missing, changed, renamed,
+legacy-v1, or hand-authored assertion causes a safe fallback to the actual GLB
+instead of a false full-quality claim.
+
+The default coordinate/attribute tolerance is `1e-6` model units and the audit
+records the largest observed delta. `--tolerance` may lower it or raise it only
+as far as `1e-3`; choose a bound appropriate for the source coordinate units.
+
+### Deliberately unsupported proof cases
+
+The v1 algorithm fails closed for Draco/meshopt-compressed geometry, sparse
+accessors, morphs, skins, GPU instancing, non-triangle primitives, external GLB
+buffers, alternate compressed texture-source extensions, binary
+`RTC_CENTER`, or remote URLs. Decode these into the supported GLB/B3DM subset
+inside the trusted conversion job before auditing.
+
+Spatial partitioning itself is supported when leaves retain the source
+triangles. If a tiler clips triangles at tile boundaries or retriangulates the
+surface, triangle topology differs and this algorithm cannot prove exact
+equivalence even when the rendered surfaces look the same. Likewise, texture
+atlas repacking or lossless re-encoding changes texture bytes and is rejected.
+Those cases require a separately designed and versioned surface/texture proof;
+do not loosen the v1 result or manually change the provenance file.
 
 ## Validate before deployment
 
@@ -54,9 +98,10 @@ actual GLB/OBJ instead of making a false full-quality claim.
 npm run validate:lod -- /path/to/derivatives/project-task /path/to/full/model.glb
 ```
 
-The command recursively validates the root and external child tilesets,
-zero-error leaf frontier, content paths/files, and provenance digest. A valid
-result is necessary but real hardware QA is still required: start far away,
+Run the audit first, then this independent validator. It recursively validates
+the root and external child tilesets, zero-error leaf frontier, content
+paths/files, source digest, and every artifact digest in the audit evidence. A
+valid result is necessary but real hardware QA is still required: start far away,
 move close to several different regions, confirm detail increases without
 holes, move back out, and verify memory settles rather than growing without
 bound. Repeat on a representative phone viewport/device.

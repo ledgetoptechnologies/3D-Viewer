@@ -13,6 +13,7 @@
     "preview": "vite preview --host 0.0.0.0 --port 8080",
     "server": "node server/index.js",
     "check": "npm test && npm run build",
+    "audit:lod": "node scripts/audit-lod-equivalence.mjs",
     "validate:lod": "node scripts/validate-lod.mjs",
     "verify:production": "node scripts/production-readiness.mjs",
     "start": "npm run build && npm run server"

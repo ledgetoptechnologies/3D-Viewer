@@ -55,6 +55,6 @@ COPY scripts/production-readiness.mjs ./scripts/production-readiness.mjs
 COPY --from=build /app/dist ./dist
 RUN mkdir -p /app/data && chown -R node:node /app/data
 
-EXPOSE 8080
+EXPOSE 8088
 USER node
 CMD ["node", "server/index.js"]

@@ -4,9 +4,9 @@ services:
     image: ${VIEWER_IMAGE:-ghcr.io/ledgetoptechnologies/3d-viewer:latest}
     restart: unless-stopped
     ports:
-      - "${VIEWER_PORT:-8080}:8080"
+      - "${VIEWER_PORT:-8088}:8088"
     environment:
-      PORT: 8080
+      PORT: 8088
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://viewer.ledgetopdroneservices.com}
       EXPECTED_HOST: ${EXPECTED_HOST:-viewer.ledgetopdroneservices.com}
       OPS_BASE_URL: ${OPS_BASE_URL:-https://ops.ledgetopdroneservices.com}
@@ -22,9 +22,12 @@ services:
       # Administration is owned by LTDS Ops. The legacy local password shell
       # is intentionally unavailable in this deployment profile.
       EMERGENCY_ADMIN_ENABLED: "false"
-      WEBODM_API_URL: ${WEBODM_API_URL}
-      WEBODM_USERNAME: ${WEBODM_USERNAME}
-      WEBODM_PASSWORD: ${WEBODM_PASSWORD}
+      # Prefer the LAN endpoint so discovery traffic stays local. Override
+      # with https://webodm.ledgetopdroneservices.com only when the container
+      # cannot route to the WebODM host.
+      WEBODM_API_URL: ${WEBODM_API_URL:-http://192.168.50.80:30048}
+      WEBODM_USERNAME: ${WEBODM_USERNAME:-Model-Viewer}
+      WEBODM_PASSWORD: ${WEBODM_PASSWORD:?set the dedicated Model-Viewer WebODM password}
       WEBODM_ENABLED: ${WEBODM_ENABLED:-true}
       WEBODM_MEDIA_MOUNT: /mnt/webodm
       DERIVATIVES_MOUNT: /mnt/derivatives
@@ -35,7 +38,7 @@ services:
       SESSION_GRANT_TTL_SECONDS: ${SESSION_GRANT_TTL_SECONDS:-60}
       X_ACCEL_REDIRECT_PREFIX: ${X_ACCEL_REDIRECT_PREFIX:-}
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8088/api/v1/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3

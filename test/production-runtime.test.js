@@ -15,6 +15,11 @@ const repositoryRoot = path.resolve(__dirname, '..');
 test('production Compose pins the approved TrueNAS storage layout', () => {
   const compose = fs.readFileSync(path.join(repositoryRoot, 'docker-compose.yml'), 'utf8');
 
+  assert.match(compose, /\$\{VIEWER_PORT:-8088\}:8088/);
+  assert.match(compose, /PORT:\s*8088/);
+  assert.match(compose, /WEBODM_API_URL:\s*\$\{WEBODM_API_URL:-http:\/\/192\.168\.50\.80:30048\}/);
+  assert.match(compose, /WEBODM_USERNAME:\s*\$\{WEBODM_USERNAME:-Model-Viewer\}/);
+  assert.match(compose, /WEBODM_PASSWORD:\s*\$\{WEBODM_PASSWORD:\?/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/WebODM\/Media:\/mnt\/webodm:ro/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Derivatives:\/mnt\/derivatives:ro/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Data:\/app\/data/);

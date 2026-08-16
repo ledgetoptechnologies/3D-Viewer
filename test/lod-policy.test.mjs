@@ -71,12 +71,20 @@ test('valid REPLACE hierarchy converges to zero-error full-detail leaves', () =>
 
 test('full-quality claim requires provenance for the exact active full mesh', () => {
   const valid = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceAsset: 'model.glb',
     sourceSha256: 'a'.repeat(64),
-    geometry: 'preserved',
-    textures: 'preserved',
+    geometry: 'bounded-triangle-equivalence',
+    textures: 'byte-identical-material-equivalence',
     leafGeometricError: 0,
+    audit: {
+      algorithm: 'ltds-glb-leaf-equivalence-v1',
+      coordinateTolerance: 1e-6,
+      maxNumericDelta: 0,
+      triangleCount: 42,
+      equivalenceSha256: 'b'.repeat(64),
+      artifactCount: 3,
+    },
   };
   assert.deepEqual(inspectLodProvenance(valid, '/assets/p/derivatives/model.glb'), {
     verified: true,
@@ -86,7 +94,7 @@ test('full-quality claim requires provenance for the exact active full mesh', ()
   assert.equal(inspectLodProvenance({ ...valid, sourceAsset: 'other.glb' }, '/assets/p/derivatives/model.glb').verified, false);
   assert.equal(inspectLodProvenance({ ...valid, geometry: 'decimated' }, '/assets/p/derivatives/model.glb').verified, false);
   assert.equal(inspectLodProvenance({ ...valid, textures: 'reduced' }, '/assets/p/derivatives/model.glb').verified, false);
-  assert.equal(inspectLodProvenance({ ...valid, sourceAsset: 'model.obj' }, '/assets/p/webodm/model.obj').verified, true);
+  assert.equal(inspectLodProvenance({ ...valid, sourceAsset: 'model.obj' }, '/assets/p/webodm/model.obj').verified, false);
 });
 
 test('unverified LOD safely falls back to the actual full mesh', () => {
