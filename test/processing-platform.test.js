@@ -2,7 +2,9 @@
 const assert=require('node:assert/strict');const crypto=require('node:crypto');const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const test=require('node:test');
 const {openDatabase}=require('../server/database');const {ProcessingRepository}=require('../server/processingRepository');const {ViewerRepository}=require('../server/repository');const {StorageManager,hashFile,hashTree}=require('../server/storageManager');const {publishedAssetAllows,publishedAssetIntegrityAllows,safeExistingFile}=require('../server/assets');const {discoverOutputs}=require('../server/processingWorker');const {publicDerivativeKind,sanitizeLogMessage}=require('../server/processingSecurity');
 const {processOneDatasetOperation}=require('../server/datasetOperationWorker');
+const {applyStorageMutation,reconcileStorageMutations,purgeExpiredTrash}=require('../server/storageLifecycle');
 function fixture(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-processing-'));for(const name of['datasets','models','cache','trash','imports'])fs.mkdirSync(path.join(root,name));const db=openDatabase(path.join(root,'viewer.sqlite')),processing=new ProcessingRepository(db),storage=new StorageManager({datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),datasetImportMount:path.join(root,'imports'),storageReserveBytes:0,storageReservePercent:0});storage.initialize();t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});return{root,db,processing,storage};}
+function storedDataset(context,label='Stored',storageMode='managed'){const{root,processing}=context,project=processing.createProject({displayName:`${label} project`}),relativePath=crypto.randomUUID(),dataset=processing.createDataset({projectId:project.id,displayName:label,storageMode,rootKey:storageMode==='external_reference'?'dataset_import':'datasets',relativePath});const directory=path.join(root,storageMode==='external_reference'?'imports':'datasets',relativePath),body=Buffer.from(`${label} bytes`),sha256=crypto.createHash('sha256').update(body).digest('hex');fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(path.join(directory,'photo.jpg'),body);processing.finalizeDataset(dataset.id,[{id:crypto.randomUUID(),relativePath:'photo.jpg',byteSize:body.length,sha256}],sha256);return{dataset:processing.getDataset(dataset.id),directory,project};}
 test('processing migration, keyset pagination, relationship integrity and upload resume are durable',(t)=>{const{processing}=fixture(t);for(let i=0;i<105;i++)processing.createProject({displayName:`P ${i}`,createdBy:'ops:1'});const first=processing.listProjectsPage({limit:100});assert.equal(first.items.length,100);assert.ok(first.nextCursor);assert.equal(processing.listProjectsPage({limit:100,cursor:first.nextCursor}).items.length,5);const p=first.items[0],other=first.items[1],dataset=processing.createDataset({projectId:p.id,displayName:'Input',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID(),createdBy:'ops:1'}),file={id:'f1',relativePath:'photo.jpg',byteSize:0,sha256:crypto.createHash('sha256').digest('hex')};processing.finalizeDataset(dataset.id,[file],file.sha256);assert.throws(()=>processing.createTask({projectId:other.id,datasetId:dataset.id,displayName:'wrong'}),/must match/);const expiresAt=new Date(Date.now()+3600000).toISOString(),created=processing.createUpload({datasetId:processing.createDataset({projectId:p.id,displayName:'Resume',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()}).id,files:[file],subject:'ops:1',chunkSize:16,expiresAt}),resumed=processing.resumeUpload(created.upload.datasetId,'ops:1',[file],expiresAt);assert.equal(resumed.upload.id,created.upload.id);assert.notEqual(resumed.token,created.token);assert.equal(processing.verifyUploadToken(resumed.upload,resumed.token),true);assert.equal(processing.verifyUploadToken(resumed.upload,created.token),false);});
 test('admin grant redemption deadline is separate from authorization/session expiry',(t)=>{const{processing}=fixture(t),base=Date.now(),grant=processing.createAdminGrant({subject:'ops:7',permissions:['viewer.projects.read'],displayUnits:'metric',expiresAt:new Date(base+60000).toISOString(),authorizationExpiresAt:new Date(base+1800000).toISOString()}),redeemed=processing.redeemAdminGrant(grant.token,base+30000);assert.equal(redeemed.authorizationExpiresAt,new Date(base+1800000).toISOString());assert.equal(processing.redeemAdminGrant(grant.token,base+31000),null);const sessionExpiry=new Date(Math.min(Date.parse(redeemed.authorizationExpiresAt),base+30000+1800000)).toISOString();assert.ok(Date.parse(sessionExpiry)>base+60000);});
 test('import previews bind a deterministic tree fingerprint and adoption preserves source until promotion',(t)=>{const{root,storage}=fixture(t),source=path.join(root,'imports','batch');fs.mkdirSync(source);fs.writeFileSync(path.join(source,'a.jpg'),'first');const preview=storage.previewImport('dataset_import','batch');fs.writeFileSync(path.join(source,'a.jpg'),'other');const changed=storage.previewImport('dataset_import','batch');assert.notEqual(changed.treeFingerprint,preview.treeFingerprint);assert.rejects(storage.adoptImport('dataset_import','batch','dataset-a',{expectedFingerprint:preview.treeFingerprint}),/changed/);assert.equal(fs.existsSync(source),true);});
@@ -19,3 +21,194 @@ test('dataset operation lease is the sole recovery authority and import promotio
 test('processing assets bind every published tree child and fail closed after same-size mutation',async(t)=>{const{root,db}=fixture(t),repository=new ViewerRepository(db),directory=path.join(root,'models','task','attempt','ept');fs.mkdirSync(path.join(directory,'ept-data'),{recursive:true});const manifest=path.join(directory,'ept.json'),child=path.join(directory,'ept-data','0.bin');fs.writeFileSync(manifest,'{}');fs.writeFileSync(child,'safe');const integrity=await hashTree(directory),model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:'task',providerVersionId:'attempt',displayName:'Bound',status:'ready',sourceLocator:{taskId:'task',attemptId:'attempt'},assets:[{kind:'ept',rootKey:'models',relativePath:'task/attempt/ept/ept.json',format:'ept',byteSize:2,sha256:await hashFile(manifest),...integrity}],makeActive:true}),asset=model.activeVersion.assets[0];assert.equal(await publishedAssetIntegrityAllows(repository,model,asset,'task/attempt/ept/ept-data/0.bin',child),true);const extra=path.join(directory,'ept-data','extra.bin');fs.writeFileSync(extra,'safe');assert.equal(await publishedAssetIntegrityAllows(repository,model,asset,'task/attempt/ept/ept-data/extra.bin',extra),false);fs.writeFileSync(child,'evil');assert.equal(await publishedAssetIntegrityAllows(repository,model,asset,'task/attempt/ept/ept-data/0.bin',child),false);});
 test('job ownership fences state changes and derivative retries are idempotent',(t)=>{const{processing}=fixture(t),project=processing.createProject({displayName:'Fence'}),dataset=processing.createDataset({projectId:project.id,displayName:'Data',storageMode:'managed',rootKey:'datasets',relativePath:'fenced'}),empty=crypto.createHash('sha256').digest('hex');processing.finalizeDataset(dataset.id,[{relativePath:'a.jpg',byteSize:0,sha256:empty}],empty);const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Task'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true}),attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),job=processing.claimJob('owner-a');assert.equal(processing.transitionAttemptForJob(job.id,'owner-b','running'),null);assert.equal(processing.transitionAttemptForJob(job.id,'owner-a','running').status,'running');const derivative=processing.enqueueDerivative(attempt.id,'ept',{source:'a'});assert.equal(processing.enqueueDerivative(attempt.id,'ept',{source:'a'}),derivative);assert.throws(()=>processing.enqueueDerivative(attempt.id,'ept',{source:'b'}),/different request/);processing.cancelAttempt(attempt.id);assert.equal(processing.transitionAttemptForJob(job.id,'owner-a','ready_for_review'),null);});
 test('active dataset operations block archive and trash transitions',(t)=>{const{processing}=fixture(t),project=processing.createProject({displayName:'Guard'}),draft=processing.createDataset({projectId:project.id,displayName:'Draft',storageMode:'managed',rootKey:'datasets',relativePath:'guard'}),upload=processing.createUpload({datasetId:draft.id,files:[{id:'f',relativePath:'a.jpg',byteSize:0,sha256:crypto.createHash('sha256').digest('hex')}],subject:'ops:1',chunkSize:8,expiresAt:new Date(Date.now()+60000).toISOString()});processing.createUploadFinalizeOperation(upload.upload.id,'ops:1');assert.equal(processing.activeDatasetOperations(draft.id),1);assert.equal(processing.archiveDataset(draft.id),null);assert.equal(processing.trashDataset(draft.id,{actor:'ops:1'}),null);});
+
+test('trash lifecycle journal recovers crashes before and after the filesystem effect',(t)=>{
+  const context=fixture(t),{processing,storage}=context;
+  const first=storedDataset(context,'Trash intent'),intent=processing.beginTrashMutation(first.dataset.id,'ops:1');
+  assert.equal(intent.status,'intent');
+  assert.throws(()=>applyStorageMutation(processing,storage,intent,{faultAt:'after_intent'}),{code:'fault_injected'});
+  assert.equal(fs.existsSync(first.directory),true);
+  assert.equal(processing.getDataset(first.dataset.id).status,'finalized');
+  assert.equal(reconcileStorageMutations(processing,storage).find((row)=>row.id===intent.id).status,'complete');
+  assert.equal(fs.existsSync(first.directory),false);
+  assert.equal(storage.pathExists('trash',intent.destinationRelativePath),true);
+  assert.equal(processing.getDataset(first.dataset.id).status,'trashed');
+
+  const second=storedDataset(context,'Trash applied'),applied=processing.beginTrashMutation(second.dataset.id,'ops:1');
+  assert.throws(()=>applyStorageMutation(processing,storage,applied,{faultAt:'after_fs'}),{code:'fault_injected'});
+  assert.equal(processing.getStorageMutation(applied.id).status,'fs_applied');
+  assert.equal(fs.existsSync(second.directory),false);
+  assert.equal(processing.getDataset(second.dataset.id).status,'finalized');
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(applied.id).status,'complete');
+  assert.equal(processing.getDataset(second.dataset.id).status,'trashed');
+
+  const third=storedDataset(context,'Trash destination recovery'),destinationOnly=processing.beginTrashMutation(third.dataset.id,'ops:1');
+  storage.moveExact(destinationOnly.sourceRootKey,destinationOnly.sourceRelativePath,destinationOnly.destinationRootKey,destinationOnly.destinationRelativePath);
+  assert.equal(processing.getStorageMutation(destinationOnly.id).status,'intent');
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(destinationOnly.id).status,'complete');
+  assert.equal(processing.getDataset(third.dataset.id).status,'trashed');
+});
+
+test('storage lifecycle conflicts fail closed and can be retried after operator repair',(t)=>{
+  const context=fixture(t),{processing,storage}=context,{dataset,directory}=storedDataset(context,'Conflict'),mutation=processing.beginTrashMutation(dataset.id,'ops:1');
+  const conflicting=storage.resolve(mutation.destinationRootKey,mutation.destinationRelativePath);
+  fs.mkdirSync(conflicting,{recursive:true});fs.writeFileSync(path.join(conflicting,'other.txt'),'conflict');
+  assert.throws(()=>applyStorageMutation(processing,storage,mutation),{code:'lifecycle_conflict'});
+  assert.equal(processing.getStorageMutation(mutation.id).status,'failed');
+  assert.equal(processing.getDataset(dataset.id).status,'finalized');
+  assert.equal(fs.existsSync(directory),true);
+  assert.equal(processing.beginTrashMutation(dataset.id,'ops:1'),null);
+  fs.rmSync(conflicting,{recursive:true,force:true});
+  assert.equal(processing.retryStorageMutation(mutation.id).status,'intent');
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(mutation.id).status,'complete');
+  assert.equal(processing.getDataset(dataset.id).status,'trashed');
+});
+
+test('trash restore and purge recover when a process dies before recording the filesystem effect',(t)=>{
+  const context=fixture(t),{processing,storage}=context,{dataset,directory}=storedDataset(context,'Filesystem boundary');
+  const trashMutation=processing.beginTrashMutation(dataset.id,'ops:1');
+  assert.throws(()=>applyStorageMutation(processing,storage,trashMutation,{faultAt:'after_filesystem'}),{code:'fault_injected'});
+  assert.equal(processing.getStorageMutation(trashMutation.id).status,'intent');
+  assert.equal(fs.existsSync(directory),false);
+  assert.equal(storage.pathExists('trash',trashMutation.destinationRelativePath),true);
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getDataset(dataset.id).status,'trashed');
+
+  const restore=processing.beginRestoreMutation(trashMutation.trashId,'ops:1');
+  assert.throws(()=>applyStorageMutation(processing,storage,restore,{faultAt:'after_filesystem'}),{code:'fault_injected'});
+  assert.equal(processing.getStorageMutation(restore.id).status,'intent');
+  assert.equal(fs.existsSync(directory),true);
+  assert.equal(storage.pathExists('trash',trashMutation.destinationRelativePath),false);
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getDataset(dataset.id).status,'archived');
+
+  const retrash=processing.beginTrashMutation(dataset.id,'ops:1');applyStorageMutation(processing,storage,retrash);
+  const purge=processing.beginPurgeMutation(retrash.trashId,'ops:1');
+  assert.throws(()=>applyStorageMutation(processing,storage,purge,{faultAt:'after_filesystem'}),{code:'fault_injected'});
+  assert.equal(processing.getStorageMutation(purge.id).status,'intent');
+  assert.equal(storage.pathExists('trash',retrash.destinationRelativePath),false);
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(purge.id).status,'complete');
+  assert.ok(processing.getTrash(retrash.trashId).permanentlyDeletedAt);
+});
+
+test('overlapping lifecycle reconcilers converge to one metadata transition',(t)=>{
+  const context=fixture(t),{db,processing,storage}=context,{dataset}=storedDataset(context,'Concurrent reconciliation'),mutation=processing.beginTrashMutation(dataset.id,'ops:1'),move=storage.moveExact.bind(storage);let nested=false;
+  storage.moveExact=(...args)=>{const result=move(...args);if(!nested){nested=true;applyStorageMutation(processing,storage,mutation.id);}return result;};
+  const completed=applyStorageMutation(processing,storage,mutation.id);
+  assert.equal(completed.status,'complete');
+  assert.equal(processing.getDataset(dataset.id).status,'trashed');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM storage_trash WHERE entity_id=? AND permanently_deleted_at IS NULL').get(dataset.id).count,1);
+  assert.equal(reconcileStorageMutations(processing,storage).length,0);
+});
+
+test('restore and manual purge use the same recoverable lifecycle journal',(t)=>{
+  const context=fixture(t),{processing,storage}=context,{dataset,directory}=storedDataset(context,'Restore'),trashMutation=processing.beginTrashMutation(dataset.id,'ops:1');
+  applyStorageMutation(processing,storage,trashMutation);
+  const trash=processing.getTrash(trashMutation.trashId),restore=processing.beginRestoreMutation(trash.id,'ops:1');
+  assert.throws(()=>applyStorageMutation(processing,storage,restore,{faultAt:'after_fs'}),{code:'fault_injected'});
+  assert.equal(processing.getDataset(dataset.id).status,'trashed');
+  assert.equal(fs.existsSync(directory),true);
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(restore.id).status,'complete');
+  assert.equal(processing.getDataset(dataset.id).status,'archived');
+
+  const retrash=processing.beginTrashMutation(dataset.id,'ops:1');applyStorageMutation(processing,storage,retrash);
+  const secondTrash=processing.getTrash(retrash.trashId),purge=processing.beginPurgeMutation(secondTrash.id,'ops:1');
+  assert.throws(()=>applyStorageMutation(processing,storage,purge,{faultAt:'after_intent'}),{code:'fault_injected'});
+  assert.equal(storage.pathExists('trash',secondTrash.relativePath),true);
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(purge.id).status,'complete');
+  assert.ok(processing.getTrash(secondTrash.id).permanentlyDeletedAt);
+  assert.equal(storage.pathExists('trash',secondTrash.relativePath),false);
+
+  const absent=storedDataset(context,'Already absent purge'),absentTrashMutation=processing.beginTrashMutation(absent.dataset.id,'ops:1');
+  applyStorageMutation(processing,storage,absentTrashMutation);
+  const absentTrash=processing.getTrash(absentTrashMutation.trashId);storage.removeExact('trash',absentTrash.relativePath);
+  const absentPurge=processing.beginPurgeMutation(absentTrash.id,'ops:1');
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(absentPurge.id).status,'complete');
+});
+
+test('empty draft trash is metadata-recoverable and retention purges use the journal',(t)=>{
+  const context=fixture(t),{db,processing,storage}=context,project=processing.createProject({displayName:'Draft project'}),draft=processing.createDataset({projectId:project.id,displayName:'Empty draft',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()}),trashMutation=processing.beginTrashMutation(draft.id,'ops:1');
+  assert.equal(trashMutation.allowAbsentSource,true);
+  applyStorageMutation(processing,storage,trashMutation);
+  const trash=processing.getTrash(trashMutation.trashId);assert.equal(trash.relativePath,'');
+  const restore=processing.beginRestoreMutation(trash.id,'ops:1');assert.equal(restore.allowAbsentSource,true);applyStorageMutation(processing,storage,restore);
+  assert.equal(processing.getDataset(draft.id).status,'archived');
+
+  const managed=storedDataset(context,'Retention'),managedTrashMutation=processing.beginTrashMutation(managed.dataset.id,'system');applyStorageMutation(processing,storage,managedTrashMutation);
+  db.prepare("UPDATE storage_trash SET purge_after='2000-01-01T00:00:00.000Z' WHERE id=?").run(managedTrashMutation.trashId);
+  const interruptedPurge=processing.beginPurgeMutation(managedTrashMutation.trashId,'maintenance');
+  assert.throws(()=>applyStorageMutation(processing,storage,interruptedPurge,{faultAt:'after_intent'}),{code:'fault_injected'});
+  const results=purgeExpiredTrash(processing,storage,{actor:'maintenance'});
+  assert.equal(results.find((row)=>row.trashId===managedTrashMutation.trashId).status,'complete');
+  assert.ok(processing.getTrash(managedTrashMutation.trashId).permanentlyDeletedAt);
+  assert.equal(processing.getStorageMutation(processing.database.prepare("SELECT id FROM storage_mutations WHERE trash_id=? AND mutation_type='purge'").get(managedTrashMutation.trashId).id).status,'complete');
+});
+
+test('external-reference lifecycle never moves or deletes referenced bytes',(t)=>{
+  const context=fixture(t),{db,processing,storage}=context,{dataset,directory}=storedDataset(context,'External','external_reference');
+  assert.equal(processing.beginTrashMutation(dataset.id,'ops:1'),null);
+  const firstTrash=processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'});
+  assert.ok(firstTrash);assert.equal(fs.existsSync(directory),true);assert.equal(processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'}),null);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM storage_trash WHERE entity_id=? AND permanently_deleted_at IS NULL').get(dataset.id).count,1);
+  assert.equal(processing.restoreTrash(firstTrash.id).status,'archived');assert.equal(fs.existsSync(directory),true);
+  const secondTrash=processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'});
+  db.prepare("UPDATE storage_trash SET purge_after='2000-01-01T00:00:00.000Z' WHERE id=?").run(secondTrash.id);
+  const result=purgeExpiredTrash(processing,storage,{actor:'maintenance'}).find((row)=>row.trashId===secondTrash.id);
+  assert.equal(result.status,'complete');assert.equal(result.externalReference,true);
+  assert.equal(fs.existsSync(directory),true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM storage_mutations WHERE entity_id=?').get(dataset.id).count,0);
+  assert.ok(processing.getTrash(secondTrash.id).permanentlyDeletedAt);
+});
+
+test('malformed ownership metadata and unavailable mounts cannot delete external bytes',(t)=>{
+  const context=fixture(t),{root,processing,storage}=context,project=processing.createProject({displayName:'Ownership'}),relativePath=`malformed-${crypto.randomUUID()}`,directory=path.join(root,'imports',relativePath),body=Buffer.from('external bytes'),sha256=crypto.createHash('sha256').update(body).digest('hex');
+  fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(path.join(directory,'photo.jpg'),body);
+  const malformed=processing.createDataset({projectId:project.id,displayName:'Malformed',storageMode:'managed',rootKey:'dataset_import',relativePath});
+  processing.finalizeDataset(malformed.id,[{id:crypto.randomUUID(),relativePath:'photo.jpg',byteSize:body.length,sha256}],sha256);
+  assert.equal(processing.beginTrashMutation(malformed.id,'ops:1'),null);
+  assert.throws(()=>storage.moveExact('dataset_import',relativePath,'trash','dataset/forbidden'),{code:'external_reference'});
+  assert.equal(fs.existsSync(directory),true);
+
+  const owned=storedDataset(context,'Unavailable mount'),mutation=processing.beginTrashMutation(owned.dataset.id,'ops:1'),original=storage.pathExistsStrict;
+  storage.pathExistsStrict=()=>{throw Object.assign(new Error('simulated mount outage'),{code:'lifecycle_storage_unavailable'});};
+  assert.throws(()=>applyStorageMutation(processing,storage,mutation),{code:'lifecycle_storage_unavailable'});
+  storage.pathExistsStrict=original.bind(storage);
+  assert.equal(processing.getStorageMutation(mutation.id).status,'intent');
+  assert.equal(processing.getDataset(owned.dataset.id).status,'finalized');
+  assert.equal(fs.existsSync(owned.directory),true);
+  reconcileStorageMutations(processing,storage);
+  assert.equal(processing.getStorageMutation(mutation.id).status,'complete');
+});
+
+test('invalid absent and divergent lifecycle states fail closed without metadata transitions',(t)=>{
+  const missing=fixture(t),missingDataset=storedDataset(missing,'Missing source'),missingMutation=missing.processing.beginTrashMutation(missingDataset.dataset.id,'ops:1');
+  fs.rmSync(missingDataset.directory,{recursive:true,force:true});
+  assert.throws(()=>applyStorageMutation(missing.processing,missing.storage,missingMutation),{code:'lifecycle_conflict'});
+  assert.equal(missing.processing.getDataset(missingDataset.dataset.id).status,'finalized');
+
+  const restoreMissing=fixture(t),restoreDataset=storedDataset(restoreMissing,'Missing restore'),trashMutation=restoreMissing.processing.beginTrashMutation(restoreDataset.dataset.id,'ops:1');
+  applyStorageMutation(restoreMissing.processing,restoreMissing.storage,trashMutation);const trash=restoreMissing.processing.getTrash(trashMutation.trashId);
+  restoreMissing.storage.removeExact('trash',trash.relativePath);const restore=restoreMissing.processing.beginRestoreMutation(trash.id,'ops:1');
+  assert.throws(()=>applyStorageMutation(restoreMissing.processing,restoreMissing.storage,restore),{code:'lifecycle_conflict'});
+  assert.equal(restoreMissing.processing.getDataset(restoreDataset.dataset.id).status,'trashed');
+
+  const both=fixture(t),bothDataset=storedDataset(both,'Restore conflict'),bothTrashMutation=both.processing.beginTrashMutation(bothDataset.dataset.id,'ops:1');
+  applyStorageMutation(both.processing,both.storage,bothTrashMutation);fs.mkdirSync(bothDataset.directory,{recursive:true});fs.writeFileSync(path.join(bothDataset.directory,'conflict.txt'),'x');
+  const conflictingRestore=both.processing.beginRestoreMutation(bothTrashMutation.trashId,'ops:1');
+  assert.throws(()=>applyStorageMutation(both.processing,both.storage,conflictingRestore),{code:'lifecycle_conflict'});
+  assert.equal(both.processing.getDataset(bothDataset.dataset.id).status,'trashed');
+  assert.equal(both.storage.pathExistsStrict('trash',bothTrashMutation.destinationRelativePath),true);
+
+  const divergent=fixture(t),divergentDataset=storedDataset(divergent,'Divergent applied'),divergentMutation=divergent.processing.beginTrashMutation(divergentDataset.dataset.id,'ops:1');
+  divergent.processing.markStorageMutationFsApplied(divergentMutation.id);
+  assert.throws(()=>applyStorageMutation(divergent.processing,divergent.storage,divergentMutation.id),{code:'lifecycle_conflict'});
+  assert.equal(divergent.processing.getStorageMutation(divergentMutation.id).status,'failed');
+  assert.equal(divergent.processing.getDataset(divergentDataset.dataset.id).status,'finalized');
+});

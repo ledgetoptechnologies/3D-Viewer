@@ -559,6 +559,42 @@ const MIGRATIONS = [
       CREATE UNIQUE INDEX derivative_jobs_attempt_type_idx ON derivative_jobs(attempt_id,derivative_type);
     `,
   },
+  {
+    version: 9,
+    name: 'storage_lifecycle_journal',
+    sql: `
+      CREATE TABLE storage_mutations (
+        id TEXT PRIMARY KEY,
+        mutation_type TEXT NOT NULL CHECK(mutation_type IN ('trash','restore','purge')),
+        entity_type TEXT NOT NULL CHECK(entity_type='dataset'),
+        entity_id TEXT NOT NULL,
+        trash_id TEXT NOT NULL,
+        source_root_key TEXT,
+        source_relative_path TEXT,
+        destination_root_key TEXT,
+        destination_relative_path TEXT,
+        allow_absent_source INTEGER NOT NULL DEFAULT 0 CHECK(allow_absent_source IN (0,1)),
+        status TEXT NOT NULL CHECK(status IN ('intent','fs_applied','complete','failed')),
+        actor TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE UNIQUE INDEX storage_mutations_active_entity_idx
+        ON storage_mutations(entity_type,entity_id)
+        WHERE status IN ('intent','fs_applied');
+      CREATE INDEX storage_mutations_reconcile_idx ON storage_mutations(status,created_at);
+      CREATE INDEX storage_mutations_trash_idx ON storage_mutations(trash_id,status);
+      UPDATE storage_trash SET permanently_deleted_at=created_at
+        WHERE permanently_deleted_at IS NULL AND rowid NOT IN (
+          SELECT MAX(rowid) FROM storage_trash WHERE permanently_deleted_at IS NULL GROUP BY entity_type,entity_id
+        );
+      CREATE UNIQUE INDEX storage_trash_active_entity_idx
+        ON storage_trash(entity_type,entity_id) WHERE permanently_deleted_at IS NULL;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

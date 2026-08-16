@@ -18,7 +18,9 @@ Uploads are chunked, checksum-bound, subject-bound, resumable, and finalized by 
 
 Managed and adopted datasets are immutable after finalization. Every file is re-hashed before each ODM submission. External references retain their original location and are also re-hashed. Raw images, GCP files, logs, provider archives, and processing inputs are created unpublished and cannot be selected for a public share.
 
-Deleting a dataset moves Viewer-owned bytes to recoverable trash for 14 days. Restore refuses destination conflicts. External-reference deletion changes Viewer metadata only and never deletes external bytes. Archive/delete refuse datasets with tasks or active finalize/import operations. Permanent purge requires the dedicated `viewer.storage.purge` permission and typed confirmation.
+Deleting a dataset moves Viewer-owned bytes to recoverable trash for 14 days. Trash, restore, manual purge, and retention purge use a durable two-phase journal: the database records intent before any rename/delete, the worker applies an idempotent filesystem effect, and a single database transaction finalizes metadata afterward. Startup and hourly maintenance reconcile interrupted intents, including a move that completed before its journal update. A source/destination conflict fails closed and makes processing readiness fail until an operator removes the conflicting path and retries the failed mutation through `POST /api/v1/storage/mutations/:id/retry`; failed mutations can be inspected with the bounded `GET /api/v1/storage/mutations?status=failed` route.
+
+External-reference deletion changes Viewer metadata only and never creates a byte-mutation journal, moves, or deletes external bytes. Archive/delete refuse datasets with tasks or active finalize/import/lifecycle operations. Permanent purge requires the dedicated `viewer.storage.purge` permission and typed confirmation. Empty draft datasets use a metadata-only journal entry and remain restorable during the retention window.
 
 ## Backups and recovery
 
@@ -29,7 +31,7 @@ Before maintenance:
 1. Stop new processing admission in Ops and wait for active operations or attempts to settle.
 2. Stop the worker, then the API.
 3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client or take a TrueNAS atomic snapshot of Data, Datasets, Models, Cache, and Trash.
-4. Restart the API and worker. Confirm `/api/v1/health`, `/api/v1/ready`, and the authenticated `/api/v1/processing/ready` response.
+4. Restart the API and worker. Confirm `/api/v1/health`, `/api/v1/ready`, and the authenticated `/api/v1/processing/ready` response. Processing readiness reports pending and failed lifecycle journal rows; do not resume admission while a failed row remains.
 
 Never restore only `Models` without the matching database snapshot: published asset rows contain immutable SHA-256 manifests for every GLB, EPT child, and 3D Tiles child. Serving fails closed when files are missing, added, or modified.
 
