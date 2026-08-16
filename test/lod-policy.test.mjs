@@ -130,6 +130,18 @@ test('missing geometric error is invalid instead of being coerced to zero', () =
   assert.match(report.errors.join('\n'), /geometricError/);
 });
 
+test('a zero-error internal tile is rejected because its full-detail children are unreachable', () => {
+  const report = inspectLodTileset({ root: {
+    refine: 'REPLACE',
+    geometricError: 0,
+    content: { uri: 'coarse-parent.b3dm' },
+    children: [{ geometricError: 0, content: { uri: 'full-leaf.b3dm' } }],
+  } });
+  assert.equal(report.valid, false);
+  assert.equal(report.canConvergeToZeroError, false);
+  assert.match(report.errors.join('\n'), /greater than zero while the tile has children/);
+});
+
 test('runtime frontier reports full detail only when every visible tile is zero-error', () => {
   const root = {
     geometricError: 10,

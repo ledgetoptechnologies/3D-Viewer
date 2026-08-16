@@ -71,3 +71,14 @@ export function localizePointPositions(source, rtc = {}, options = {}) {
 export function hasMeshSource(source) {
   return source === 'tiles' || source === 'glb' || source === 'obj';
 }
+
+export function refreshPointGeometryBounds(geometry) {
+  if (!geometry
+    || typeof geometry.computeBoundingBox !== 'function'
+    || typeof geometry.computeBoundingSphere !== 'function') {
+    throw new TypeError('Point geometry must support bounding-box and bounding-sphere calculation');
+  }
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}

@@ -28,23 +28,28 @@ See `server/config.js` for all environment variables.
 
 ## Running with Docker (production)
 
-1. Copy `.env.example` to `.env`. Set the public Viewer origin/hostname,
-   exact Ops/client embed origins, independent 32+ character
-   `SERVICE_AUTH_SECRET` and `SESSION_SECRET` values, WebODM API credentials,
-   and the host path to WebODM's media/output storage (see "Read-only WebODM
-   access" below). Leave emergency admin disabled for normal Ops-managed
-   production access.
-2. `docker compose up -d --build`
-3. Open `http://<host>:8080/` and sign in with `ADMIN_PASSWORD`. The viewer
-   syncs from WebODM on startup and every `SYNC_INTERVAL_MINUTES` after that;
-   trigger a sync manually with
-   `curl -X POST -H "Authorization: Bearer $ADMIN_PASSWORD" http://<host>:8080/api/sync`.
+1. Create the fixed TrueNAS directories and make the database directory
+   writable by container UID/GID `1000:1000`:
+   ```bash
+   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Data
+   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Derivatives
+   chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Data
+   ```
+2. Copy `.env.example` to `.env`. Set independent 32+ character
+   `SERVICE_AUTH_SECRET` and `SESSION_SECRET` values and the dedicated WebODM
+   API URL/credentials. The production Viewer/Ops/client hostnames and TrueNAS
+   mount paths already have safe defaults in `docker-compose.yml`.
+3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
+   that has `read:packages`, then run `docker compose pull` and
+   `docker compose up -d`.
+4. Route `viewer.ledgetopdroneservices.com` through cloudflared to this service
+   on port `8080`. The bare Viewer URL redirects to LTDS Ops; there is no local
+   password-admin login in the production Compose profile.
 
-For a standalone/break-glass deployment, set `EMERGENCY_ADMIN_ENABLED=true`
-and provide a unique `ADMIN_PASSWORD` of at least 16 characters before using
-the admin login or the legacy sync command above. The container exposes
-`GET /api/v1/health` for liveness and `GET /api/v1/ready` for its writable data
-directory plus required mounts; Docker Compose uses the readiness endpoint.
+The Viewer syncs on startup and every `SYNC_INTERVAL_MINUTES`. Ops can request
+a provider rescan through the signed v1 API. `GET /api/v1/health` is the
+liveness probe and `GET /api/v1/ready` verifies the database and WebODM mount;
+Docker Compose uses readiness for its health check.
 
 The container only ever receives network access to your WebODM instance's
 HTTP(S) API and a **read-only** bind mount of WebODM's media/output storage.
@@ -53,13 +58,18 @@ secrets, worker configuration, or the Docker socket.
 
 ### Read-only WebODM access
 
-WebODM runs on a separate host from the viewer, so:
+The Viewer uses the fixed host path
+`/mnt/Plugins/App_Data/WebODM/Media`, mounted read-only inside the container as
+`/mnt/webodm`. It must contain WebODM's Django media tree
+`project/{id}/task/{id}/assets/...` and must not be the WebODM Postgres path.
+
+In addition to the media mount:
 
 - **API**: create a dedicated, least-privilege WebODM user (view-only
   permission on the projects you want exposed) and put its credentials in
   `.env`. Do not use an admin account.
-- **Storage**: WebODM's own `docker-compose.yml` bind-mounts a host directory
-  as its media root:
+- **Storage**: WebODM's own application must use that same dataset as its media
+  root:
   ```yaml
   webapp:
     volumes:
@@ -72,21 +82,8 @@ WebODM runs on a separate host from the viewer, so:
   under top-level `volumes:`, it's unused — every service overrides it with
   the bind mount above via `WO_MEDIA_DIR`/`WO_DB_DIR` env vars.)
 
-  `WEBODM_MEDIA_PATH` needs to resolve to that exact same directory (WebODM's
-  Django `MEDIA_ROOT`, containing `project/{id}/task/{id}/assets/...` — this
-  is what `server/sync.js` walks). Concretely:
-
-  1. On the WebODM host, in the directory containing WebODM's
-     `docker-compose.yml`, run `grep WO_MEDIA_DIR .env` to get the real path
-     (e.g. it may itself be a TrueNAS NFS/SMB mount rather than local disk).
-  2. Re-share that directory (NFS/SMB) to the viewer's Docker host, since the
-     two aren't on the same machine.
-  3. Mount that share on the viewer's Docker host at some local path and set
-     `WEBODM_MEDIA_PATH` in `.env` to it.
-  4. `docker-compose.yml` bind-mounts `WEBODM_MEDIA_PATH` into the viewer
-     container **read-only** at `/mnt/webodm` (`WEBODM_MEDIA_MOUNT`). Never
-     point this at `WO_DB_DIR` (Postgres data) or mount anything else from
-     WebODM's compose file (Redis, secrets, app source, Docker socket).
+  `server/sync.js` walks only this media tree. The Viewer never mounts
+  `WO_DB_DIR`, Redis, WebODM secrets, application source, or the Docker socket.
 
 ## Multi-project support
 
@@ -105,7 +102,7 @@ have it, which hides the corresponding tab/layer button) and georeferencing
 
 The Viewer deliberately has no duplicate LTDS user database. LTDS Ops remains
 the identity/ACL source of truth and calls the versioned API with signed HMAC
-requests. The old shared admin password is break-glass compatibility only.
+requests. The production Compose profile disables the legacy password admin.
 
 - **Ops/client sessions**: Ops calls `POST /api/v1/models/:id/sessions` with
   the authorized subject, audience, active model-version ID, permission set,
@@ -120,21 +117,19 @@ origins.
   URL logs; `deploy/nginx-viewer.conf.example` disables Nginx access logging
   for those routes.
 
-- **Admin mode** (`/`, no token in the URL): requires signing in with
-  `ADMIN_PASSWORD` (a minimal login page is served until you do — see
-  `public/admin-login.html`). Signed in as admin, you get the full internal
-  catalog, the project switcher, and a **Share** button in the top bar for
-  creating/listing/revoking links for the selected project. `GET /api/models`,
-  `GET /api/models/:id`, and `POST /api/sync` all require this same admin
-  session (or `Authorization: Bearer $ADMIN_PASSWORD` for scripts/cron).
-- **Share links**: created via the Share modal (or
-  `POST /api/models/:id/share-links`, admin-only), each one gets a random
+- **Administration**: staff use LTDS Ops. The bare Viewer origin redirects to
+  Ops, which lists models and uses the signed `/api/v1` service API to create
+  staff/client sessions, project associations, provider rescans, and public
+  demo links. Legacy `/api/admin` and password-protected catalog routes return
+  `404` while emergency administration is disabled.
+- **Share links**: created by Ops through
+  `POST /api/v1/models/:id/shares`, each one gets a random
   256-bit token (only its SHA-256 hash is ever stored — the raw token is
   returned once, at creation time, and cannot be retrieved again). A link can
   optionally have a password (scrypt-hashed) and/or an expiry, and can disable
   the measuring tools and/or camera-position layer for that link specifically
   via `permissions: { measure, cameras }`. Revoking a link
-  (`DELETE /api/share-links/:id`) is a soft-delete that takes effect
+  (`DELETE /api/v1/shares/:id`) is a soft-delete that takes effect
   immediately — asset requests re-check the live share record on every
   request rather than trusting a cached session.
 - **`/view/:token`** opens the full toolbar (measurements, camera photos,
@@ -149,6 +144,35 @@ origins.
   original flight-photo access. Pinned-version public shares are rejected
   until pinned-version asset resolution is implemented; `latest` works now.
 
+### Cloudflare edge layout
+
+Cloudflare Access authenticates staff on
+`ops.ledgetopdroneservices.com` and authenticated customers on
+`client.ledgetopdroneservices.com`. Do **not** put a blanket employee-login
+Access policy over `viewer.ledgetopdroneservices.com`: an anonymous demo link
+must also load the Viewer shell, hashed static bundles, public-share API, and
+capability-protected model assets. Instead:
+
+1. Publish the Viewer only through Cloudflare Tunnel; do not port-forward
+   container port `8080` from the Internet.
+2. Keep the Viewer hostname Cloudflare-proxied and apply normal zone WAF/rate
+   limiting. There is no public administrator UI at that hostname.
+3. Staff authorization flows from Access-protected Ops through HMAC-signed
+   service requests. Client embeds use an Ops-issued short Viewer session.
+4. Demo viewers use an unguessable, revocable, optionally password-protected
+   public-share token. Every API and asset request rechecks the live share or
+   Viewer session.
+
+If account-wide Access protection is enabled, create a narrowly scoped Viewer
+exception/application for the public Viewer surface. Cloudflare documents that
+path-specific Bypass disables Access enforcement and Access logging, so the
+Viewer's own session/share checks remain mandatory. A separate public Viewer
+hostname is preferable to a growing list of bypassed asset paths.
+
+When cloudflared connects directly to the container, leave
+`X_ACCEL_REDIRECT_PREFIX` empty and use `TRUST_PROXY_HOPS=1`. Set the prefix and
+change the proxy count to `2` only when deploying the supplied Nginx layer.
+
 ## Known limitations (by design, for this iteration)
 
 - **No direct WebODM DB access, ever.** Metadata comes only from WebODM's
@@ -158,10 +182,13 @@ origins.
   outputs.** They're produced by a one-time external pipeline (Obj2Tiles +
   Entwine) that this iteration does not automate. A project only gets the
   fast streamed-LOD "3D Model" tab and the Potree "Point Cloud" tab if those
-  derivatives already exist under `DERIVATIVES_PATH/{projectId}-{taskId}/`
+  derivatives already exist under
+  `/mnt/Plugins/App_Data/Model-Viewer/Derivatives/{projectId}-{taskId}/`
   (`tileset.json` / `model.glb` / `ept/ept.json`, plus an optional
   `viewer.json` with `{ "bboxCenter": {x,y,z}, "pointCount": N }` for precise
-  centering). Automating that conversion pipeline is future work.
+  centering). The Viewer mounts that tree read-only; a separate trusted
+  conversion job must populate it. Automating that conversion pipeline is
+  future work.
 - **Without derivatives**, newly auto-synced projects still work: the "3D
   Model" tab prefers WebODM's native `textured_model.glb` when present
   (confirmed available on current WebODM versions) and falls back to the raw
@@ -172,8 +199,8 @@ origins.
   streaming so budget it for smaller clouds). Georeferenced positions are
   decoded as Float64 and rebased against `coords.txt` before conversion to the
   GPU's Float32 buffers, preserving local detail at UTM-scale coordinates.
-  `.ply` remains an older-WebODM fallback. The orthophoto/DSM/DTM tabs always work as-is since those come
-  straight from WebODM's own GeoTIFF outputs.
+  `.ply` remains an older-WebODM fallback. The orthophoto/DSM/DTM tabs always
+  work as-is since those come straight from WebODM's own GeoTIFF outputs.
 - **Exact on-disk asset paths are still a best-effort guess.** `server/sync.js`
   tries both the classic nested ODM pipeline layout (`odm_texturing/`,
   `odm_orthophoto/`, ...) and flat filenames matching WebODM's
@@ -232,16 +259,16 @@ Run the backend and the Vite dev server side by side:
 # terminal 1 — backend (reads server/config.js env vars)
 WEBODM_API_URL=... WEBODM_USERNAME=... WEBODM_PASSWORD=... \
 WEBODM_MEDIA_MOUNT=/path/to/webodm/media \
-ADMIN_PASSWORD=dev-only \
+EMERGENCY_ADMIN_ENABLED=true ADMIN_PASSWORD=dev-only-password \
 PORT=8090 npm run server
 
 # terminal 2 — frontend, proxies /api and /assets to :8090 (see vite.config.js)
 npm run dev
 ```
 
-Note: `npm run dev` uses Vite's own dev server for `/`, which does NOT run
-the admin-login gate in `server/index.js` (that only applies when this app's
-own Express server serves `index.html`, i.e. `npm run server`/production).
+This legacy password shell is only a local-development harness; the production
+Compose profile fixes `EMERGENCY_ADMIN_ENABLED=false`. `npm run dev` uses
+Vite's own dev server for `/`, so it does not run the Express login gate.
 `/view/:token` and `/embed/:token` behave the same in both, since their auth
 is token-based via the API, not the login page.
 
@@ -266,10 +293,10 @@ debugging.
   title, point count) comes from its query string, set by `main.js`.
 - `server/` — backend: WebODM provider/sync, SQLite registry/migrations,
   signed v1 API, legacy compatibility, session/share authorization, protected
-  asset delivery, admin login, and auth primitives (`auth.js` — capabilities,
+  asset delivery, legacy development login, and auth primitives (`auth.js` — capabilities,
   hashing, share tokens). See `server/config.js` for env vars.
-- `public/admin-login.html` — minimal standalone login page served when
-  there's no valid admin session (see `server/index.js`).
+- `public/admin-login.html` — legacy local-development login shell; production
+  redirects standalone administration to LTDS Ops.
 - `serve-all.sh` — legacy local-dev-only asset server startup (see above).
 
 ## Georeferencing
@@ -377,6 +404,10 @@ and below and loads the whole file; large field clouds should use EPT.
   without ever calling `view.lookAt()`) — Potree's own `View.getSide()`
   confirms the `(cos(yaw), sin(yaw), 0)` right-vector approximation used in
   `pointcloud.html` is otherwise correct.
+- When direct PLY/LAS positions are replaced after RTC localization, recompute
+  both geometry bounds. PLYLoader's old absolute-UTM bounding sphere otherwise
+  stays millions of metres away and Three.js frustum-culls the entire cloud,
+  producing a black canvas even though decoding completed successfully.
 - Headless CDP verification: connect websocket with `suppress_origin=True`,
   drive with Input.dispatchMouseEvent; vite HMR means always hard-navigate
   after editing main.js before measuring behavior.

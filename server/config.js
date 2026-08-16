@@ -69,6 +69,7 @@ const config = {
   port: positiveInteger(process.env.PORT, 8080),
   expectedHost: String(process.env.EXPECTED_HOST || '').trim().toLowerCase(),
   publicBaseUrl,
+  opsBaseUrl: normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com'),
   allowedEmbedOrigins: csv(process.env.ALLOWED_EMBED_ORIGINS).map(normalizedOrigin).filter(Boolean),
   trustProxyHops: Math.min(positiveInteger(process.env.TRUST_PROXY_HOPS, 1), 5),
 
@@ -117,6 +118,8 @@ function validate() {
     problems.push('PUBLIC_BASE_URL must be an exact HTTPS origin');
   if (config.production && !config.expectedHost)
     problems.push('EXPECTED_HOST is required in production');
+  if (config.production && !config.opsBaseUrl)
+    problems.push('OPS_BASE_URL must be an exact HTTPS origin');
   if (config.production && config.allowedEmbedOrigins.length === 0)
     problems.push('ALLOWED_EMBED_ORIGINS must include the exact Ops/client origin in production');
   if (!config.sessionSecret || config.sessionSecret.length < 32)

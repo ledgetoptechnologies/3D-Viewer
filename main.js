@@ -22,7 +22,7 @@ import {
   visibleLodFrontier,
 } from './lod-policy.mjs';
 import { EarthLikeControls } from './earth-controls.js';
-import { hasMeshSource, localizePointPositions } from './point-cloud-utils.mjs';
+import { hasMeshSource, localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -2233,13 +2233,34 @@ function loadPointCloudDirect() {
         const localized = localizePointPositions(sourcePositions, RTC);
         geometry.setAttribute('position', new THREE.BufferAttribute(localized.positions, 3));
       }
-      geometry.computeBoundingBox();
-      const mat = new THREE.PointsMaterial({ size: 0.03, vertexColors: geometry.hasAttribute('color') });
+      // PLYLoader computes its bounds before we replace absolute UTM POSITION
+      // with localized coordinates. Recompute the sphere as well: leaving the
+      // stale UTM-scale sphere makes Three.js frustum-cull an otherwise valid
+      // cloud millions of metres away from the fitted camera.
+      refreshPointGeometryBounds(geometry);
+      // Keep direct-cloud points visible across survey scales and high-DPI
+      // displays. A fixed 0.03-world-unit point became sub-pixel at the fitted
+      // overview camera (a successfully loaded cloud looked entirely black).
+      // Potree also defaults to fixed screen-space sizing; two pixels is small
+      // enough for dense clouds while remaining visibly testable when sparse.
+      const mat = new THREE.PointsMaterial({
+        size: 2,
+        sizeAttenuation: false,
+        vertexColors: geometry.hasAttribute('color'),
+      });
       pointCloudObject = new THREE.Points(geometry, mat);
       // Keep the offset group as an explicit reference. A production-browser
       // smoke test caught the name lookup returning undefined during the async
       // PLY completion callback, leaving the loading overlay stuck at 100%.
       pointCloudOffset.add(pointCloudObject);
+      // Direct clouds do not have Potree's fitToScreen path. Fit the shared
+      // camera after the cloud has entered its complete RTC/C/world transform;
+      // otherwise the fixed mesh-oriented home view can look at empty space
+      // and make a successfully decoded cloud appear as a black canvas.
+      pointCloudParent.updateMatrixWorld(true);
+      if (state.activeMode === 'cloud' && state.cloudMode === 'direct') {
+        frameObjectHome(pointCloudObject);
+      }
       state.pointCloudLoaded = true;
       state.pointCloudLoading = false;
       hideLoading();

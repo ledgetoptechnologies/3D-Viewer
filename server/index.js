@@ -138,6 +138,13 @@ app.use(createApiV1(repository));
 app.use(apiRouter);
 app.use(assetsRouter);
 
+// Prevent direct requests for the legacy standalone shells from bypassing the
+// Ops redirect through express.static when local administration is disabled.
+app.get(['/index.html', '/admin-login.html'], (_req, res, next) => {
+  if (config.emergencyAdminEnabled) return next();
+  return res.redirect(302, config.opsBaseUrl);
+});
+
 // Built frontend (npx vite build -> dist/). In local dev, Vite's own dev
 // server (npm run dev) proxies /api and /assets to this server instead —
 // see vite.config.js.
@@ -147,15 +154,18 @@ app.use(assetsRouter);
 app.use(express.static(config.distDir, { index: false }));
 
 // `/view/:token` and `/embed/:token` are public — access control happens
-// client-side/API-side via the token (see server/shareApi.js). Every other
-// path is the internal/admin app and requires a logged-in admin session;
-// unauthenticated visitors get a minimal login page instead of the SPA.
+// API-side via the token (see server/shareApi.js). Normal administration lives
+// in LTDS Ops, so the standalone password shell is reachable only when the
+// explicit emergency switch is enabled.
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/assets/') || req.path.startsWith('/session-assets/')) return next();
   const isShareRoute = req.path.startsWith('/view/')
     || req.path.startsWith('/embed/')
     || req.path === '/session'
     || req.path.startsWith('/session/');
+  if (!isShareRoute && !config.emergencyAdminEnabled) {
+    return res.redirect(302, config.opsBaseUrl);
+  }
   if (!isShareRoute && !adminAuth.isAdminRequest(req)) {
     return res.sendFile(path.join(config.distDir, 'admin-login.html'), (err) => { if (err) next(err); });
   }

@@ -10,6 +10,18 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const test = require('node:test');
 
+const repositoryRoot = path.resolve(__dirname, '..');
+
+test('production Compose pins the approved TrueNAS storage layout', () => {
+  const compose = fs.readFileSync(path.join(repositoryRoot, 'docker-compose.yml'), 'utf8');
+
+  assert.match(compose, /\/mnt\/Plugins\/App_Data\/WebODM\/Media:\/mnt\/webodm:ro/);
+  assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Derivatives:\/mnt\/derivatives:ro/);
+  assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Data:\/app\/data/);
+  assert.match(compose, /EMERGENCY_ADMIN_ENABLED:\s+"false"/);
+  assert.doesNotMatch(compose, /ADMIN_PASSWORD:/);
+});
+
 async function unusedPort() {
   const server = net.createServer();
   server.listen(0, '127.0.0.1');
@@ -34,11 +46,11 @@ async function waitFor(url, child) {
   throw new Error('viewer did not become ready');
 }
 
-function requestWithHost(port, host) {
+function requestWithHost(port, host, requestPath = '/') {
   return new Promise((resolve, reject) => {
-    const request = http.get({ hostname: '127.0.0.1', port, path: '/', headers: { Host: host } }, (response) => {
+    const request = http.get({ hostname: '127.0.0.1', port, path: requestPath, headers: { Host: host } }, (response) => {
       response.resume();
-      response.once('end', () => resolve(response.statusCode));
+      response.once('end', () => resolve({ status: response.statusCode, location: response.headers.location || null }));
     });
     request.once('error', reject);
   });
@@ -63,6 +75,7 @@ test('production exposes health/readiness and rejects an unexpected host', async
       PUBLIC_BASE_URL: 'https://viewer.example.test',
       EXPECTED_HOST: 'viewer.example.test',
       ALLOWED_EMBED_ORIGINS: 'https://ops.example.test,https://client.example.test',
+      OPS_BASE_URL: 'https://ops.example.test',
       WEBODM_ENABLED: 'false',
       SYNC_ON_STARTUP: 'false',
       EMERGENCY_ADMIN_ENABLED: 'false',
@@ -89,6 +102,14 @@ test('production exposes health/readiness and rejects an unexpected host', async
   );
   assert.equal(health.headers.get('referrer-policy'), 'no-referrer');
 
-  assert.equal(await requestWithHost(port, 'attacker.example.test'), 421);
-  assert.equal(await requestWithHost(port, 'viewer.example.test'), 200);
+  assert.equal((await requestWithHost(port, 'attacker.example.test')).status, 421);
+  assert.deepEqual(await requestWithHost(port, 'viewer.example.test'), {
+    status: 302,
+    location: 'https://ops.example.test',
+  });
+  assert.deepEqual(await requestWithHost(port, 'viewer.example.test', '/admin-login.html'), {
+    status: 302,
+    location: 'https://ops.example.test',
+  });
+  assert.equal((await requestWithHost(port, 'viewer.example.test', '/api/admin/session')).status, 404);
 });

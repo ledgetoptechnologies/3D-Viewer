@@ -67,10 +67,13 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   const assetRoot = path.join(root, 'assets');
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(distDir, { recursive: true });
-  fs.mkdirSync(assetRoot, { recursive: true });
+  fs.mkdirSync(path.join(assetRoot, 'ept', 'ept-data'), { recursive: true });
   fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>Viewer session');
   fs.writeFileSync(path.join(distDir, 'admin-login.html'), '<!doctype html>Login');
   fs.writeFileSync(path.join(assetRoot, 'model.glb'), Buffer.from('abcdefghij'));
+  fs.writeFileSync(path.join(assetRoot, 'point-cloud.laz'), Buffer.from('raw-laz-points'));
+  fs.writeFileSync(path.join(assetRoot, 'ept', 'ept.json'), JSON.stringify({ schema: [], dataType: 'laszip' }));
+  fs.writeFileSync(path.join(assetRoot, 'ept', 'ept-data', '0-0-0-0.laz'), Buffer.from('ept-node-points'));
   fs.writeFileSync(path.join(dataDir, 'viewer-projects.json'), JSON.stringify({
     'webodm-4-9': {
       id: 'webodm-4-9',
@@ -82,7 +85,11 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
       available: true,
       georef: { rtc: { e: 1, n: 2, z: 3 } },
       assetRoots: { derivatives: assetRoot },
-      relAssets: { glb: { root: 'derivatives', rel: 'model.glb', format: 'glb' } },
+      relAssets: {
+        glb: { root: 'derivatives', rel: 'model.glb', format: 'glb' },
+        ept: { root: 'derivatives', rel: 'ept/ept.json', format: 'ept' },
+        pointCloud: { root: 'derivatives', rel: 'point-cloud.laz', format: 'laz' },
+      },
     },
   }));
 
@@ -178,6 +185,8 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.ok(!JSON.stringify(browserSession).includes(SERVICE_SECRET));
   assert.match(browserSession.accessToken, /^[A-Za-z0-9_-]{43}$/);
   assert.ok(browserSession.model.assets.glb.includes(`/session-assets/${browserSession.accessToken}/`));
+  assert.ok(browserSession.model.assets.ept.includes(`/session-assets/${browserSession.accessToken}/`));
+  assert.equal(browserSession.model.assets.pointCloudFormat, 'laz');
 
   assert.equal((await fetch(`${baseUrl}/api/v1/sessions/redeem`, {
     method: 'POST',
@@ -197,6 +206,21 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.equal(rangedAsset.headers.get('cache-control'), 'private, no-store');
   assert.equal(await rangedAsset.text(), 'cdef');
   assert.equal((await fetch(`${baseUrl}${browserSession.model.assets.glb.replace(model.id, 'unknown-model')}`)).status, 403);
+
+  // Potree resolves EPT children relative to ept.json. Prove that the stable
+  // v1 capability remains in that nested URL and that large point-cloud nodes
+  // retain byte-range delivery without relying on a third-party cookie.
+  const eptNodeUrl = new URL('ept-data/0-0-0-0.laz', `${baseUrl}${browserSession.model.assets.ept}`).toString();
+  const eptNode = await fetch(eptNodeUrl, { headers: { Range: 'bytes=4-7' } });
+  assert.equal(eptNode.status, 206);
+  assert.equal(eptNode.headers.get('cache-control'), 'private, no-store');
+  assert.equal(await eptNode.text(), 'node');
+
+  const directPointCloud = await fetch(`${baseUrl}${browserSession.model.assets.pointCloud}`, {
+    headers: { Range: 'bytes=4-6' },
+  });
+  assert.equal(directPointCloud.status, 206);
+  assert.equal(await directPointCloud.text(), 'laz');
 
   const renewalRequest = JSON.stringify({
     subject: 'client-user-7', audience: 'client', modelVersionId: model.activeVersion.id,
@@ -236,7 +260,10 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.equal(publicExchange.headers.get('cache-control'), 'no-store');
   const publicConfig = await publicExchange.json();
   assert.match(publicConfig.assets.glb, /^\/session-assets\//);
+  assert.match(publicConfig.assets.ept, /^\/session-assets\//);
   assert.equal((await fetch(`${baseUrl}${publicConfig.assets.glb}`)).status, 200);
+  const publicEptNodeUrl = new URL('ept-data/0-0-0-0.laz', `${baseUrl}${publicConfig.assets.ept}`).toString();
+  assert.equal((await fetch(publicEptNodeUrl)).status, 200);
 
   const revokePath = `/api/v1/shares/${createdShare.share.id}`;
   const revoke = await signedFetch(baseUrl, revokePath, {
@@ -244,6 +271,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   });
   assert.equal(revoke.status, 200);
   assert.equal((await fetch(`${baseUrl}${publicConfig.assets.glb}`)).status, 403);
+  assert.equal((await fetch(publicEptNodeUrl)).status, 403);
 
   const secondShareResponse = await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {
     method: 'POST', body: shareBody, headers: { 'Idempotency-Key': 'share-client-review-0002' },

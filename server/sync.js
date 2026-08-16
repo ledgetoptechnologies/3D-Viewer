@@ -136,12 +136,17 @@ async function buildRecord(project, task) {
       path.join(assetsDir, 'shots.geojson'),
     ]),
     eptNative: firstExisting([path.join(assetsDir, 'entwine_pointcloud', 'ept.json')]),
-    // LAZ is WebODM's current default point-cloud export (`georeferenced_model.laz`);
-    // PLY is kept as a fallback for older WebODM versions/configurations.
+    // LAZ is WebODM's current default point-cloud export
+    // (`georeferenced_model.laz`). Uncompressed LAS uses the same loaders.gl
+    // decoder and is still emitted by some ODM configurations, so discover
+    // both before falling back to PLY.
     lazModel: firstExisting([
       path.join(assetsDir, 'odm_georeferencing', 'odm_georeferenced_model.laz'),
       path.join(assetsDir, 'odm_georeferencing', 'georeferenced_model.laz'),
       path.join(assetsDir, 'georeferenced_model.laz'),
+      path.join(assetsDir, 'odm_georeferencing', 'odm_georeferenced_model.las'),
+      path.join(assetsDir, 'odm_georeferencing', 'georeferenced_model.las'),
+      path.join(assetsDir, 'georeferenced_model.las'),
     ]),
     plyModel: firstExisting([
       path.join(assetsDir, 'odm_georeferencing', 'odm_georeferenced_model.ply'),
@@ -189,10 +194,14 @@ async function buildRecord(project, task) {
       dtm: rel.dtm ? { root: 'webodm', rel: path.relative(assetsDir, rel.dtm) } : null,
       shots: rel.shots ? { root: 'webodm', rel: path.relative(assetsDir, rel.shots) } : null,
       // Direct (non-Potree) point cloud fallback — format tells the client
-      // which loader to use (loaders.gl LASLoader for .laz, three.js PLYLoader
-      // for .ply). Prefers LAZ since that's WebODM's current default export.
+      // which loader to use (loaders.gl LASLoader for .las/.laz, three.js
+      // PLYLoader for .ply). Prefers LAZ since that's WebODM's current default.
       pointCloud: rel.lazModel
-        ? { root: 'webodm', rel: path.relative(assetsDir, rel.lazModel), format: 'laz' }
+        ? {
+            root: 'webodm',
+            rel: path.relative(assetsDir, rel.lazModel),
+            format: path.extname(rel.lazModel).slice(1).toLowerCase(),
+          }
         : (rel.plyModel ? { root: 'webodm', rel: path.relative(assetsDir, rel.plyModel), format: 'ply' } : null),
     },
     lastSyncedAt: new Date().toISOString(),

@@ -150,6 +150,13 @@ export function inspectLodTileset(tileset) {
     if (children.length > 0 && refine !== 'REPLACE') {
       errors.push(`${path} must use REPLACE refinement for full-resolution substitution`);
     }
+    // A zero-error internal node already satisfies every possible screen-space
+    // error target, so a conforming renderer has no reason to select its
+    // children. Calling such a hierarchy convergent would be false even when
+    // those unreachable terminal children themselves declare zero error.
+    if (children.length > 0 && error === 0) {
+      errors.push(`${path}.geometricError must be greater than zero while the tile has children`);
+    }
 
     if (external) {
       externalTilesetCount += 1;

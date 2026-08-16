@@ -10,6 +10,9 @@ Viewer instead streams 3D Tiles to the browser and renders them locally.
 
 - `tileset.json` and every external child tileset use `REPLACE` refinement.
 - Parent geometric errors decrease monotonically toward the leaves.
+- Every internal tile has a strictly positive geometric error. An internal
+  zero-error tile already satisfies the renderer's refinement target, making
+  its nominally full-quality children unreachable.
 - Every terminal leaf has renderable content and `geometricError: 0`.
 - Tiles are spatially partitioned. A chain of whole-model LOD files is not an
   acceptable substitute because approaching one area would download the whole

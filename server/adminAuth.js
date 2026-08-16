@@ -8,6 +8,7 @@ const COOKIE_NAME = 'ltds_admin';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 
 function isAdminRequest(req) {
+  if (!config.emergencyAdminEnabled) return false;
   const authHeader = req.headers.authorization || '';
   if (authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice('Bearer '.length);
@@ -19,11 +20,17 @@ function isAdminRequest(req) {
 }
 
 function requireAdmin(req, res, next) {
+  if (!config.emergencyAdminEnabled) return res.status(404).json({ error: 'legacy administration is disabled; use LTDS Ops' });
   if (isAdminRequest(req)) return next();
   res.status(401).json({ error: 'admin authentication required' });
 }
 
 const router = express.Router();
+
+router.use('/api/admin', (_req, res, next) => {
+  if (config.emergencyAdminEnabled) return next();
+  return res.status(404).json({ error: 'legacy administration is disabled; use LTDS Ops' });
+});
 
 router.post('/api/admin/login', (req, res) => {
   if (auth.rateLimited(`admin-login:${req.ip}`, 10, 5 * 60 * 1000)) {

@@ -47,3 +47,26 @@ test('point-cloud-only projects do not initialize a nonexistent mesh', async () 
   assert.equal(hasMeshSource('glb'), true);
   assert.equal(hasMeshSource('obj'), true);
 });
+
+test('localized geometry replaces the stale UTM bounding sphere used for frustum culling', async () => {
+  const THREE = await import('three');
+  const { localizePointPositions, refreshPointGeometryBounds } = await modulePromise;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+    367257, 4759982, 200,
+    367267, 4759992, 205,
+  ]), 3));
+  geometry.computeBoundingSphere();
+  assert.ok(geometry.boundingSphere.center.y > 4_000_000);
+
+  const localized = localizePointPositions(
+    geometry.getAttribute('position').array,
+    { e: 367257, n: 4759982, z: 200 },
+  );
+  geometry.setAttribute('position', new THREE.BufferAttribute(localized.positions, 3));
+  refreshPointGeometryBounds(geometry);
+
+  assert.deepEqual(geometry.boundingSphere.center.toArray(), [5, 5, 2.5]);
+  assert.deepEqual(geometry.boundingBox.min.toArray(), [0, 0, 0]);
+  assert.deepEqual(geometry.boundingBox.max.toArray(), [10, 10, 5]);
+});
