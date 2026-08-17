@@ -165,7 +165,8 @@ reauthorize. It does not guess or backfill an association, and review sessions
 are unaffected. Roll out with the flag off, deploy Ops support that sends the
 descriptor on every new session and revokes the exact prior association version
 on every refresh/reactivation/revoke transition, then enable the flag. Once
-enabled, descriptor-less session creation fails closed.
+enabled, startup atomically removes/revokes any unbound state created during the
+compatibility window, and descriptor-less session creation fails closed.
 
 On a new volume, confirm Docker copied the image-owned directory skeleton and
 that UID/GID 568 can write it:

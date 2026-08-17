@@ -159,6 +159,11 @@ function createApiV1(repository) {
   const serviceOnly = requireService(repository);
   const idempotentService = idempotent(repository);
   const importWorker = createImportWorker(repository);
+  if (config.publishedSessionSourceRevocationEnabled) repository.failClosedUnboundPublishedSessions({
+    actorType: 'system',
+    action: 'published_session.unbound_revoked',
+    entityType: 'source_authorization',
+  });
   // Durable queue rows survive process restarts. Any job claimed by the old
   // process is returned to pending, then all pending work is resumed.
   repository.requeueInterruptedImports();

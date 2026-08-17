@@ -85,6 +85,17 @@ test('exact source revocation is atomic, scoped, replay-safe, and token-redacted
   const seedRepository = new ViewerRepository(seedDatabase);
   const firstModel = model(seedRepository, 'one');
   const secondModel = model(seedRepository, 'two');
+  const legacyExpiry = new Date(Date.now() + 10 * 60_000).toISOString();
+  const legacyGrant = seedRepository.createSessionGrant({
+    modelId: firstModel.id, modelVersionId: firstModel.activeVersionId,
+    subject: 'ops:legacy', audience: 'ops', permissions: { view: true }, expiresAt: legacyExpiry,
+  });
+  const legacyAccessToken = crypto.randomBytes(32).toString('base64url');
+  seedRepository.createViewerSession({
+    tokenHash: crypto.createHash('sha256').update(legacyAccessToken).digest('hex'),
+    modelId: firstModel.id, modelVersionId: firstModel.activeVersionId,
+    subject: 'ops:legacy', audience: 'ops', permissions: { view: true }, expiresAt: legacyExpiry,
+  });
   seedDatabase.close();
 
   const port = await unusedPort();
@@ -118,6 +129,20 @@ test('exact source revocation is atomic, scoped, replay-safe, and token-redacted
   });
   const base = `http://127.0.0.1:${port}`;
   await waitFor(base, child);
+
+  assert.equal((await fetch(`${base}/api/v1/sessions/redeem`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ grant: legacyGrant.id }),
+  })).status, 410, 'enabling revocation fails closed for compatibility-window unbound grants');
+  assert.equal((await fetch(`${base}/api/v1/sessions/current`, {
+    headers: { Authorization: `Bearer ${legacyAccessToken}` },
+  })).status, 401, 'enabling revocation fails closed for compatibility-window unbound sessions');
+  const activationDatabase = openDatabase(databasePath);
+  assert.deepEqual(JSON.parse(activationDatabase.prepare(`SELECT details_json FROM audit_events
+    WHERE action='published_session.unbound_revoked'`).get().details_json), {
+    revokedGrants: 1, revokedSessions: 1,
+  });
+  activationDatabase.close();
 
   const revokePath = '/api/v1/published-sessions/source-authorization';
   assert.equal((await fetch(`${base}${revokePath}`, {

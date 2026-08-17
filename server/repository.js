@@ -648,6 +648,26 @@ class ViewerRepository {
     });
   }
 
+  failClosedUnboundPublishedSessions(audit) {
+    const timestamp = now();
+    return this.transaction(() => {
+      const grants = this.database.prepare(`DELETE FROM session_grants
+        WHERE session_mode='published' AND redeemed_at IS NULL AND source_authorization_id IS NULL`
+      ).run().changes;
+      const sessions = this.database.prepare(`UPDATE viewer_sessions
+        SET revoked_at=COALESCE(revoked_at,?),updated_at=?
+        WHERE session_mode='published' AND revoked_at IS NULL AND expires_at>?
+          AND source_authorization_id IS NULL`
+      ).run(timestamp, timestamp, timestamp).changes;
+      const result = { grants, sessions };
+      if (grants || sessions) this.audit({
+        ...audit,
+        details: { revokedGrants: grants, revokedSessions: sessions },
+      });
+      return result;
+    });
+  }
+
   renewViewerSession(id, { permissions, displayUnits = 'imperial', expiresAt }) {
     const timestamp = now();
     const result = this.database.prepare(`UPDATE viewer_sessions SET
