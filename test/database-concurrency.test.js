@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
-const { MIGRATIONS } = require('../server/database');
+const { MIGRATIONS, openDatabase } = require('../server/database');
 
 const databaseModule = path.resolve(__dirname, '..', 'server', 'database.js');
 const childSource = "const {openDatabase}=require(process.argv[1]);const db=openDatabase(process.argv[2]);db.close();";
@@ -63,4 +63,42 @@ test('two processes serialize the same pending upgrade migration', async (t) => 
 
   await Promise.all([openInChild(databasePath), openInChild(databasePath)]);
   assertFullyMigrated(databasePath);
+});
+
+test('v17 fails closed for legacy live unbound published authorization state', (t) => {
+  const databasePath = temporaryDatabase(t, 'migration-v17-auth');
+  const database = new DatabaseSync(databasePath);
+  database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+  for (const migration of MIGRATIONS.slice(0, -1)) {
+    database.exec(migration.sql);
+    database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+      .run(migration.version, migration.name, new Date().toISOString());
+  }
+  database.exec('PRAGMA foreign_keys=OFF');
+  const future = new Date(Date.now() + 60_000).toISOString();
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const created = new Date().toISOString();
+  const insertGrant = database.prepare(`INSERT INTO session_grants(
+    id,model_id,subject,audience,permissions_json,expires_at,redeemed_at,created_at,session_mode
+  ) VALUES (?,?,?,?,?,?,?,?,?)`);
+  insertGrant.run('published-pending', 'model-one', 'ops:one', 'ops', '{}', future, null, created, 'published');
+  insertGrant.run('published-redeemed', 'model-one', 'ops:one', 'ops', '{}', future, created, created, 'published');
+  insertGrant.run('review-pending', 'model-one', 'ops:one', 'ops', '{}', future, null, created, 'review');
+  const insertSession = database.prepare(`INSERT INTO viewer_sessions(
+    id,token_hash,model_id,model_version_id,subject,audience,permissions_json,expires_at,revoked_at,created_at,updated_at,session_mode
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+  insertSession.run('published-live', 'hash-live', 'model-one', 'version-one', 'ops:one', 'ops', '{}', future, null, created, created, 'published');
+  insertSession.run('published-expired', 'hash-expired', 'model-one', 'version-one', 'ops:one', 'ops', '{}', past, null, created, created, 'published');
+  insertSession.run('review-live', 'hash-review', 'model-one', 'version-one', 'ops:one', 'ops', '{}', future, null, created, created, 'review');
+  database.close();
+
+  const upgraded = openDatabase(databasePath);
+  assert.equal(upgraded.prepare("SELECT COUNT(*) count FROM session_grants WHERE id='published-pending'").get().count, 0);
+  assert.equal(upgraded.prepare("SELECT COUNT(*) count FROM session_grants WHERE id='published-redeemed'").get().count, 1);
+  assert.equal(upgraded.prepare("SELECT COUNT(*) count FROM session_grants WHERE id='review-pending'").get().count, 1);
+  assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
+  assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
+  assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 17);
+  upgraded.close();
 });

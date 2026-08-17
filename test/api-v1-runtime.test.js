@@ -131,6 +131,20 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   const model = catalog.models[0];
   assert.match(model.id, /^[0-9a-f-]{36}$/);
 
+  const disabledRevocationBody = JSON.stringify({
+    sourceAuthorization: { type: 'model_association', id: 'association-disabled', version: 1 },
+  });
+  const disabledRevocation = await signedFetch(baseUrl, '/api/v1/published-sessions/source-authorization', {
+    method: 'DELETE', body: disabledRevocationBody, headers: { 'Idempotency-Key': 'source-revoke-disabled-0001' },
+  });
+  assert.equal(disabledRevocation.status, 503);
+  assert.equal(disabledRevocation.headers.get('cache-control'), 'no-store');
+  const disabledDatabase = openDatabase(path.join(dataDir, 'viewer.sqlite'));
+  assert.equal(disabledDatabase.prepare(
+    'SELECT COUNT(*) count FROM service_idempotency WHERE idempotency_key=?',
+  ).get('source-revoke-disabled-0001').count, 0, 'disabled route does not reserve an idempotency key');
+  disabledDatabase.close();
+
   const sessionPath = `/api/v1/models/${model.id}/sessions`;
   const incompleteSession = JSON.stringify({ subject: 'client-user-7', audience: 'client' });
   assert.equal((await signedFetch(baseUrl, sessionPath, {

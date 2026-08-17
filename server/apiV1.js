@@ -97,6 +97,21 @@ function validSubject(value) {
   return typeof value === 'string' && value.length >= 1 && value.length <= 200;
 }
 
+function modelAssociationSourceAuthorization(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'id,type,version'
+    || value.type !== 'model_association'
+    || typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.id)
+    || !Number.isSafeInteger(value.version) || value.version < 1)
+    return null;
+  return { type: value.type, id: value.id, version: value.version };
+}
+
+function sameSourceAuthorization(left, right) {
+  if (!left || !right) return left === null && right === null;
+  return left.type === right.type && left.id === right.id && left.version === right.version;
+}
+
 function createImportWorker(repository) {
   let running = false;
   async function synchronizeWhenAvailable() {
@@ -245,7 +260,8 @@ function createApiV1(repository) {
       && existing.session.subject === grant.subject
       && existing.session.audience === grant.audience
       && existing.session.sessionMode === target.sessionMode
-      && (existing.session.reviewAttemptId || null) === target.reviewAttemptId;
+      && (existing.session.reviewAttemptId || null) === target.reviewAttemptId
+      && sameSourceAuthorization(existing.session.sourceAuthorization, grant.sourceAuthorization);
     if (canRenew) {
       accessToken = existing.token;
       session = repository.renewViewerSession(existing.session.id, { permissions: grantedPermissions, displayUnits: grant.displayUnits || config.defaultUnits, expiresAt });
@@ -257,6 +273,7 @@ function createApiV1(repository) {
         modelVersionId,
         reviewAttemptId: target.reviewAttemptId,
         sessionMode: target.sessionMode,
+        sourceAuthorization: grant.sourceAuthorization,
         subject: grant.subject,
         audience: grant.audience,
         permissions: grantedPermissions,
@@ -293,6 +310,13 @@ function createApiV1(repository) {
     if (!model || model.status !== 'ready' || !model.activeVersion)
       return res.status(404).json({ error: 'ready model not found' });
     const body = req.body || {};
+    const sourceAuthorization = body.sourceAuthorization === undefined
+      ? null
+      : modelAssociationSourceAuthorization(body.sourceAuthorization);
+    if (body.sourceAuthorization !== undefined && !sourceAuthorization)
+      return res.status(400).json({ error: 'sourceAuthorization is invalid' });
+    if (config.publishedSessionSourceRevocationEnabled && !sourceAuthorization)
+      return res.status(400).json({ error: 'sourceAuthorization is required while published-session revocation is enabled' });
     if (!body.modelVersionId) return res.status(400).json({ error: 'modelVersionId is required' });
     if (body.modelVersionId !== model.activeVersionId)
       return res.status(409).json({ error: 'requested model version is not active' });
@@ -315,21 +339,35 @@ function createApiV1(repository) {
       Date.parse(authorizedUntil),
       Date.now() + config.sessionGrantTtlSeconds * 1000,
     )).toISOString();
-    const grant = repository.createSessionGrant({
-      modelId: model.id,
-      modelVersionId: model.activeVersionId,
-      sessionMode: 'published',
-      subject: body.subject,
-      audience: body.audience,
-      permissions: {
-        ...grantedPermissions,
-        __authorizedUntil: authorizedUntil,
-        __versionId: model.activeVersionId,
-      },
-      displayUnits: body.displayUnits || config.defaultUnits,
-      expiresAt: grantExpiresAt,
-    });
-    repository.audit({ actorType: 'service', actorId: req.servicePrincipal.keyId, action: 'session.created', entityType: 'model', entityId: model.id, details: { audience: body.audience, subject: body.subject } });
+    let grant;
+    try {
+      grant = repository.createSessionGrantAudited({
+        modelId: model.id,
+        modelVersionId: model.activeVersionId,
+        sessionMode: 'published',
+        sourceAuthorization,
+        subject: body.subject,
+        audience: body.audience,
+        permissions: {
+          ...grantedPermissions,
+          __authorizedUntil: authorizedUntil,
+          __versionId: model.activeVersionId,
+        },
+        displayUnits: body.displayUnits || config.defaultUnits,
+        expiresAt: grantExpiresAt,
+      }, {
+        actorType: 'service',
+        actorId: req.servicePrincipal.keyId,
+        action: 'session.created',
+        entityType: 'model',
+        entityId: model.id,
+        details: { audience: body.audience, subject: body.subject },
+      });
+    } catch (error) {
+      if (error?.code === 'source_authorization_revoked')
+        return res.status(409).json({ error: 'sourceAuthorization is revoked' });
+      throw error;
+    }
     const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
     res.setHeader('Cache-Control', 'no-store');
     res.status(201).json({
@@ -342,6 +380,39 @@ function createApiV1(repository) {
       embedUrl: `${base}/session/${encodeURIComponent(grant.id)}`,
     });
   });
+
+  function publishedSessionSourceRevocationEnabled(_req, res, next) {
+    if (!config.publishedSessionSourceRevocationEnabled) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.status(503).json({ error: 'published-session source revocation is disabled' });
+    }
+    return next();
+  }
+
+  router.delete('/api/v1/published-sessions/source-authorization', serviceOnly,
+    publishedSessionSourceRevocationEnabled, idempotentService, (req, res) => {
+      const body = req.body || {};
+      const sourceAuthorization = Object.keys(body).join(',') === 'sourceAuthorization'
+        ? modelAssociationSourceAuthorization(body.sourceAuthorization)
+        : null;
+      if (!sourceAuthorization)
+        return res.status(400).json({ error: 'sourceAuthorization is invalid' });
+      const revoked = repository.revokePublishedSessionsBySourceAuthorization({
+        sourceAuthorization,
+        audit: {
+          actorType: 'service',
+          actorId: req.servicePrincipal.keyId,
+          action: 'published_session.source_authorization_revoked',
+          entityType: 'source_authorization',
+        },
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        sourceAuthorization,
+        revokedGrants: revoked.grants,
+        revokedSessions: revoked.sessions,
+      });
+    });
 
   router.get('/api/v1/models/:id/shares', serviceOnly, (req, res) => {
     const model = repository.getModel(req.params.id);

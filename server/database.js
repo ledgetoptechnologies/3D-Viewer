@@ -1153,6 +1153,68 @@ const MIGRATIONS = [
       END;
     `,
   },
+  {
+    version: 17,
+    name: 'published_session_source_authorizations',
+    sql: `
+      ALTER TABLE session_grants ADD COLUMN source_authorization_type TEXT
+        CHECK(source_authorization_type IS NULL OR source_authorization_type='model_association');
+      ALTER TABLE session_grants ADD COLUMN source_authorization_id TEXT;
+      ALTER TABLE session_grants ADD COLUMN source_authorization_version INTEGER
+        CHECK(source_authorization_version IS NULL OR source_authorization_version >= 1);
+      CREATE INDEX session_grants_source_authorization_idx
+        ON session_grants(source_authorization_type,source_authorization_id,source_authorization_version,session_mode,redeemed_at)
+        WHERE source_authorization_id IS NOT NULL;
+
+      ALTER TABLE viewer_sessions ADD COLUMN source_authorization_type TEXT
+        CHECK(source_authorization_type IS NULL OR source_authorization_type='model_association');
+      ALTER TABLE viewer_sessions ADD COLUMN source_authorization_id TEXT;
+      ALTER TABLE viewer_sessions ADD COLUMN source_authorization_version INTEGER
+        CHECK(source_authorization_version IS NULL OR source_authorization_version >= 1);
+      CREATE INDEX viewer_sessions_source_authorization_idx
+        ON viewer_sessions(source_authorization_type,source_authorization_id,source_authorization_version,session_mode,revoked_at,expires_at)
+        WHERE source_authorization_id IS NOT NULL;
+      CREATE TABLE revoked_published_session_authorizations (
+        source_authorization_type TEXT NOT NULL CHECK(source_authorization_type='model_association'),
+        source_authorization_id TEXT NOT NULL,
+        source_authorization_version INTEGER NOT NULL CHECK(source_authorization_version >= 1),
+        revoked_at TEXT NOT NULL,
+        revoked_by TEXT,
+        PRIMARY KEY(source_authorization_type,source_authorization_id,source_authorization_version)
+      );
+      CREATE TRIGGER session_grants_source_authorization_complete_insert
+      BEFORE INSERT ON session_grants
+      WHEN (NEW.source_authorization_type IS NULL) + (NEW.source_authorization_id IS NULL)
+        + (NEW.source_authorization_version IS NULL) NOT IN (0,3)
+      BEGIN SELECT RAISE(ABORT,'source_authorization_incomplete'); END;
+      CREATE TRIGGER session_grants_source_authorization_immutable
+      BEFORE UPDATE OF source_authorization_type,source_authorization_id,source_authorization_version ON session_grants
+      WHEN NEW.source_authorization_type IS NOT OLD.source_authorization_type
+        OR NEW.source_authorization_id IS NOT OLD.source_authorization_id
+        OR NEW.source_authorization_version IS NOT OLD.source_authorization_version
+      BEGIN SELECT RAISE(ABORT,'source_authorization_immutable'); END;
+      CREATE TRIGGER viewer_sessions_source_authorization_complete_insert
+      BEFORE INSERT ON viewer_sessions
+      WHEN (NEW.source_authorization_type IS NULL) + (NEW.source_authorization_id IS NULL)
+        + (NEW.source_authorization_version IS NULL) NOT IN (0,3)
+      BEGIN SELECT RAISE(ABORT,'source_authorization_incomplete'); END;
+      CREATE TRIGGER viewer_sessions_source_authorization_immutable
+      BEFORE UPDATE OF source_authorization_type,source_authorization_id,source_authorization_version ON viewer_sessions
+      WHEN NEW.source_authorization_type IS NOT OLD.source_authorization_type
+        OR NEW.source_authorization_id IS NOT OLD.source_authorization_id
+        OR NEW.source_authorization_version IS NOT OLD.source_authorization_version
+      BEGIN SELECT RAISE(ABORT,'source_authorization_immutable'); END;
+
+      -- Existing grants/sessions cannot be safely attributed to a model
+      -- association. Fail closed instead of inventing an authorization source.
+      DELETE FROM session_grants
+        WHERE session_mode='published' AND redeemed_at IS NULL
+          AND source_authorization_id IS NULL;
+      UPDATE viewer_sessions SET revoked_at=COALESCE(revoked_at,datetime('now')),updated_at=datetime('now')
+        WHERE session_mode='published' AND revoked_at IS NULL
+          AND datetime(expires_at)>datetime('now') AND source_authorization_id IS NULL;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

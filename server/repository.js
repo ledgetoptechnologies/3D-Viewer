@@ -11,6 +11,29 @@ function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+function sourceAuthorization(row) {
+  if (!row || row.source_authorization_type !== 'model_association'
+    || typeof row.source_authorization_id !== 'string' || !row.source_authorization_id
+    || !Number.isSafeInteger(row.source_authorization_version) || row.source_authorization_version < 1)
+    return null;
+  return {
+    type: 'model_association',
+    id: row.source_authorization_id,
+    version: row.source_authorization_version,
+  };
+}
+
+function sourceAuthorizationValues(value) {
+  if (value === undefined || value === null) return [null, null, null];
+  if (typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'id,type,version'
+    || value.type !== 'model_association'
+    || typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,200}$/.test(value.id)
+    || !Number.isSafeInteger(value.version) || value.version < 1)
+    throw new TypeError('invalid model association source authorization');
+  return [value.type, value.id, value.version];
+}
+
 function asModel(row, version, assets = []) {
   if (!row) return null;
   return {
@@ -454,16 +477,29 @@ class ViewerRepository {
     ).run(timestamp, timestamp, id);
   }
 
-  createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+  createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     this.pruneAuthState();
     const id = crypto.randomUUID();
     const timestamp = now();
-    this.database.prepare(`INSERT INTO session_grants(
-      id,model_id,model_version_id,review_attempt_id,session_mode,subject,audience,permissions_json,display_units,expires_at,created_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
-      id, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience, JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp,
+    const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
+    if (sessionMode !== 'published' && sourceId !== null)
+      throw new TypeError('source authorization is only valid for published sessions');
+    const inserted = this.database.prepare(`INSERT INTO session_grants(
+      id,model_id,model_version_id,review_attempt_id,session_mode,
+      source_authorization_type,source_authorization_id,source_authorization_version,
+      subject,audience,permissions_json,display_units,expires_at,created_at
+    ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?
+      WHERE ? IS NULL OR NOT EXISTS (
+        SELECT 1 FROM revoked_published_session_authorizations
+        WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?
+      )`).run(
+      id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceType, sourceId, sourceVersion,
+      subject, audience, JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp,
+      sourceId, sourceType, sourceId, sourceVersion,
     );
-    return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
+    if (inserted.changes !== 1)
+      throw Object.assign(new Error('source authorization is revoked'), { code: 'source_authorization_revoked' });
+    return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceAuthorization: authorization, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
   }
 
   createSessionGrantAudited(input, audit) {
@@ -478,6 +514,10 @@ class ViewerRepository {
     return this.transaction(() => {
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
       if (!row || row.redeemed_at || Date.parse(row.expires_at) <= at) return null;
+      if (row.source_authorization_id && this.database.prepare(`SELECT 1
+        FROM revoked_published_session_authorizations
+        WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
+      ).get(row.source_authorization_type, row.source_authorization_id, row.source_authorization_version)) return null;
       const timestamp = new Date(at).toISOString();
       const updated = this.database.prepare(
         'UPDATE session_grants SET redeemed_at=? WHERE id=? AND redeemed_at IS NULL',
@@ -489,6 +529,7 @@ class ViewerRepository {
         modelVersionId: row.model_version_id,
         reviewAttemptId: row.review_attempt_id,
         sessionMode: row.session_mode || 'published',
+        sourceAuthorization: sourceAuthorization(row),
         subject: row.subject,
         audience: row.audience,
         permissions: parseJson(row.permissions_json, {}),
@@ -509,6 +550,7 @@ class ViewerRepository {
       audience: row.audience,
       sessionMode: row.session_mode || 'published',
       reviewAttemptId: row.review_attempt_id,
+      sourceAuthorization: sourceAuthorization(row),
       permissions: parseJson(row.permissions_json, {}),
       displayUnits: row.display_units,
       expiresAt: row.expires_at,
@@ -518,15 +560,26 @@ class ViewerRepository {
     };
   }
 
-  createViewerSession({ tokenHash, modelId, modelVersionId, reviewAttemptId = null, sessionMode = 'published', subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+  createViewerSession({ tokenHash, modelId, modelVersionId, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     const id = crypto.randomUUID();
     const timestamp = now();
-    this.database.prepare(`INSERT INTO viewer_sessions(
-      id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,subject,audience,permissions_json,display_units,expires_at,created_at,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      id, tokenHash, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience,
+    const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
+    if (sessionMode !== 'published' && sourceId !== null)
+      throw new TypeError('source authorization is only valid for published sessions');
+    const inserted = this.database.prepare(`INSERT INTO viewer_sessions(
+      id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,
+      source_authorization_type,source_authorization_id,source_authorization_version,
+      subject,audience,permissions_json,display_units,expires_at,created_at,updated_at
+    ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+      WHERE ? IS NULL OR NOT EXISTS (
+        SELECT 1 FROM revoked_published_session_authorizations
+        WHERE source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?
+      )`).run(
+      id, tokenHash, modelId, modelVersionId, reviewAttemptId, sessionMode, sourceType, sourceId, sourceVersion, subject, audience,
       JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp, timestamp,
+      sourceId, sourceType, sourceId, sourceVersion,
     );
+    if (inserted.changes !== 1) return null;
     return this.getViewerSessionByHash(tokenHash);
   }
 
@@ -558,6 +611,39 @@ class ViewerRepository {
         WHERE session_mode='review' AND review_attempt_id=? AND subject=? AND revoked_at IS NULL`).run(timestamp, timestamp, attemptId, subject).changes;
       const result = { grants, sessions };
       if (audit) this.audit({ ...audit, entityId: audit.entityId || attemptId, details: { ...(audit.details || {}), revokedGrants: grants, revokedSessions: sessions } });
+      return result;
+    });
+  }
+
+  revokePublishedSessionsBySourceAuthorization({ sourceAuthorization: authorization, audit }) {
+    const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
+    if (sourceId === null) throw new TypeError('source authorization is required');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.database.prepare(`INSERT INTO revoked_published_session_authorizations(
+        source_authorization_type,source_authorization_id,source_authorization_version,revoked_at,revoked_by
+      ) VALUES (?,?,?,?,?) ON CONFLICT(source_authorization_type,source_authorization_id,source_authorization_version) DO NOTHING`
+      ).run(sourceType, sourceId, sourceVersion, timestamp, audit?.actorId || null);
+      const grants = this.database.prepare(`DELETE FROM session_grants
+        WHERE session_mode='published' AND redeemed_at IS NULL
+          AND source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
+      ).run(sourceType, sourceId, sourceVersion).changes;
+      const sessions = this.database.prepare(`UPDATE viewer_sessions
+        SET revoked_at=COALESCE(revoked_at,?),updated_at=?
+        WHERE session_mode='published' AND revoked_at IS NULL AND expires_at>?
+          AND source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
+      ).run(timestamp, timestamp, timestamp, sourceType, sourceId, sourceVersion).changes;
+      const result = { grants, sessions };
+      this.audit({
+        ...audit,
+        entityId: sourceId,
+        details: {
+          sourceAuthorizationType: sourceType,
+          sourceAuthorizationVersion: sourceVersion,
+          revokedGrants: grants,
+          revokedSessions: sessions,
+        },
+      });
       return result;
     });
   }

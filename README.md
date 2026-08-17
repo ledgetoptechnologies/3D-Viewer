@@ -155,6 +155,18 @@ provider. The event-direction HMAC key is reused only under the distinct
 source-introspection canonical path/body; it is never the Ops-to-Viewer service
 key.
 
+Published Ops/client session revocation is separately gated by
+`PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED=false`. Schema migration v17 adds
+an immutable `{type:"model_association",id,version}` authorization descriptor
+to published grants and sessions. The v16-to-v17 upgrade deliberately deletes
+unredeemed legacy published grants and revokes active legacy published sessions
+whose association cannot be proven; operators should expect those browsers to
+reauthorize. It does not guess or backfill an association, and review sessions
+are unaffected. Roll out with the flag off, deploy Ops support that sends the
+descriptor on every new session and revokes the exact prior association version
+on every refresh/reactivation/revoke transition, then enable the flag. Once
+enabled, descriptor-less session creation fails closed.
+
 On a new volume, confirm Docker copied the image-owned directory skeleton and
 that UID/GID 568 can write it:
 
@@ -307,7 +319,9 @@ requests. The production Compose profile disables the legacy password admin.
 
 - **Ops/client sessions**: Ops calls `POST /api/v1/models/:id/sessions` with
   the authorized subject, audience, active model-version ID, permission set,
-  and required future authorization expiry. The browser redeems the returned one-use
+  required future authorization expiry, and the immutable source authorization
+  `{ "type": "model_association", "id": "<opaque association id>", "version": 1 }`.
+  The descriptor is optional only during the flag-off rollout window. The browser redeems the returned one-use
   grant for a random, model-and-version-scoped capability; only its SHA-256
   hash is stored. Capability asset paths work when third-party cookies are
 blocked and do not collide across simultaneous embeds. Renewal extends the
@@ -440,6 +454,15 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
 
 - `GET /api/v1/models`; `GET /api/v1/models/:id`
 - `POST /api/v1/models/:id/sessions`
+- `DELETE /api/v1/published-sessions/source-authorization` requires
+  `PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED=true` and the exact body
+  `{ "sourceAuthorization": { "type": "model_association", "id": "<opaque>", "version": 1 } }`.
+  It atomically tombstones that exact version, removes its unredeemed published
+  grants, revokes its active published sessions, and writes a bounded audit.
+  The `200` response is exactly `{ sourceAuthorization, revokedGrants,
+  revokedSessions }`; a same-key/same-body retry replays that result, while a
+  reused key with different bytes returns `409`. Raw grants and session tokens
+  are never returned or audited by this route.
 - `GET|POST /api/v1/models/:id/shares`; `DELETE /api/v1/shares/:id`
 - `POST /api/v1/imports`; `POST /api/v1/imports/rescan`; `GET /api/v1/imports`
 - Admin sessions: `POST /api/v1/admin-grants`; `POST /api/v1/admin-sessions/redeem`

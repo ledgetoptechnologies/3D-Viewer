@@ -177,6 +177,7 @@ const config = {
   viewerEventPreviousKeyId: String(process.env.VIEWER_EVENT_PREVIOUS_KEY_ID || '').trim(),
   viewerEventPreviousSecret: process.env.VIEWER_EVENT_PREVIOUS_SECRET || '',
   clientViewerSharesEnabled: bool(process.env.CLIENT_VIEWER_SHARES_ENABLED, false),
+  publishedSessionSourceRevocationEnabled: bool(process.env.PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED, false),
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
