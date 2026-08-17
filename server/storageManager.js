@@ -84,12 +84,12 @@ class StorageManager {
   // Same-device adoption is an atomic rename. Deterministic destination and
   // `.incomplete` paths make a killed worker resumable without re-copying or
   // losing the source authorization boundary.
-  async adoptImport(rootKey,relativePath,datasetRelative,{externalReference=false,expectedFingerprint=null,onProgress=()=>{}}={}) {
+  async adoptImport(rootKey,relativePath,datasetRelative,{externalReference=false,expectedFingerprint=null,maxFiles=100000,onProgress=()=>{}}={}) {
     const destination=this.resolve('datasets',datasetRelative),incomplete=`${destination}.incomplete`;
     let source=null,before=null;
-    try{source=this.resolve(rootKey,relativePath,{mustExist:true});before=this.scanTree(rootKey,relativePath);}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}
+    try{source=this.resolve(rootKey,relativePath,{mustExist:true});before=this.scanTree(rootKey,relativePath,{maxFiles});}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}
     if(externalReference){if(!before)throw Object.assign(new Error('import source is unavailable'),{code:'import_source_unavailable'});const fingerprint=await this.treeFingerprint(before,{captureHashes:true});if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('import source changed after preview'),{code:'import_changed'});for(const file of before.files)file.metadata=jpegMetadata(readHead(file.absolutePath));return{rootKey,relativePath:safeRelativePath(relativePath),scan:before,sourceToRemove:null};}
-    const scanAndHash=async(root)=>{const scan=this.scanAbsolute(root);await this.treeFingerprint(scan,{captureHashes:true});for(const file of scan.files)file.metadata=jpegMetadata(readHead(file.absolutePath));return scan;};
+    const scanAndHash=async(root)=>{const scan=this.scanAbsolute(root,{maxFiles});await this.treeFingerprint(scan,{captureHashes:true});for(const file of scan.files)file.metadata=jpegMetadata(readHead(file.absolutePath));return scan;};
     if(fs.existsSync(destination)){const scan=await scanAndHash(destination),fingerprint=await this.treeFingerprint(scan);if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('existing import destination conflicts with manifest'),{code:'manifest_mismatch'});return{rootKey:'datasets',relativePath:datasetRelative,scan,sourceToRemove:source};}
     if(fs.existsSync(incomplete)&&!before){const staged=await scanAndHash(incomplete),fingerprint=await this.treeFingerprint(staged);if(expectedFingerprint&&fingerprint!==expectedFingerprint)throw Object.assign(new Error('staged import conflicts with manifest'),{code:'manifest_mismatch'});fs.renameSync(incomplete,destination);return{rootKey:'datasets',relativePath:datasetRelative,scan:await scanAndHash(destination),sourceToRemove:null};}
     if(!before||!source)throw Object.assign(new Error('import source is unavailable'),{code:'import_source_unavailable'});

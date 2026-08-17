@@ -17,6 +17,7 @@
     "validate:lod": "node scripts/validate-lod.mjs",
     "verify:production": "node scripts/production-readiness.mjs",
     "verify:odm-provider": "node scripts/verify-odm-provider.mjs",
+    "verify:processing-scale": "node scripts/processing-scale-rehearsal.js",
     "start": "npm run build && npm run server"
   },
   "keywords": [],
