@@ -97,6 +97,15 @@ test('runtime image is rootless as the TrueNAS Apps service identity', () => {
   assert.doesNotMatch(dockerfile, /ENTRYPOINT|USER root/);
 });
 
+test('release-candidate image tags cannot move latest', () => {
+  const workflow = fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'viewer-image.yml'), 'utf8');
+
+  assert.match(workflow, /flavor:\s*\|\s*latest=false/);
+  assert.match(workflow, /type=raw,value=latest,enable=\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.match(workflow, /type=ref,event=tag/);
+  assert.match(workflow, /type=sha,prefix=sha-/);
+});
+
 test('live ODM compatibility cancellation exercises committed work and waits for status 50', () => {
   const harness = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'verify-odm-provider.mjs'), 'utf8');
   const initialize = harness.indexOf('provider.initialize({ uuid:cancelUuid');

@@ -43,6 +43,10 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.name }}
+          # metadata-action's automatic semver flavor otherwise emits
+          # `latest` for version tags even when the explicit raw tag is off.
+          flavor: |
+            latest=false
           tags: |
             type=sha,prefix=sha-
             type=ref,event=tag
