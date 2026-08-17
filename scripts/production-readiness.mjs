@@ -15,6 +15,10 @@ const { signServiceRequest } = require('../server/serviceAuth');
 const { HEADER_NAME: PROXY_HEADER_NAME } = require('../server/proxyGate');
 const { resolveEnabledProviderCredentials } = require('../server/processingReadiness');
 const { REVISION_HEADER, SCHEMA_HEADER, readRuntimeRevision } = require('../server/runtimeIdentity');
+const { MIGRATIONS } = require('../server/database');
+const { validateRuntimeProbeHeaders } = await import('./runtime-probe-identity.mjs');
+
+const EXPECTED_SCHEMA_VERSION = Math.max(...MIGRATIONS.map((migration) => migration.version));
 
 const sensitiveValues = new Set();
 
@@ -416,17 +420,16 @@ async function main() {
   if (readyResponse.status !== 200 || ready.ok !== true || ready.missing?.length)
     fail(`readiness probe returned HTTP ${readyResponse.status}: ${(ready.missing || []).join(', ')}`);
 
-  const healthRevision = healthResponse.headers.get(REVISION_HEADER);
-  const readyRevision = readyResponse.headers.get(REVISION_HEADER);
-  const healthSchema = healthResponse.headers.get(SCHEMA_HEADER);
-  const readySchema = readyResponse.headers.get(SCHEMA_HEADER);
-  if (!healthRevision || healthRevision !== readyRevision || !(/^[0-9a-f]{40}$/.test(healthRevision) || healthRevision === 'unavailable'))
-    fail('health and readiness do not agree on a valid Viewer revision');
-  if (!healthSchema || healthSchema !== readySchema || !/^[1-9][0-9]*$/.test(healthSchema))
-    fail('health and readiness do not agree on a valid Viewer schema version');
   const bakedRevision = readRuntimeRevision();
-  if (bakedRevision && healthRevision !== bakedRevision)
-    fail('served Viewer revision does not match the immutable runtime source identity');
+  const identityError = validateRuntimeProbeHeaders({
+    healthHeaders: healthResponse.headers,
+    readyHeaders: readyResponse.headers,
+    expectedSchemaVersion: EXPECTED_SCHEMA_VERSION,
+    bakedRevision,
+  });
+  if (identityError) fail(identityError);
+  const healthRevision = healthResponse.headers.get(REVISION_HEADER);
+  const healthSchema = healthResponse.headers.get(SCHEMA_HEADER);
 
   const root = await request(baseUrl, '/');
   const rootLocation = root.headers.get('location');

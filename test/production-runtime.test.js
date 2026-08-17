@@ -209,7 +209,11 @@ test('production gates health/readiness and all routes behind exact proxy host a
 
   const baseUrl = `http://127.0.0.1:${port}`;
   const proxyHeaders = { Host: 'viewer.example.test', 'X-Viewer-Proxy-Secret': proxySecret };
-  assert.deepEqual(await (await waitFor(`${baseUrl}/api/v1/ready`, child, { headers: proxyHeaders })).json(), { ok: true, missing: [] });
+  const ready = await waitFor(`${baseUrl}/api/v1/ready`, child, { headers: proxyHeaders });
+  assert.deepEqual(await ready.json(), { ok: true, missing: [] });
+  assert.equal(ready.headers.get('x-ltds-viewer-revision'), 'unavailable');
+  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '16');
+  assert.equal(ready.headers.get('cache-control'), 'no-store');
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`)).status, 421);
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`, { Host: 'viewer.example.test' })).status, 403);
   const rejected = await httpRequest(`${baseUrl}/api/v1/health`, { Host: 'viewer.example.test', 'X-Viewer-Proxy-Secret': `${proxySecret}x` });
@@ -219,6 +223,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   assert.deepEqual(await health.json(), { ok: true });
   assert.equal(health.headers.get('x-ltds-viewer-revision'), 'unavailable');
   assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '16');
+  assert.equal(health.headers.get('cache-control'), 'no-store');
   assert.match(
     health.headers.get('content-security-policy') || '',
     /frame-ancestors 'self' https:\/\/ops\.example\.test https:\/\/client\.example\.test/,
