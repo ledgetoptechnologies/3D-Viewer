@@ -809,6 +809,52 @@ const MIGRATIONS = [
       ALTER TABLE processing_providers ADD COLUMN last_probe_credential_revision INTEGER;
     `,
   },
+  {
+    version: 13,
+    name: 'durable_import_preview_operations',
+    sql: `
+      DROP INDEX dataset_operations_claim_idx;
+      DROP INDEX dataset_operations_subject_idx;
+      DROP INDEX dataset_operations_active_upload_idx;
+      DROP INDEX dataset_operations_active_preview_idx;
+      ALTER TABLE dataset_operations RENAME TO dataset_operations_v12;
+      CREATE TABLE dataset_operations (
+        id TEXT PRIMARY KEY,
+        operation_type TEXT NOT NULL CHECK(operation_type IN ('upload_finalize','import_preview','import_adopt')),
+        subject TEXT NOT NULL,
+        session_id TEXT,
+        dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+        upload_id TEXT REFERENCES upload_sessions(id) ON DELETE SET NULL,
+        import_preview_id TEXT REFERENCES dataset_import_previews(id) ON DELETE SET NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN ('queued','leased','succeeded','failed','cancelled')),
+        progress REAL NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 1),
+        result_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      INSERT INTO dataset_operations SELECT * FROM dataset_operations_v12;
+      DROP TABLE dataset_operations_v12;
+      CREATE INDEX dataset_operations_claim_idx
+        ON dataset_operations(status,available_at,lease_expires_at,created_at);
+      CREATE INDEX dataset_operations_subject_idx
+        ON dataset_operations(subject,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX dataset_operations_active_upload_idx
+        ON dataset_operations(upload_id)
+        WHERE upload_id IS NOT NULL AND status IN ('queued','leased','succeeded');
+      CREATE UNIQUE INDEX dataset_operations_active_preview_idx
+        ON dataset_operations(import_preview_id)
+        WHERE import_preview_id IS NOT NULL AND status IN ('queued','leased','succeeded');
+    `,
+  },
 ];
 
 function applyMigrations(database) {

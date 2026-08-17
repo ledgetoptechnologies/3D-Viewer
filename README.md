@@ -422,9 +422,10 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
 - Admin sessions: `POST /api/v1/admin-grants`; `POST /api/v1/admin-sessions/redeem`
 - Catalog: `/api/v1/projects`, `/api/v1/datasets`, and `/api/v1/tasks`
 - Resumable upload/finalize: `/api/v1/admin/uploads/...`; durable operation
-  polling: `GET /api/v1/operations/:id`
-- Server import: `/api/v1/dataset-imports/preview` and
-  `/api/v1/dataset-imports/adopt`
+  polling: `GET /api/v1/operations/:id`; preview cancellation:
+  `POST /api/v1/operations/:id/cancel`
+- Server import: durable `/api/v1/dataset-imports/preview` and
+  `/api/v1/dataset-imports/adopt` operations
 - Processing: `/api/v1/processing/providers`, `/presets`, task/attempt detail,
   cancel, retry, and publish routes
 - Storage accounting/recovery: `/api/v1/storage`, `/storage/trash/...`, and

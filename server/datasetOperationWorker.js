@@ -73,15 +73,31 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   return { dataset };
 }
 
+function publicImportPreview(preview) {
+  const value = preview.destinationSpace;
+  return {...preview,destinationSpace:{availableBytes:Number(value.available),totalBytes:Number(value.total),reserveBytes:Number(value.reserve),requiredBytes:Number(value.required),sufficient:Boolean(value.ok)}};
+}
+
+async function previewImport(operation, { storage, config }, updateProgress, signal) {
+  const payload = JSON.parse(operation.payload_json || '{}');
+  const preview = await storage.previewImport(payload.rootKey, payload.relativePath, {
+    maxFiles: config?.uploadMaxFiles || 100000,
+    signal,
+    onProgress: updateProgress,
+  });
+  return { request: { rootKey: payload.rootKey, relativePath: payload.relativePath }, preview, publicPreview: publicImportPreview(preview) };
+}
+
 async function processOneDatasetOperation(deps, owner) {
   const operation = deps.processing.claimDatasetOperation(owner);
   if (!operation) return false;
   let progress = Number(operation.progress) || 0;
   let lostLease = false;
+  const controller = new AbortController();
   const heartbeat = () => {
-    if (!deps.processing.heartbeatDatasetOperation(operation.id, owner, progress)) lostLease = true;
+    if (!deps.processing.heartbeatDatasetOperation(operation.id, owner, progress)) { lostLease = true; controller.abort(); }
   };
-  const timer = setInterval(heartbeat, 10_000);
+  const timer = setInterval(heartbeat, 2_000);
   timer.unref?.();
   const updateProgress = async (value) => {
     progress = Math.max(progress, Math.min(0.99, Number(value) || 0));
@@ -89,9 +105,16 @@ async function processOneDatasetOperation(deps, owner) {
     if (lostLease) throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
   };
   try {
-    const result = operation.operation_type === 'upload_finalize'
-      ? await finalizeUpload(operation, deps, owner, updateProgress)
-      : await adoptImport(operation, deps, owner, updateProgress);
+    let result;
+    if (operation.operation_type === 'upload_finalize') result = await finalizeUpload(operation, deps, owner, updateProgress);
+    else if (operation.operation_type === 'import_preview') {
+      const completed = await previewImport(operation, deps, updateProgress, controller.signal);
+      if (lostLease || !deps.processing.completeImportPreviewOperation(operation.id, owner, completed))
+        throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
+      return true;
+    }
+    else if (operation.operation_type === 'import_adopt') result = await adoptImport(operation, deps, owner, updateProgress);
+    else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
     if (lostLease || !deps.processing.completeDatasetOperation(operation.id, owner, result))
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
   } catch (error) {
