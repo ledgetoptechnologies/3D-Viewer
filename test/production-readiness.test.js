@@ -22,16 +22,23 @@ async function unusedPort() {
   return port;
 }
 
-async function waitFor(url, child) {
+async function waitFor(url, child, proxySecret) {
+  let lastStatus = null;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (child.exitCode !== null) throw new Error(`viewer exited with ${child.exitCode}`);
     try {
-      const response = await fetch(url);
-      if (response.ok) return;
+      const status = await new Promise((resolve, reject) => {
+        const request = require('node:http').get(url, { headers: { Host: 'viewer.example.test', 'X-Viewer-Proxy-Secret': proxySecret } }, (response) => {
+          response.resume(); response.once('end', () => resolve(response.statusCode));
+        });
+        request.once('error', reject);
+      });
+      lastStatus = status;
+      if (status >= 200 && status < 300) return;
     } catch { /* listener not ready */ }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error('viewer did not become ready');
+  throw new Error(`viewer did not become ready (last HTTP ${lastStatus})`);
 }
 
 test('production readiness verifies the live policy and signed catalog without exposing secrets', async (t) => {
@@ -45,6 +52,7 @@ test('production readiness verifies the live policy and signed catalog without e
   const port = await unusedPort();
   const sessionSecret = 'readiness-session-secret-that-is-at-least-32-characters';
   const serviceSecret = 'readiness-service-secret-that-is-at-least-32-characters';
+  const proxySecret = 'readiness-proxy-secret-00000000000000000000000';
   const env = {
     ...process.env,
     NODE_ENV: 'production',
@@ -60,6 +68,7 @@ test('production readiness verifies the live policy and signed catalog without e
     EMERGENCY_ADMIN_ENABLED: 'false',
     SESSION_SECRET: sessionSecret,
     SERVICE_AUTH_SECRET: serviceSecret,
+    PROXY_SHARED_SECRET: proxySecret,
     VIEWER_READINESS_BASE_URL: `http://127.0.0.1:${port}`,
   };
   const child = spawn(process.execPath, ['server/index.js'], { cwd: repositoryRoot, env, stdio: 'ignore' });
@@ -70,7 +79,7 @@ test('production readiness verifies the live policy and signed catalog without e
     }
     fs.rmSync(root, { recursive: true, force: true });
   });
-  await waitFor(`http://127.0.0.1:${port}/api/v1/ready`, child);
+  await waitFor(`http://127.0.0.1:${port}/api/v1/ready`, child, proxySecret);
 
   const result = spawnSync(process.execPath, ['scripts/production-readiness.mjs'], {
     cwd: repositoryRoot,
@@ -156,6 +165,7 @@ test('production readiness exercises an exact protected Ops browser capability w
   const port = await unusedPort();
   const sessionSecret = 'capability-readiness-session-secret-that-is-at-least-32-characters';
   const serviceSecret = 'capability-readiness-service-secret-that-is-at-least-32-characters';
+  const proxySecret = 'capability-proxy-secret-0000000000000000000000';
   const env = {
     ...process.env,
     NODE_ENV: 'production',
@@ -171,6 +181,7 @@ test('production readiness exercises an exact protected Ops browser capability w
     EMERGENCY_ADMIN_ENABLED: 'false',
     SESSION_SECRET: sessionSecret,
     SERVICE_AUTH_SECRET: serviceSecret,
+    PROXY_SHARED_SECRET: proxySecret,
     VIEWER_READINESS_BASE_URL: `http://127.0.0.1:${port}`,
   };
   const child = spawn(process.execPath, ['server/index.js'], { cwd: repositoryRoot, env, stdio: 'ignore' });
@@ -181,7 +192,7 @@ test('production readiness exercises an exact protected Ops browser capability w
     }
     fs.rmSync(root, { recursive: true, force: true });
   });
-  await waitFor(`http://127.0.0.1:${port}/api/v1/ready`, child);
+  await waitFor(`http://127.0.0.1:${port}/api/v1/ready`, child, proxySecret);
 
   const databasePath = path.join(dataDir, 'viewer.sqlite');
   let database = openDatabase(databasePath);

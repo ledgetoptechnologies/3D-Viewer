@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 const require = createRequire(import.meta.url);
 const { config, validate } = require('../server/config');
 const { signServiceRequest } = require('../server/serviceAuth');
+const { HEADER_NAME: PROXY_HEADER_NAME } = require('../server/proxyGate');
 
 const sensitiveValues = new Set();
 
@@ -77,10 +78,15 @@ function mountedReadOnly(target) {
 async function request(baseUrl, requestPath, init = {}) {
   const target = new URL(requestPath, baseUrl);
   const transport = target.protocol === 'https:' ? https : http;
+  const loopback = ['127.0.0.1', 'localhost', '::1'].includes(target.hostname);
   return new Promise((resolve, reject) => {
     const req = transport.request(target, {
       method: init.method || 'GET',
-      headers: { Host: init.host || config.expectedHost, ...(init.headers || {}) },
+      headers: {
+        Host: init.host || config.expectedHost,
+        ...(loopback ? { [PROXY_HEADER_NAME]: config.proxySharedSecret } : {}),
+        ...(init.headers || {}),
+      },
     }, (res) => {
       const chunks = [];
       let size = 0;
@@ -369,6 +375,7 @@ async function main() {
   if (config.emergencyAdminEnabled) fail('EMERGENCY_ADMIN_ENABLED must remain false');
   const authSecret = sensitive(config.serviceAuthKeys?.[config.serviceAuthKeyId] || config.serviceAuthSecret);
   sensitive(config.sessionSecret);
+  sensitive(config.proxySharedSecret);
   if (!authSecret) fail(`no service authentication secret is configured for ${config.serviceAuthKeyId}`);
   if (Object.values(config.serviceAuthKeys || { [config.serviceAuthKeyId]: authSecret }).includes(config.sessionSecret))
     fail('SESSION_SECRET and service authentication secrets must be independent');

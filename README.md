@@ -41,36 +41,52 @@ already-published viewing.
 1. Create the fixed TrueNAS directories and make the managed storage and import
    drop directories writable by container UID/GID `1000:1000`:
    ```bash
-   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/{Data,Datasets,Models,Cache,Trash}
+   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/{Config,Data,Datasets,Models,Cache,Trash}
    mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Import/{Datasets,Terra}
    mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Derivatives
    chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Data
    chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/{Datasets,Models,Cache,Trash}
    chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Import/{Datasets,Terra}
+   chmod 700 /mnt/Plugins/App_Data/Model-Viewer/Config
    ```
-2. Copy `.env.example` to `.env`. Set independent 32+ character
-   `SERVICE_AUTH_SECRET` and `SESSION_SECRET` values. WebODM API discovery is
+2. Copy `.env.example` to the persistent configuration path, restrict it, and
+   set independent generated secrets:
+
+   ```bash
+   cp .env.example /mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env
+   chmod 600 /mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env
+   ```
+
+   `SERVICE_AUTH_SECRET` must exactly equal Ops
+   `VIEWER_SERVICE_HMAC_SECRET`; `VIEWER_EVENT_SECRET` must exactly equal Ops
+   `VIEWER_EVENT_HMAC_SECRET`. `SESSION_SECRET` is an independent Viewer-only
+   secret and must not be reused. `PROXY_SHARED_SECRET` and
+   `TRUSTED_PROXY_ADDRESSES` are optional follow-up hardening and should remain
+   empty until the matching Nginx changes are ready. WebODM API discovery is
    disabled by default, so credentials are not required for direct read-only
    media imports or the processing platform. Configure the dedicated WebODM
    API user only if `WEBODM_ENABLED=true`. The production Viewer/Ops/client
    hostnames and TrueNAS mount paths already have safe defaults in
-   `docker-compose.yml`.
+   `docker-compose.yml`. Back up `Config/viewer.env` securely with the database
+   and never copy its populated contents into this repository or logs.
 3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
-   that has `read:packages`, then run `docker compose pull`. For view-only or
+   that has `read:packages`, then run the commands below. For view-only or
    legacy WebODM compatibility, keep `PROCESSING_PLATFORM_ENABLED=false` and
-   run `docker compose up -d`; this intentionally does not start the profiled
+   run `docker compose --env-file "$VIEWER_ENV" up -d`; this intentionally does not start the profiled
    worker. To activate processing, set `PROCESSING_PLATFORM_ENABLED=true`, the
    exact NodeODM/ClusterODM `PROCESSING_PROVIDER_ORIGINS`,
    `PROCESSING_PROVIDER_TOKENS_JSON`, and
-   matching `VIEWER_EVENT_URL`/key/secret in `.env`, then run:
+   matching `VIEWER_EVENT_URL`/key/secret in `Config/viewer.env`, then run:
 
    ```bash
-   docker compose --profile processing up -d
-   docker compose --profile processing ps
+   VIEWER_ENV=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env
+   docker compose --env-file "$VIEWER_ENV" pull
+   docker compose --env-file "$VIEWER_ENV" --profile processing up -d
+   docker compose --env-file "$VIEWER_ENV" --profile processing ps
    ```
 
    The API must receive `PROCESSING_PLATFORM_ENABLED=true` through the shared
-   environment; the profiled worker explicitly fixes it true. The platform is
+   persistent environment; the profiled worker reads the same file. The platform is
    not active unless both `viewer-api` and `viewer-worker` are healthy. The
    production Compose profile always pulls the configured registry image;
    local source builds remain explicit with `docker build` and cannot silently
@@ -82,9 +98,18 @@ already-published viewing.
    and token to `PROCESSING_PROVIDER_TOKENS_JSON`, restart the API and worker,
    then probe capabilities and enable it in Ops. This order keeps provider
    credentials out of the catalog and avoids a probe that cannot authenticate.
-4. Route `viewer.ledgetopdroneservices.com` through cloudflared to this service
-   on port `8088`. The bare Viewer URL redirects to LTDS Ops; there is no local
-   password-admin login in the production Compose profile.
+4. Compose publishes `viewer-api` directly on the configured LAN bind address
+   and port `8088`; it does not run Nginx. Route Cloudflare/cloudflared through
+   the separately managed Nginx, then proxy to that LAN address. Adapt
+   `deploy/nginx-viewer.conf.example`: preserve request/body limits, streaming
+   and range headers, rate/connection limits, disabled caching/access logging
+   for capability paths and exact Host rewriting. Direct LAN requests using an
+   IP Host are rejected. Optional proxy-secret/IP enforcement is documented for
+   a later coordinated rollout. The bare authenticated Viewer URL redirects to LTDS Ops; there is
+   no local password-admin login in production.
+
+   For Nginx Proxy Manager, follow the paste-ready GUI instructions and
+   verification matrix in [`deploy/NGINX_PROXY_MANAGER.md`](deploy/NGINX_PROXY_MANAGER.md).
 
 When WebODM discovery is enabled, the Viewer syncs on startup and every
 `SYNC_INTERVAL_MINUTES`; Ops can request a provider rescan through the signed
@@ -101,8 +126,10 @@ bounded in-memory storage. The WebODM Media and legacy Derivatives mounts stay
 read-only. An `adopted` import consumes its verified source from the drop
 directory after durable promotion, while `external_reference` never moves or
 deletes the external source bytes.
-Nginx is the only host-published service on port `8088`. Container JSON logs
-rotate at 10 MiB with three files.
+The Viewer API is the only Compose service published on port `8088`; the worker
+has no published port. Container JSON logs rotate at 10 MiB with three files.
+`X_ACCEL_REDIRECT_PREFIX` is empty, so the application performs authorized,
+range-capable asset delivery itself.
 
 After the container is healthy, run the production readiness check inside it:
 
@@ -178,14 +205,16 @@ In addition to the media mount:
 
 - **Optional API discovery**: only when `WEBODM_ENABLED=true`, create a
   dedicated, least-privilege WebODM user (view-only permission on the projects
-  you want reconciled) and put its credentials in `.env`. Do not use an admin
-  account. The production Compose file deliberately pins discovery false, so
-  enabling it also requires a reviewed Compose override. The LTDS API default is
+  you want reconciled) and put its credentials in the persistent
+  `Config/viewer.env`. Do not use an admin account. The production Compose file
+  deliberately pins discovery false, so enabling it also requires a reviewed
+  Compose override. The LTDS API default is
   `http://192.168.50.80:30048` with username `Model-Viewer`, keeping discovery
   traffic on the LAN. If that address is not routable from the Viewer
   container, set `WEBODM_API_URL=https://webodm.ledgetopdroneservices.com`.
-  Supply the password only through `.env`/TrueNAS secret configuration; it is
-  intentionally not present in this repository.
+  Supply the password only through the mode-`600` persistent
+  `Config/viewer.env` or a TrueNAS secret mechanism; it is intentionally not
+  present in this repository.
 - **Storage**: WebODM's own application must use that same dataset as its media
   root:
   ```yaml
@@ -271,8 +300,10 @@ Access policy over `viewer.ledgetopdroneservices.com`: an anonymous demo link
 must also load the Viewer shell, hashed static bundles, public-share API, and
 capability-protected model assets. Instead:
 
-1. Publish the Viewer only through Cloudflare Tunnel; do not port-forward
-   container port `8088` from the Internet.
+1. Publish external Nginx only through Cloudflare Tunnel; do not port-forward
+   Viewer port `8088` from the Internet. Bind it to one reviewed LAN address
+   with `VIEWER_BIND_ADDRESS` (or deliberately to all LAN interfaces only when
+   host firewall rules require traffic to originate from Nginx).
 2. Keep the Viewer hostname Cloudflare-proxied and apply normal zone WAF/rate
    limiting. There is no public administrator UI at that hostname.
 3. Staff authorization flows from Access-protected Ops through HMAC-signed
@@ -287,9 +318,14 @@ path-specific Bypass disables Access enforcement and Access logging, so the
 Viewer's own session/share checks remain mandatory. A separate public Viewer
 hostname is preferable to a growing list of bypassed asset paths.
 
-When cloudflared connects directly to the container, leave
-`X_ACCEL_REDIRECT_PREFIX` empty and use `TRUST_PROXY_HOPS=1`. Set the prefix and
-change the proxy count to `2` only when deploying the supplied Nginx layer.
+The supported production chain is Cloudflare/cloudflared → external Nginx →
+Viewer. Nginx resolves the trusted Cloudflare client address, overwrites
+`X-Forwarded-For`; therefore Viewer uses `TRUST_PROXY_HOPS=1`. Do not append
+inbound forwarding headers. Exact Host enforcement is enabled immediately.
+As a later coordinated hardening step, configure `PROXY_SHARED_SECRET` in both
+Viewer and Nginx and optionally set `TRUSTED_PROXY_ADDRESSES` to Nginx's exact
+socket-source IP/CIDR when Docker preserves it. `X_ACCEL_REDIRECT_PREFIX` stays
+empty.
 
 ## Known limitations (by design, for this iteration)
 

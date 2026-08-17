@@ -4,6 +4,7 @@
 
 const crypto = require('crypto');
 const path = require('path');
+const { parseTrustedProxyAddresses } = require('./proxyGate');
 
 function bool(value, fallback) {
   if (value === undefined || value === '') return fallback;
@@ -43,6 +44,10 @@ if (!sessionSecret && !production) {
 const dataDir = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const processingRoot = process.env.PROCESSING_ROOT || path.join(dataDir, 'processing');
 const publicBaseUrl = normalizedOrigin(process.env.PUBLIC_BASE_URL || '');
+let trustedProxyAllowlist;
+let trustedProxyAddressesError = null;
+try { trustedProxyAllowlist = parseTrustedProxyAddresses(process.env.TRUSTED_PROXY_ADDRESSES || ''); }
+catch (error) { trustedProxyAddressesError = error.message; trustedProxyAllowlist = parseTrustedProxyAddresses(''); }
 let serviceAuthKeys = null;
 let serviceAuthKeysError = null;
 if (process.env.SERVICE_AUTH_KEYS_JSON) {
@@ -77,6 +82,10 @@ const config = {
   opsBaseUrl: normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com'),
   allowedEmbedOrigins: csv(process.env.ALLOWED_EMBED_ORIGINS).map(normalizedOrigin).filter(Boolean),
   trustProxyHops: Math.min(positiveInteger(process.env.TRUST_PROXY_HOPS, 1), 5),
+  proxySharedSecret: String(process.env.PROXY_SHARED_SECRET || ''),
+  trustedProxyAddresses: trustedProxyAllowlist.entries,
+  trustedProxyAllowlist,
+  trustedProxyAddressesError,
 
   dataDir,
   databasePath: process.env.DATABASE_PATH || path.join(dataDir, 'viewer.sqlite'),
@@ -150,6 +159,10 @@ function validate() {
     problems.push('PUBLIC_BASE_URL must be an exact HTTPS origin');
   if (config.production && !config.expectedHost)
     problems.push('EXPECTED_HOST is required in production');
+  if (config.proxySharedSecret && !/^[A-Za-z0-9_-]{43,128}$/.test(config.proxySharedSecret))
+    problems.push('PROXY_SHARED_SECRET must be a 43-128 character base64url secret when configured');
+  if (config.trustedProxyAddressesError)
+    problems.push(`TRUSTED_PROXY_ADDRESSES ${config.trustedProxyAddressesError}`);
   if (config.production && !config.opsBaseUrl)
     problems.push('OPS_BASE_URL must be an exact HTTPS origin');
   if (config.production && config.allowedEmbedOrigins.length === 0)

@@ -4,11 +4,11 @@ The processing platform is feature-flagged and off by default. Published Viewer 
 
 ## TrueNAS layout
 
-The production Compose profile publishes only the Nginx gateway on port `8088`. The API and worker share the same pinned application image on a private Compose network. Cloudflared is managed separately by TrueNAS and should route `viewer.ledgetopdroneservices.com` to the gateway.
+Production Compose publishes `viewer-api` directly on the configured LAN bind address and port `8088`; it does not run Nginx. The worker shares the pinned application image but has no published port. Cloudflared and external Nginx are separately managed. Nginx forwards the exact Viewer host; optional proxy-secret/IP enforcement can be enabled later as a coordinated hardening step. The application itself streams authorized byte ranges because `X_ACCEL_REDIRECT_PREFIX` is empty.
 
-Host mounts are fixed under `/mnt/Plugins/App_Data/Model-Viewer`: `Data`, `Datasets`, `Models`, `Cache`, `Import/Datasets`, and `Import/Terra`. WebODM media is mounted read-only from `/mnt/Plugins/App_Data/WebODM/Media`. WebODM API discovery is disabled by default and does not require credentials. Release-one WebODM imports are read-only external references; source media is never moved or deleted.
+Host mounts are fixed under `/mnt/Plugins/App_Data/Model-Viewer`: `Config`, `Data`, `Datasets`, `Models`, `Cache`, `Import/Datasets`, and `Import/Terra`. Runtime settings and secrets live only in `Config/viewer.env` (directory mode `700`, file mode `600`) and are shared by API and worker through Compose `env_file`. WebODM media is mounted read-only from `/mnt/Plugins/App_Data/WebODM/Media`. WebODM API discovery is disabled by default and does not require credentials. Release-one WebODM imports are read-only external references; source media is never moved or deleted.
 
-Set `PROCESSING_PLATFORM_ENABLED=true`, configure exact provider origins in `PROCESSING_PROVIDER_ORIGINS`, and map provider IDs to tokens with `PROCESSING_PROVIDER_TOKENS_JSON`. Provider endpoints cannot select arbitrary environment variable names and redirects are rejected. Enable a provider only after its capability probe confirms the required `pc-ept`, `3d-tiles`, and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines, not hard version lockouts; unknown compatible versions produce a warning.
+Set `PROCESSING_PLATFORM_ENABLED=true`, configure exact provider origins in `PROCESSING_PROVIDER_ORIGINS`, and map provider IDs to tokens with `PROCESSING_PROVIDER_TOKENS_JSON`. Start with `docker compose --env-file /mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env --profile processing up -d`; both API and worker must read the true flag from that file. Provider endpoints cannot select arbitrary environment variable names and redirects are rejected. Enable a provider only after its capability probe confirms the required `pc-ept`, `3d-tiles`, and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines, not hard version lockouts; unknown compatible versions produce a warning.
 
 `LOCAL_DERIVATIVES_ENABLED` remains false in the stock image. The production path requests native EPT, GLB, and 3D Tiles outputs from ODM. If local derivatives are explicitly enabled, worker startup fails unless compatible Entwine and Obj2Tiles executables are present. A 3D Tiles result is publishable only after the existing LOD-v2 audit proves the full-detail frontier; otherwise the self-contained full GLB is retained as the safe fallback.
 
@@ -62,7 +62,7 @@ admin bearer permission plus `Idempotency-Key`.
 
 ## Backups and recovery
 
-Back up `Data/viewer.sqlite` together with its `-wal` and `-shm` files, or take a SQLite online backup after `PRAGMA wal_checkpoint(PASSIVE)`. Do not copy only the main database while the API or worker is writing. Dataset/model files and the database must be captured in the same storage snapshot when possible.
+Back up `Config/viewer.env` through a secret-capable backup path together with `Data/viewer.sqlite` and its `-wal` and `-shm` files, or take a SQLite online backup after `PRAGMA wal_checkpoint(PASSIVE)`. Never put the populated environment file in source control or ordinary logs. Do not copy only the main database while the API or worker is writing. Dataset/model files and the database must be captured in the same storage snapshot when possible.
 
 Before maintenance:
 

@@ -19,6 +19,7 @@ const { ProcessingRepository } = require('./processingRepository');
 const { StorageManager } = require('./storageManager');
 const { createProcessingApi } = require('./processingApi');
 const { sanitizeLogMessage } = require('./processingSecurity');
+const { createProxyGate } = require('./proxyGate');
 
 const problems = validate();
 if (problems.length) {
@@ -95,17 +96,11 @@ app.use((_req, res, next) => {
   next();
 });
 
-// Refuse production requests addressed to an unexpected virtual host. This
-// prevents proxy/header confusion from leaking absolute URLs or cookies onto
-// a sibling host behind the same reverse proxy.
-app.use((req, res, next) => {
-  const localProbe = req.path === '/api/v1/health' || req.path === '/api/v1/ready';
-  if (config.production && !localProbe) {
-    const host = String(req.headers.host || '').split(':', 1)[0].toLowerCase();
-    if (host !== config.expectedHost) return res.status(421).json({ error: 'unexpected host' });
-  }
-  next();
-});
+// The LAN-published port is not an alternate public origin. In production,
+// every route (including health/readiness) requires the exact virtual host.
+// Optional staged hardening can additionally require the separately managed
+// proxy's shared header secret and a matching socket source address/CIDR.
+app.use(createProxyGate(config));
 
 app.get('/api/v1/health', (_req, res) => res.json({ ok: true }));
 app.get('/api/v1/ready', (_req, res) => {
