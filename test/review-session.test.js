@@ -136,6 +136,9 @@ test('admin review sessions expose only an exact review-ready derived version an
     assert.equal((await fetch(`${base}/api/v1/sessions/current`, { headers: { authorization: `Bearer ${cancellationSession.accessToken}` } })).status, 401);
     assert.equal((await fetch(`${base}${cancellationSession.model.assets.glb}`)).status, 403);
     database.prepare("UPDATE processing_attempts SET status='ready_for_review' WHERE id=?").run(attempt.id);
+    database.prepare("UPDATE model_outputs SET status='ready' WHERE id=?").run(versionId);
+    database.prepare("UPDATE model_versions SET status='ready' WHERE id=?").run(versionId);
+    database.prepare("UPDATE models SET status='ready' WHERE id=?").run(model.id);
   });
 
   await t.test('result-version replacement invalidates a capability pinned to the prior version', async () => {

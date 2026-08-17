@@ -466,6 +466,14 @@ class ViewerRepository {
     return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
   }
 
+  createSessionGrantAudited(input, audit) {
+    return this.transaction(() => {
+      const grant = this.createSessionGrant(input);
+      this.audit({ ...audit, entityId: audit.entityId || input.reviewAttemptId || grant.id });
+      return grant;
+    });
+  }
+
   redeemSessionGrant(id, at = Date.now()) {
     return this.transaction(() => {
       const row = this.database.prepare('SELECT * FROM session_grants WHERE id=?').get(id);
@@ -541,14 +549,16 @@ class ViewerRepository {
       && attempt.result_model_version_id === session.modelVersionId);
   }
 
-  revokeReviewSessions({ attemptId, subject }) {
+  revokeReviewSessions({ attemptId, subject, audit = null }) {
     const timestamp = now();
     return this.transaction(() => {
       const grants = this.database.prepare(`DELETE FROM session_grants
         WHERE session_mode='review' AND review_attempt_id=? AND subject=?`).run(attemptId, subject).changes;
       const sessions = this.database.prepare(`UPDATE viewer_sessions SET revoked_at=COALESCE(revoked_at,?),updated_at=?
         WHERE session_mode='review' AND review_attempt_id=? AND subject=? AND revoked_at IS NULL`).run(timestamp, timestamp, attemptId, subject).changes;
-      return { grants, sessions };
+      const result = { grants, sessions };
+      if (audit) this.audit({ ...audit, entityId: audit.entityId || attemptId, details: { ...(audit.details || {}), revokedGrants: grants, revokedSessions: sessions } });
+      return result;
     });
   }
 

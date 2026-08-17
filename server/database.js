@@ -1057,6 +1057,102 @@ const MIGRATIONS = [
         ON viewer_sessions(review_attempt_id,subject,expires_at);
     `,
   },
+  {
+    version: 16,
+    name: 'processing_roles_and_staged_outputs',
+    sql: `
+      ALTER TABLE dataset_files ADD COLUMN processing_role TEXT NOT NULL DEFAULT 'auto'
+        CHECK(processing_role IN ('auto','image','gcp_source','provider_input','administrative'));
+      UPDATE dataset_files SET processing_role=CASE
+        WHEN lower(relative_path) GLOB '*.csv' THEN 'gcp_source'
+        WHEN lower(relative_path) GLOB '*.jpg' OR lower(relative_path) GLOB '*.jpeg'
+          OR lower(relative_path) GLOB '*.png' OR lower(relative_path) GLOB '*.tif'
+          OR lower(relative_path) GLOB '*.tiff' OR lower(relative_path) GLOB '*.dng'
+          OR lower(relative_path) GLOB '*.raw' OR lower(relative_path) GLOB '*.heic'
+          THEN 'image'
+        ELSE 'auto'
+      END;
+
+      DROP INDEX model_outputs_page_idx;
+      DROP INDEX model_outputs_project_page_idx;
+      DROP INDEX model_outputs_task_page_idx;
+      DROP INDEX model_outputs_status_page_idx;
+      ALTER TABLE model_outputs RENAME TO model_outputs_v15;
+      CREATE TABLE model_outputs (
+        id TEXT PRIMARY KEY REFERENCES model_versions(id) ON DELETE RESTRICT,
+        model_id TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        storage_mode TEXT NOT NULL DEFAULT 'managed'
+          CHECK(storage_mode IN ('managed','adopted','external_reference')),
+        status TEXT NOT NULL CHECK(status IN ('staged','ready','published','failed','archived','trashed')),
+        byte_size INTEGER NOT NULL DEFAULT 0 CHECK(byte_size >= 0),
+        asset_count INTEGER NOT NULL DEFAULT 0 CHECK(asset_count >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT,
+        trashed_at TEXT,
+        UNIQUE(root_key,relative_path)
+      );
+      INSERT INTO model_outputs(id,model_id,task_id,attempt_id,project_id,root_key,relative_path,storage_mode,status,byte_size,asset_count,created_at,updated_at,archived_at,trashed_at)
+        SELECT id,model_id,task_id,attempt_id,project_id,root_key,relative_path,storage_mode,status,byte_size,asset_count,created_at,updated_at,archived_at,trashed_at
+        FROM model_outputs_v15;
+      UPDATE model_outputs SET status='failed'
+        WHERE status='ready'
+          AND attempt_id IN (SELECT id FROM processing_attempts WHERE status IN ('failed','cancelled'))
+          AND NOT EXISTS (SELECT 1 FROM models WHERE models.id=model_outputs.model_id AND models.active_version_id=model_outputs.id);
+      UPDATE model_versions SET status='failed'
+        WHERE id IN (SELECT id FROM model_outputs WHERE status='failed')
+          AND NOT EXISTS (SELECT 1 FROM models WHERE models.id=model_versions.model_id AND models.active_version_id=model_versions.id);
+      UPDATE model_outputs SET status='staged'
+        WHERE status='ready'
+          AND attempt_id IN (SELECT id FROM processing_attempts WHERE status IN ('ingesting','derivatives'))
+          AND NOT EXISTS (SELECT 1 FROM models WHERE models.id=model_outputs.model_id AND models.active_version_id=model_outputs.id);
+      UPDATE model_versions SET status='importing'
+        WHERE id IN (SELECT id FROM model_outputs WHERE status='staged')
+          AND NOT EXISTS (SELECT 1 FROM models WHERE models.id=model_versions.model_id AND models.active_version_id=model_versions.id);
+      DROP TABLE model_outputs_v15;
+      CREATE INDEX model_outputs_page_idx ON model_outputs(created_at DESC,id DESC);
+      CREATE INDEX model_outputs_project_page_idx ON model_outputs(project_id,created_at DESC,id DESC);
+      CREATE INDEX model_outputs_task_page_idx ON model_outputs(task_id,created_at DESC,id DESC);
+      CREATE INDEX model_outputs_status_page_idx ON model_outputs(status,created_at DESC,id DESC);
+      CREATE TABLE task_draft_requests (
+        subject TEXT NOT NULL,
+        submission_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(subject,submission_id)
+      );
+      CREATE TRIGGER processing_attempt_output_failed
+      AFTER UPDATE OF status ON processing_attempts
+      WHEN NEW.status IN ('failed','cancelled') AND NEW.result_model_version_id IS NOT NULL
+      BEGIN
+        UPDATE model_outputs SET status='failed',updated_at=NEW.updated_at
+          WHERE id=NEW.result_model_version_id AND attempt_id=NEW.id AND status IN ('staged','ready');
+        UPDATE model_versions SET status='failed',updated_at=NEW.updated_at
+          WHERE id=NEW.result_model_version_id AND model_id=NEW.result_model_id
+            AND EXISTS (SELECT 1 FROM model_outputs WHERE id=NEW.result_model_version_id AND status='failed')
+            AND NOT EXISTS (SELECT 1 FROM models WHERE id=NEW.result_model_id AND active_version_id=NEW.result_model_version_id);
+        UPDATE models SET status='failed',updated_at=NEW.updated_at
+          WHERE id=NEW.result_model_id AND active_version_id IS NULL
+            AND EXISTS (SELECT 1 FROM model_outputs WHERE id=NEW.result_model_version_id AND status='failed');
+      END;
+      CREATE TRIGGER storage_mutation_audit_complete
+      AFTER UPDATE OF status ON storage_mutations
+      WHEN OLD.status<>'complete' AND NEW.status='complete'
+      BEGIN
+        INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at)
+        VALUES (lower(hex(randomblob(16))),'admin',NEW.actor,
+          NEW.entity_type||'.'||CASE NEW.mutation_type WHEN 'trash' THEN 'trashed' WHEN 'restore' THEN 'restored' ELSE 'purged' END,
+          NEW.entity_type,NEW.entity_id,
+          json_object('mutationId',NEW.id,'trashId',NEW.trash_id),NEW.updated_at);
+      END;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

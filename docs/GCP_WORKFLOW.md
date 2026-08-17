@@ -10,6 +10,12 @@ Ground control is part of the default-off processing platform. It is available o
 - Canonical elevations and camera altitudes are meters. Ops converts them for imperial-default or metric display without rewriting stored values.
 - A correspondence belongs to one processing task and links one GCP point to one image in that task's dataset using non-negative pixel X/Y coordinates.
 - Database triggers reject task, GCP, or image combinations from different datasets.
+- Dataset CSV/GCP source files are finalized with the private `gcp_source`
+  processing role. They are retained for administrative provenance but never
+  uploaded to ODM. Each attempt instead snapshots a deterministic private ODM
+  `gcp_list.txt` from its saved correspondences. Restart/replay of that same
+  attempt reuses its checksum-bound snapshot; retry creates a new Attempt and
+  freezes a new snapshot from the correspondences current at retry time.
 
 ## Generic interchange v1
 

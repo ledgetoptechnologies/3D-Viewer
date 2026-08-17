@@ -63,6 +63,24 @@ Uploads are chunked, checksum-bound, subject-bound, resumable, and finalized by 
 
 Managed and adopted datasets are immutable after finalization. Every file is re-hashed before each ODM submission. External references retain their original location and are also re-hashed. Raw images, GCP files, logs, provider archives, and processing inputs are created unpublished and cannot be selected for a public share.
 
+Each dataset manifest file has an explicit processing role. Omitted/`auto`
+roles fail closed: supported photographs become `image`, CSV becomes private
+`gcp_source`, and other files become private `administrative`. Only an explicit
+`provider_input` on the bounded auxiliary allowlist is uploaded to ODM. The
+immutable `gcp_list.txt` generated from a processing attempt's saved GCP
+correspondences replaces any legacy input with that name; source CSV/GCP files
+remain administrative bytes and are never sent upstream.
+
+Draft creation is recoverable across an admin-session renewal. Persist the
+`submissionId` UUID, exact normalized body, and `Idempotency-Key` before `POST
+/api/v1/tasks`. The first commit returns `201`; the same subject and exact
+submission replay returns the same task with `200`, while a changed request
+with that submission ID returns `409`. Historical attempts are immutable and
+available newest-first through bounded `GET
+/api/v1/tasks/:id/attempts?limit=&cursor=` pagination, including provider,
+options, capability fingerprint, result version IDs, submission phase, and all
+lifecycle timestamps.
+
 An administrator with `viewer.processing.publish` may inspect an unpublished `ready_for_review` result through `POST /api/v1/attempts/:id/review-sessions` using an exact `{}` body and an `Idempotency-Key`. The one-use grant is bound to the authenticated subject, attempt, model, and immutable model version, and it exposes only reviewable derived kinds (`glb`, `tiles`, `ept`, `ortho`, `dsm`, `dtm`) whose integrity metadata is complete. It neither publishes the version nor creates a public share. Redemption and every model, nested asset, and range request revalidate that the exact attempt is still `ready_for_review`; publishing, cancellation, version replacement, expiry, or explicit subject-scoped `DELETE /api/v1/attempts/:id/review-sessions` fails closed immediately. A renewed grant for the same subject and target renews the existing browser token/session so camera, layer, and measurement state remain in place.
 
 Adopted catalog moves are journaled before filesystem mutation. If a same-filesystem Terra rename succeeds but later catalog registration fails, maintenance restores the deterministic destination to its original import path (or removes a duplicate copy) before clearing the intent. This reconciliation survives restart and prevents unaccounted dataset bytes even when the failed operation is never manually retried.
@@ -143,10 +161,20 @@ still depends on it. Trash, restore, manual purge, and retention purge reuse
 the two-phase storage journal; permanent purge removes asset rows and bytes but
 retains the zero-byte output record as an audit tombstone.
 
+Archiving one historical output never archives its parent Task. Adopted and
+external-reference outputs use the same 14-day metadata lifecycle without
+moving or deleting provider-owned bytes. Catalog imports whose Dataset and
+Output describe the same external/adopted tree count those physical bytes once
+in project/task totals. Native ingest keeps an output `staged` until all
+required outputs and derivatives pass; readiness, callback outbox, and audit
+commit together. Publication similarly commits selected assets, active
+version, attempt/task/output state, and its audit row in one transaction.
+
 Catalog and accounting routes used by Ops are:
 
 - `PATCH /api/v1/projects/:id` and `PATCH /api/v1/datasets/:id`
 - `GET /api/v1/projects/:id/storage` and `GET /api/v1/tasks/:id/storage`
+- `GET /api/v1/tasks/:id/attempts?limit=&cursor=`
 - `GET /api/v1/processing/outputs`
 - `POST /api/v1/processing/outputs/:id/archive` and
   `DELETE /api/v1/processing/outputs/:id`

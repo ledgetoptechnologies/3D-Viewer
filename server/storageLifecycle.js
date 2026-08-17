@@ -66,6 +66,10 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
         const purged=processing.markTrashPurged(item.id);
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',externalReference:true});
+      }else if(output&&output.storageMode!=='managed'){
+        const purged=processing.purgeMetadataOutput(item.id);
+        if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
+        results.push({trashId:item.id,status:'complete',externalReference:true});
       }else{
         const mutation=processing.beginPurgeMutation(item.id,actor);
         if(!mutation){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
