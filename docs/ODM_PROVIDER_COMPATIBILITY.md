@@ -71,6 +71,27 @@ npm run verify:odm-provider -- \
 
 That mode creates an LTDS-assigned UUID, uploads and commits the corpus, polls
 status and bounded output, streams and hashes `all.zip` without retaining it,
-then creates a second task to verify cancel and removes both tasks in `finally`.
+then uploads and commits a second task, verifies that cancelling real queued or
+running work settles at NodeODM status code 50, and removes both tasks in `finally`.
 It has a two-hour default task timeout and never runs without the exact
 confirmation phrase.
+
+### NodeODM 2.2.3 baseline evidence
+
+On 2026-08-17 the destructive gate completed against immutable image
+`opendronemap/nodeodm@sha256:b5260d56e96e24fd70a44f5bd892e6f2e3ee8a7a37b1247c1667b7ffc5758361`
+on an isolated Docker network. The corpus was the 16-image `banana` starter set
+linked by the official [ODMdata catalog](https://github.com/OpenDroneMap/ODMdata),
+pinned to `pierotofy/dataset_banana` commit
+`2778294e4a73aec8f37747e0d2edfc4cb38b23a6`. Its 16 image files totalled
+15,294,677 bytes; a sorted `name<TAB>size<TAB>sha256<LF>` manifest hashed to
+`0521a4583c8a9bab746ad5c5f4bf45e82547fa5e9c82e0250407f148f07c4013`.
+
+The task completed, its streamed `all.zip` contained 694,062,035 bytes with
+SHA-256 `ac7ecaf548ca5fc8b932ce4513bc83c04d4bba788ef4789c1e48f2b276f7cddd`,
+and the second committed task settled at `cancelled`. Both assigned tasks were
+removed and the provider data directory was empty before the disposable
+container, network, and corpus checkout were removed. This proves the small
+NodeODM baseline workflow and cancel contract. It does not replace a
+representative TrueNAS corpus, GCP/LOD review, restart interruption, or the
+separate ClusterODM 1.5.5 gate.

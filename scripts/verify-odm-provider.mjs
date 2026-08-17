@@ -22,7 +22,12 @@ try{
   let finalStatus=null;for(;;){const status=await provider.status(uuid);await provider.output(uuid,0);if(['completed','failed','cancelled'].includes(status.status)){finalStatus=status;break;}if(Date.now()>=deadline)throw new Error('provider task did not reach a terminal state before timeout');await new Promise((resolve)=>setTimeout(resolve,5000));}
   if(finalStatus.status!=='completed')throw new Error(`provider compatibility task ended as ${finalStatus.status}`);
   const response=await provider.downloadAll(uuid),hash=crypto.createHash('sha256');let bytes=0;for await(const chunk of response.body){bytes+=chunk.byteLength;if(bytes>20*1024*1024*1024)throw new Error('all.zip exceeded the 20 GiB verification limit');hash.update(chunk);}if(!bytes)throw new Error('all.zip was empty');
-  await provider.initialize({uuid:cancelUuid,name:'LTDS cancellation verification',options:{},outputs:[]});cancelExists=true;await provider.cancel(cancelUuid);const cancelled=await provider.status(cancelUuid);if(cancelled.status!=='cancelled')throw new Error(`provider cancellation returned ${cancelled.status}`);
+  await provider.initialize({uuid:cancelUuid,name:'LTDS cancellation verification',options:{},outputs:[]});cancelExists=true;
+  await provider.upload(cancelUuid,files);await provider.commit(cancelUuid);
+  const cancelDeadline=Math.min(deadline,Date.now()+5*60_000);let cancelReady=null;
+  for(;;){cancelReady=await provider.status(cancelUuid);if(['queued_upstream','running'].includes(cancelReady.status))break;if(['completed','failed','cancelled'].includes(cancelReady.status))throw new Error(`provider cancellation task became ${cancelReady.status} before cancellation`);if(Date.now()>=cancelDeadline)throw new Error('provider cancellation task did not become cancellable before timeout');await new Promise((resolve)=>setTimeout(resolve,1000));}
+  await provider.cancel(cancelUuid);let cancelled=null;
+  for(;;){cancelled=await provider.status(cancelUuid);if(cancelled.status==='cancelled')break;if(['completed','failed'].includes(cancelled.status))throw new Error(`provider cancellation returned ${cancelled.status}`);if(Date.now()>=cancelDeadline)throw new Error(`provider cancellation did not settle before timeout (last status ${cancelled.status})`);await new Promise((resolve)=>setTimeout(resolve,1000));}
   console.log(JSON.stringify({mode:'destructive',result:'compatible',taskStatus:finalStatus.status,downloadBytes:bytes,downloadSha256:hash.digest('hex'),cancelStatus:cancelled.status},null,2));
 }finally{
   if(cancelExists)try{await provider.remove(cancelUuid);}catch{/* cleanup is reported by provider logs; token is never printed */}

@@ -97,6 +97,19 @@ test('runtime image is rootless as the TrueNAS Apps service identity', () => {
   assert.doesNotMatch(dockerfile, /ENTRYPOINT|USER root/);
 });
 
+test('live ODM compatibility cancellation exercises committed work and waits for status 50', () => {
+  const harness = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'verify-odm-provider.mjs'), 'utf8');
+  const initialize = harness.indexOf("provider.initialize({uuid:cancelUuid");
+  const upload = harness.indexOf('provider.upload(cancelUuid,files)', initialize);
+  const commit = harness.indexOf('provider.commit(cancelUuid)', upload);
+  const cancel = harness.indexOf('provider.cancel(cancelUuid)', commit);
+
+  assert(initialize >= 0 && initialize < upload && upload < commit && commit < cancel);
+  assert.match(harness, /\['queued_upstream','running'\]\.includes\(cancelReady\.status\)/);
+  assert.match(harness, /cancelled\.status==='cancelled'/);
+  assert.match(harness, /provider cancellation did not settle before timeout/);
+});
+
 async function unusedPort() {
   const server = net.createServer();
   server.listen(0, '127.0.0.1');
