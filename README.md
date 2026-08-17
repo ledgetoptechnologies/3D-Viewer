@@ -445,6 +445,11 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
 - Storage accounting/recovery: `/api/v1/storage`, `/storage/trash/...`, and
   `/storage/mutations/...`
 - Browser: `POST /api/v1/sessions/redeem`; `GET /api/v1/sessions/current`
+- Unpublished admin review: `POST /api/v1/attempts/:id/review-sessions` and
+  subject-scoped `DELETE /api/v1/attempts/:id/review-sessions` require
+  `viewer.processing.publish`. Review grants are short-lived, bind the exact
+  review-ready attempt/model version, expose only integrity-checked derived
+  assets, and never publish or create a public share.
 - Public probes: `GET /api/v1/health`; `GET /api/v1/ready`
 
 Session-grant responses are `Cache-Control: no-store`; the service secret is

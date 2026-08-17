@@ -63,6 +63,10 @@ Uploads are chunked, checksum-bound, subject-bound, resumable, and finalized by 
 
 Managed and adopted datasets are immutable after finalization. Every file is re-hashed before each ODM submission. External references retain their original location and are also re-hashed. Raw images, GCP files, logs, provider archives, and processing inputs are created unpublished and cannot be selected for a public share.
 
+An administrator with `viewer.processing.publish` may inspect an unpublished `ready_for_review` result through `POST /api/v1/attempts/:id/review-sessions` using an exact `{}` body and an `Idempotency-Key`. The one-use grant is bound to the authenticated subject, attempt, model, and immutable model version, and it exposes only reviewable derived kinds (`glb`, `tiles`, `ept`, `ortho`, `dsm`, `dtm`) whose integrity metadata is complete. It neither publishes the version nor creates a public share. Redemption and every model, nested asset, and range request revalidate that the exact attempt is still `ready_for_review`; publishing, cancellation, version replacement, expiry, or explicit subject-scoped `DELETE /api/v1/attempts/:id/review-sessions` fails closed immediately. A renewed grant for the same subject and target renews the existing browser token/session so camera, layer, and measurement state remain in place.
+
+Adopted catalog moves are journaled before filesystem mutation. If a same-filesystem Terra rename succeeds but later catalog registration fails, maintenance restores the deterministic destination to its original import path (or removes a duplicate copy) before clearing the intent. This reconciliation survives restart and prevents unaccounted dataset bytes even when the failed operation is never manually retried.
+
 ## Existing-model catalog migration
 
 Durable mounted-tree scans discover WebODM outputs without API credentials and

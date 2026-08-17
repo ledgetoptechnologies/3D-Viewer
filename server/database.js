@@ -1039,6 +1039,24 @@ const MIGRATIONS = [
       CREATE INDEX subject_operation_receipts_operation_idx ON subject_operation_receipts(operation_id);
     `,
   },
+  {
+    version: 15,
+    name: 'unpublished_review_sessions',
+    sql: `
+      ALTER TABLE session_grants ADD COLUMN session_mode TEXT NOT NULL DEFAULT 'published'
+        CHECK(session_mode IN ('published','review'));
+      ALTER TABLE session_grants ADD COLUMN model_version_id TEXT REFERENCES model_versions(id) ON DELETE RESTRICT;
+      ALTER TABLE session_grants ADD COLUMN review_attempt_id TEXT REFERENCES processing_attempts(id) ON DELETE CASCADE;
+      CREATE INDEX session_grants_review_attempt_idx
+        ON session_grants(review_attempt_id,subject,expires_at);
+
+      ALTER TABLE viewer_sessions ADD COLUMN session_mode TEXT NOT NULL DEFAULT 'published'
+        CHECK(session_mode IN ('published','review'));
+      ALTER TABLE viewer_sessions ADD COLUMN review_attempt_id TEXT REFERENCES processing_attempts(id) ON DELETE CASCADE;
+      CREATE INDEX viewer_sessions_review_attempt_idx
+        ON viewer_sessions(review_attempt_id,subject,expires_at);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

@@ -316,6 +316,27 @@
       "createdAt": "2027-01-15T08:46:00.000Z", "updatedAt": "2027-01-15T08:46:00.000Z", "completedAt": null
     }
   },
+  "reviewSessionCreated": {
+    "status": 201,
+    "headers": { "Cache-Control": "no-store" },
+    "body": {
+      "grant": "77777777-7777-4777-8777-777777777777",
+      "grantExpiresAt": "2027-01-15T08:50:00.000Z",
+      "sessionTtlSeconds": 900,
+      "sessionMode": "review",
+      "attemptId": "attempt-import-two",
+      "modelId": "model-one",
+      "modelVersionId": "version-import-two",
+      "assetKinds": ["ept", "glb"],
+      "redeemUrl": "https://viewer.example.test/api/v1/sessions/redeem",
+      "embedUrl": "https://viewer.example.test/session/77777777-7777-4777-8777-777777777777"
+    }
+  },
+  "reviewSessionsRevoked": {
+    "status": 200,
+    "headers": { "Cache-Control": "no-store" },
+    "body": { "attemptId": "attempt-import-two", "revokedGrants": 1, "revokedSessions": 1 }
+  },
   "storage": {
     "storage": {
       "datasets": { "available": 900, "total": 1000, "reserve": 100, "required": 50, "ok": true },

@@ -126,6 +126,30 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.get('/api/v1/attempts/:id',authorize('viewer.processing.read'),(req,res)=>{const a=processing.getAttempt(req.params.id);return a?res.json({attempt:a,logs:processing.listLogs(a.id,req.query.logLimit)}):error(res,404,'attempt_not_found');});
   router.post('/api/v1/attempts/:id/cancel',authorize('viewer.processing.write'),mutate,async(req,res)=>{const a=processing.getAttempt(req.params.id);if(!a)return error(res,404,'attempt_not_found');const cancelled=processing.cancelAttempt(a.id);if(a.providerTaskId&&['queued_upstream','running'].includes(a.status)){try{const p=processing.getProvider(a.providerId);if(p)await new NodeOdmProvider({endpoint:p.endpoint,token:providerCredentials.resolve(p.id),providerType:p.type,...(providerFetch?{fetchImpl:providerFetch}:{})}).cancel(a.providerTaskId);}catch(e){processing.appendLog(a.id,'warning',`Upstream cancellation could not be confirmed: ${sanitizeLogMessage(e.message)}`);}}res.json({attempt:cancelled});});
   router.post('/api/v1/attempts/:id/retry',authorize('viewer.processing.write'),mutate,(req,res)=>{const a=processing.retryAttempt(req.params.id,req.actorId);return a?res.status(202).json({attempt:a}):error(res,409,'attempt_not_retryable');});
+  router.post('/api/v1/attempts/:id/review-sessions',authorize('viewer.processing.publish'),mutate,(req,res)=>{
+    if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
+    const attempt=processing.getAttempt(req.params.id);
+    if(!attempt||attempt.status!=='ready_for_review'||!attempt.resultModelId||!attempt.resultModelVersionId)return error(res,409,'attempt_not_reviewable');
+    const output=processing.getModelOutput(attempt.resultModelVersionId),candidate=repository.getModelVersion(attempt.resultModelId,attempt.resultModelVersionId);
+    if(!output||output.attemptId!==attempt.id||output.modelId!==attempt.resultModelId||output.status!=='ready'||!candidate?.activeVersion)return error(res,409,'review_output_unavailable');
+    const reviewAssets=candidate.activeVersion.assets.filter((asset)=>publicDerivativeKind(asset.kind));
+    const integrityReady=reviewAssets.length>0&&reviewAssets.every((asset)=>asset.sha256&&(!['ept','tiles'].includes(asset.kind)||(asset.manifestSha256&&repository.getModelAssetFile(asset.id,path.posix.basename(asset.relativePath)))));
+    if(!integrityReady)return error(res,409,'asset_integrity_not_ready');
+    const authorizedUntil=new Date(Math.min(Date.parse(req.adminPrincipal.expiresAt),Date.now()+config.viewerSessionTtlSeconds*1000)).toISOString();
+    if(Date.parse(authorizedUntil)<=Date.now())return error(res,410,'authorization_expired');
+    const grantExpiresAt=new Date(Math.min(Date.parse(authorizedUntil),Date.now()+config.sessionGrantTtlSeconds*1000)).toISOString();
+    const grant=repository.createSessionGrant({modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,reviewAttemptId:attempt.id,sessionMode:'review',subject:req.actorId,audience:'ops',permissions:{view:true,measure:true,cameras:true,download:false,__authorizedUntil:authorizedUntil,__versionId:attempt.resultModelVersionId},displayUnits:req.adminPrincipal.displayUnits||config.defaultUnits,expiresAt:grantExpiresAt});
+    const base=config.publicBaseUrl||`${req.protocol}://${req.get('host')}`;
+    repository.audit({actorType:'admin',actorId:req.actorId,action:'processing_review_session.created',entityType:'processing_attempt',entityId:attempt.id,details:{modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId}});
+    return res.status(201).json({grant:grant.id,grantExpiresAt,sessionTtlSeconds:config.viewerSessionTtlSeconds,sessionMode:'review',attemptId:attempt.id,modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,assetKinds:[...new Set(reviewAssets.map((asset)=>asset.kind))].sort(),redeemUrl:`${base}/api/v1/sessions/redeem`,embedUrl:`${base}/session/${encodeURIComponent(grant.id)}`});
+  });
+  router.delete('/api/v1/attempts/:id/review-sessions',authorize('viewer.processing.publish'),mutate,(req,res)=>{
+    if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
+    const attempt=processing.getAttempt(req.params.id);if(!attempt)return error(res,404,'attempt_not_found');
+    const revoked=repository.revokeReviewSessions({attemptId:attempt.id,subject:req.actorId});
+    repository.audit({actorType:'admin',actorId:req.actorId,action:'processing_review_session.revoked',entityType:'processing_attempt',entityId:attempt.id,details:{revokedGrants:revoked.grants,revokedSessions:revoked.sessions}});
+    return res.json({attemptId:attempt.id,revokedGrants:revoked.grants,revokedSessions:revoked.sessions});
+  });
   router.post('/api/v1/attempts/:id/publish',authorize('viewer.processing.publish'),mutate,(req,res)=>{const a=processing.getAttempt(req.params.id);if(!a||a.status!=='ready_for_review'||!a.resultModelId||!a.resultModelVersionId)return error(res,409,'attempt_not_reviewable');const selected=req.body?.selectedAssetKinds;if(!Array.isArray(selected)||!selected.length||selected.some((k)=>!publicDerivativeKind(k)))return error(res,400,'invalid_published_assets');const candidate=repository.getModelVersion(a.resultModelId,a.resultModelVersionId),available=new Set(candidate?.activeVersion?.assets.map((x)=>x.kind)||[]);if(selected.some((k)=>!available.has(k)))return error(res,400,'published_asset_unavailable');const model=repository.publishModelVersion(a.resultModelId,a.resultModelVersionId,selected);if(!model)return error(res,409,'asset_integrity_not_ready');const task=processing.publishAttempt(a.id,model.id);res.json({task,model});});
   mountGcpRoutes(router,{repository,processing,storage,authorize,mutate,error});
   return router;

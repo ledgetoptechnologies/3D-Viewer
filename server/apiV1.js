@@ -7,6 +7,7 @@ const { config } = require('./config');
 const sync = require('./sync');
 const { requireService } = require('./serviceAuth');
 const { idempotent } = require('./serviceIdempotency');
+const { publicDerivativeKind } = require('./processingSecurity');
 
 const VIEWER_COOKIE = 'ltds_viewer';
 
@@ -161,9 +162,26 @@ function createApiV1(repository) {
     return { token, session };
   }
 
-  function sendCurrentSession(_req, res, session, accessToken) {
+  function modelForSession(session) {
+    if (!repository.viewerSessionLive(session)) return null;
+    if (session.sessionMode === 'review') {
+      const candidate = repository.getModelVersion(session.modelId, session.modelVersionId);
+      if (!candidate?.activeVersion || candidate.activeVersion.id !== session.modelVersionId) return null;
+      return {
+        ...candidate,
+        activeVersion: {
+          ...candidate.activeVersion,
+          assets: candidate.activeVersion.assets.filter((asset) => publicDerivativeKind(asset.kind)),
+        },
+      };
+    }
     const model = repository.getModel(session.modelId);
-    if (!model || model.status !== 'ready' || model.activeVersionId !== session.modelVersionId)
+    return model?.status === 'ready' && model.activeVersionId === session.modelVersionId ? model : null;
+  }
+
+  function sendCurrentSession(_req, res, session, accessToken) {
+    const model = modelForSession(session);
+    if (!model)
       return res.status(404).json({ error: 'model version is no longer available' });
     res.setHeader('Cache-Control', 'no-store');
     return res.json({
@@ -172,6 +190,8 @@ function createApiV1(repository) {
       sessionId: session.id,
       subject: session.subject,
       audience: session.audience,
+      sessionMode: session.sessionMode || 'published',
+      reviewAttemptId: session.reviewAttemptId || null,
       expiresAt: session.expiresAt,
       displayUnits: session.displayUnits || config.defaultUnits,
       accessToken,
@@ -196,8 +216,22 @@ function createApiV1(repository) {
       Number.isFinite(authorizedUntilMs) ? authorizedUntilMs - Date.now() : config.viewerSessionTtlSeconds * 1000,
     );
     if (ttlMs <= 0) return res.status(410).json({ error: 'LTDS authorization has expired' });
-    const model = repository.getModel(grant.modelId);
-    if (!model || model.status !== 'ready' || !model.activeVersionId || model.activeVersionId !== grant.permissions.__versionId)
+    const modelVersionId = grant.modelVersionId || grant.permissions.__versionId;
+    const target = {
+      sessionMode: grant.sessionMode || 'published',
+      reviewAttemptId: grant.reviewAttemptId || null,
+      modelId: grant.modelId,
+      modelVersionId,
+      expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+      revokedAt: null,
+    };
+    const model = target.sessionMode === 'review'
+      ? repository.getModelVersion(target.modelId, target.modelVersionId)
+      : repository.getModel(target.modelId);
+    const targetLive = target.sessionMode === 'review'
+      ? repository.viewerSessionLive(target)
+      : model?.status === 'ready' && model.activeVersionId === target.modelVersionId;
+    if (!model || !targetLive)
       return res.status(404).json({ error: 'model not found' });
     const grantedPermissions = { ...grant.permissions };
     delete grantedPermissions.__authorizedUntil;
@@ -207,9 +241,11 @@ function createApiV1(repository) {
     let session;
     const canRenew = existing
       && existing.session.modelId === grant.modelId
-      && existing.session.modelVersionId === model.activeVersionId
+      && existing.session.modelVersionId === modelVersionId
       && existing.session.subject === grant.subject
-      && existing.session.audience === grant.audience;
+      && existing.session.audience === grant.audience
+      && existing.session.sessionMode === target.sessionMode
+      && (existing.session.reviewAttemptId || null) === target.reviewAttemptId;
     if (canRenew) {
       accessToken = existing.token;
       session = repository.renewViewerSession(existing.session.id, { permissions: grantedPermissions, displayUnits: grant.displayUnits || config.defaultUnits, expiresAt });
@@ -218,7 +254,9 @@ function createApiV1(repository) {
       session = repository.createViewerSession({
         tokenHash: auth.hashToken(accessToken),
         modelId: grant.modelId,
-        modelVersionId: model.activeVersionId,
+        modelVersionId,
+        reviewAttemptId: target.reviewAttemptId,
+        sessionMode: target.sessionMode,
         subject: grant.subject,
         audience: grant.audience,
         permissions: grantedPermissions,
@@ -279,6 +317,8 @@ function createApiV1(repository) {
     )).toISOString();
     const grant = repository.createSessionGrant({
       modelId: model.id,
+      modelVersionId: model.activeVersionId,
+      sessionMode: 'published',
       subject: body.subject,
       audience: body.audience,
       permissions: {

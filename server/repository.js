@@ -454,16 +454,16 @@ class ViewerRepository {
     ).run(timestamp, timestamp, id);
   }
 
-  createSessionGrant({ modelId, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+  createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     this.pruneAuthState();
     const id = crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO session_grants(
-      id,model_id,subject,audience,permissions_json,display_units,expires_at,created_at
-    ) VALUES (?,?,?,?,?,?,?,?)`).run(
-      id, modelId, subject, audience, JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp,
+      id,model_id,model_version_id,review_attempt_id,session_mode,subject,audience,permissions_json,display_units,expires_at,created_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience, JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp,
     );
-    return { id, modelId, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
+    return { id, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience, permissions, displayUnits, expiresAt, createdAt: timestamp };
   }
 
   redeemSessionGrant(id, at = Date.now()) {
@@ -478,6 +478,9 @@ class ViewerRepository {
       return {
         id: row.id,
         modelId: row.model_id,
+        modelVersionId: row.model_version_id,
+        reviewAttemptId: row.review_attempt_id,
+        sessionMode: row.session_mode || 'published',
         subject: row.subject,
         audience: row.audience,
         permissions: parseJson(row.permissions_json, {}),
@@ -496,6 +499,8 @@ class ViewerRepository {
       modelVersionId: row.model_version_id,
       subject: row.subject,
       audience: row.audience,
+      sessionMode: row.session_mode || 'published',
+      reviewAttemptId: row.review_attempt_id,
       permissions: parseJson(row.permissions_json, {}),
       displayUnits: row.display_units,
       expiresAt: row.expires_at,
@@ -505,13 +510,13 @@ class ViewerRepository {
     };
   }
 
-  createViewerSession({ tokenHash, modelId, modelVersionId, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
+  createViewerSession({ tokenHash, modelId, modelVersionId, reviewAttemptId = null, sessionMode = 'published', subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     const id = crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO viewer_sessions(
-      id,token_hash,model_id,model_version_id,subject,audience,permissions_json,display_units,expires_at,created_at,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
-      id, tokenHash, modelId, modelVersionId, subject, audience,
+      id,token_hash,model_id,model_version_id,review_attempt_id,session_mode,subject,audience,permissions_json,display_units,expires_at,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      id, tokenHash, modelId, modelVersionId, reviewAttemptId, sessionMode, subject, audience,
       JSON.stringify(permissions || {}), displayUnits, expiresAt, timestamp, timestamp,
     );
     return this.getViewerSessionByHash(tokenHash);
@@ -522,7 +527,29 @@ class ViewerRepository {
   }
 
   viewerSessionLive(session, at = Date.now()) {
-    return Boolean(session && !session.revokedAt && Date.parse(session.expiresAt) > at);
+    if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
+    if (session.sessionMode !== 'review') return true;
+    const attempt = this.database.prepare(`SELECT a.status,a.result_model_id,a.result_model_version_id,o.status AS output_status
+      FROM processing_attempts a
+      JOIN model_outputs o ON o.id=a.result_model_version_id AND o.attempt_id=a.id AND o.model_id=a.result_model_id
+      JOIN model_versions v ON v.id=a.result_model_version_id AND v.model_id=a.result_model_id
+      WHERE a.id=?`).get(session.reviewAttemptId);
+    return Boolean(attempt
+      && attempt.status === 'ready_for_review'
+      && attempt.output_status === 'ready'
+      && attempt.result_model_id === session.modelId
+      && attempt.result_model_version_id === session.modelVersionId);
+  }
+
+  revokeReviewSessions({ attemptId, subject }) {
+    const timestamp = now();
+    return this.transaction(() => {
+      const grants = this.database.prepare(`DELETE FROM session_grants
+        WHERE session_mode='review' AND review_attempt_id=? AND subject=?`).run(attemptId, subject).changes;
+      const sessions = this.database.prepare(`UPDATE viewer_sessions SET revoked_at=COALESCE(revoked_at,?),updated_at=?
+        WHERE session_mode='review' AND review_attempt_id=? AND subject=? AND revoked_at IS NULL`).run(timestamp, timestamp, attemptId, subject).changes;
+      return { grants, sessions };
+    });
   }
 
   renewViewerSession(id, { permissions, displayUnits = 'imperial', expiresAt }) {

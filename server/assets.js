@@ -14,6 +14,7 @@ const { isAdminRequest } = require('./adminAuth');
 const { SHARE_COOKIE } = require('./shareApi');
 const { VIEWER_COOKIE } = require('./apiV1');
 const { config } = require('./config');
+const { publicDerivativeKind } = require('./processingSecurity');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const router = express.Router();
@@ -117,12 +118,12 @@ function resolveProject(projectId, rootKey) {
 // A scoped Viewer capability is authorization for one published model version,
 // not for an entire storage mount. Metadata files for EPT and 3D Tiles are
 // roots for their relative child requests; every other asset is a single file.
-function publishedAssetMatch(model, rootKey, relPath) {
+function publishedAssetMatch(model, rootKey, relPath, { review = false } = {}) {
   if (!model?.activeVersion || model.status !== 'ready') return false;
   const requested = String(relPath || '').replaceAll('\\', '/');
   const hierarchical = new Set(['ept', 'tiles']);
   return model.activeVersion.assets.find((asset) => {
-    if (!asset.published || asset.rootKey !== rootKey) return false;
+    if ((review ? !publicDerivativeKind(asset.kind) : !asset.published) || asset.rootKey !== rootKey) return false;
     const published = String(asset.relativePath || '').replaceAll('\\', '/');
     if (requested === published) return true;
     if (!hierarchical.has(asset.kind)) return false;
@@ -137,17 +138,21 @@ function requestedRange(header,size){const match=/^bytes=(\d*)-(\d*)$/.exec(Stri
 async function verifyChunks(filePath,chunks,range,totalSize){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(!range){let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}const handle=await fs.promises.open(filePath,'r');try{for(const chunk of selected){const buffer=Buffer.allocUnsafe(chunk.byteSize),{bytesRead}=await handle.read(buffer,0,chunk.byteSize,chunk.byteOffset);if(bytesRead!==chunk.byteSize||crypto.createHash('sha256').update(buffer.subarray(0,bytesRead)).digest('hex')!==chunk.sha256)return false;}return true;}finally{await handle.close();}}
 async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=fs.statSync(abs);if(stat.size!==expected.byteSize)return false;const chunks=repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[];if(chunks.length)return verifyChunks(abs,chunks,requestedRange(rangeHeader,stat.size),stat.size);return await sha256File(abs)===expected.sha256;}
 
-async function pathTokenAuthorized(req, projectId) {
+async function pathTokenAuthorization(req, projectId) {
   if (!canonicalRepository) return false;
   const requestedModelId = canonicalRepository.resolveModelId(projectId);
   if (!requestedModelId) return false;
   const viewer = canonicalRepository.getViewerSessionByHash(auth.hashToken(req.params.token));
   if (canonicalRepository.viewerSessionLive(viewer)) {
-    const model = canonicalRepository.getModel(requestedModelId);
-    return viewer.permissions?.view !== false
+    const review = viewer.sessionMode === 'review';
+    const model = review
+      ? canonicalRepository.getModelVersion(requestedModelId, viewer.modelVersionId)
+      : canonicalRepository.getModel(requestedModelId);
+    const allowed = viewer.permissions?.view !== false
       && viewer.modelId === requestedModelId
       && model?.status === 'ready'
-      && model.activeVersionId === viewer.modelVersionId;
+      && (review ? model.activeVersion?.id === viewer.modelVersionId : model.activeVersionId === viewer.modelVersionId);
+    return allowed ? { model, review } : false;
   }
   const payload = auth.verify(req.params.token);
   if (!payload) return false;
@@ -155,15 +160,16 @@ async function pathTokenAuthorized(req, projectId) {
     if (payload.modelId) {
       const share = canonicalRepository.getPublicShare(payload.shareId);
       const model = canonicalRepository.getModel(requestedModelId);
-      return payload.modelId === requestedModelId
+      const allowed = payload.modelId === requestedModelId
         && canonicalRepository.publicShareLive(share)
         && await sourceAuthorizationValidator.allows(share)
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
+      return allowed ? { model, review: false } : false;
     }
     const share = shareStore.getById(payload.shareId);
-    return shareStore.isLive(share) && share.viewerProjectId === projectId;
+    return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false } : false;
   }
   return false;
 }
@@ -188,13 +194,16 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res) {
-  const { project, rootPath } = resolveProject(req.params.id, req.params.root);
+async function sendAsset(req, res, authorizedModel = null, { review = false } = {}) {
+  const resolved = authorizedModel
+    ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
+    : resolveProject(req.params.id, req.params.root);
+  const { project, rootPath } = resolved;
   if (!project) return res.status(404).json({ error: 'unknown project' });
   if (!rootPath) return res.status(404).json({ error: 'unknown asset root' });
 
   const rel = req.params[0] || '';
-  const publishedAsset = project.activeVersion ? publishedAssetMatch(project, req.params.root, rel) : null;
+  const publishedAsset = project.activeVersion ? publishedAssetMatch(project, req.params.root, rel, { review }) : null;
   if (project.activeVersion && !publishedAsset) {
     return res.status(404).json({ error: 'asset not found' });
   }
@@ -237,8 +246,9 @@ router.get('/assets/:id/:root/*', async (req, res, next) => {
 // children inherit this path prefix automatically.
 router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
   if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
-  if (!await pathTokenAuthorized(req, req.params.id)) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res).catch(next);
+  const authorization = await pathTokenAuthorization(req, req.params.id);
+  if (!authorization) return res.status(403).json({ error: 'not authorized' });
+  return sendAsset(req, res, authorization.model, { review: authorization.review }).catch(next);
 });
 
 module.exports = router;

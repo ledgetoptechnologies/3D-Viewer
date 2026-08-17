@@ -5,6 +5,7 @@ const { sanitizeLogMessage } = require('./processingSecurity');
 const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
 
 function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{let absolute=null;try{absolute=storage.resolve(item.rootKey,item.relativePath,{mustExist:true});}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}if(absolute)storage.removeAdoptedSource(absolute);processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch{/* durable journal retries during maintenance */}}return cleaned;}
+function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
 
 function manifestHash(files) {
   const canonical = files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 }));
@@ -130,16 +131,17 @@ async function processOneDatasetOperation(deps, owner) {
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
     if (lostLease || !deps.processing.completeDatasetOperation(operation.id, owner, result))
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
-    if(operation.operation_type==='catalog_map')reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);
+    if(operation.operation_type==='catalog_map'){reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);}
   } catch (error) {
     if(operation.operation_type==='catalog_map'){
       try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
     }
     deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
+    if(operation.operation_type==='catalog_map')reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);
   } finally {
     clearInterval(timer);
   }
   return true;
 }
 
-module.exports = { manifestHash, processOneDatasetOperation, reconcileCatalogSourceCleanups };
+module.exports = { manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };

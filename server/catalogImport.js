@@ -115,7 +115,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   if (!candidate) throw Object.assign(new Error('catalog candidate is unavailable'), { code: 'candidate_unavailable' });
   if(candidate.sourceFingerprint!==payload.sourceFingerprint)throw Object.assign(new Error('catalog source changed after mapping approval'),{code:'catalog_source_changed'});
   const approvedFingerprint=payload.sourceFingerprint;
-  if (candidate.mapping && candidate.state === 'mapped') return {project:processing.getProject(candidate.mapping.projectId),task:processing.getTask(candidate.mapping.taskId),attempt:processing.getAttempt(candidate.mapping.attemptId),model:repository.getModelVersion(candidate.mapping.modelId,candidate.mapping.modelVersionId),candidate};
+  if (candidate.mapping && candidate.state === 'mapped') { processing.clearCatalogAdoptionIntent(operation.id);return {project:processing.getProject(candidate.mapping.projectId),task:processing.getTask(candidate.mapping.taskId),attempt:processing.getAttempt(candidate.mapping.attemptId),model:repository.getModelVersion(candidate.mapping.modelId,candidate.mapping.modelVersionId),candidate}; }
   if (candidate.provider === 'webodm' && request.storageMode !== 'external_reference') throw Object.assign(new Error('WebODM media is reference-only'), { code: 'invalid_storage_mode' });
 
   let project = processing.getProject(request.projectId || ids.projectId);
@@ -126,6 +126,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   let sourceRootKey = candidate.sourceRootKey, sourceRelativePath = candidate.sourceRelativePath;
   if (!dataset) dataset = processing.createDataset({id:ids.datasetId,projectId:project.id,displayName:`${request.taskDisplayName} source`,sourceType:candidate.provider,storageMode:request.storageMode,rootKey:request.storageMode==='external_reference'?`${sourceRootKey}@${ids.datasetId}`:'datasets',relativePath:request.storageMode==='external_reference'?sourceRelativePath:ids.datasetId,status:'finalizing',createdBy:operation.subject,metadata:{catalogCandidateId:candidate.id,catalogImportOperationId:operation.id,externalProjectId:candidate.externalProjectId,externalTaskId:candidate.externalTaskId,sourceRootKey,sourceRelativePath}});
   if (dataset.status !== 'finalized') {
+    if(request.storageMode==='adopted'&&!processing.setCatalogAdoptionIntent(operation.id,operation.lease_owner,{rootKey:sourceRootKey,relativePath:sourceRelativePath,datasetRelative:ids.datasetId}))throw Object.assign(new Error('catalog import lease was lost before adoption was journaled'),{code:'operation_lease_lost'});
     const adopted = await storage.adoptImport(sourceRootKey, sourceRelativePath, ids.datasetId, {externalReference:request.storageMode==='external_reference',expectedFingerprint:approvedFingerprint,onProgress:(value)=>progress(0.05+value*0.5)});
     if(adopted.sourceToRemove&&!processing.setCatalogSourceCleanup(operation.id,operation.lease_owner,{rootKey:candidate.sourceRootKey,relativePath:candidate.sourceRelativePath}))throw Object.assign(new Error('catalog import lease was lost before source cleanup was journaled'),{code:'operation_lease_lost'});
     const files = adopted.scan.files;
@@ -147,6 +148,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   processing.setAttemptResult(attempt.id,model.id,ids.versionId);
   processing.registerModelOutput({versionId:ids.versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:request.storageMode==='external_reference'?`${assetRootKey}@${ids.versionId}`:assetRootKey,relativePath:sourceRelativePath,storageMode:request.storageMode,byteSize:dataset.byteSize,assetCount:assets.length});
   const mapped=processing.markCatalogCandidateMapped(candidate.id,{projectId:project.id,taskId:task.id,datasetId:dataset.id,attemptId:attempt.id,modelId:model.id,modelVersionId:ids.versionId},approvedFingerprint);if(!mapped)throw Object.assign(new Error('catalog source changed while mapping'),{code:'catalog_source_changed'});
+  if(request.storageMode==='adopted')processing.clearCatalogAdoptionIntent(operation.id);
   await progress(0.98);
   return {project,task:processing.getTask(task.id),attempt:processing.getAttempt(attempt.id),model:repository.getModelVersion(model.id,ids.versionId),candidate:mapped};
 }
