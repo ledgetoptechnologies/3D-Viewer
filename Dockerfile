@@ -48,18 +48,18 @@ RUN npx vite build
 FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+RUN groupmod --gid 568 node \
+    && usermod --uid 568 --gid 568 node
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
 COPY --from=build /app/dist ./dist
-RUN mkdir -p /app/data /app/datasets /app/models /app/cache /app/trash \
-      /imports/datasets /imports/terra \
-    && chown -R node:node /app/data /app/datasets /app/models /app/cache \
-      /app/trash /imports/datasets /imports/terra \
-    && chmod 0555 /app/scripts/container-entrypoint.sh
+RUN mkdir -p /app/storage/data /app/storage/datasets /app/storage/models \
+      /app/storage/cache /app/storage/trash \
+      /app/storage/imports/datasets /app/storage/imports/terra \
+    && chown -R 568:568 /app/storage
 
 EXPOSE 8088
-USER root
-ENTRYPOINT ["/app/scripts/container-entrypoint.sh"]
+USER 568:568
 CMD ["node", "server/index.js"]

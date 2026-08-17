@@ -38,21 +38,18 @@ already-published viewing.
 
 ## Running with Docker (production)
 
-1. Create the fixed TrueNAS parent/config paths. The container now mirrors
-   Project Alpha's TrueNAS bootstrap: it creates or repairs the exact writable
-   mount roots while privileged, then permanently drops to the configured
-   non-root UID/GID before Node starts. A named TrueNAS host user for UID 1000
-   is not required:
+1. Create only the fixed TrueNAS configuration path:
    ```bash
    mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Config
    chmod 700 /mnt/Plugins/App_Data/Model-Viewer/Config
    ```
 
-   Keep `Datasets`, `Models`, and `Trash` as ordinary directories in the same
-   parent ZFS dataset. Do not create them as separate ZFS child datasets:
-   crash-safe trash/restore uses atomic renames and production readiness fails
-   when those roots have different filesystem device IDs. The bootstrap never
-   changes the read-only WebODM Media or Derivatives sources.
+   Application data uses the fixed Docker-managed volume
+   `ltds-viewer-storage`. Docker creates it automatically on first deployment
+   and initializes its `data`, `datasets`, `models`, `cache`, `trash`, and
+   import directories from the image. This avoids TrueNAS host-path ACL and
+   startup-`chown` failures, while keeping every crash-safe rename on one
+   filesystem. Do not delete this volume during an image update or app rename.
 2. Copy `.env.example` to the persistent configuration path, restrict it, and
    set independent generated secrets:
 
@@ -70,7 +67,7 @@ already-published viewing.
    disabled by default, so credentials are not required for direct read-only
    media imports or the processing platform. Configure the dedicated WebODM
    API user only if `WEBODM_ENABLED=true`. The production Viewer/Ops/client
-   hostnames and TrueNAS mount paths already have safe defaults in
+   hostnames and read-only TrueNAS source paths already have safe defaults in
    `docker-compose.yml`. Back up `Config/viewer.env` securely with the database
    and never copy its populated contents into this repository or logs.
 3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
@@ -79,7 +76,7 @@ already-published viewing.
    run `docker compose --env-file "$VIEWER_ENV" up -d`; this intentionally does not start the profiled
    worker. To activate processing, set `PROCESSING_PLATFORM_ENABLED=true`, the
    exact NodeODM/ClusterODM `PROCESSING_PROVIDER_ORIGINS`,
-   `PROCESSING_PROVIDER_TOKENS_JSON`, and
+   `PROVIDER_CREDENTIALS_KEY`, and
    matching `VIEWER_EVENT_URL`/key/secret in `Config/viewer.env`, then run:
 
    ```bash
@@ -96,12 +93,13 @@ already-published viewing.
    local source builds remain explicit with `docker build` and cannot silently
    replace the reviewed production image.
 
-   `PROCESSING_PROVIDER_ORIGINS` must name the actual NodeODM or ClusterODM
-   service origin, not the WebODM application URL. For a token-protected
-   provider, create it disabled (or preassign its stable UUID), add that UUID
-   and token to `PROCESSING_PROVIDER_TOKENS_JSON`, restart the API and worker,
-   then probe capabilities and enable it in Ops. This order keeps provider
-   credentials out of the catalog and avoids a probe that cannot authenticate.
+   `PROCESSING_PROVIDER_ORIGINS` contains any fixed exact NodeODM or ClusterODM
+   origins; it must not name the WebODM application. The one-time
+   `PROCESSING_PROVIDER_ALLOWED_CIDRS` boundary permits IP-literal nodes on the
+   two reviewed private LANs. After startup, create a provider and securely
+   store or rotate its token in Ops, then probe capabilities and enable it.
+   Credentials are encrypted in the Viewer database and never returned to the
+   browser; no environment edit or container restart is needed for each node.
 4. Compose publishes `viewer-api` directly on the configured LAN bind address
    and port `8088`; it does not run Nginx. Route Cloudflare/cloudflared through
    the separately managed Nginx, then proxy to that LAN address. Adapt
@@ -122,18 +120,14 @@ database and required mounts. The authenticated
 `GET /api/v1/processing/ready` separately reports the durable worker and
 lifecycle journal, so provider failure never makes published viewing unhealthy.
 
-The API and worker start with a narrowly capability-bounded entrypoint that
-prepares only the seven fixed writable mount roots. It rejects symlink/special
-mount roots, then uses `setpriv` to become the configured non-root UID/GID
-(`1000:1000` by default) and clear its capability bounding set before Node
-starts. The application therefore runs unprivileged even though TrueNAS does
-not have a named UID-1000 host account. Privilege escalation remains disabled,
-process creation is limited, and the container root is read-only. The explicit Data, Datasets, Models, Cache, Trash,
-and two Import drop-directory mounts are persistent and writable; `/tmp` is
-bounded in-memory storage. The WebODM Media and legacy Derivatives mounts stay
-read-only. An `adopted` import consumes its verified source from the drop
-directory after durable promotion, while `external_reference` never moves or
-deletes the external source bytes.
+The API and worker run directly as the TrueNAS Apps service identity
+`568:568`; there is no privileged entrypoint or runtime ownership repair.
+Every Linux capability is dropped, privilege escalation is disabled, process
+creation is limited, and the container root is read-only. The fixed
+`ltds-viewer-storage` volume is persistent and writable; `/tmp` is bounded
+in-memory storage. WebODM Media and legacy Derivatives remain read-only host
+mounts. An `adopted` import consumes its verified source after durable
+promotion, while `external_reference` never moves or deletes external bytes.
 The Viewer API is the only Compose service published on port `8088`; the worker
 has no published port. Container JSON logs rotate at 10 MiB with three files.
 `X_ACCEL_REDIRECT_PREFIX` is empty, so the application performs authorized,
@@ -338,8 +332,8 @@ empty.
 ## Known limitations (by design, for this iteration)
 
 - **Processing is opt-in.** `PROCESSING_PLATFORM_ENABLED` defaults to false.
-  Enabling it requires the durable worker, writable Datasets/Models/Cache/Trash
-  mounts, disk reserve, and an explicitly allowlisted NodeODM or ClusterODM
+  Enabling it requires the durable worker, the writable managed storage
+  volume, disk reserve, and an explicitly allowlisted NodeODM or ClusterODM
   provider. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines; other
   compatible versions are capability-probed and warned, not silently trusted.
 - **Production derivatives come from ODM's native stages.** Provider

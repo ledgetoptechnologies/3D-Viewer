@@ -4,11 +4,10 @@ x-runtime: &runtime
   restart: unless-stopped
   init: true
   read_only: true
+  # TrueNAS SCALE Apps service identity. Storage is a Docker-managed named
+  # volume initialized with this ownership by the image; no startup chown.
+  user: "568:568"
   cap_drop: [ALL]
-  # The root entrypoint uses only these transient capabilities to prepare
-  # TrueNAS bind mounts, then setpriv drops UID/GID and the full bounding set
-  # before Node starts. The application never runs as root.
-  cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETPCAP]
   security_opt: [no-new-privileges:true]
   pids_limit: 256
   env_file:
@@ -18,29 +17,22 @@ x-runtime: &runtime
   logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
   environment: &runtime-env
     PORT: 8088
-    VIEWER_RUNTIME_UID: ${VIEWER_RUNTIME_UID:-1000}
-    VIEWER_RUNTIME_GID: ${VIEWER_RUNTIME_GID:-1000}
     EMERGENCY_ADMIN_ENABLED: "false"
     WEBODM_ENABLED: "false"
     LOCAL_DERIVATIVES_ENABLED: "false"
-    DATABASE_PATH: /app/data/viewer.sqlite
-    DATASETS_MOUNT: /app/datasets
-    MODELS_MOUNT: /app/models
-    CACHE_MOUNT: /app/cache
-    TRASH_MOUNT: /app/trash
-    DATASET_IMPORT_MOUNT: /imports/datasets
-    TERRA_IMPORT_MOUNT: /imports/terra
+    DATA_DIR: /app/storage/data
+    DATABASE_PATH: /app/storage/data/viewer.sqlite
+    DATASETS_MOUNT: /app/storage/datasets
+    MODELS_MOUNT: /app/storage/models
+    CACHE_MOUNT: /app/storage/cache
+    TRASH_MOUNT: /app/storage/trash
+    DATASET_IMPORT_MOUNT: /app/storage/imports/datasets
+    TERRA_IMPORT_MOUNT: /app/storage/imports/terra
     WEBODM_MEDIA_MOUNT: /imports/webodm
     DERIVATIVES_MOUNT: /imports/legacy-derivatives
     X_ACCEL_REDIRECT_PREFIX: ""
   volumes: &runtime-volumes
-    - /mnt/Plugins/App_Data/Model-Viewer/Data:/app/data
-    - /mnt/Plugins/App_Data/Model-Viewer/Datasets:/app/datasets
-    - /mnt/Plugins/App_Data/Model-Viewer/Models:/app/models
-    - /mnt/Plugins/App_Data/Model-Viewer/Cache:/app/cache
-    - /mnt/Plugins/App_Data/Model-Viewer/Trash:/app/trash
-    - /mnt/Plugins/App_Data/Model-Viewer/Import/Datasets:/imports/datasets
-    - /mnt/Plugins/App_Data/Model-Viewer/Import/Terra:/imports/terra
+    - viewer_storage:/app/storage
     - /mnt/Plugins/App_Data/WebODM/Media:/imports/webodm:ro
     - /mnt/Plugins/App_Data/Model-Viewer/Derivatives:/imports/legacy-derivatives:ro
 
@@ -49,7 +41,7 @@ services:
     <<: *runtime
     ports: ["${VIEWER_BIND_ADDRESS:-192.168.50.80}:${VIEWER_PORT:-8088}:8088"]
     healthcheck:
-      test: [CMD-SHELL, 'exec setpriv --reuid="$${VIEWER_RUNTIME_UID:-1000}" --regid="$${VIEWER_RUNTIME_GID:-1000}" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- node scripts/container-healthcheck.js']
+      test: [CMD, node, scripts/container-healthcheck.js]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -60,8 +52,14 @@ services:
     profiles: [processing]
     command: [node, server/worker.js]
     healthcheck:
-      test: [CMD-SHELL, 'exec setpriv --reuid="$${VIEWER_RUNTIME_UID:-1000}" --regid="$${VIEWER_RUNTIME_GID:-1000}" --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- node -e ''const {config}=require("./server/config");const {openDatabase}=require("./server/database");const db=openDatabase(config.databasePath);const row=db.prepare("SELECT value FROM app_state WHERE key=\"processing_worker_heartbeat\"").get();db.close();const value=row&&JSON.parse(row.value);if(!value||Date.parse(value.at)<=Date.now()-30000)process.exit(1)''']
+      test: [CMD, node, -e, "const {config}=require('./server/config');const {openDatabase}=require('./server/database');const db=openDatabase(config.databasePath);const row=db.prepare(\"SELECT value FROM app_state WHERE key='processing_worker_heartbeat'\").get();db.close();const value=row&&JSON.parse(row.value);if(!value||Date.parse(value.at)<=Date.now()-30000)process.exit(1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+volumes:
+  viewer_storage:
+    # Fixed global name keeps the volume stable across TrueNAS app/project
+    # renames and mirrors Project Alpha's Docker-managed persistence model.
+    name: ltds-viewer-storage

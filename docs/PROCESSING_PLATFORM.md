@@ -6,19 +6,36 @@ The processing platform is feature-flagged and off by default. Published Viewer 
 
 Production Compose publishes `viewer-api` directly on the configured LAN bind address and port `8088`; it does not run Nginx. The worker shares the pinned application image but has no published port. Cloudflared and external Nginx are separately managed. Nginx forwards the exact Viewer host; optional proxy-secret/IP enforcement can be enabled later as a coordinated hardening step. The application itself streams authorized byte ranges because `X_ACCEL_REDIRECT_PREFIX` is empty.
 
-Host mounts are fixed under `/mnt/Plugins/App_Data/Model-Viewer`: `Config`, `Data`, `Datasets`, `Models`, `Cache`, `Import/Datasets`, and `Import/Terra`. Runtime settings and secrets live only in `Config/viewer.env` (directory mode `700`, file mode `600`) and are shared by API and worker through Compose `env_file`. WebODM media is mounted read-only from `/mnt/Plugins/App_Data/WebODM/Media`. WebODM API discovery is disabled by default and does not require credentials. Release-one WebODM imports are read-only external references; source media is never moved or deleted.
+Runtime settings and secrets live only in the host path
+`/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env` (directory mode `700`,
+file mode `600`) and are shared by API and worker through Compose `env_file`.
+All managed application bytes live in the fixed Docker volume
+`ltds-viewer-storage`, mounted at `/app/storage`. Docker creates the volume on
+first deployment and copies the image's pre-owned directory skeleton into it,
+so no host-path `chown` or privileged bootstrap is needed. The API and worker
+run as the TrueNAS Apps service identity `568:568`, with all capabilities
+dropped. The one volume keeps `datasets`, `models`, and `trash` on the same
+filesystem for journaled atomic renames. Preserve and back up the volume across
+image updates or app/project renames.
 
-TrueNAS does not need a named host account for Viewer UID 1000. As in Project
-Alpha, each service starts with a narrowly bounded root bootstrap that creates
-or repairs only its fixed application-owned writable mount roots. It then
-permanently drops to `VIEWER_RUNTIME_UID`/`VIEWER_RUNTIME_GID` (default
-`1000:1000`) and clears all capabilities before executing Node. It never
-changes the read-only WebODM or legacy-derivative roots. Keep `Datasets`,
-`Models`, and `Trash` as ordinary directories on one parent ZFS dataset rather
-than separate ZFS child datasets; lifecycle journal renames must remain on one
-filesystem.
+WebODM media is mounted read-only from
+`/mnt/Plugins/App_Data/WebODM/Media`; legacy derivatives are also read-only.
+WebODM API discovery is disabled by default and does not require credentials.
+Release-one WebODM imports are external references; source media is never
+moved or deleted.
 
-Set `PROCESSING_PLATFORM_ENABLED=true`, configure exact provider origins in `PROCESSING_PROVIDER_ORIGINS`, and map provider IDs to tokens with `PROCESSING_PROVIDER_TOKENS_JSON`. Start with `docker compose --env-file /mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env --profile processing up -d`; both API and worker must read the true flag from that file. Provider endpoints cannot select arbitrary environment variable names and redirects are rejected. Enable a provider only after its capability probe confirms the required `pc-ept`, `3d-tiles`, and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines, not hard version lockouts; unknown compatible versions produce a warning.
+Set `PROCESSING_PLATFORM_ENABLED=true`, generate the one-time
+`PROVIDER_CREDENTIALS_KEY`, and configure the exact origins and/or private LAN
+boundary in `PROCESSING_PROVIDER_ORIGINS` and
+`PROCESSING_PROVIDER_ALLOWED_CIDRS`. Start with `docker compose --env-file
+/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env --profile processing up
+-d`; both API and worker must read the true flag from that file. Thereafter an
+administrator creates nodes, stores or rotates tokens, probes, and enables them
+in Ops without editing the environment or restarting containers. Provider
+credentials are encrypted at rest and are never returned. Enable a provider
+only after its capability probe confirms the required `pc-ept`, `3d-tiles`,
+and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines,
+not hard version lockouts; unknown compatible versions produce a warning.
 
 `LOCAL_DERIVATIVES_ENABLED` remains false in the stock image. The production path requests native EPT, GLB, and 3D Tiles outputs from ODM. If local derivatives are explicitly enabled, worker startup fails unless compatible Entwine and Obj2Tiles executables are present. A 3D Tiles result is publishable only after the existing LOD-v2 audit proves the full-detail frontier; otherwise the self-contained full GLB is retained as the safe fallback.
 
@@ -72,16 +89,23 @@ admin bearer permission plus `Idempotency-Key`.
 
 ## Backups and recovery
 
-Back up `Config/viewer.env` through a secret-capable backup path together with `Data/viewer.sqlite` and its `-wal` and `-shm` files, or take a SQLite online backup after `PRAGMA wal_checkpoint(PASSIVE)`. Never put the populated environment file in source control or ordinary logs. Do not copy only the main database while the API or worker is writing. Dataset/model files and the database must be captured in the same storage snapshot when possible.
+Back up `Config/viewer.env` through a secret-capable backup path together with
+the entire `ltds-viewer-storage` Docker volume, or take a SQLite online backup
+of `/app/storage/data/viewer.sqlite` after `PRAGMA wal_checkpoint(PASSIVE)` and
+then capture the matching managed bytes. Never put the populated environment
+file in source control or ordinary logs. Do not copy only the main database
+while the API or worker is writing. Dataset/model files and the database must
+be captured as one consistent backup.
 
 Before maintenance:
 
 1. Stop new processing admission in Ops and wait for active operations or attempts to settle.
 2. Stop the worker, then the API.
-3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client or take a TrueNAS atomic snapshot of Data, Datasets, Models, Cache, and Trash.
+3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client, then back up
+   the complete `ltds-viewer-storage` volume before either service restarts.
 4. Restart the API and worker. Confirm `/api/v1/health`, `/api/v1/ready`, and the authenticated `/api/v1/processing/ready` response. Processing readiness reports pending and failed lifecycle journal rows; do not resume admission while a failed row remains.
 
-Never restore only `Models` without the matching database snapshot: published asset rows contain immutable SHA-256 manifests for every GLB, EPT child, and 3D Tiles child. Serving fails closed when files are missing, added, or modified.
+Never restore only `models` without the matching database snapshot: published asset rows contain immutable SHA-256 manifests for every GLB, EPT child, and 3D Tiles child. Serving fails closed when files are missing, added, or modified.
 
 After activation, run `node scripts/production-readiness.mjs --verify-mount-options --require-processing`. This opt-in check is read-only: it verifies all processing mounts, the datasets/trash same-filesystem invariant, configured disk reserve, fresh worker heartbeat, enabled provider capability fingerprints and required native outputs, and absence of stale operation leases. It does not probe, enable, or mutate a provider.
 

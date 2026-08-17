@@ -27,10 +27,8 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /pull_policy:\s*always/);
   assert.match(compose, /read_only:\s*true/);
   assert.match(compose, /cap_drop:\s*\[ALL\]/);
-  assert.match(compose, /cap_add:\s*\[CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETPCAP\]/);
-  assert.doesNotMatch(compose, /^\s+user:/m);
-  assert.match(compose, /VIEWER_RUNTIME_UID:\s*\$\{VIEWER_RUNTIME_UID:-1000\}/);
-  assert.match(compose, /VIEWER_RUNTIME_GID:\s*\$\{VIEWER_RUNTIME_GID:-1000\}/);
+  assert.doesNotMatch(compose, /cap_add:/);
+  assert.match(compose, /user:\s*"568:568"/);
   assert.match(compose, /no-new-privileges:true/);
   assert.match(compose, /pids_limit:\s*256/);
   assert.match(compose, /\/tmp:rw,noexec,nosuid,nodev,size=256m/);
@@ -38,20 +36,25 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /max-file:\s*"3"/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/WebODM\/Media:\/imports\/webodm:ro/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Derivatives:\/imports\/legacy-derivatives:ro/);
-  assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Data:\/app\/data/);
+  assert.match(compose, /viewer_storage:\/app\/storage/);
+  assert.match(compose, /name:\s*ltds-viewer-storage/);
+  assert.doesNotMatch(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/(?:Data|Datasets|Models|Cache|Trash):/);
+  assert.match(compose, /DATA_DIR:\s*\/app\/storage\/data/);
+  assert.match(compose, /DATABASE_PATH:\s*\/app\/storage\/data\/viewer\.sqlite/);
+  assert.match(compose, /DATASETS_MOUNT:\s*\/app\/storage\/datasets/);
+  assert.match(compose, /MODELS_MOUNT:\s*\/app\/storage\/models/);
+  assert.match(compose, /TRASH_MOUNT:\s*\/app\/storage\/trash/);
   assert.match(compose, /EMERGENCY_ADMIN_ENABLED:\s+"false"/);
   assert.match(compose, /LOCAL_DERIVATIVES_ENABLED:\s+"false"/);
   assert.match(compose, /viewer-worker:[\s\S]*processing_worker_heartbeat/);
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);
   assert.doesNotMatch(compose, /^\s{2}gateway:/m);
   assert.match(compose, /viewer-api:[\s\S]*?ports:\s*\["\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088"\]/);
-  assert.match(compose, /setpriv[\s\S]*node scripts\/container-healthcheck\.js/);
+  assert.match(compose, /test:\s*\[CMD, node, scripts\/container-healthcheck\.js\]/);
   assert.doesNotMatch(compose, /ADMIN_PASSWORD:/);
   assert.doesNotMatch(compose, /SERVICE_AUTH_SECRET:|SESSION_SECRET:|VIEWER_EVENT_SECRET:|PROXY_SHARED_SECRET:/);
   assert.match(environmentTemplate, /^PROXY_SHARED_SECRET=\s*$/m);
   assert.match(environmentTemplate, /TRUST_PROXY_HOPS=1/);
-  assert.match(environmentTemplate, /^VIEWER_RUNTIME_UID=1000$/m);
-  assert.match(environmentTemplate, /^VIEWER_RUNTIME_GID=1000$/m);
   assert.match(externalNginx, /# proxy_set_header X-Viewer-Proxy-Secret \$viewer_proxy_secret/);
   assert.doesNotMatch(externalNginx.slice(externalNginx.indexOf('    location ')), /proxy_set_header/);
   assert.match(externalNginx, /proxy_set_header X-Forwarded-For \$remote_addr/);
@@ -63,23 +66,14 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(updateScript, /--profile processing/);
 });
 
-test('container entrypoint prepares only managed roots and drops privileges before exec', () => {
-  const entrypoint = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'container-entrypoint.sh'), 'utf8');
+test('runtime image is rootless as the TrueNAS Apps service identity', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
 
-  assert.match(dockerfile, /USER root/);
-  assert.match(dockerfile, /ENTRYPOINT \["\/app\/scripts\/container-entrypoint\.sh"\]/);
-  assert.match(entrypoint, /VIEWER_RUNTIME_UID:-1000/);
-  assert.match(entrypoint, /VIEWER_RUNTIME_GID:-1000/);
-  assert.match(entrypoint, /\/app\/data/);
-  assert.match(entrypoint, /\/imports\/terra/);
-  assert.doesNotMatch(entrypoint, /\/imports\/webodm|\/imports\/legacy-derivatives/);
-  assert.match(entrypoint, /-L "\$managed_root"/);
-  assert.match(entrypoint, /find \/app\/data -xdev -mindepth 1 -maxdepth 1/);
-  assert.match(entrypoint, /exec setpriv/);
-  assert.match(entrypoint, /--reuid="\$runtime_uid"/);
-  assert.match(entrypoint, /--bounding-set=-all/);
-  assert.match(entrypoint, /-- "\$@"/);
+  assert.match(dockerfile, /groupmod --gid 568 node/);
+  assert.match(dockerfile, /usermod --uid 568 --gid 568 node/);
+  assert.match(dockerfile, /chown -R 568:568 \/app\/storage/);
+  assert.match(dockerfile, /USER 568:568/);
+  assert.doesNotMatch(dockerfile, /ENTRYPOINT|USER root/);
 });
 
 async function unusedPort() {
