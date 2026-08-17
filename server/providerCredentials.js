@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 
 const ALGORITHM = 'aes-256-gcm';
 const VERSION = 1;
+const IDEMPOTENCY_CONTEXT = Buffer.from('ltds-viewer-provider-idempotency:v1', 'utf8');
 
 function credentialError(code = 'provider_credential_unavailable') {
   return Object.assign(new Error('processing provider credential is unavailable'), { code });
@@ -50,6 +51,16 @@ class ProviderCredentials {
     const key = this.keys.get(this.activeKeyId);
     if (!key) throw credentialError();
     return key;
+  }
+
+  idempotencyFingerprint(method, requestPath, rawBody = Buffer.alloc(0)) {
+    // Domain-separate the database-visible fingerprint from the AES key. A
+    // database-only attacker cannot use it as an oracle for weak token bodies.
+    const key = crypto.hkdfSync('sha256', this.activeKey(), Buffer.alloc(0), IDEMPOTENCY_CONTEXT, 32);
+    return crypto.createHmac('sha256', key)
+      .update(`${method}\n${requestPath}\n`, 'utf8')
+      .update(rawBody)
+      .digest('hex');
   }
 
   seal(providerId, token) {

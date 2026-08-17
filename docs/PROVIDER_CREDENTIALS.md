@@ -14,9 +14,17 @@ The processing platform fails configuration validation when it has no valid acti
 
 Generate a hexadecimal key with `openssl rand -hex 32`. Store it in the persistent Viewer environment file with permissions limited to the container operator.
 
+## Provider network admission
+
+Provider endpoints remain fail-closed until an operator establishes a one-time network boundary. `PROCESSING_PROVIDER_ALLOWED_CIDRS` is a comma-separated list used only for IP-literal endpoints; for example, `192.168.50.0/24,192.168.10.0/24`. After those LANs are admitted, administrators can add and rotate processing nodes entirely through the UI. `PROCESSING_PROVIDER_ORIGINS` remains available for individually approved exact origins, including DNS origins.
+
+Every endpoint must be a bare HTTP(S) origin. User information, paths, queries, and fragments are rejected. CIDRs never authorize DNS names. Loopback, link-local, multicast, unspecified, metadata, documentation, benchmarking, and reserved address ranges remain blocked even when a broad CIDR or exact IP origin would match. Provider HTTP redirects are rejected. When neither an exact origin nor a CIDR authorizes an endpoint, provider creation and endpoint changes fail closed.
+
 ## API lifecycle
 
 All mutations require a Viewer admin bearer session with `viewer.providers.write` and an `Idempotency-Key` header.
+
+Provider mutation idempotency fingerprints are keyed with a domain-separated derivative of the installation credential key. This preserves replay/conflict behavior without leaving a database-only verifier for low-entropy credential bodies.
 
 - `POST /api/v1/processing/providers` accepts the provider metadata and optional `credential: { "token": "..." }`. Creation always leaves the provider disabled, even if the request includes `enabled: true`.
 - `PUT /api/v1/processing/providers/:id/credential` with `{ "token": "..." }` installs or rotates a credential.

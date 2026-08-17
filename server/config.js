@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { parseTrustedProxyAddresses } = require('./proxyGate');
 const { decodeKey } = require('./providerCredentials');
+const { parseProviderCidrs } = require('./providerAdmission');
 
 function bool(value, fallback) {
   if (value === undefined || value === '') return fallback;
@@ -66,6 +67,10 @@ let processingProviderTokensError = null;
 try { processingProviderTokens = JSON.parse(process.env.PROCESSING_PROVIDER_TOKENS_JSON || '{}'); if(!processingProviderTokens||Array.isArray(processingProviderTokens)||typeof processingProviderTokens!=='object'||Object.values(processingProviderTokens).some((v)=>typeof v!=='string'))throw new Error('must be a JSON object of string values'); }
 catch (error) { processingProviderTokens = {}; processingProviderTokensError=error.message; }
 const providerCredentialsKeyId = String(process.env.PROVIDER_CREDENTIALS_KEY_ID || 'provider-v1').trim();
+let processingProviderAllowedCidrs = [];
+let processingProviderAllowedCidrsError = null;
+try { processingProviderAllowedCidrs = parseProviderCidrs(process.env.PROCESSING_PROVIDER_ALLOWED_CIDRS || ''); }
+catch (error) { processingProviderAllowedCidrsError = error.message; }
 let providerCredentialsKeys = {};
 let providerCredentialsKeysError = null;
 try {
@@ -158,6 +163,8 @@ const config = {
   processingLogRetentionDays: Math.min(positiveInteger(process.env.PROCESSING_LOG_RETENTION_DAYS, 30), 365),
   processingProviderTransferTimeoutMs: Math.min(positiveInteger(process.env.PROCESSING_PROVIDER_TRANSFER_TIMEOUT_MS, 6*3600_000), 24*3600_000),
   processingProviderOrigins: csv(process.env.PROCESSING_PROVIDER_ORIGINS),
+  processingProviderAllowedCidrs,
+  processingProviderAllowedCidrsError,
   processingProviderTokens,
   providerCredentialsKeyId,
   providerCredentialsKeys,
@@ -222,6 +229,8 @@ function validate() {
       problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when callbacks are enabled');
     if (processingProviderTokensError) problems.push(`PROCESSING_PROVIDER_TOKENS_JSON ${processingProviderTokensError}`);
     if (providerCredentialsKeysError) problems.push(`PROVIDER_CREDENTIALS_KEYS_JSON ${providerCredentialsKeysError}`);
+    if (config.processingProviderAllowedCidrsError)
+      problems.push(`PROCESSING_PROVIDER_ALLOWED_CIDRS ${config.processingProviderAllowedCidrsError}`);
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(config.providerCredentialsKeyId))
       problems.push('PROVIDER_CREDENTIALS_KEY_ID must contain only letters, numbers, dot, underscore, or hyphen');
     if (!decodeKey(config.providerCredentialsKeys[config.providerCredentialsKeyId]))

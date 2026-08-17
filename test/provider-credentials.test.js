@@ -14,6 +14,7 @@ const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { ProviderCredentials, validToken } = require('../server/providerCredentials');
+const { parseProviderCidrs } = require('../server/providerAdmission');
 const { createProcessingApi } = require('../server/processingApi');
 const { adapterFor } = require('../server/processingWorker');
 
@@ -33,10 +34,12 @@ async function odmServer(t, { beforeInfo } = {}) {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  return { origin: `http://127.0.0.1:${server.address().port}`, seen };
+  const localOrigin = `http://127.0.0.1:${server.address().port}`;
+  const origin = `http://192.168.50.80:${server.address().port}`;
+  return { origin, seen, fetchImpl: (input, init) => fetch(String(input).replace(origin, localOrigin), init) };
 }
 
-async function fixture(t) {
+async function fixture(t, { providerFetch } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-provider-credentials-'));
   const databasePath = path.join(root, 'viewer.sqlite');
   const database = openDatabase(databasePath);
@@ -48,7 +51,7 @@ async function fixture(t) {
   const storage = {};
   const app = express();
   app.use(express.json({ verify(req, _res, body) { req.rawBody = Buffer.from(body); } }));
-  app.use(createProcessingApi({ repository, processing, storage, providerCredentials: credentials }));
+  app.use(createProcessingApi({ repository, processing, storage, providerCredentials: credentials, providerFetch }));
   const server = await new Promise((resolve) => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
@@ -71,13 +74,14 @@ async function request(context, route, { method = 'GET', body, key } = {}) {
 }
 
 test('provider tokens are encrypted, private, restart-safe, probed before enable, rotatable and clearable', async (t) => {
-  const c = await fixture(t);
   const odm = await odmServer(t);
-  const oldOrigins = [...config.processingProviderOrigins];
-  config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, odm.origin);
-  t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
+  const c = await fixture(t, { providerFetch: odm.fetchImpl });
+  const oldCidrs = [...config.processingProviderAllowedCidrs];
+  config.processingProviderAllowedCidrs.splice(0, config.processingProviderAllowedCidrs.length, ...parseProviderCidrs('192.168.50.0/24'));
+  t.after(() => config.processingProviderAllowedCidrs.splice(0, config.processingProviderAllowedCidrs.length, ...oldCidrs));
 
-  const created = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-create-0002', body: { type: 'nodeodm', displayName: 'Primary ODM', endpoint: odm.origin, enabled: true, credential: { token: TOKEN } } });
+  const createBody = { type: 'nodeodm', displayName: 'Primary ODM', endpoint: odm.origin, enabled: true, credential: { token: TOKEN } };
+  const created = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-create-0002', body: createBody });
   assert.equal(created.status, 201);
   const payload = await created.json();
   assert.equal(payload.provider.enabled, false);
@@ -93,8 +97,21 @@ test('provider tokens are encrypted, private, restart-safe, probed before enable
   assert.equal(c.credentials.resolve(payload.provider.id), TOKEN, 'token bytes survive encryption exactly');
   const storedIdempotency = c.database.prepare("SELECT request_hash,response_json FROM admin_idempotency WHERE idempotency_key='provider-create-0002'").get();
   assert.match(storedIdempotency.request_hash, /^[a-f0-9]{64}$/);
+  const rawBody = Buffer.from(JSON.stringify(createBody));
+  const unkeyed = crypto.createHash('sha256').update(Buffer.concat([Buffer.from('POST\n/api/v1/processing/providers\n'), rawBody])).digest('hex');
+  assert.notEqual(storedIdempotency.request_hash, unkeyed, 'database fingerprint is not a token-enumerable raw SHA-256');
+  assert.equal(storedIdempotency.request_hash, c.credentials.idempotencyFingerprint('POST', '/api/v1/processing/providers', rawBody));
+  const unrelatedKey = new ProviderCredentials({ processing: c.processing, activeKeyId: 'provider-v1', keys: { 'provider-v1': 'ab'.repeat(32) } });
+  assert.notEqual(storedIdempotency.request_hash, unrelatedKey.idempotencyFingerprint('POST', '/api/v1/processing/providers', rawBody));
   assert.doesNotMatch(storedIdempotency.response_json, /node-token|ciphertext/i);
   assert.doesNotMatch(JSON.stringify(c.database.prepare('SELECT details_json FROM audit_events WHERE entity_id=?').all(payload.provider.id)), /node-token/i);
+  const replay = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-create-0002', body: createBody });
+  assert.equal(replay.status, 201);
+  assert.equal(replay.headers.get('idempotency-replayed'), 'true');
+  assert.equal((await replay.json()).provider.id, payload.provider.id);
+  const conflict = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-create-0002', body: { ...createBody, credential: { token: 'x' } } });
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).code, 'idempotency_conflict');
 
   const enableBeforeProbe = await request(c, `/api/v1/processing/providers/${payload.provider.id}`, { method: 'PATCH', key: 'provider-enable-0001', body: { enabled: true } });
   assert.equal(enableBeforeProbe.status, 409);
@@ -110,12 +127,8 @@ test('provider tokens are encrypted, private, restart-safe, probed before enable
   assert.equal(typeConfusion.status, 400);
   assert.equal((await typeConfusion.json()).code, 'invalid_provider_enabled');
   const endpointChanged = await request(c, `/api/v1/processing/providers/${payload.provider.id}`, { method: 'PATCH', key: 'provider-endpoint-change', body: { endpoint: `${odm.origin}/nodeodm` } });
-  assert.equal(endpointChanged.status, 200);
-  const changedProvider = (await endpointChanged.json()).provider;
-  assert.equal(changedProvider.enabled, false);
-  assert.deepEqual(changedProvider.capabilities, {});
-  assert.equal(changedProvider.lastHealth, null);
-  assert.equal(c.processing.providerProbeCurrent(payload.provider.id), false);
+  assert.equal(endpointChanged.status, 400);
+  assert.equal((await endpointChanged.json()).code, 'invalid_provider_endpoint');
 
   const restarted = new ProviderCredentials({ processing: c.processing, activeKeyId: 'provider-v2', keys: { 'provider-v1': KEY, 'provider-v2': 'a3'.repeat(32) } });
   assert.equal(restarted.resolve(payload.provider.id), TOKEN, 'key overlap decrypts credentials created before restart/rotation');
@@ -162,7 +175,7 @@ test('a concurrent credential rotation cannot certify a stale probe', async (t) 
   let infoStarted;
   const started = new Promise((resolve) => { infoStarted = resolve; });
   const odm = await odmServer(t, { beforeInfo: async () => { infoStarted();await blocked; } });
-  const c = await fixture(t);
+  const c = await fixture(t, { providerFetch: odm.fetchImpl });
   const oldOrigins = [...config.processingProviderOrigins];
   config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, odm.origin);
   t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
