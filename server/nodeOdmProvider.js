@@ -92,6 +92,12 @@ class NodeOdmProvider {
   async commit(uuid,{signal=null}={}) { return boundedJson(await this.request(`/task/new/commit/${encodeURIComponent(uuid)}`, { method:'POST' },{}, {signal})); }
   async status(uuid,{signal=null}={}) {
     const info = await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/info`,{}, {}, {signal}),1024*1024);
+    if (typeof info?.error === 'string') {
+      const error = new Error('ODM task info request failed');
+      error.code = /not found/i.test(info.error) ? 'provider_task_not_found' : 'provider_request_failed';
+      throw error;
+    }
+    if (!info || info.uuid !== uuid || !info.status || !Number.isFinite(Number(info.status.code))) throw new Error('provider returned an incompatible task response');
     return { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code),
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount };
   }
