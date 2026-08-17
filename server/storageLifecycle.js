@@ -59,9 +59,10 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
   const results=[];
   for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
     try{
-      const dataset=processing.getDataset(item.entityId);
-      if(!dataset){results.push({trashId:item.id,status:'failed',errorCode:'dataset_not_found'});continue;}
-      if(dataset.storageMode==='external_reference'){
+      const dataset=item.entityType==='dataset'?processing.getDataset(item.entityId):null;
+      const output=item.entityType==='output'?processing.getModelOutput(item.entityId):null;
+      if(!dataset&&!output){results.push({trashId:item.id,status:'failed',errorCode:'entity_not_found'});continue;}
+      if(dataset?.storageMode==='external_reference'){
         const purged=processing.markTrashPurged(item.id);
         if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
         results.push({trashId:item.id,status:'complete',externalReference:true});

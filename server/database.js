@@ -595,6 +595,206 @@ const MIGRATIONS = [
         ON storage_trash(entity_type,entity_id) WHERE permanently_deleted_at IS NULL;
     `,
   },
+  {
+    version: 10,
+    name: 'processing_resume_tags_and_output_lifecycle',
+    sql: `
+      ALTER TABLE projects ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE datasets ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE processing_attempts ADD COLUMN submission_phase TEXT NOT NULL DEFAULT 'new'
+        CHECK(submission_phase IN ('new','initializing','initialized','uploading','uploading_auxiliary','uploaded','committing','committed'));
+      ALTER TABLE processing_attempts ADD COLUMN uploaded_file_count INTEGER NOT NULL DEFAULT 0
+        CHECK(uploaded_file_count >= 0);
+      ALTER TABLE processing_attempts ADD COLUMN result_model_id TEXT REFERENCES models(id) ON DELETE SET NULL;
+      ALTER TABLE processing_attempts ADD COLUMN result_model_version_id TEXT REFERENCES model_versions(id) ON DELETE SET NULL;
+
+      CREATE TABLE model_outputs (
+        id TEXT PRIMARY KEY REFERENCES model_versions(id) ON DELETE RESTRICT,
+        model_id TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        root_key TEXT NOT NULL DEFAULT 'models' CHECK(root_key='models'),
+        relative_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('ready','published','archived','trashed')),
+        byte_size INTEGER NOT NULL DEFAULT 0 CHECK(byte_size >= 0),
+        asset_count INTEGER NOT NULL DEFAULT 0 CHECK(asset_count >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT,
+        trashed_at TEXT,
+        UNIQUE(root_key,relative_path)
+      );
+      CREATE INDEX model_outputs_page_idx ON model_outputs(created_at DESC,id DESC);
+      CREATE INDEX model_outputs_project_page_idx ON model_outputs(project_id,created_at DESC,id DESC);
+      CREATE INDEX model_outputs_task_page_idx ON model_outputs(task_id,created_at DESC,id DESC);
+      CREATE INDEX model_outputs_status_page_idx ON model_outputs(status,created_at DESC,id DESC);
+      INSERT INTO model_outputs(id,model_id,task_id,attempt_id,project_id,root_key,relative_path,status,byte_size,asset_count,created_at,updated_at)
+      SELECT v.id,v.model_id,a.task_id,a.id,t.project_id,'models',t.id||'/'||a.id,
+        CASE WHEN a.status='published' THEN 'published' ELSE 'ready' END,
+        COALESCE((SELECT SUM(COALESCE(ma.byte_size,0)) FROM model_assets ma WHERE ma.version_id=v.id),0),
+        (SELECT COUNT(*) FROM model_assets ma WHERE ma.version_id=v.id),v.created_at,v.updated_at
+      FROM model_versions v
+      JOIN processing_attempts a ON a.result_model_version_id=v.id
+      JOIN processing_tasks t ON t.id=a.task_id;
+
+      DROP INDEX storage_mutations_active_entity_idx;
+      DROP INDEX storage_mutations_reconcile_idx;
+      DROP INDEX storage_mutations_trash_idx;
+      ALTER TABLE storage_mutations RENAME TO storage_mutations_v9;
+      CREATE TABLE storage_mutations (
+        id TEXT PRIMARY KEY,
+        mutation_type TEXT NOT NULL CHECK(mutation_type IN ('trash','restore','purge')),
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('dataset','output')),
+        entity_id TEXT NOT NULL,
+        trash_id TEXT NOT NULL,
+        source_root_key TEXT,
+        source_relative_path TEXT,
+        destination_root_key TEXT,
+        destination_relative_path TEXT,
+        allow_absent_source INTEGER NOT NULL DEFAULT 0 CHECK(allow_absent_source IN (0,1)),
+        status TEXT NOT NULL CHECK(status IN ('intent','fs_applied','complete','failed')),
+        actor TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      INSERT INTO storage_mutations SELECT * FROM storage_mutations_v9;
+      DROP TABLE storage_mutations_v9;
+      CREATE UNIQUE INDEX storage_mutations_active_entity_idx
+        ON storage_mutations(entity_type,entity_id) WHERE status IN ('intent','fs_applied');
+      CREATE INDEX storage_mutations_reconcile_idx ON storage_mutations(status,created_at);
+      CREATE INDEX storage_mutations_trash_idx ON storage_mutations(trash_id,status);
+    `,
+  },
+  {
+    version: 11,
+    name: 'gcp_workflow_and_dataset_image_index',
+    sql: `
+      ALTER TABLE dataset_files ADD COLUMN mime_type TEXT;
+      ALTER TABLE dataset_files ADD COLUMN captured_at TEXT;
+      ALTER TABLE dataset_files ADD COLUMN latitude REAL CHECK(latitude IS NULL OR (latitude >= -90 AND latitude <= 90));
+      ALTER TABLE dataset_files ADD COLUMN longitude REAL CHECK(longitude IS NULL OR (longitude >= -180 AND longitude <= 180));
+      ALTER TABLE dataset_files ADD COLUMN altitude_m REAL;
+      ALTER TABLE dataset_files ADD COLUMN width INTEGER CHECK(width IS NULL OR width > 0);
+      ALTER TABLE dataset_files ADD COLUMN height INTEGER CHECK(height IS NULL OR height > 0);
+      UPDATE dataset_files SET
+        mime_type=content_type,
+        captured_at=CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json,'$.capturedAt') END,
+        latitude=CASE WHEN json_valid(metadata_json) AND json_type(metadata_json,'$.gps.latitude') IN ('integer','real')
+          AND json_extract(metadata_json,'$.gps.latitude') BETWEEN -90 AND 90 THEN json_extract(metadata_json,'$.gps.latitude') END,
+        longitude=CASE WHEN json_valid(metadata_json) AND json_type(metadata_json,'$.gps.longitude') IN ('integer','real')
+          AND json_extract(metadata_json,'$.gps.longitude') BETWEEN -180 AND 180 THEN json_extract(metadata_json,'$.gps.longitude') END,
+        altitude_m=CASE WHEN json_valid(metadata_json) AND json_type(metadata_json,'$.gps.altitudeM') IN ('integer','real') THEN json_extract(metadata_json,'$.gps.altitudeM') END,
+        width=CASE WHEN json_valid(metadata_json) AND json_type(metadata_json,'$.width')='integer'
+          AND json_extract(metadata_json,'$.width') > 0 THEN json_extract(metadata_json,'$.width') END,
+        height=CASE WHEN json_valid(metadata_json) AND json_type(metadata_json,'$.height')='integer'
+          AND json_extract(metadata_json,'$.height') > 0 THEN json_extract(metadata_json,'$.height') END;
+      CREATE INDEX dataset_files_gps_idx ON dataset_files(dataset_id,latitude,longitude)
+        WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+
+      CREATE TABLE gcp_sets (
+        id TEXT PRIMARY KEY,
+        dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+        display_name TEXT NOT NULL,
+        source_format TEXT NOT NULL CHECK(source_format IN ('generic-csv-v1','generic-geojson-v1')),
+        source_file_id TEXT REFERENCES dataset_files(id) ON DELETE RESTRICT,
+        source_filename TEXT,
+        source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+        source_content TEXT NOT NULL,
+        source_byte_size INTEGER NOT NULL CHECK(source_byte_size >= 0 AND source_byte_size <= 2097152),
+        crs TEXT NOT NULL CHECK(crs='EPSG:4326'),
+        elevation_units TEXT NOT NULL CHECK(elevation_units='m'),
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX gcp_sets_dataset_idx ON gcp_sets(dataset_id,created_at DESC,id DESC);
+      CREATE TRIGGER gcp_set_source_dataset_insert BEFORE INSERT ON gcp_sets
+      WHEN NEW.source_file_id IS NOT NULL AND COALESCE((SELECT dataset_id FROM dataset_files WHERE id=NEW.source_file_id),'') <> NEW.dataset_id
+      BEGIN SELECT RAISE(ABORT,'gcp_source_dataset_mismatch'); END;
+      CREATE TRIGGER gcp_set_source_dataset_update BEFORE UPDATE OF dataset_id,source_file_id ON gcp_sets
+      WHEN NEW.source_file_id IS NOT NULL AND COALESCE((SELECT dataset_id FROM dataset_files WHERE id=NEW.source_file_id),'') <> NEW.dataset_id
+      BEGIN SELECT RAISE(ABORT,'gcp_source_dataset_mismatch'); END;
+
+      CREATE TABLE gcp_points (
+        id TEXT PRIMARY KEY,
+        set_id TEXT NOT NULL REFERENCES gcp_sets(id) ON DELETE CASCADE,
+        external_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        latitude REAL NOT NULL CHECK(latitude >= -90 AND latitude <= 90),
+        longitude REAL NOT NULL CHECK(longitude >= -180 AND longitude <= 180),
+        elevation_m REAL NOT NULL CHECK(elevation_m >= -12000 AND elevation_m <= 100000),
+        description TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(set_id,external_id)
+      );
+      CREATE INDEX gcp_points_set_idx ON gcp_points(set_id,external_id,id);
+
+      CREATE TABLE gcp_image_correspondences (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        gcp_point_id TEXT NOT NULL REFERENCES gcp_points(id) ON DELETE CASCADE,
+        dataset_file_id TEXT NOT NULL REFERENCES dataset_files(id) ON DELETE RESTRICT,
+        pixel_x REAL NOT NULL CHECK(pixel_x >= 0),
+        pixel_y REAL NOT NULL CHECK(pixel_y >= 0),
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id,gcp_point_id,dataset_file_id)
+      );
+      CREATE INDEX gcp_correspondences_task_idx ON gcp_image_correspondences(task_id,created_at,id);
+
+      CREATE TRIGGER gcp_correspondence_dataset_insert
+      BEFORE INSERT ON gcp_image_correspondences
+      WHEN COALESCE((SELECT dataset_id FROM processing_tasks WHERE id=NEW.task_id),'') = ''
+        OR COALESCE((SELECT sets.dataset_id FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id WHERE points.id=NEW.gcp_point_id),'') = ''
+        OR COALESCE((SELECT dataset_id FROM dataset_files WHERE id=NEW.dataset_file_id),'') = ''
+        OR (SELECT dataset_id FROM processing_tasks WHERE id=NEW.task_id) <>
+          (SELECT sets.dataset_id FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id WHERE points.id=NEW.gcp_point_id)
+        OR (SELECT dataset_id FROM processing_tasks WHERE id=NEW.task_id) <>
+          (SELECT dataset_id FROM dataset_files WHERE id=NEW.dataset_file_id)
+      BEGIN SELECT RAISE(ABORT,'gcp_dataset_mismatch'); END;
+
+      CREATE TRIGGER gcp_correspondence_dataset_update
+      BEFORE UPDATE OF task_id,gcp_point_id,dataset_file_id ON gcp_image_correspondences
+      WHEN COALESCE((SELECT dataset_id FROM processing_tasks WHERE id=NEW.task_id),'') = ''
+        OR COALESCE((SELECT sets.dataset_id FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id WHERE points.id=NEW.gcp_point_id),'') = ''
+        OR COALESCE((SELECT dataset_id FROM dataset_files WHERE id=NEW.dataset_file_id),'') = ''
+        OR (SELECT dataset_id FROM processing_tasks WHERE id=NEW.task_id) <>
+          (SELECT sets.dataset_id FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id WHERE points.id=NEW.gcp_point_id)
+        OR (SELECT dataset_id FROM processing_tasks WHERE id=NEW.task_id) <>
+          (SELECT dataset_id FROM dataset_files WHERE id=NEW.dataset_file_id)
+      BEGIN SELECT RAISE(ABORT,'gcp_dataset_mismatch'); END;
+
+      CREATE TRIGGER gcp_correspondence_pixels_insert
+      BEFORE INSERT ON gcp_image_correspondences
+      WHEN ((SELECT width FROM dataset_files WHERE id=NEW.dataset_file_id) IS NOT NULL
+          AND NEW.pixel_x >= (SELECT width FROM dataset_files WHERE id=NEW.dataset_file_id))
+        OR ((SELECT height FROM dataset_files WHERE id=NEW.dataset_file_id) IS NOT NULL
+          AND NEW.pixel_y >= (SELECT height FROM dataset_files WHERE id=NEW.dataset_file_id))
+      BEGIN SELECT RAISE(ABORT,'gcp_pixel_out_of_bounds'); END;
+
+      CREATE TRIGGER gcp_correspondence_pixels_update
+      BEFORE UPDATE OF dataset_file_id,pixel_x,pixel_y ON gcp_image_correspondences
+      WHEN ((SELECT width FROM dataset_files WHERE id=NEW.dataset_file_id) IS NOT NULL
+          AND NEW.pixel_x >= (SELECT width FROM dataset_files WHERE id=NEW.dataset_file_id))
+        OR ((SELECT height FROM dataset_files WHERE id=NEW.dataset_file_id) IS NOT NULL
+          AND NEW.pixel_y >= (SELECT height FROM dataset_files WHERE id=NEW.dataset_file_id))
+      BEGIN SELECT RAISE(ABORT,'gcp_pixel_out_of_bounds'); END;
+
+      CREATE TABLE processing_attempt_gcp_snapshots (
+        attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE CASCADE,
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        content_text TEXT NOT NULL,
+        correspondence_count INTEGER NOT NULL CHECK(correspondence_count > 0),
+        created_at TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 function applyMigrations(database) {

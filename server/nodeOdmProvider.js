@@ -81,7 +81,8 @@ class NodeOdmProvider {
     for (const file of files) { const name=path.basename(file.relativePath||file.absolutePath).toLowerCase(); if(basenames.has(name)) throw Object.assign(new Error('dataset contains duplicate source basenames'),{code:'duplicate_source_basename'}); basenames.add(name); }
     const body = new FormData();
     for (const file of files) {
-      const blob = await fs.openAsBlob(file.absolutePath);
+      const blob = file.buffer == null ? await fs.openAsBlob(file.absolutePath) :
+        new Blob([Buffer.from(file.buffer)], { type: 'text/plain' });
       body.append('images', blob, path.basename(file.relativePath || file.absolutePath));
     }
     await this.request(`/task/new/upload/${encodeURIComponent(uuid)}`, { method:'POST', body }, {}, {timeoutMs:this.transferTimeoutMs,signal});
@@ -94,10 +95,11 @@ class NodeOdmProvider {
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount };
   }
   async output(uuid, fromLine = 0,{signal=null}={}) { const value=await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/output`, {}, { line:fromLine },{signal}),4*1024*1024);const lines=String(value||'').split(/\r?\n/).filter(Boolean);return{lines,nextLine:fromLine+lines.length}; }
-  async cancel(uuid) {
+  async cancel(uuid,{signal=null}={}) {
     const body = new URLSearchParams({ uuid });
-    return boundedJson(await this.request('/task/cancel', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body }));
+    return boundedJson(await this.request('/task/cancel', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body },{}, {signal}));
   }
+  async remove(uuid,{signal=null}={}) { const body=new URLSearchParams({uuid});return boundedJson(await this.request('/task/remove',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body},{},{signal})); }
   async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
 }
 

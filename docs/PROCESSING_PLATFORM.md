@@ -18,9 +18,47 @@ Uploads are chunked, checksum-bound, subject-bound, resumable, and finalized by 
 
 Managed and adopted datasets are immutable after finalization. Every file is re-hashed before each ODM submission. External references retain their original location and are also re-hashed. Raw images, GCP files, logs, provider archives, and processing inputs are created unpublished and cannot be selected for a public share.
 
+Friendly project and dataset names, descriptions, tags, and arbitrary bounded
+catalog metadata remain editable. Dataset reassociation changes only the stable
+project ID association; it never moves files or changes a manifest. It is
+rejected while the dataset has an active operation, lifecycle mutation, or
+non-archived processing task, and duplicate names in the target project fail
+closed.
+
+ODM submission persists initialization, photo-upload, auxiliary-upload, and
+commit phases. A restart resumes photo batches from the provider's documented
+image count. Auxiliary inputs such as GCP text cannot be inferred from that
+count, so an ambiguous auxiliary response removes the assigned upstream task
+and deterministically restarts it instead of risking a duplicate or missing
+input. Commit ambiguity is reconciled from provider state. Before any provider
+side effect, admission verifies the immutable source hashes and combines the
+peak Dataset, Cache, and Model requirements for mounts that share one storage
+pool.
+
 Deleting a dataset moves Viewer-owned bytes to recoverable trash for 14 days. Trash, restore, manual purge, and retention purge use a durable two-phase journal: the database records intent before any rename/delete, the worker applies an idempotent filesystem effect, and a single database transaction finalizes metadata afterward. Startup and hourly maintenance reconcile interrupted intents, including a move that completed before its journal update. A source/destination conflict fails closed and makes processing readiness fail until an operator removes the conflicting path and retries the failed mutation through `POST /api/v1/storage/mutations/:id/retry`; failed mutations can be inspected with the bounded `GET /api/v1/storage/mutations?status=failed` route.
 
 External-reference deletion changes Viewer metadata only and never creates a byte-mutation journal, moves, or deletes external bytes. Archive/delete refuse datasets with tasks or active finalize/import/lifecycle operations. Permanent purge requires the dedicated `viewer.storage.purge` permission and typed confirmation. Empty draft datasets use a metadata-only journal entry and remain restorable during the retention window.
+
+Managed model outputs have the same 14-day recoverable lifecycle. The bounded
+output catalog and project/task storage routes report actual ingested output
+bytes separately from immutable dataset bytes. Archiving first unpublishes the
+selected version and is rejected while a live share/session or processing job
+still depends on it. Trash, restore, manual purge, and retention purge reuse
+the two-phase storage journal; permanent purge removes asset rows and bytes but
+retains the zero-byte output record as an audit tombstone.
+
+Catalog and accounting routes used by Ops are:
+
+- `PATCH /api/v1/projects/:id` and `PATCH /api/v1/datasets/:id`
+- `GET /api/v1/projects/:id/storage` and `GET /api/v1/tasks/:id/storage`
+- `GET /api/v1/processing/outputs`
+- `POST /api/v1/processing/outputs/:id/archive` and
+  `DELETE /api/v1/processing/outputs/:id`
+- `POST /api/v1/storage/trash/:id/restore` and
+  `DELETE /api/v1/storage/trash/:id` with typed confirmation for purge
+
+All list routes use capped keyset pagination, and every mutation requires an
+admin bearer permission plus `Idempotency-Key`.
 
 ## Backups and recovery
 

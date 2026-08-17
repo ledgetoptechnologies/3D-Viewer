@@ -139,8 +139,9 @@ router.get('/api/share/:token', (req, res) => {
   res.json({ ...sharedViewerConfig(project, share), permissions: share.permissions, displayUnits: share.displayUnits || config.defaultUnits, shareExpiresAt: share.expiresAt || null });
 });
 
+function shareUnlockRateKey(token,ip){return `share-unlock:${auth.hashToken(String(token||'').normalize('NFKC'))}:${ip}`;}
 router.post('/api/share/:token/unlock', async (req, res) => {
-  if (auth.rateLimited(`share-unlock:${req.params.token}:${req.ip}`, 8, 5 * 60 * 1000)) {
+  if (auth.rateLimited(shareUnlockRateKey(req.params.token,req.ip), 8, 5 * 60 * 1000)) {
     return res.status(429).json({ error: 'too many attempts, try again later' });
   }
   const tokenHash = auth.hashToken(req.params.token);
@@ -169,3 +170,4 @@ module.exports = router;
 module.exports.SHARE_COOKIE = SHARE_COOKIE;
 module.exports.setRepository = setRepository;
 module.exports.sharedViewerConfig = sharedViewerConfig;
+module.exports.shareUnlockRateKey = shareUnlockRateKey;

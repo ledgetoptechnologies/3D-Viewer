@@ -12,18 +12,37 @@ function adapterFor(provider,config){return new NodeOdmProvider({endpoint:provid
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/'))));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),byteSize:fs.statSync(absolute).size});}return assets;}
 
-async function processSubmit(job,{processing,storage,config,signal}){
-  const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),dataset=processing.getDataset(task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFor(provider,config);
+async function processSubmit(job,{processing,storage,config,signal,adapterFactory=adapterFor}){
+  let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config);
   const basenames=new Set(),allowed=/\.(?:jpe?g|png|tiff?|dng|raw|heic|txt|geojson|json|zip|las|laz)$/i;for(const file of dataset.files){const name=path.basename(file.relativePath).toLowerCase();if(basenames.has(name))throw Object.assign(new Error('dataset contains duplicate source basenames'),{code:'duplicate_source_basename'});if(!allowed.test(name))throw Object.assign(new Error('dataset contains a file type NodeODM does not accept'),{code:'unsupported_source_file'});basenames.add(name);const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});}
+  storage.requireProcessingHeadroom(dataset.byteSize);
+  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
+  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
+    throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
+  const mapped=dataset.files.map((file)=>({relativePath:file.relativePath,absolutePath:storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true})}))
+    .filter((file)=>!gcpSnapshot||path.basename(file.relativePath).toLowerCase()!=='gcp_list.txt');
+  if(gcpSnapshot)mapped.push({relativePath:'gcp_list.txt',buffer:Buffer.from(gcpSnapshot.content,'utf8')});
+  const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,photoFiles=mapped.filter((file)=>photo.test(file.relativePath)),auxiliaryFiles=mapped.filter((file)=>!photo.test(file.relativePath)),files=[...photoFiles,...auxiliaryFiles];
   let known=null;try{known=await adapter.status(attempt.providerTaskId,{signal});}catch(error){if(error.code!=='provider_task_not_found')throw error;}
-  if(!known){
-    transition(processing,job,'initializing');
-    await adapter.initialize({uuid:attempt.providerTaskId,name:task.displayName,options:attempt.options},{signal});
-    transition(processing,job,'uploading');
-    const files=dataset.files.map((file)=>({relativePath:file.relativePath,absolutePath:storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true})}));
-    for(let index=0;index<files.length;index+=20)await adapter.upload(attempt.providerTaskId,files.slice(index,index+20),{signal});
-    transition(processing,job,'committed');await adapter.commit(attempt.providerTaskId,{signal});
+  const save=(phase,count=attempt.uploadedFileCount)=>{if(!processing.setSubmissionStateForJob(job.id,job.lease_owner,phase,count))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});attempt={...attempt,submissionPhase:phase,uploadedFileCount:count};};
+  const restart=async()=>{if(known){await adapter.remove(attempt.providerTaskId,{signal});known=null;}save('new',0);};
+  if(known&&attempt.submissionPhase==='new')await restart();
+  if(known&&attempt.submissionPhase==='initializing')save('initialized',0);
+  if(known&&attempt.submissionPhase==='uploading'){
+    const providerCount=Number(known.imagesCount);
+    if(!Number.isSafeInteger(providerCount)||providerCount<attempt.uploadedFileCount||providerCount>photoFiles.length)await restart();else save('uploading',providerCount);
   }
+  if(known&&attempt.submissionPhase==='uploading_auxiliary')await restart();
+  if(known&&attempt.submissionPhase==='committing'){if(['running','completed'].includes(known.status))save('committed',files.length);else await restart();}
+  if(!known&&attempt.submissionPhase!=='new')save('new',0);
+  if(!known){
+    transition(processing,job,'initializing');save('initializing',0);
+    await adapter.initialize({uuid:attempt.providerTaskId,name:task.displayName,options:attempt.options},{signal});save('initialized',0);
+  }
+  if(attempt.uploadedFileCount<photoFiles.length){transition(processing,job,'uploading');for(let index=attempt.uploadedFileCount;index<photoFiles.length;index+=20){save('uploading',index);const batch=photoFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('uploading',index+batch.length);}}
+  if(auxiliaryFiles.length&&attempt.uploadedFileCount<files.length){transition(processing,job,'uploading');for(let index=Math.max(0,attempt.uploadedFileCount-photoFiles.length);index<auxiliaryFiles.length;index+=20){save('uploading_auxiliary',photoFiles.length+index);const batch=auxiliaryFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('uploading_auxiliary',photoFiles.length+index+batch.length);}}
+  if(attempt.submissionPhase!=='committed'){save('uploaded',files.length);transition(processing,job,'committed');save('committing',files.length);await adapter.commit(attempt.providerTaskId,{signal});save('committed',files.length);}
+  known=known&&['running','completed'].includes(known.status)?known:null;
   transition(processing,job,known?.status==='running'?'running':'queued_upstream',{progress:known?.progress||0});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
 }
 
@@ -48,6 +67,7 @@ async function processIngest(job,{processing,repository,storage,config,signal}){
   const model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:task.datasetId},status:'ready',assets,makeActive:false});
   const version=repository.database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id,attempt.id);
   if(!processing.setAttemptResultForJob(job.id,job.lease_owner,model.id,version.id))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+  const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:relative,byteSize:tree.byteSize,assetCount:assets.length});
   const needsEpt=assets.some((asset)=>asset.kind==='pointCloud')&&!assets.some((asset)=>asset.kind==='ept'),hasFullMesh=assets.some((asset)=>asset.kind==='glb'||asset.kind==='obj');
   if(needsEpt&&config.localDerivativesEnabled)processing.enqueueDerivative(attempt.id,'ept');
   if(nativeTiles&&hasFullMesh)processing.enqueueDerivative(attempt.id,'lod_audit',{tilesRelativePath:`${relative}/${path.posix.dirname(nativeTiles.relativePath)}`});
@@ -63,7 +83,7 @@ async function processOne(deps,owner=crypto.randomUUID()){
   const job=deps.processing.claimJob(owner);if(!job)return false;
   const controller=new AbortController();const heartbeat=setInterval(()=>{const attempt=deps.processing.getAttempt(job.attempt_id);if(!deps.processing.heartbeatJob(job.id,owner)||attempt?.status==='cancelled')controller.abort();},20000);heartbeat.unref?.();
   try{const work={...deps,signal:controller.signal};if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
-  catch(error){const safe=sanitizeLogMessage(error.message).slice(0,1000);deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['duplicate_source_basename','missing_required_output','invalid_storage_location']).has(error.code);const retry=!permanent&&job.attempt_count<5?new Date(Date.now()+Math.min(300000,5000*2**job.attempt_count)).toISOString():null;const owned=deps.processing.failJob(job.id,job.lease_owner,error.code||'processing_failed',safe,retry);if(owned&&!retry){const attempt=deps.processing.transitionAttempt(job.attempt_id,'failed',{errorCode:error.code||'processing_failed',errorMessage:safe,completedAt:new Date().toISOString()}),task=deps.processing.getTask(attempt.taskId);deps.processing.enqueueEvent('processing.failed',{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',occurredAt:attempt.completedAt,projectId:task.projectId,taskId:task.id,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed',error:{code:error.code||'processing_failed',message:safe}});}return true;}
+  catch(error){const safe=sanitizeLogMessage(error.message).slice(0,1000);deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree']).has(error.code);const retry=!permanent&&job.attempt_count<5?new Date(Date.now()+Math.min(300000,5000*2**job.attempt_count)).toISOString():null;const owned=deps.processing.failJob(job.id,job.lease_owner,error.code||'processing_failed',safe,retry);if(owned&&!retry){const attempt=deps.processing.transitionAttempt(job.attempt_id,'failed',{errorCode:error.code||'processing_failed',errorMessage:safe,completedAt:new Date().toISOString()}),task=deps.processing.getTask(attempt.taskId);deps.processing.enqueueEvent('processing.failed',{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',occurredAt:attempt.completedAt,projectId:task.projectId,taskId:task.id,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed',error:{code:error.code||'processing_failed',message:safe}});}return true;}
   finally{clearInterval(heartbeat);}
 }
 module.exports={adapterFor,discoverOutputs,processIngest,processOne,processReconcile,processSubmit};
