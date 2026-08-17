@@ -79,6 +79,13 @@ class ViewerRepository {
     ).run(key, String(value), now());
   }
 
+  rateLimited(bucket,max,windowMs,{blockMs=windowMs,at=Date.now()}={}){
+    const key=crypto.createHash('sha256').update(String(bucket).normalize('NFKC')).digest('hex'),timestamp=new Date(at).toISOString();
+    return this.transaction(()=>{const row=this.database.prepare('SELECT * FROM abuse_windows WHERE bucket_key=?').get(key);if(row?.blocked_until&&Date.parse(row.blocked_until)>at)return true;const reset=!row||Date.parse(row.window_started_at)+windowMs<=at;if(reset){this.database.prepare(`INSERT INTO abuse_windows(bucket_key,window_started_at,hit_count,blocked_until,updated_at) VALUES (?,?,1,NULL,?) ON CONFLICT(bucket_key) DO UPDATE SET window_started_at=excluded.window_started_at,hit_count=1,blocked_until=NULL,updated_at=excluded.updated_at`).run(key,timestamp,timestamp);return false;}const hits=Number(row.hit_count)+1,blocked=hits>max?new Date(at+blockMs).toISOString():null;this.database.prepare('UPDATE abuse_windows SET hit_count=?,blocked_until=COALESCE(?,blocked_until),updated_at=? WHERE bucket_key=?').run(hits,blocked,timestamp,key);return Boolean(blocked);});
+  }
+
+  pruneAbuseWindows(at=Date.now(),maxAgeMs=7*86400_000){return this.database.prepare('DELETE FROM abuse_windows WHERE updated_at<? AND (blocked_until IS NULL OR blocked_until<?)').run(new Date(at-maxAgeMs).toISOString(),new Date(at).toISOString()).changes;}
+
   resolveModelId(id) {
     const direct = this.database.prepare('SELECT id FROM models WHERE id=?').get(id);
     if (direct) return direct.id;
@@ -119,6 +126,7 @@ class ViewerRepository {
     const row = this.database.prepare('SELECT relative_path,byte_size,sha256 FROM model_asset_files WHERE asset_id=? AND relative_path=?').get(assetId, relativePath);
     return row ? { relativePath: row.relative_path, byteSize: row.byte_size, sha256: row.sha256 } : null;
   }
+  getModelAssetChunks(assetId,relativePath=''){return this.database.prepare('SELECT chunk_index,byte_offset,byte_size,sha256 FROM model_asset_chunks WHERE asset_id=? AND relative_path=? ORDER BY chunk_index').all(assetId,relativePath).map((row)=>({chunkIndex:row.chunk_index,byteOffset:row.byte_offset,byteSize:row.byte_size,sha256:row.sha256}));}
 
   publishModelVersion(modelId, versionId, selectedKinds) {
     const allowed = new Set(selectedKinds);
@@ -207,6 +215,7 @@ class ViewerRepository {
         id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const insertAssetFile = this.database.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)');
+      const insertAssetChunk=this.database.prepare('INSERT INTO model_asset_chunks(asset_id,relative_path,chunk_index,byte_offset,byte_size,sha256) VALUES (?,?,?,?,?,?)');
       for (const asset of input.assets || []) {
         const assetId = crypto.randomUUID();
         insertAsset.run(
@@ -225,7 +234,8 @@ class ViewerRepository {
           asset.manifestSha256 || null,
           timestamp,
         );
-        for (const file of asset.manifestFiles || asset.files || []) insertAssetFile.run(assetId, file.relativePath, file.byteSize, file.sha256);
+        for(const chunk of asset.chunks||[])insertAssetChunk.run(assetId,'',chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);
+        for (const file of asset.manifestFiles || asset.files || []){insertAssetFile.run(assetId,file.relativePath,file.byteSize,file.sha256);for(const chunk of file.chunks||[])insertAssetChunk.run(assetId,file.relativePath,chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);}
       }
 
       if (input.aliasId) {
@@ -330,12 +340,13 @@ class ViewerRepository {
   }
 
   createPublicShare(input) {
-    const id = crypto.randomUUID();
+    const id = input.id || crypto.randomUUID();
     const timestamp = now();
     this.database.prepare(`INSERT INTO public_shares(
       id,model_id,version_policy,model_version_id,public_id_hash,password_hash,permissions_json,label,created_by,
-      created_at,updated_at,expires_at,display_units
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      created_at,updated_at,expires_at,display_units,share_class,source_authorization_id,source_authorization_version,
+      source_authorization_subject,source_authorization_expires_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       id,
       input.modelId,
       input.versionPolicy || 'latest',
@@ -349,6 +360,11 @@ class ViewerRepository {
       timestamp,
       input.expiresAt || null,
       input.displayUnits || null,
+      input.shareClass || 'staff',
+      input.sourceAuthorization?.id || null,
+      input.sourceAuthorization?.version == null ? null : String(input.sourceAuthorization.version),
+      input.sourceAuthorization?.subject || null,
+      input.sourceAuthorization?.expiresAt || null,
     );
     return this.getPublicShare(id);
   }
@@ -400,6 +416,8 @@ class ViewerRepository {
       revokeReason: row.revoke_reason,
       accessCount: row.access_count,
       lastAccessedAt: row.last_accessed_at,
+      shareClass: row.share_class || 'staff',
+      sourceAuthorization: row.share_class==='client'?{type:'client_grant',id:row.source_authorization_id,version:Number(row.source_authorization_version),subject:row.source_authorization_subject,expiresAt:row.source_authorization_expires_at||null}:null,
     };
   }
 

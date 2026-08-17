@@ -855,6 +855,190 @@ const MIGRATIONS = [
         WHERE import_preview_id IS NOT NULL AND status IN ('queued','leased','succeeded');
     `,
   },
+  {
+    version: 14,
+    name: 'catalog_imports_presets_and_authorization',
+    sql: `
+      ALTER TABLE processing_presets ADD COLUMN description TEXT;
+      UPDATE processing_presets SET options_json='{"orthophoto-resolution":2}' WHERE id='orthophoto';
+
+      -- A task points at its current dataset, while every attempt retains the
+      -- exact immutable dataset snapshot it processed. This is required when
+      -- an externally referenced catalog source is rescanned into a new model
+      -- version without changing the stable LTDS task identity.
+      ALTER TABLE processing_attempts ADD COLUMN dataset_id TEXT REFERENCES datasets(id) ON DELETE RESTRICT;
+      UPDATE processing_attempts
+        SET dataset_id=(SELECT dataset_id FROM processing_tasks WHERE processing_tasks.id=processing_attempts.task_id)
+        WHERE dataset_id IS NULL;
+      CREATE INDEX processing_attempts_dataset_idx ON processing_attempts(dataset_id,created_at DESC);
+
+      ALTER TABLE processing_providers ADD COLUMN runtime_health TEXT CHECK(runtime_health IN ('healthy','unhealthy'));
+      ALTER TABLE processing_providers ADD COLUMN runtime_health_at TEXT;
+      ALTER TABLE processing_providers ADD COLUMN runtime_health_error TEXT;
+      ALTER TABLE processing_providers ADD COLUMN runtime_health_owner TEXT;
+      ALTER TABLE processing_providers ADD COLUMN runtime_health_lease_expires_at TEXT;
+
+      CREATE TABLE catalog_import_scans (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL CHECK(provider IN ('webodm','terra')),
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        candidate_count INTEGER NOT NULL DEFAULT 0 CHECK(candidate_count >= 0),
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE(provider,generation)
+      );
+
+      CREATE TABLE catalog_import_candidates (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL CHECK(provider IN ('webodm','terra')),
+        external_project_id TEXT NOT NULL,
+        external_task_id TEXT NOT NULL,
+        source_root_key TEXT NOT NULL CHECK(source_root_key IN ('webodm','terra_import')),
+        source_relative_path TEXT NOT NULL,
+        source_fingerprint TEXT NOT NULL,
+        suggested_project_name TEXT NOT NULL,
+        suggested_task_name TEXT NOT NULL,
+        assets_json TEXT NOT NULL DEFAULT '[]',
+        state TEXT NOT NULL DEFAULT 'unmapped' CHECK(state IN ('unmapped','mapped','stale')),
+        stale_reason TEXT CHECK(stale_reason IN ('source_changed','not_seen')),
+        scan_generation INTEGER NOT NULL CHECK(scan_generation > 0),
+        last_seen_at TEXT NOT NULL,
+        mapped_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        mapped_task_id TEXT REFERENCES processing_tasks(id) ON DELETE SET NULL,
+        mapped_dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+        mapped_attempt_id TEXT REFERENCES processing_attempts(id) ON DELETE SET NULL,
+        mapped_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+        mapped_model_version_id TEXT REFERENCES model_versions(id) ON DELETE SET NULL,
+        mapped_source_fingerprint TEXT,
+        mapped_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(provider,external_project_id,external_task_id,source_relative_path)
+      );
+      CREATE INDEX catalog_import_candidates_page_idx
+        ON catalog_import_candidates(provider,state,updated_at DESC,id DESC);
+
+      DROP INDEX model_outputs_page_idx;
+      DROP INDEX model_outputs_project_page_idx;
+      DROP INDEX model_outputs_task_page_idx;
+      DROP INDEX model_outputs_status_page_idx;
+      ALTER TABLE model_outputs RENAME TO model_outputs_v13;
+      CREATE TABLE model_outputs (
+        id TEXT PRIMARY KEY REFERENCES model_versions(id) ON DELETE RESTRICT,
+        model_id TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        storage_mode TEXT NOT NULL DEFAULT 'managed'
+          CHECK(storage_mode IN ('managed','adopted','external_reference')),
+        status TEXT NOT NULL CHECK(status IN ('ready','published','archived','trashed')),
+        byte_size INTEGER NOT NULL DEFAULT 0 CHECK(byte_size >= 0),
+        asset_count INTEGER NOT NULL DEFAULT 0 CHECK(asset_count >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        archived_at TEXT,
+        trashed_at TEXT,
+        UNIQUE(root_key,relative_path)
+      );
+      INSERT INTO model_outputs(id,model_id,task_id,attempt_id,project_id,root_key,relative_path,storage_mode,status,byte_size,asset_count,created_at,updated_at,archived_at,trashed_at)
+        SELECT id,model_id,task_id,attempt_id,project_id,root_key,relative_path,'managed',status,byte_size,asset_count,created_at,updated_at,archived_at,trashed_at
+        FROM model_outputs_v13;
+      DROP TABLE model_outputs_v13;
+      CREATE INDEX model_outputs_page_idx ON model_outputs(created_at DESC,id DESC);
+      CREATE INDEX model_outputs_project_page_idx ON model_outputs(project_id,created_at DESC,id DESC);
+      CREATE INDEX model_outputs_task_page_idx ON model_outputs(task_id,created_at DESC,id DESC);
+      CREATE INDEX model_outputs_status_page_idx ON model_outputs(status,created_at DESC,id DESC);
+
+      DROP INDEX dataset_operations_claim_idx;
+      DROP INDEX dataset_operations_subject_idx;
+      DROP INDEX dataset_operations_active_upload_idx;
+      DROP INDEX dataset_operations_active_preview_idx;
+      ALTER TABLE dataset_operations RENAME TO dataset_operations_v13;
+      CREATE TABLE dataset_operations (
+        id TEXT PRIMARY KEY,
+        operation_type TEXT NOT NULL CHECK(operation_type IN ('upload_finalize','import_preview','import_adopt','catalog_scan','catalog_map')),
+        subject TEXT NOT NULL,
+        session_id TEXT,
+        dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+        upload_id TEXT REFERENCES upload_sessions(id) ON DELETE SET NULL,
+        import_preview_id TEXT REFERENCES dataset_import_previews(id) ON DELETE SET NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN ('queued','leased','succeeded','failed','cancelled')),
+        progress REAL NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 1),
+        result_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      INSERT INTO dataset_operations SELECT * FROM dataset_operations_v13;
+      DROP TABLE dataset_operations_v13;
+      CREATE INDEX dataset_operations_claim_idx
+        ON dataset_operations(status,available_at,lease_expires_at,created_at);
+      CREATE INDEX dataset_operations_subject_idx
+        ON dataset_operations(subject,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX dataset_operations_active_upload_idx
+        ON dataset_operations(upload_id)
+        WHERE upload_id IS NOT NULL AND status IN ('queued','leased','succeeded');
+      CREATE UNIQUE INDEX dataset_operations_active_preview_idx
+        ON dataset_operations(import_preview_id)
+        WHERE import_preview_id IS NOT NULL AND status IN ('queued','leased','succeeded');
+
+      ALTER TABLE public_shares ADD COLUMN source_authorization_id TEXT;
+      ALTER TABLE public_shares ADD COLUMN source_authorization_version TEXT;
+      ALTER TABLE public_shares ADD COLUMN source_authorization_subject TEXT;
+      ALTER TABLE public_shares ADD COLUMN source_authorization_expires_at TEXT;
+      ALTER TABLE public_shares ADD COLUMN source_authorization_revoked_at TEXT;
+      ALTER TABLE public_shares ADD COLUMN share_class TEXT NOT NULL DEFAULT 'staff' CHECK(share_class IN ('staff','client'));
+      CREATE INDEX public_shares_source_authorization_idx
+        ON public_shares(source_authorization_id,source_authorization_version);
+
+      CREATE TABLE model_asset_chunks (
+        asset_id TEXT NOT NULL REFERENCES model_assets(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0),
+        byte_offset INTEGER NOT NULL CHECK(byte_offset >= 0),
+        byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        PRIMARY KEY(asset_id,relative_path,chunk_index)
+      );
+      CREATE INDEX model_asset_chunks_lookup_idx ON model_asset_chunks(asset_id,relative_path,byte_offset);
+
+      CREATE TABLE task_submissions (
+        subject TEXT NOT NULL,
+        submission_id TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+        task_id TEXT NOT NULL UNIQUE REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(subject,submission_id)
+      );
+
+      CREATE TABLE subject_operation_receipts (
+        subject TEXT NOT NULL,
+        client_key TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+        response_status INTEGER,
+        response_json TEXT,
+        operation_id TEXT REFERENCES dataset_operations(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(subject,client_key)
+      );
+      CREATE INDEX subject_operation_receipts_operation_idx ON subject_operation_receipts(operation_id);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

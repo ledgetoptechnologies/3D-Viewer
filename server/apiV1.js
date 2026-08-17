@@ -77,6 +77,8 @@ function publicShareSummary(share) {
     revokeReason: share.revokeReason,
     accessCount: share.accessCount,
     lastAccessedAt: share.lastAccessedAt,
+    shareClass: share.shareClass || 'staff',
+    sourceAuthorization: share.sourceAuthorization || null,
   };
 }
 
@@ -180,7 +182,7 @@ function createApiV1(repository) {
   // Browser-facing endpoints use a one-time, short-lived grant. They never
   // accept or return the LTDS Ops service credential.
   router.post('/api/v1/sessions/redeem', (req, res) => {
-    if (auth.rateLimited(`session-redeem:${req.ip}`, 30, 5 * 60 * 1000))
+    if (repository.rateLimited(`session-redeem:${req.ip}`, 30, 5 * 60 * 1000))
       return res.status(429).json({ error: 'too many attempts, try again later' });
     const grantId = req.body && req.body.grant;
     if (typeof grantId !== 'string' || !/^[0-9a-f-]{36}$/i.test(grantId))
@@ -312,6 +314,7 @@ function createApiV1(repository) {
       const model = repository.getModel(req.params.id);
       if (!model || model.status !== 'ready') return res.status(404).json({ error: 'ready model not found' });
       const body = req.body || {};
+      const shareClass=body.shareClass===undefined?'staff':body.shareClass,source=body.sourceAuthorization;if(!['staff','client'].includes(shareClass))return res.status(400).json({error:'shareClass must be staff or client'});if(shareClass==='staff'&&source!==undefined&&source!==null)return res.status(400).json({error:'staff shares cannot include sourceAuthorization'});if(shareClass==='client'){if(!config.clientViewerSharesEnabled)return res.status(503).json({error:'client Viewer shares are disabled'});if(!source||typeof source!=='object'||Array.isArray(source)||Object.keys(source).sort().join(',')!=='expiresAt,id,subject,type,version'||source.type!=='client_grant'||typeof source.id!=='string'||!source.id||!Number.isSafeInteger(source.version)||source.version<1||typeof source.subject!=='string'||!source.subject||source.subject.length>512||(source.expiresAt!==null&&(!Number.isFinite(Date.parse(source.expiresAt))||Date.parse(source.expiresAt)<=Date.now())))return res.status(400).json({error:'sourceAuthorization is invalid'});}
       if (body.versionPolicy === 'pinned') {
         return res.status(422).json({ error: 'pinned shares are not supported until pinned-version asset resolution is available' });
       }
@@ -326,6 +329,7 @@ function createApiV1(repository) {
         if (!Number.isFinite(parsed) || parsed <= Date.now()) return res.status(400).json({ error: 'expiresAt must be in the future' });
         expiresAt = new Date(parsed).toISOString();
       }
+      if(shareClass==='client'&&source.expiresAt!==null&&(expiresAt===null||Date.parse(expiresAt)>Date.parse(source.expiresAt)))return res.status(400).json({error:'client share expiry cannot exceed source authorization'});
       const { token, tokenHash } = auth.newShareToken();
       if (body.displayUnits !== undefined && body.displayUnits !== 'imperial' && body.displayUnits !== 'metric')
         return res.status(400).json({ error: 'displayUnits must be imperial or metric' });
@@ -340,6 +344,8 @@ function createApiV1(repository) {
         createdBy: body.createdBy ? String(body.createdBy).slice(0, 200) : req.servicePrincipal.keyId,
         expiresAt,
         displayUnits: body.displayUnits || config.defaultUnits,
+        shareClass,
+        sourceAuthorization:shareClass==='client'?source:null,
       });
       repository.audit({ actorType: 'service', actorId: req.servicePrincipal.keyId, action: 'share.created', entityType: 'share', entityId: share.id, details: { modelId: model.id } });
       const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;

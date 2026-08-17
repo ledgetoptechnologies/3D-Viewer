@@ -102,6 +102,7 @@ const config = {
   expectedHost: String(process.env.EXPECTED_HOST || '').trim().toLowerCase(),
   publicBaseUrl,
   opsBaseUrl: normalizedOrigin(process.env.OPS_BASE_URL || 'https://ops.ledgetopdroneservices.com'),
+  opsAutomationBaseUrl: normalizedOrigin(process.env.OPS_AUTOMATION_BASE_URL || ''),
   allowedEmbedOrigins: csv(process.env.ALLOWED_EMBED_ORIGINS).map(normalizedOrigin).filter(Boolean),
   trustProxyHops: Math.min(positiveInteger(process.env.TRUST_PROXY_HOPS, 1), 5),
   proxySharedSecret: String(process.env.PROXY_SHARED_SECRET || ''),
@@ -173,6 +174,9 @@ const config = {
   viewerEventUrl: String(process.env.VIEWER_EVENT_URL || '').trim(),
   viewerEventKeyId: String(process.env.VIEWER_EVENT_KEY_ID || 'viewer-v1').trim(),
   viewerEventSecret: process.env.VIEWER_EVENT_SECRET || '',
+  viewerEventPreviousKeyId: String(process.env.VIEWER_EVENT_PREVIOUS_KEY_ID || '').trim(),
+  viewerEventPreviousSecret: process.env.VIEWER_EVENT_PREVIOUS_SECRET || '',
+  clientViewerSharesEnabled: bool(process.env.CLIENT_VIEWER_SHARES_ENABLED, false),
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
@@ -222,8 +226,8 @@ function validate() {
       if (!path.isAbsolute(value)) problems.push(`${name} must be an absolute path`);
     }
     if (config.viewerEventUrl) {
-      try { const eventUrl=new URL(config.viewerEventUrl);if(eventUrl.protocol!=='https:'||eventUrl.username||eventUrl.password||eventUrl.search||eventUrl.hash||eventUrl.pathname!=='/api/viewer/events'||eventUrl.origin!==config.opsBaseUrl)throw new Error(); }
-      catch { problems.push('VIEWER_EVENT_URL must be the exact Ops HTTPS /api/viewer/events endpoint without credentials, query, or fragment'); }
+      try { const eventUrl=new URL(config.viewerEventUrl);if(eventUrl.protocol!=='https:'||eventUrl.username||eventUrl.password||eventUrl.search||eventUrl.hash||eventUrl.pathname!=='/api/viewer/events'||eventUrl.origin!==config.opsAutomationBaseUrl)throw new Error(); }
+      catch { problems.push('VIEWER_EVENT_URL must be the exact automation HTTPS /api/viewer/events endpoint without credentials, query, or fragment'); }
     }
     if (config.viewerEventUrl && config.viewerEventSecret.length < 32)
       problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when callbacks are enabled');
@@ -244,6 +248,9 @@ function validate() {
       catch { problems.push(`PROCESSING_PROVIDER_ORIGINS contains invalid exact origin: ${origin}`); }
     }
   }
+  if(Boolean(config.viewerEventPreviousKeyId)!==Boolean(config.viewerEventPreviousSecret))problems.push('VIEWER_EVENT_PREVIOUS_KEY_ID and VIEWER_EVENT_PREVIOUS_SECRET must be configured together');
+  if(config.viewerEventPreviousSecret&&config.viewerEventPreviousSecret.length<32)problems.push('VIEWER_EVENT_PREVIOUS_SECRET must contain at least 32 characters');
+  if(config.clientViewerSharesEnabled){if(config.opsAutomationBaseUrl!=='https://incoming.ledgetopdroneservices.com')problems.push('OPS_AUTOMATION_BASE_URL must be https://incoming.ledgetopdroneservices.com when client Viewer shares are enabled');if(config.viewerEventSecret.length<32)problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when client Viewer shares are enabled');}
   return problems;
 }
 

@@ -2,6 +2,9 @@
 
 const crypto = require('node:crypto');
 const { sanitizeLogMessage } = require('./processingSecurity');
+const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
+
+function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{let absolute=null;try{absolute=storage.resolve(item.rootKey,item.relativePath,{mustExist:true});}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}if(absolute)storage.removeAdoptedSource(absolute);processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch{/* durable journal retries during maintenance */}}return cleaned;}
 
 function manifestHash(files) {
   const canonical = files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 }));
@@ -39,8 +42,6 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   const payload = JSON.parse(operation.payload_json || '{}');
   const existing = processing.getDataset(operation.dataset_id, true);
   const finishAuthorizationAndSource = () => {
-    if (!processing.consumeOperationImportPreview(operation.id, payload.previewId))
-      throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
     if (payload.storageMode === 'adopted' && ['dataset_import', 'terra_import'].includes(payload.rootKey)) {
       try {
         const source = storage.resolve(payload.rootKey, payload.relativePath, { mustExist: true });
@@ -49,6 +50,8 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
         if (error.code !== 'ENOENT') throw error;
       }
     }
+    if (!processing.consumeOperationImportPreview(operation.id, payload.previewId))
+      throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
   };
   if (existing?.status === 'finalized') {
     finishAuthorizationAndSource();
@@ -114,10 +117,24 @@ async function processOneDatasetOperation(deps, owner) {
       return true;
     }
     else if (operation.operation_type === 'import_adopt') result = await adoptImport(operation, deps, owner, updateProgress);
+    else if (operation.operation_type === 'catalog_scan') {
+      const payload=JSON.parse(operation.payload_json||'{}'),candidates=await scanCatalog(payload.provider,deps.config,updateProgress);
+      result=deps.processing.upsertCatalogScanCandidates({scanId:payload.scanId,provider:payload.provider,generation:payload.generation,candidates});
+      deps.processing.classifyCatalogStaleness(payload.provider,payload.generation);
+      deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.scan_completed',entityType:'catalog_import_scan',entityId:payload.scanId,details:{provider:payload.provider,candidateCount:candidates.length}});
+    }
+    else if (operation.operation_type === 'catalog_map') {
+      result=await mapCatalogCandidate(operation,deps,updateProgress);
+      deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});
+    }
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
     if (lostLease || !deps.processing.completeDatasetOperation(operation.id, owner, result))
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
+    if(operation.operation_type==='catalog_map')reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);
   } catch (error) {
+    if(operation.operation_type==='catalog_map'){
+      try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
+    }
     deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
   } finally {
     clearInterval(timer);
@@ -125,4 +142,4 @@ async function processOneDatasetOperation(deps, owner) {
   return true;
 }
 
-module.exports = { manifestHash, processOneDatasetOperation };
+module.exports = { manifestHash, processOneDatasetOperation, reconcileCatalogSourceCleanups };

@@ -37,3 +37,40 @@ Primary sources:
 
 - <https://github.com/OpenDroneMap/NodeODM/blob/master/docs/index.adoc>
 - <https://github.com/OpenDroneMap/ClusterODM>
+
+## Opt-in live compatibility gate
+
+The tested source baselines are NodeODM v2.2.3 release commit `baa619a` and
+ClusterODM tag `v1.5.5`. They are compatibility baselines, not production
+version lockouts. The default harness is read-only and calls only `/info` and
+`/options`:
+
+```bash
+npm run verify:odm-provider -- \
+  --provider-type nodeodm \
+  --endpoint http://192.168.50.80:3000
+```
+
+If the provider needs a token, put it in `ODM_PROVIDER_TOKEN` (or name another
+environment variable with `--token-env`). The harness never prints the token.
+It rejects redirects and reports only bounded capability metadata and the
+static fingerprint.
+
+Destructive contract verification is never run by `npm test`, CI, container
+health, or production readiness. Run it only against a disposable provider or
+with explicit operator approval and a user-supplied small 1-50 image corpus:
+
+```bash
+npm run verify:odm-provider -- \
+  --provider-type clusterodm \
+  --endpoint http://192.168.50.80:3000 \
+  --destructive \
+  --corpus /path/to/small-reviewed-corpus \
+  --confirm I_UNDERSTAND_PROVIDER_TASKS_WILL_BE_CREATED_AND_REMOVED
+```
+
+That mode creates an LTDS-assigned UUID, uploads and commits the corpus, polls
+status and bounded output, streams and hashes `all.zip` without retaining it,
+then creates a second task to verify cancel and removes both tasks in `finally`.
+It has a two-hour default task timeout and never runs without the exact
+confirmation phrase.

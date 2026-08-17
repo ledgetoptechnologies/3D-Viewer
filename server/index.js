@@ -107,8 +107,9 @@ app.use((_req, res, next) => {
 // proxy's shared header secret and a matching socket source address/CIDR.
 app.use(createProxyGate(config));
 
-app.get('/api/v1/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/v1/health', (_req, res) => res.set('Cache-Control','no-store').json({ ok: true }));
 app.get('/api/v1/ready', (_req, res) => {
+  res.set('Cache-Control','no-store');
   const missing = [];
   try {
     fs.accessSync(config.dataDir, fs.constants.R_OK | fs.constants.W_OK);

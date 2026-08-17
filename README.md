@@ -143,6 +143,18 @@ has no published port. Container JSON logs rotate at 10 MiB with three files.
 `X_ACCEL_REDIRECT_PREFIX` is empty, so the application performs authorized,
 range-capable asset delivery itself.
 
+Client-origin shares are separately gated by
+`CLIENT_VIEWER_SHARES_ENABLED=false`. When enabled, the Viewer calls the exact
+HMAC-only automation origin `https://incoming.ledgetopdroneservices.com` to
+revalidate the bound client grant at bootstrap, unlock, and every asset/range
+authorization. Positive decisions are Promise-coalesced for at most five
+seconds (negative decisions for one second), then timeout, redirect, mismatch,
+revocation, or Ops failure fails that client share closed. Staff-created shares
+bypass this check, so published staff viewing never depends on Ops or an ODM
+provider. The event-direction HMAC key is reused only under the distinct
+source-introspection canonical path/body; it is never the Ops-to-Viewer service
+key.
+
 On a new volume, confirm Docker copied the image-owned directory skeleton and
 that UID/GID 568 can write it:
 
@@ -190,6 +202,8 @@ docker compose exec -T viewer-api \
 Do not submit a production dataset until this check is green. Provider health
 is deliberately excluded from public `/api/v1/health`, so already-published
 models remain viewable if NodeODM/ClusterODM later becomes unavailable.
+Both public `/api/v1/health` and `/api/v1/ready` explicitly return
+`Cache-Control: no-store` so proxy configuration cannot cache readiness state.
 
 The three readiness levels are intentionally different: container/public
 `/api/v1/ready` proves the database and required local mounts only;

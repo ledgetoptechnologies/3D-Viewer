@@ -62,7 +62,8 @@ class NodeOdmProvider {
         ? `NodeODM API ${info.version} is outside the tested 2.x range`
         : (this.providerType === 'clusterodm' && !String(info.version).startsWith('1.') ? `ClusterODM API ${info.version} is outside the tested 1.x range` : null),
     };
-    return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(capabilities)).digest('hex') };
+    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
+    return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
   }
 
   async initialize({ uuid, name, options, outputs }, { signal=null } = {}) {

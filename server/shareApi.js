@@ -8,6 +8,7 @@ const { requireAdmin } = require('./adminAuth');
 const { toClientConfig } = require('./api');
 const { config } = require('./config');
 const { toViewerConfig } = require('./apiV1');
+let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const SHARE_COOKIE = 'ltds_share';
 const SHARE_SESSION_TTL_MS = 60 * 60 * 1000; // 60 minutes; revocation is still checked live (see below)
@@ -18,6 +19,7 @@ let canonicalRepository = null;
 function setRepository(repository) {
   canonicalRepository = repository;
 }
+function setSourceAuthorizationValidator(validator){sourceAuthorizationValidator=validator;}
 
 function shareSummary(s) {
   return {
@@ -115,13 +117,14 @@ router.delete('/api/share-links/:id', requireAdmin, (req, res) => {
 });
 
 // ── Public: validate a token / unlock a password-protected one ───────────
-router.get('/api/share/:token', (req, res) => {
+router.get('/api/share/:token', async (req, res) => {
   const tokenHash = auth.hashToken(req.params.token);
   const legacyShare = shareStore.getByTokenHash(tokenHash);
   const share = legacyShare || (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash));
   if (!share) return res.status(404).json({ error: 'link not found' });
   const live = share.modelId ? canonicalRepository.publicShareLive(share) : shareStore.isLive(share);
   if (!live) return res.status(410).json({ error: 'link expired or revoked' });
+  if (!await sourceAuthorizationValidator.allows(share)) return res.status(410).json({ error: 'link authorization is no longer active' });
 
   const project = share.modelId ? canonicalRepository.getModel(share.modelId) : store.getById(share.viewerProjectId);
   const available = share.modelId ? project && project.status === 'ready' : project && project.available;
@@ -141,7 +144,7 @@ router.get('/api/share/:token', (req, res) => {
 
 function shareUnlockRateKey(token,ip){return `share-unlock:${auth.hashToken(String(token||'').normalize('NFKC'))}:${ip}`;}
 router.post('/api/share/:token/unlock', async (req, res) => {
-  if (auth.rateLimited(shareUnlockRateKey(req.params.token,req.ip), 8, 5 * 60 * 1000)) {
+  if ((canonicalRepository?.rateLimited(shareUnlockRateKey(req.params.token,req.ip), 8, 5 * 60 * 1000)) || (!canonicalRepository && auth.rateLimited(shareUnlockRateKey(req.params.token,req.ip), 8, 5 * 60 * 1000))) {
     return res.status(429).json({ error: 'too many attempts, try again later' });
   }
   const tokenHash = auth.hashToken(req.params.token);
@@ -150,6 +153,7 @@ router.post('/api/share/:token/unlock', async (req, res) => {
   if (!share) return res.status(404).json({ error: 'link not found' });
   const live = share.modelId ? canonicalRepository.publicShareLive(share) : shareStore.isLive(share);
   if (!live) return res.status(410).json({ error: 'link expired or revoked' });
+  if (!await sourceAuthorizationValidator.allows(share)) return res.status(410).json({ error: 'link authorization is no longer active' });
   if (!share.passwordHash) return res.status(400).json({ error: 'this link does not require a password' });
 
   const ok = await auth.verifyPassword(String((req.body && req.body.password) || ''), share.passwordHash);
@@ -169,5 +173,6 @@ router.post('/api/share/:token/unlock', async (req, res) => {
 module.exports = router;
 module.exports.SHARE_COOKIE = SHARE_COOKIE;
 module.exports.setRepository = setRepository;
+module.exports.setSourceAuthorizationValidator = setSourceAuthorizationValidator;
 module.exports.sharedViewerConfig = sharedViewerConfig;
 module.exports.shareUnlockRateKey = shareUnlockRateKey;

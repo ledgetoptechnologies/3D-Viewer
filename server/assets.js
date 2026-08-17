@@ -14,6 +14,7 @@ const { isAdminRequest } = require('./adminAuth');
 const { SHARE_COOKIE } = require('./shareApi');
 const { VIEWER_COOKIE } = require('./apiV1');
 const { config } = require('./config');
+let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const router = express.Router();
 let canonicalRepository = null;
@@ -21,6 +22,7 @@ let canonicalRepository = null;
 function setRepository(repository) {
   canonicalRepository = repository;
 }
+function setSourceAuthorizationValidator(validator){sourceAuthorizationValidator=validator;}
 
 // Resolve `relPath` under `root`, refusing anything that escapes it.
 function safeResolve(root, relPath) {
@@ -34,7 +36,7 @@ function safeResolve(root, relPath) {
 // THIS exact project. The referenced share is looked up live on every
 // request (cheap in-memory check) so revoking it takes effect immediately
 // instead of waiting out the session cookie's TTL.
-function isAuthorizedForProject(req, projectId) {
+async function isAuthorizedForProject(req, projectId) {
   if (isAdminRequest(req)) return true;
 
   const viewerCookie = req.cookies && req.cookies[VIEWER_COOKIE];
@@ -58,6 +60,7 @@ function isAuthorizedForProject(req, projectId) {
     const share = canonicalRepository.getPublicShare(payload.shareId);
     return requestedModelId === payload.modelId
       && canonicalRepository.publicShareLive(share)
+      && await sourceAuthorizationValidator.allows(share)
       && share.modelId === payload.modelId;
   }
   if (payload.viewerProjectId !== projectId) return false;
@@ -88,6 +91,9 @@ function canonicalAssetRoot(model, rootKey) {
   const source = model && model.activeVersion && model.activeVersion.sourceLocator || {};
   const legacyRoot = source.legacyAssetRoots && source.legacyAssetRoots[rootKey];
   if (legacyRoot) return legacyRoot;
+  if (source.catalogImport && rootKey === 'webodm') return config.webodmMediaMount;
+  if (source.catalogImport && rootKey === 'terra') return config.terraImportMount;
+  if (source.catalogImport && rootKey === 'datasets') return config.datasetsMount;
   if (model.provider === 'webodm' && source.projectId !== null && source.taskId !== null) {
     if (rootKey === 'webodm') {
       return path.join(config.webodmMediaMount, 'project', String(source.projectId), 'task', String(source.taskId), 'assets');
@@ -127,9 +133,11 @@ function publishedAssetMatch(model, rootKey, relPath) {
 function publishedAssetAllows(model, rootKey, relPath) { return Boolean(publishedAssetMatch(model,rootKey,relPath)); }
 
 function sha256File(filePath) { return new Promise((resolve,reject)=>{const hash=crypto.createHash('sha256'),stream=fs.createReadStream(filePath);stream.on('data',(chunk)=>hash.update(chunk));stream.on('error',reject);stream.on('end',()=>resolve(hash.digest('hex')));}); }
-async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs){if(project.provider!=='ltds-processing')return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null;if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=fs.statSync(abs);return stat.size===expected.byteSize&&await sha256File(abs)===expected.sha256;}
+function requestedRange(header,size){const match=/^bytes=(\d*)-(\d*)$/.exec(String(header||''));if(!match)return null;let start=match[1]?Number(match[1]):null,end=match[2]?Number(match[2]):null;if(start===null&&end!==null){start=Math.max(0,size-end);end=size-1;}else{if(start===null)return null;if(end===null||end>=size)end=size-1;}return Number.isSafeInteger(start)&&Number.isSafeInteger(end)&&start>=0&&start<=end&&start<size?{start,end}:null;}
+async function verifyChunks(filePath,chunks,range,totalSize){const selected=range?chunks.filter((chunk)=>chunk.byteOffset<=range.end&&chunk.byteOffset+chunk.byteSize-1>=range.start):chunks;if(!selected.length)return false;if(!range){let offset=0;for(const chunk of chunks){if(chunk.byteOffset!==offset)return false;offset+=chunk.byteSize;}if(offset!==totalSize)return false;}const handle=await fs.promises.open(filePath,'r');try{for(const chunk of selected){const buffer=Buffer.allocUnsafe(chunk.byteSize),{bytesRead}=await handle.read(buffer,0,chunk.byteSize,chunk.byteOffset);if(bytesRead!==chunk.byteSize||crypto.createHash('sha256').update(buffer.subarray(0,bytesRead)).digest('hex')!==chunk.sha256)return false;}return true;}finally{await handle.close();}}
+async function publishedAssetIntegrityAllows(repository,project,publishedAsset,requested,abs,rangeHeader=null){const integrityRequired=project.provider==='ltds-processing'||Boolean(publishedAsset.sha256)||Boolean(publishedAsset.manifestSha256);if(!integrityRequired)return true;const published=String(publishedAsset.relativePath).replaceAll('\\','/');let expected=null,chunkPath='';if(['ept','tiles'].includes(publishedAsset.kind)){if(!publishedAsset.manifestSha256)return false;const child=path.posix.relative(path.posix.dirname(published),requested);if(!child||child.startsWith('../'))return false;expected=repository.getModelAssetFile(publishedAsset.id,child);chunkPath=child;}else if(requested===published&&publishedAsset.sha256)expected={byteSize:publishedAsset.byteSize,sha256:publishedAsset.sha256};if(!expected)return false;const stat=fs.statSync(abs);if(stat.size!==expected.byteSize)return false;const chunks=repository.getModelAssetChunks?.(publishedAsset.id,chunkPath)||[];if(chunks.length)return verifyChunks(abs,chunks,requestedRange(rangeHeader,stat.size),stat.size);return await sha256File(abs)===expected.sha256;}
 
-function pathTokenAuthorized(req, projectId) {
+async function pathTokenAuthorized(req, projectId) {
   if (!canonicalRepository) return false;
   const requestedModelId = canonicalRepository.resolveModelId(projectId);
   if (!requestedModelId) return false;
@@ -149,6 +157,7 @@ function pathTokenAuthorized(req, projectId) {
       const model = canonicalRepository.getModel(requestedModelId);
       return payload.modelId === requestedModelId
         && canonicalRepository.publicShareLive(share)
+        && await sourceAuthorizationValidator.allows(share)
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
@@ -165,6 +174,7 @@ function xAccelLocation(abs) {
     ['webodm', config.webodmMediaMount],
     ['derivatives', config.derivativesMount],
     ['terra', config.terraImportMount],
+    ['datasets', config.datasetsMount],
     ['models', config.modelsMount],
   ];
   for (const [name, root] of roots) {
@@ -190,9 +200,9 @@ async function sendAsset(req, res) {
   }
   const abs = safeExistingFile(rootPath, rel);
   if (!abs) return res.status(404).json({ error: 'asset not found' });
-  if (project.provider === 'ltds-processing') {
+  if (project.activeVersion) {
     const requested=String(rel).replaceAll('\\','/'),published=String(publishedAsset.relativePath).replaceAll('\\','/');
-    if (!await publishedAssetIntegrityAllows(canonicalRepository,project,publishedAsset,requested,abs))return res.status(404).json({ error: 'asset not found' });
+    if (!await publishedAssetIntegrityAllows(canonicalRepository,project,publishedAsset,requested,abs,req.get('range')))return res.status(404).json({ error: 'asset not found' });
   }
 
   // Authorization/revocation is evaluated for every request. Prevent an
@@ -212,8 +222,10 @@ async function sendAsset(req, res) {
   });
 }
 
-router.get('/assets/:id/:root/*', (req, res, next) => {
-  if (!isAuthorizedForProject(req, req.params.id)) {
+router.get('/assets/:id/:root/*', async (req, res, next) => {
+  const capability=req.cookies?.[VIEWER_COOKIE]||req.cookies?.[SHARE_COOKIE];
+  if(capability&&canonicalRepository?.rateLimited(`public-asset:${auth.hashToken(capability)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
+  if (!await isAuthorizedForProject(req, req.params.id)) {
     return res.status(403).json({ error: 'not authorized' });
   }
   return sendAsset(req, res).catch(next);
@@ -223,13 +235,15 @@ router.get('/assets/:id/:root/*', (req, res, next) => {
 // the scoped browser credential in the asset URL makes iframe delivery work
 // even when the browser blocks third-party cookies. Relative 3D Tiles/EPT
 // children inherit this path prefix automatically.
-router.get('/session-assets/:token/:id/:root/*', (req, res, next) => {
-  if (!pathTokenAuthorized(req, req.params.id)) return res.status(403).json({ error: 'not authorized' });
+router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
+  if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
+  if (!await pathTokenAuthorized(req, req.params.id)) return res.status(403).json({ error: 'not authorized' });
   return sendAsset(req, res).catch(next);
 });
 
 module.exports = router;
 module.exports.setRepository = setRepository;
+module.exports.setSourceAuthorizationValidator = setSourceAuthorizationValidator;
 module.exports.safeResolve = safeResolve;
 module.exports.safeExistingFile = safeExistingFile;
 module.exports.xAccelLocation = xAccelLocation;

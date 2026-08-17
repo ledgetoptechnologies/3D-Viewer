@@ -63,6 +63,53 @@ Uploads are chunked, checksum-bound, subject-bound, resumable, and finalized by 
 
 Managed and adopted datasets are immutable after finalization. Every file is re-hashed before each ODM submission. External references retain their original location and are also re-hashed. Raw images, GCP files, logs, provider archives, and processing inputs are created unpublished and cannot be selected for a public share.
 
+## Existing-model catalog migration
+
+Durable mounted-tree scans discover WebODM outputs without API credentials and
+Terra output drops. Candidate rows retain scan generation, last-seen time, full
+source fingerprint, mapping identity, and `source_changed` versus `not_seen`
+staleness. Repeat scans are duplicate-safe. An unchanged mapped candidate is a
+no-op; a changed source must be explicitly reviewed and mapped again. A remap
+keeps its LTDS Project, Task, and model IDs but creates a new immutable Dataset,
+Attempt, and model Version. It cannot be moved to a different project. A
+missing candidate is non-actionable until it is seen again.
+
+WebODM is always `external_reference`. Terra may be reference-only or adopted;
+same-filesystem adoption is an atomic rename and cross-filesystem adoption is
+copy-verify-promote followed by a durable source-cleanup journal. The approved
+scan fingerprint is rechecked at worker start and during adoption. Operation-
+owned project/dataset/task/attempt/model rows are rolled back on a failed map,
+while the same deterministic IDs are reused on retry after restart. Pre-existing
+projects and prior model versions are never removed. EPT and 3D Tiles imports
+register an immutable hash allowlist for every nested child.
+
+All catalog scan/map and upload/import mutations use subject-scoped client
+operation keys. Acceptance atomically links the receipt to the durable
+operation. If every `202` response is lost, retrying the same method/path/body
+and key—after session renewal included—returns the same operation and canonical
+`Location`; `GET /api/v1/operation-receipts/:key` provides recovery. Completed
+response bodies are redacted after seven days, but the compact subject/key/body
+fingerprint and operation identity remain as a duplicate-prevention tombstone
+for the operation lifecycle.
+
+## Presets, capabilities, and health
+
+Admins manage custom processing presets through the API/UI. A preset binds to
+the probed provider type and static capability fingerprint and is revalidated
+at task submission. Structured option domains receive local type/range checks;
+NodeODM descriptive string domains are retained as help text and the provider
+remains the final compatibility authority. Required browser outputs cannot be
+disabled, including by the orthophoto-focused preset. Scheduled provider health
+refresh records fresh runtime status and sanitized errors with endpoint and
+credential-revision fencing, but does not disable a provider after one transient
+failure and never changes public readiness or published viewing.
+
+Large immutable assets store 4 MiB chunk hashes at ingest/import. A Range
+response verifies only intersecting chunks with bounded memory, while a full
+response verifies complete contiguous chunk coverage. Legacy assets without
+chunk rows use exact whole-file SHA-256 as a safe fallback. Nested EPT/3D Tiles
+children remain constrained by their exact manifest allowlist.
+
 Friendly project and dataset names, descriptions, tags, and arbitrary bounded
 catalog metadata remain editable. Dataset reassociation changes only the stable
 project ID association; it never moves files or changes a manifest. It is
