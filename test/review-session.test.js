@@ -123,4 +123,44 @@ test('admin review sessions expose only an exact review-ready derived version an
   assert.ok(revoked.revokedGrants >= 1);
   assert.ok(revoked.revokedSessions >= 1);
   assert.equal((await fetch(`${base}/api/v1/sessions/redeem`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: extra.grant }) })).status, 410);
+
+  await t.test('attempt cancellation invalidates an existing review capability', async () => {
+    const cancellationGrant = await (await issue('review-session-cancellation-0001')).json();
+    const cancellationResponse = await fetch(`${base}/api/v1/sessions/redeem`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: cancellationGrant.grant }),
+    });
+    assert.equal(cancellationResponse.status, 200);
+    const cancellationSession = await cancellationResponse.json();
+
+    database.prepare("UPDATE processing_attempts SET status='cancelled' WHERE id=?").run(attempt.id);
+    assert.equal((await fetch(`${base}/api/v1/sessions/current`, { headers: { authorization: `Bearer ${cancellationSession.accessToken}` } })).status, 401);
+    assert.equal((await fetch(`${base}${cancellationSession.model.assets.glb}`)).status, 403);
+    database.prepare("UPDATE processing_attempts SET status='ready_for_review' WHERE id=?").run(attempt.id);
+  });
+
+  await t.test('result-version replacement invalidates a capability pinned to the prior version', async () => {
+    const replacementGrant = await (await issue('review-session-replacement-0001')).json();
+    const replacementResponse = await fetch(`${base}/api/v1/sessions/redeem`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant: replacementGrant.grant }),
+    });
+    assert.equal(replacementResponse.status, 200);
+    const replacementSession = await replacementResponse.json();
+
+    fs.writeFileSync(path.join(directory, 'model-v2.glb'), 'replacement-mesh');
+    const replacementSha256 = crypto.createHash('sha256').update('replacement-mesh').digest('hex');
+    const replacementModel = repository.upsertModelVersion({
+      provider: 'ltds-processing', providerModelId: task.id, providerVersionId: `${attempt.id}-replacement`,
+      displayName: task.displayName, status: 'ready', sourceLocator: { taskId: task.id, attemptId: attempt.id },
+      assets: [{ kind: 'glb', rootKey: 'models', relativePath: `${task.id}/${attempt.id}/model-v2.glb`, byteSize: 16, sha256: replacementSha256, published: false }],
+      makeActive: false,
+    });
+    const replacementVersionId = database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?')
+      .get(replacementModel.id, `${attempt.id}-replacement`).id;
+    database.prepare('DELETE FROM model_outputs WHERE id=?').run(versionId);
+    processing.registerModelOutput({ versionId: replacementVersionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: project.id, relativePath: `${task.id}/${attempt.id}-replacement`, byteSize: 16, assetCount: 1 });
+    processing.setAttemptResult(attempt.id, model.id, replacementVersionId);
+
+    assert.equal((await fetch(`${base}/api/v1/sessions/current`, { headers: { authorization: `Bearer ${replacementSession.accessToken}` } })).status, 401);
+    assert.equal((await fetch(`${base}${replacementSession.model.assets.glb}`)).status, 403);
+  });
 });
