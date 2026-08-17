@@ -8,12 +8,12 @@ const {extractZipStream}=require('./safeZip');
 const {hashFile,hashTree}=require('./storageManager');
 const {sanitizeLogMessage}=require('./processingSecurity');
 
-function adapterFor(provider,config){return new NodeOdmProvider({endpoint:provider.endpoint,token:String(config.processingProviderTokens[provider.id]||''),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
+function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/'))));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),byteSize:fs.statSync(absolute).size});}return assets;}
 
-async function processSubmit(job,{processing,storage,config,signal,adapterFactory=adapterFor}){
-  let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config);
+async function processSubmit(job,{processing,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
   const basenames=new Set(),allowed=/\.(?:jpe?g|png|tiff?|dng|raw|heic|txt|geojson|json|zip|las|laz)$/i;for(const file of dataset.files){const name=path.basename(file.relativePath).toLowerCase();if(basenames.has(name))throw Object.assign(new Error('dataset contains duplicate source basenames'),{code:'duplicate_source_basename'});if(!allowed.test(name))throw Object.assign(new Error('dataset contains a file type NodeODM does not accept'),{code:'unsupported_source_file'});basenames.add(name);const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});}
   storage.requireProcessingHeadroom(dataset.byteSize);
   const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
@@ -46,8 +46,8 @@ async function processSubmit(job,{processing,storage,config,signal,adapterFactor
   transition(processing,job,known?.status==='running'?'running':'queued_upstream',{progress:known?.progress||0});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
 }
 
-async function processReconcile(job,{processing,config,signal}){
-  const attempt=processing.getAttempt(job.attempt_id),provider=processing.getProvider(attempt.providerId),adapter=adapterFor(provider,config);
+async function processReconcile(job,{processing,config,providerCredentials,signal}){
+  const attempt=processing.getAttempt(job.attempt_id),provider=processing.getProvider(attempt.providerId),adapter=adapterFor(provider,config,providerCredentials);
   const status=await adapter.status(attempt.providerTaskId,{signal}),output=await adapter.output(attempt.providerTaskId,attempt.providerOutputCursor,{signal});
   for(const line of output.lines)processing.appendLog(attempt.id,'provider',line);processing.setOutputCursor(attempt.id,output.nextLine);
   if(status.status==='completed'){transition(processing,job,'ingesting',{progress:1,upstreamCompletedAt:new Date().toISOString()});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'ingest'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
@@ -55,8 +55,8 @@ async function processReconcile(job,{processing,config,signal}){
   else{transition(processing,job,status.status,{progress:status.progress});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+15000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
 }
 
-async function processIngest(job,{processing,repository,storage,config,signal}){
-  const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId),adapter=adapterFor(provider,config);
+async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
+  const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId),adapter=adapterFor(provider,config,providerCredentials);
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
   const relative=`${task.id}/${attempt.id}`,destination=storage.resolve('models',relative);

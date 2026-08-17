@@ -795,6 +795,20 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 12,
+    name: 'encrypted_processing_provider_credentials',
+    sql: `
+      ALTER TABLE processing_providers ADD COLUMN credential_ciphertext TEXT;
+      ALTER TABLE processing_providers ADD COLUMN credential_key_id TEXT;
+      ALTER TABLE processing_providers ADD COLUMN credential_updated_at TEXT;
+      ALTER TABLE processing_providers ADD COLUMN credential_revision INTEGER NOT NULL DEFAULT 0
+        CHECK(credential_revision >= 0);
+      ALTER TABLE processing_providers ADD COLUMN credential_cleared INTEGER NOT NULL DEFAULT 0
+        CHECK(credential_cleared IN (0,1));
+      ALTER TABLE processing_providers ADD COLUMN last_probe_credential_revision INTEGER;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

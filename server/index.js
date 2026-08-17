@@ -20,6 +20,7 @@ const { StorageManager } = require('./storageManager');
 const { createProcessingApi } = require('./processingApi');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { createProxyGate } = require('./proxyGate');
+const { ProviderCredentials } = require('./providerCredentials');
 
 const problems = validate();
 if (problems.length) {
@@ -44,11 +45,15 @@ let database;
 let repository;
 let processingRepository;
 let storageManager;
+let providerCredentials;
 try {
   database = openDatabase(config.databasePath);
   repository = new ViewerRepository(database);
   if (config.processingPlatformEnabled) {
     processingRepository = new ProcessingRepository(database, { logMaxBytes: config.processingLogMaxBytes });
+    providerCredentials = new ProviderCredentials({ processing: processingRepository, activeKeyId: config.providerCredentialsKeyId, keys: config.providerCredentialsKeys, legacyTokens: config.processingProviderTokens });
+    const migratedProviderCredentials = providerCredentials.migrateLegacy();
+    if (migratedProviderCredentials) console.log(`[migration] encrypted ${migratedProviderCredentials} legacy processing provider credential(s)`);
     storageManager = new StorageManager(config);
     storageManager.initialize();
   }
@@ -148,7 +153,7 @@ app.use((req, res, next) => {
 app.use(adminAuth.router);
 app.use(shareApi);
 app.use(createApiV1(repository));
-if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager }));
+if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
 app.use(apiRouter);
 app.use(assetsRouter);
 

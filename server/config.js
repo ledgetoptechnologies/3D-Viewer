@@ -5,6 +5,7 @@
 const crypto = require('crypto');
 const path = require('path');
 const { parseTrustedProxyAddresses } = require('./proxyGate');
+const { decodeKey } = require('./providerCredentials');
 
 function bool(value, fallback) {
   if (value === undefined || value === '') return fallback;
@@ -64,6 +65,22 @@ let processingProviderTokens = {};
 let processingProviderTokensError = null;
 try { processingProviderTokens = JSON.parse(process.env.PROCESSING_PROVIDER_TOKENS_JSON || '{}'); if(!processingProviderTokens||Array.isArray(processingProviderTokens)||typeof processingProviderTokens!=='object'||Object.values(processingProviderTokens).some((v)=>typeof v!=='string'))throw new Error('must be a JSON object of string values'); }
 catch (error) { processingProviderTokens = {}; processingProviderTokensError=error.message; }
+const providerCredentialsKeyId = String(process.env.PROVIDER_CREDENTIALS_KEY_ID || 'provider-v1').trim();
+let providerCredentialsKeys = {};
+let providerCredentialsKeysError = null;
+try {
+  if (process.env.PROVIDER_CREDENTIALS_KEYS_JSON) {
+    const parsed = JSON.parse(process.env.PROVIDER_CREDENTIALS_KEYS_JSON);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object'
+      || Object.values(parsed).some((value) => typeof value !== 'string')) throw new Error('must be a JSON object of string values');
+    providerCredentialsKeys = { ...parsed };
+  }
+  if (process.env.PROVIDER_CREDENTIALS_KEY)
+    providerCredentialsKeys[providerCredentialsKeyId] = process.env.PROVIDER_CREDENTIALS_KEY;
+} catch (error) {
+  providerCredentialsKeys = {};
+  providerCredentialsKeysError = error.message;
+}
 const previousServiceKeyId = String(process.env.SERVICE_AUTH_PREVIOUS_KEY_ID || '').trim();
 const previousServiceSecret = process.env.SERVICE_AUTH_PREVIOUS_SECRET || '';
 if (!serviceAuthKeys && (previousServiceKeyId || previousServiceSecret)) {
@@ -142,6 +159,9 @@ const config = {
   processingProviderTransferTimeoutMs: Math.min(positiveInteger(process.env.PROCESSING_PROVIDER_TRANSFER_TIMEOUT_MS, 6*3600_000), 24*3600_000),
   processingProviderOrigins: csv(process.env.PROCESSING_PROVIDER_ORIGINS),
   processingProviderTokens,
+  providerCredentialsKeyId,
+  providerCredentialsKeys,
+  providerCredentialsKeysError,
   defaultUnits: /^(imperial|metric)$/.test(process.env.DEFAULT_UNITS || '') ? process.env.DEFAULT_UNITS : 'imperial',
   viewerEventUrl: String(process.env.VIEWER_EVENT_URL || '').trim(),
   viewerEventKeyId: String(process.env.VIEWER_EVENT_KEY_ID || 'viewer-v1').trim(),
@@ -201,6 +221,15 @@ function validate() {
     if (config.viewerEventUrl && config.viewerEventSecret.length < 32)
       problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when callbacks are enabled');
     if (processingProviderTokensError) problems.push(`PROCESSING_PROVIDER_TOKENS_JSON ${processingProviderTokensError}`);
+    if (providerCredentialsKeysError) problems.push(`PROVIDER_CREDENTIALS_KEYS_JSON ${providerCredentialsKeysError}`);
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(config.providerCredentialsKeyId))
+      problems.push('PROVIDER_CREDENTIALS_KEY_ID must contain only letters, numbers, dot, underscore, or hyphen');
+    if (!decodeKey(config.providerCredentialsKeys[config.providerCredentialsKeyId]))
+      problems.push('PROVIDER_CREDENTIALS_KEY must be a 32-byte hex, base64, or base64url key when processing is enabled');
+    for (const [keyId, key] of Object.entries(config.providerCredentialsKeys)) {
+      if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId) || !decodeKey(key))
+        problems.push(`provider credential key ${keyId} is invalid`);
+    }
     for (const origin of config.processingProviderOrigins) {
       try { const u=new URL(origin);if(u.origin!==origin||u.username||u.password||!['http:','https:'].includes(u.protocol))throw new Error(); }
       catch { problems.push(`PROCESSING_PROVIDER_ORIGINS contains invalid exact origin: ${origin}`); }
