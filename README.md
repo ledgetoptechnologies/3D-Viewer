@@ -396,8 +396,11 @@ empty.
 - **WebODM release-one import is reference-only.** Direct WebODM media import
   reads the mounted tree without credentials and never moves or deletes it.
   Optional API discovery can reconcile legacy WebODM projects when enabled.
-  The Terra drop folder supports explicit preview/adoption, but an automatic
-  Terra catalog importer is deferred.
+  The durable catalog scanner also discovers supported models under the
+  approved Terra drop root. Administrators map each candidate to an existing
+  or new LTDS project and either keep an explicit external reference or adopt
+  the verified tree into managed storage. Repeat scans are fingerprinted and
+  do not duplicate an unchanged mapping.
 - **Legacy WebODM compatibility remains best-effort.** `server/sync.js` still
   recognizes classic nested and flat WebODM output layouts and may use direct
   LAS/LAZ/PLY or the read-only Derivatives tree for already-existing models.
