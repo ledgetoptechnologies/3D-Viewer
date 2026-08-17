@@ -64,6 +64,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build and optionally publish
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -76,3 +77,19 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
+
+      - name: Verify published immutable image
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test -n "${PUBLISHED_IMAGE##*@}"
+          docker pull "$PUBLISHED_IMAGE"
+          test "$(docker inspect --format '{{.Config.User}}' "$PUBLISHED_IMAGE")" = "568:568"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$PUBLISHED_IMAGE")" = "$EXPECTED_REVISION"
+          docker run --rm --entrypoint sh -e EXPECTED_REVISION="$EXPECTED_REVISION" "$PUBLISHED_IMAGE" -c \
+            'test "$(cat /app/source-commit.txt)" = "$EXPECTED_REVISION" && test "$(stat -c %a /app/source-commit.txt)" = 444'
+          printf 'Verified immutable image `%s`\n' "$PUBLISHED_IMAGE" >> "$GITHUB_STEP_SUMMARY"

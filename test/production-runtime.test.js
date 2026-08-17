@@ -104,6 +104,11 @@ test('release-candidate image tags cannot move latest', () => {
   assert.match(workflow, /type=raw,value=latest,enable=\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/);
   assert.match(workflow, /type=ref,event=tag/);
   assert.match(workflow, /type=sha,prefix=sha-/);
+  assert.match(workflow, /id:\s*build[\s\S]*Verify published immutable image/);
+  assert.match(workflow, /docker pull "\$PUBLISHED_IMAGE"/);
+  assert.match(workflow, /\.Config\.User[\s\S]*568:568/);
+  assert.match(workflow, /org\.opencontainers\.image\.revision/);
+  assert.match(workflow, /source-commit\.txt[\s\S]*stat -c %a[\s\S]*444/);
 });
 
 test('live ODM compatibility cancellation exercises committed work and waits for status 50', () => {
