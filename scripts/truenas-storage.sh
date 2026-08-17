@@ -61,8 +61,11 @@ case "$command_name" in
       restart_previous || true
       fail "backup failed"
     fi
-    (cd -- "$backup_dir" && sha256sum -- "$backup_file" > "$backup_file.sha256")
-    chmod 600 -- "$target" "$target.sha256"
+    if ! (cd -- "$backup_dir" && sha256sum -- "$backup_file" > "$backup_file.sha256") || \
+       ! chmod 600 -- "$target" "$target.sha256"; then
+      restart_previous || true
+      fail "backup archive was created, but checksum or permission finalization failed"
+    fi
     restart_previous
     echo "backup complete: $target"
     ;;

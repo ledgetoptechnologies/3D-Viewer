@@ -142,7 +142,7 @@ volume archive from an untrusted source.
 
 Before maintenance:
 
-1. Stop new processing admission in Ops and wait for active operations or attempts to settle.
+1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the immutable image first, then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
 2. Stop the worker, then the API.
 3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client, then back up
    the complete `ltds-viewer-storage` volume before either service restarts.

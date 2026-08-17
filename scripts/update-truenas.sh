@@ -44,23 +44,6 @@ fi
 api_id="$(docker compose "${compose_args[@]}" ps -q viewer-api 2>/dev/null || true)"
 previous_image_id=""
 if [[ -n "$api_id" ]]; then
-  if [[ "${VIEWER_UPDATE_ALLOW_ACTIVE:-0}" != 1 ]]; then
-    if ! docker exec "$api_id" node -e '
-      const {DatabaseSync}=require("node:sqlite"),{config}=require("./server/config");
-      const db=new DatabaseSync(config.databasePath,{readOnly:true});
-      const checks=[
-        ["nonterminal attempts","SELECT COUNT(*) n FROM processing_attempts WHERE status NOT IN (\"ready_for_review\",\"failed\",\"cancelled\",\"published\")"],
-        ["processing jobs","SELECT COUNT(*) n FROM processing_jobs WHERE status=\"leased\""],
-        ["derivative jobs","SELECT COUNT(*) n FROM derivative_jobs WHERE status=\"leased\""],
-        ["dataset operations","SELECT COUNT(*) n FROM dataset_operations WHERE status=\"leased\""],
-        ["storage mutations","SELECT COUNT(*) n FROM storage_mutations WHERE status IN (\"intent\",\"fs_applied\")"],
-      ];
-      const active=checks.map(([name,sql])=>[name,Number(db.prepare(sql).get().n)]).filter(([,n])=>n>0);db.close();
-      if(active.length){console.error(active.map(([name,n])=>`${name}: ${n}`).join(", "));process.exit(3);}
-    '; then
-      fail "active durable work exists; let it settle or set VIEWER_UPDATE_ALLOW_ACTIVE=1 only for an emergency recovery"
-    fi
-  fi
   previous_image_id="$(docker inspect --format '{{.Image}}' "$api_id")"
   docker image tag "$previous_image_id" "$rollback_image"
 fi
@@ -78,12 +61,34 @@ rollback() {
 }
 
 docker compose "${compose_args[@]}" pull || rollback pull
+if [[ -n "$api_id" && "${VIEWER_UPDATE_ALLOW_ACTIVE:-0}" != 1 ]]; then
+  # Pull first, then check immediately before replacement. Operators must keep
+  # Ops processing admission paused for the update so no new work can enter
+  # between this check and Compose stopping the services.
+  if ! docker exec "$api_id" node -e '
+    const {DatabaseSync}=require("node:sqlite"),{config}=require("./server/config");
+    const db=new DatabaseSync(config.databasePath,{readOnly:true});
+    const checks=[
+      ["nonterminal attempts","SELECT COUNT(*) n FROM processing_attempts WHERE status NOT IN (\"ready_for_review\",\"failed\",\"cancelled\",\"published\")"],
+      ["processing jobs","SELECT COUNT(*) n FROM processing_jobs WHERE status=\"leased\""],
+      ["derivative jobs","SELECT COUNT(*) n FROM derivative_jobs WHERE status=\"leased\""],
+      ["dataset operations","SELECT COUNT(*) n FROM dataset_operations WHERE status=\"leased\""],
+      ["storage mutations","SELECT COUNT(*) n FROM storage_mutations WHERE status IN (\"intent\",\"fs_applied\")"],
+    ];
+    const active=checks.map(([name,sql])=>[name,Number(db.prepare(sql).get().n)]).filter(([,n])=>n>0);db.close();
+    if(active.length){console.error(active.map(([name,n])=>`${name}: ${n}`).join(", "));process.exit(3);}
+  '; then
+    fail "active durable work exists; keep Ops admission paused and let work settle, or set VIEWER_UPDATE_ALLOW_ACTIVE=1 only for emergency recovery"
+  fi
+fi
 if [[ "$mode" == view-only ]]; then
   docker compose --env-file "$viewer_config" --profile processing stop -t 120 viewer-worker >/dev/null 2>&1 || true
   docker compose --env-file "$viewer_config" --profile processing rm -f viewer-worker >/dev/null 2>&1 || true
 fi
 docker compose "${compose_args[@]}" up -d --remove-orphans --wait --wait-timeout 180 || rollback startup
-docker compose "${compose_args[@]}" exec -T viewer-api node scripts/production-readiness.mjs || rollback readiness
+readiness_args=()
+[[ "$mode" == processing ]] && readiness_args+=(--require-processing)
+docker compose "${compose_args[@]}" exec -T viewer-api node scripts/production-readiness.mjs "${readiness_args[@]}" || rollback readiness
 docker compose "${compose_args[@]}" ps
 echo "viewer update complete: $target_image ($mode)"
 if [[ -n "$previous_image_id" ]]; then

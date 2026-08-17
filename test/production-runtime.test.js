@@ -18,6 +18,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   const externalNginx = fs.readFileSync(path.join(repositoryRoot, 'deploy', 'nginx-viewer.conf.example'), 'utf8');
   const updateScript = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'update-truenas.sh'), 'utf8');
   const storageScript = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'truenas-storage.sh'), 'utf8');
+  const indexSource = fs.readFileSync(path.join(repositoryRoot, 'server', 'index.js'), 'utf8');
 
   assert.match(compose, /\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088/);
   assert.match(compose, /PORT:\s*8088/);
@@ -74,6 +75,11 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(updateScript, /--wait --wait-timeout 180/);
   assert.match(updateScript, /ltds-viewer-rollback:previous/);
   assert.match(updateScript, /production-readiness\.mjs/);
+  assert.match(updateScript, /readiness_args=\(\)/);
+  assert.match(updateScript, /mode" == processing.*readiness_args\+=\(--require-processing\)/);
+  assert(updateScript.indexOf(' pull || rollback pull') < updateScript.indexOf('active durable work exists'));
+  assert.match(updateScript, /keep Ops admission paused/);
+  assert.match(indexSource, /server\.close\(\(error\) =>/);
   assert.match(storageScript, /ltds-viewer-storage/);
   assert.match(storageScript, /--user 568:568/);
   assert.match(storageScript, /CONFIRM_UID_568/);

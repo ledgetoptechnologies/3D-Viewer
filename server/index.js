@@ -200,15 +200,23 @@ app.use((error, _req, res, _next) => {
 
 startScheduler();
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.once(signal, () => {
-    try { database.close(); } catch { /* already closed */ }
-    process.exit(0);
-  });
-}
-
-app.listen(config.port, () => {
+const server = app.listen(config.port, () => {
   console.log(`LTDS 3D Viewer server listening on :${config.port}`);
   console.log(`WebODM integration: ${config.webodmEnabled ? 'enabled' : 'disabled'}`);
   if (config.derivativesMount) console.log(`Derivatives mount: ${config.derivativesMount}`);
 });
+
+let shuttingDown = false;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Stop accepting new requests and let in-flight API responses finish before
+    // closing the shared SQLite handle. Docker's stop_grace_period is the outer
+    // bound if a client never completes.
+    server.close((error) => {
+      try { database.close(); } catch { /* already closed */ }
+      process.exit(error ? 1 : 0);
+    });
+  });
+}

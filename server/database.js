@@ -843,6 +843,20 @@ function applyMigrations(database) {
   }
 }
 
+function withBusyRetry(operation, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try { return operation(); }
+    catch (error) {
+      const busy = error?.errcode === 5 || error?.code === 'SQLITE_BUSY' || /database is locked/i.test(error?.message ?? '');
+      const remaining = timeoutMs - (Date.now() - startedAt);
+      if (!busy || remaining <= 0) throw error;
+      Atomics.wait(sleeper, 0, 0, Math.min(25, remaining));
+    }
+  }
+}
+
 function openDatabase(databasePath) {
   if (!databasePath) throw new Error('databasePath is required');
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -851,7 +865,10 @@ function openDatabase(databasePath) {
   // processes do not fail while one establishes the WAL files.
   database.exec('PRAGMA busy_timeout=5000');
   database.exec('PRAGMA foreign_keys=ON');
-  database.exec('PRAGMA journal_mode=WAL');
+  // SQLite's journal-mode transition may return SQLITE_BUSY without invoking
+  // the configured busy handler during simultaneous first boot. Retry only
+  // that bounded initialization transition; migration locking remains native.
+  withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
   database.exec('PRAGMA synchronous=NORMAL');
   applyMigrations(database);
   return database;
