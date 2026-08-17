@@ -8,6 +8,16 @@ Production Compose publishes `viewer-api` directly on the configured LAN bind ad
 
 Host mounts are fixed under `/mnt/Plugins/App_Data/Model-Viewer`: `Config`, `Data`, `Datasets`, `Models`, `Cache`, `Import/Datasets`, and `Import/Terra`. Runtime settings and secrets live only in `Config/viewer.env` (directory mode `700`, file mode `600`) and are shared by API and worker through Compose `env_file`. WebODM media is mounted read-only from `/mnt/Plugins/App_Data/WebODM/Media`. WebODM API discovery is disabled by default and does not require credentials. Release-one WebODM imports are read-only external references; source media is never moved or deleted.
 
+TrueNAS does not need a named host account for Viewer UID 1000. As in Project
+Alpha, each service starts with a narrowly bounded root bootstrap that creates
+or repairs only its fixed application-owned writable mount roots. It then
+permanently drops to `VIEWER_RUNTIME_UID`/`VIEWER_RUNTIME_GID` (default
+`1000:1000`) and clears all capabilities before executing Node. It never
+changes the read-only WebODM or legacy-derivative roots. Keep `Datasets`,
+`Models`, and `Trash` as ordinary directories on one parent ZFS dataset rather
+than separate ZFS child datasets; lifecycle journal renames must remain on one
+filesystem.
+
 Set `PROCESSING_PLATFORM_ENABLED=true`, configure exact provider origins in `PROCESSING_PROVIDER_ORIGINS`, and map provider IDs to tokens with `PROCESSING_PROVIDER_TOKENS_JSON`. Start with `docker compose --env-file /mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env --profile processing up -d`; both API and worker must read the true flag from that file. Provider endpoints cannot select arbitrary environment variable names and redirects are rejected. Enable a provider only after its capability probe confirms the required `pc-ept`, `3d-tiles`, and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines, not hard version lockouts; unknown compatible versions produce a warning.
 
 `LOCAL_DERIVATIVES_ENABLED` remains false in the stock image. The production path requests native EPT, GLB, and 3D Tiles outputs from ODM. If local derivatives are explicitly enabled, worker startup fails unless compatible Entwine and Obj2Tiles executables are present. A 3D Tiles result is publishable only after the existing LOD-v2 audit proves the full-detail frontier; otherwise the self-contained full GLB is retained as the safe fallback.

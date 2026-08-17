@@ -27,6 +27,10 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /pull_policy:\s*always/);
   assert.match(compose, /read_only:\s*true/);
   assert.match(compose, /cap_drop:\s*\[ALL\]/);
+  assert.match(compose, /cap_add:\s*\[CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETPCAP\]/);
+  assert.doesNotMatch(compose, /^\s+user:/m);
+  assert.match(compose, /VIEWER_RUNTIME_UID:\s*\$\{VIEWER_RUNTIME_UID:-1000\}/);
+  assert.match(compose, /VIEWER_RUNTIME_GID:\s*\$\{VIEWER_RUNTIME_GID:-1000\}/);
   assert.match(compose, /no-new-privileges:true/);
   assert.match(compose, /pids_limit:\s*256/);
   assert.match(compose, /\/tmp:rw,noexec,nosuid,nodev,size=256m/);
@@ -41,11 +45,13 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);
   assert.doesNotMatch(compose, /^\s{2}gateway:/m);
   assert.match(compose, /viewer-api:[\s\S]*?ports:\s*\["\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088"\]/);
-  assert.match(compose, /test:\s*\[CMD, node, scripts\/container-healthcheck\.js\]/);
+  assert.match(compose, /setpriv[\s\S]*node scripts\/container-healthcheck\.js/);
   assert.doesNotMatch(compose, /ADMIN_PASSWORD:/);
   assert.doesNotMatch(compose, /SERVICE_AUTH_SECRET:|SESSION_SECRET:|VIEWER_EVENT_SECRET:|PROXY_SHARED_SECRET:/);
   assert.match(environmentTemplate, /^PROXY_SHARED_SECRET=\s*$/m);
   assert.match(environmentTemplate, /TRUST_PROXY_HOPS=1/);
+  assert.match(environmentTemplate, /^VIEWER_RUNTIME_UID=1000$/m);
+  assert.match(environmentTemplate, /^VIEWER_RUNTIME_GID=1000$/m);
   assert.match(externalNginx, /# proxy_set_header X-Viewer-Proxy-Secret \$viewer_proxy_secret/);
   assert.doesNotMatch(externalNginx.slice(externalNginx.indexOf('    location ')), /proxy_set_header/);
   assert.match(externalNginx, /proxy_set_header X-Forwarded-For \$remote_addr/);
@@ -55,6 +61,25 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(externalNginx, /limit_req zone=viewer_share/);
   assert.match(updateScript, /--env-file "\$viewer_config"/);
   assert.match(updateScript, /--profile processing/);
+});
+
+test('container entrypoint prepares only managed roots and drops privileges before exec', () => {
+  const entrypoint = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'container-entrypoint.sh'), 'utf8');
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
+
+  assert.match(dockerfile, /USER root/);
+  assert.match(dockerfile, /ENTRYPOINT \["\/app\/scripts\/container-entrypoint\.sh"\]/);
+  assert.match(entrypoint, /VIEWER_RUNTIME_UID:-1000/);
+  assert.match(entrypoint, /VIEWER_RUNTIME_GID:-1000/);
+  assert.match(entrypoint, /\/app\/data/);
+  assert.match(entrypoint, /\/imports\/terra/);
+  assert.doesNotMatch(entrypoint, /\/imports\/webodm|\/imports\/legacy-derivatives/);
+  assert.match(entrypoint, /-L "\$managed_root"/);
+  assert.match(entrypoint, /find \/app\/data -xdev -mindepth 1 -maxdepth 1/);
+  assert.match(entrypoint, /exec setpriv/);
+  assert.match(entrypoint, /--reuid="\$runtime_uid"/);
+  assert.match(entrypoint, /--bounding-set=-all/);
+  assert.match(entrypoint, /-- "\$@"/);
 });
 
 async function unusedPort() {

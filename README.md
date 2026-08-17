@@ -38,17 +38,21 @@ already-published viewing.
 
 ## Running with Docker (production)
 
-1. Create the fixed TrueNAS directories and make the managed storage and import
-   drop directories writable by container UID/GID `1000:1000`:
+1. Create the fixed TrueNAS parent/config paths. The container now mirrors
+   Project Alpha's TrueNAS bootstrap: it creates or repairs the exact writable
+   mount roots while privileged, then permanently drops to the configured
+   non-root UID/GID before Node starts. A named TrueNAS host user for UID 1000
+   is not required:
    ```bash
-   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/{Config,Data,Datasets,Models,Cache,Trash}
-   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Import/{Datasets,Terra}
-   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Derivatives
-   chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Data
-   chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/{Datasets,Models,Cache,Trash}
-   chown 1000:1000 /mnt/Plugins/App_Data/Model-Viewer/Import/{Datasets,Terra}
+   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Config
    chmod 700 /mnt/Plugins/App_Data/Model-Viewer/Config
    ```
+
+   Keep `Datasets`, `Models`, and `Trash` as ordinary directories in the same
+   parent ZFS dataset. Do not create them as separate ZFS child datasets:
+   crash-safe trash/restore uses atomic renames and production readiness fails
+   when those roots have different filesystem device IDs. The bootstrap never
+   changes the read-only WebODM Media or Derivatives sources.
 2. Copy `.env.example` to the persistent configuration path, restrict it, and
    set independent generated secrets:
 
@@ -118,9 +122,13 @@ database and required mounts. The authenticated
 `GET /api/v1/processing/ready` separately reports the durable worker and
 lifecycle journal, so provider failure never makes published viewing unhealthy.
 
-The API and worker run as unprivileged UID/GID `1000:1000`, drop all Linux
-capabilities, prevent privilege escalation, limit process creation, and use a
-read-only container root. The explicit Data, Datasets, Models, Cache, Trash,
+The API and worker start with a narrowly capability-bounded entrypoint that
+prepares only the seven fixed writable mount roots. It rejects symlink/special
+mount roots, then uses `setpriv` to become the configured non-root UID/GID
+(`1000:1000` by default) and clear its capability bounding set before Node
+starts. The application therefore runs unprivileged even though TrueNAS does
+not have a named UID-1000 host account. Privilege escalation remains disabled,
+process creation is limited, and the container root is read-only. The explicit Data, Datasets, Models, Cache, Trash,
 and two Import drop-directory mounts are persistent and writable; `/tmp` is
 bounded in-memory storage. The WebODM Media and legacy Derivatives mounts stay
 read-only. An `adopted` import consumes its verified source from the drop

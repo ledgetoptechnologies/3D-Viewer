@@ -53,8 +53,13 @@ RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
 COPY --from=build /app/dist ./dist
-RUN mkdir -p /app/data && chown -R node:node /app/data
+RUN mkdir -p /app/data /app/datasets /app/models /app/cache /app/trash \
+      /imports/datasets /imports/terra \
+    && chown -R node:node /app/data /app/datasets /app/models /app/cache \
+      /app/trash /imports/datasets /imports/terra \
+    && chmod 0555 /app/scripts/container-entrypoint.sh
 
 EXPOSE 8088
-USER node
+USER root
+ENTRYPOINT ["/app/scripts/container-entrypoint.sh"]
 CMD ["node", "server/index.js"]
