@@ -6,7 +6,7 @@ const auth = require('./auth');
 const { config } = require('./config');
 const sync = require('./sync');
 const { requireService } = require('./serviceAuth');
-const { idempotent } = require('./serviceIdempotency');
+const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
 
 const VIEWER_COOKIE = 'ltds_viewer';
@@ -404,6 +404,11 @@ function createApiV1(repository) {
         return res.status(400).json({ error: 'sourceAuthorization is invalid' });
       const revoked = repository.revokePublishedSessionsBySourceAuthorization({
         sourceAuthorization,
+        idempotency: {
+          keyId: req.servicePrincipal.keyId,
+          idempotencyKey: req.get('Idempotency-Key'),
+          encrypt,
+        },
         audit: {
           actorType: 'service',
           actorId: req.servicePrincipal.keyId,
@@ -412,11 +417,7 @@ function createApiV1(repository) {
         },
       });
       res.setHeader('Cache-Control', 'no-store');
-      return res.json({
-        sourceAuthorization,
-        revokedGrants: revoked.grants,
-        revokedSessions: revoked.sessions,
-      });
+      return res.json(revoked);
     });
 
   router.get('/api/v1/models/:id/shares', serviceOnly, (req, res) => {

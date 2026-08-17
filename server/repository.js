@@ -615,7 +615,7 @@ class ViewerRepository {
     });
   }
 
-  revokePublishedSessionsBySourceAuthorization({ sourceAuthorization: authorization, audit }) {
+  revokePublishedSessionsBySourceAuthorization({ sourceAuthorization: authorization, audit, idempotency = null }) {
     const [sourceType, sourceId, sourceVersion] = sourceAuthorizationValues(authorization);
     if (sourceId === null) throw new TypeError('source authorization is required');
     const timestamp = now();
@@ -633,7 +633,7 @@ class ViewerRepository {
         WHERE session_mode='published' AND revoked_at IS NULL AND expires_at>?
           AND source_authorization_type=? AND source_authorization_id=? AND source_authorization_version=?`
       ).run(timestamp, timestamp, timestamp, sourceType, sourceId, sourceVersion).changes;
-      const result = { grants, sessions };
+      const result = { sourceAuthorization: authorization, revokedGrants: grants, revokedSessions: sessions };
       this.audit({
         ...audit,
         entityId: sourceId,
@@ -644,6 +644,16 @@ class ViewerRepository {
           revokedSessions: sessions,
         },
       });
+      if (idempotency) {
+        // Keep the canonical replay payload in the same commit as the
+        // revocation. A lost HTTP response must not strand the caller behind
+        // an incomplete idempotency reservation.
+        const completed = this.database.prepare(`UPDATE service_idempotency SET
+          response_status=200,response_ciphertext=?
+          WHERE key_id=? AND idempotency_key=? AND response_status IS NULL`
+        ).run(idempotency.encrypt(result), idempotency.keyId, idempotency.idempotencyKey);
+        if (completed.changes !== 1) throw new Error('source revocation idempotency reservation is unavailable');
+      }
       return result;
     });
   }

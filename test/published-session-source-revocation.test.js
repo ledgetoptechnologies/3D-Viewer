@@ -13,6 +13,14 @@ const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 
 const SERVICE_SECRET = 'published-session-source-revocation-service-secret';
+const SESSION_SECRET = 'published-session-test-cookie-secret-at-least-32';
+
+function encryptReplay(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', crypto.createHash('sha256').update(SESSION_SECRET).digest(), iv);
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
+  return [iv, cipher.getAuthTag(), encrypted].map((part) => part.toString('base64url')).join('.');
+}
 
 async function unusedPort() {
   const server = net.createServer();
@@ -111,7 +119,7 @@ test('exact source revocation is atomic, scoped, replay-safe, and token-redacted
       WEBODM_ENABLED: 'false',
       SYNC_ON_STARTUP: 'false',
       ADMIN_PASSWORD: 'published-session-test-admin-password',
-      SESSION_SECRET: 'published-session-test-cookie-secret-at-least-32',
+      SESSION_SECRET,
       SERVICE_AUTH_KEY_ID: 'ops-v1',
       SERVICE_AUTH_SECRET: SERVICE_SECRET,
       PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED: 'true',
@@ -330,7 +338,55 @@ test('exact source revocation is atomic, scoped, replay-safe, and token-redacted
     headers: { Authorization: `Bearer ${rollbackActive.accessToken}` },
   })).status, 200, 'audit failure rolls session revocation back');
 
+  const lostResponseDescriptor = { type: 'model_association', id: 'association-lost-response', version: 4 };
+  const lostResponsePending = await issue(firstModel, lostResponseDescriptor);
+  const lostResponseActive = await redeem(await issue(firstModel, lostResponseDescriptor));
+  const lostResponseBody = JSON.stringify({ sourceAuthorization: lostResponseDescriptor });
+  const lostResponseKey = 'source-revoke-lost-response-0001';
+  const lostResponseDatabase = openDatabase(databasePath);
+  const lostResponseRepository = new ViewerRepository(lostResponseDatabase);
+  const lostResponseRequestHash = crypto.createHash('sha256').update(Buffer.concat([
+    Buffer.from(`DELETE\n${revokePath}\n`), Buffer.from(lostResponseBody),
+  ])).digest('hex');
+  assert.equal(lostResponseRepository.reserveIdempotency({
+    keyId: 'ops-v1', idempotencyKey: lostResponseKey, method: 'DELETE', path: revokePath,
+    requestHash: lostResponseRequestHash, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }).created, true);
+  const committedWithoutResponse = lostResponseRepository.revokePublishedSessionsBySourceAuthorization({
+    sourceAuthorization: lostResponseDescriptor,
+    idempotency: { keyId: 'ops-v1', idempotencyKey: lostResponseKey, encrypt: encryptReplay },
+    audit: {
+      actorType: 'service', actorId: 'ops-v1', action: 'published_session.source_authorization_revoked',
+      entityType: 'source_authorization',
+    },
+  });
+  assert.deepEqual(committedWithoutResponse, {
+    sourceAuthorization: lostResponseDescriptor, revokedGrants: 1, revokedSessions: 1,
+  });
+  lostResponseDatabase.close();
+
+  const recoveredLostResponse = await signedFetch(base, revokePath, {
+    method: 'DELETE', body: lostResponseBody, idempotencyKey: lostResponseKey,
+  });
+  assert.equal(recoveredLostResponse.status, 200,
+    'a retry recovers the committed response after the mutation committed without an HTTP response');
+  assert.equal(recoveredLostResponse.headers.get('idempotency-replayed'), 'true');
+  assert.deepEqual(await recoveredLostResponse.json(), committedWithoutResponse);
+  assert.equal((await fetch(`${base}/api/v1/sessions/redeem`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ grant: lostResponsePending.grant }),
+  })).status, 410);
+  assert.equal((await fetch(`${base}/api/v1/sessions/current`, {
+    headers: { Authorization: `Bearer ${lostResponseActive.accessToken}` },
+  })).status, 401);
+  const lostResponseAuditDatabase = openDatabase(databasePath);
+  assert.equal(lostResponseAuditDatabase.prepare(`SELECT COUNT(*) count FROM audit_events
+    WHERE action='published_session.source_authorization_revoked' AND entity_id=?`
+  ).get(lostResponseDescriptor.id).count, 1, 'lost-response replay does not duplicate the audit event');
+  lostResponseAuditDatabase.close();
+
   const logs = Buffer.concat(output).toString('utf8');
-  for (const secret of [pendingTarget.grant, activeTarget.accessToken, rollbackPending.grant, rollbackActive.accessToken])
+  for (const secret of [pendingTarget.grant, activeTarget.accessToken, rollbackPending.grant,
+    rollbackActive.accessToken, lostResponsePending.grant, lostResponseActive.accessToken])
     assert.ok(!logs.includes(secret), 'raw grant/session tokens are not logged');
 });
