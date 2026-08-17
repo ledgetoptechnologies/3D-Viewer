@@ -46,7 +46,9 @@ RUN npx vite build
 # proxies read-only WebODM assets. No build tools, no dev dependencies.
 # ---------------------------------------------------------------------------
 FROM node:24-bookworm-slim AS runtime
+ARG VIEWER_SOURCE_COMMIT=unknown
 ENV NODE_ENV=production
+LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
     && usermod --uid 568 --gid 568 node
@@ -55,7 +57,9 @@ RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
 COPY --from=build /app/dist ./dist
-RUN mkdir -p /app/storage/data /app/storage/datasets /app/storage/models \
+RUN printf '%s\n' "${VIEWER_SOURCE_COMMIT}" > /app/source-commit.txt \
+    && chmod 0444 /app/source-commit.txt \
+    && mkdir -p /app/storage/data /app/storage/datasets /app/storage/models \
       /app/storage/cache /app/storage/trash \
       /app/storage/imports/datasets /app/storage/imports/terra \
     && chown -R 568:568 /app/storage

@@ -63,6 +63,8 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          build-args: |
+            VIEWER_SOURCE_COMMIT=${{ github.sha }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

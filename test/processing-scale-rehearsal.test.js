@@ -27,7 +27,9 @@ test('small processing rehearsal exercises authoritative storage and removes onl
     image: 'ghcr.io/example/viewer@sha256:' + 'a'.repeat(64), sourceCommit: 'b'.repeat(40),
   });
   assert.equal(report.ok, true);
-  assert.deepEqual(report.inputs, { fileCount: 24, bytesPerFile: 257, image: 'ghcr.io/example/viewer@sha256:' + 'a'.repeat(64), sourceCommit: 'b'.repeat(40) });
+  assert.deepEqual(report.inputs, { fileCount: 24, bytesPerFile: 257, reserveBytes: 0, image: 'ghcr.io/example/viewer@sha256:' + 'a'.repeat(64), sourceCommit: 'b'.repeat(40) });
+  assert.equal(report.preflight.requestedBytes, 24 * 257);
+  assert.equal(report.preflight.sufficient, true);
   assert.deepEqual(report.counts, { generatedFiles: 24, previewFiles: 24, finalizedFiles: 24, reopenedFiles: 24 });
   assert.equal(report.totalBytes, 24 * 257);
   assert.equal(report.storageAccountingBytes, report.totalBytes);
@@ -47,6 +49,27 @@ test('small processing rehearsal exercises authoritative storage and removes onl
 test('production rehearsal refuses a sub-100000 count before creating a target', (t) => {
   const root = operatorRoot(t);
   assert.throws(() => validateOptions({ root, fileCount: 99999, bytesPerFile: 1, production: true, image: 'viewer:sha-test', sourceCommit: 'c'.repeat(40) }), { code: 'production_file_count_too_small' });
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
+test('production preflight rejects mutable image source mismatch and insufficient real space without creating a target', async (t) => {
+  const root = operatorRoot(t), sourceCommit = 'd'.repeat(40), immutableImage = `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:${'e'.repeat(64)}`;
+  const filesystem = { device: '1', type: 'testfs', blockSize: 4096, totalBytes: 10 * 1024 ** 3, availableBytes: 10 * 1024 ** 3 };
+  const base = { root, fileCount: 100000, bytesPerFile: 1, reserveBytes: 0, production: true, image: immutableImage, sourceCommit };
+  const reject = async (input, dependencies, code) => {
+    await assert.rejects(runProcessingScaleRehearsal(input, dependencies), { code });
+    assert.deepEqual(fs.readdirSync(root), [], code);
+  };
+  await reject({ ...base, image: 'ghcr.io/ledgetoptechnologies/3d-viewer:latest' }, { runtimeSourceCommit: sourceCommit, filesystem }, 'production_image_not_immutable');
+  await reject(base, { runtimeSourceCommit: 'f'.repeat(40), filesystem }, 'source_identity_mismatch');
+  await reject(base, { runtimeSourceCommit: sourceCommit, filesystem: { ...filesystem, availableBytes: 1024 } }, 'insufficient_rehearsal_space');
+});
+
+test('requested-byte overflow and supported upper bounds fail before target creation', async (t) => {
+  const root = operatorRoot(t), common = { root, reserveBytes: 0, production: false, image: 'viewer:development', sourceCommit: 'a'.repeat(40) };
+  await assert.rejects(runProcessingScaleRehearsal({ ...common, fileCount: 1_000_000_000, bytesPerFile: 1_000_000_000 }), { code: 'requested_bytes_overflow' });
+  assert.deepEqual(fs.readdirSync(root), []);
+  await assert.rejects(runProcessingScaleRehearsal({ ...common, fileCount: 1_000_001, bytesPerFile: 1 }), { code: 'scale_upper_bound_exceeded' });
   assert.deepEqual(fs.readdirSync(root), []);
 });
 

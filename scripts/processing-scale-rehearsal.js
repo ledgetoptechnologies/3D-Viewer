@@ -9,28 +9,70 @@ const { StorageManager } = require('../server/storageManager');
 
 const SENTINEL_NAME = '.ltds-viewer-processing-scale.json';
 const TARGET_PATTERN = /^ltds-viewer-scale-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const PRODUCTION_IMAGE_PATTERN = /^ghcr\.io\/ledgetoptechnologies\/3d-viewer@sha256:[0-9a-f]{64}$/;
+const MAX_FILE_COUNT = 1_000_000;
+const MAX_BYTES_PER_FILE = 16 * 1024 * 1024;
+const DEFAULT_PRODUCTION_RESERVE_BYTES = 10 * 1024 * 1024 * 1024;
+const MIN_PRODUCTION_SAFETY_MARGIN_BYTES = 1024 * 1024 * 1024;
 
 function fail(code, message) { throw Object.assign(new Error(message), { code }); }
 function elapsedMs(start) { return Number(process.hrtime.bigint() - start) / 1e6; }
 function currentPeakRss() { return Math.max(process.memoryUsage().rss, Number(process.resourceUsage().maxRSS || 0) * 1024); }
 function manifestHash(files) { return crypto.createHash('sha256').update(JSON.stringify(files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })))).digest('hex'); }
 
-function validateOptions(input) {
+function readBuildSourceIdentity() {
+  const file = path.resolve(__dirname, '..', 'source-commit.txt');
+  let stat;
+  try { stat = fs.lstatSync(file); } catch { fail('runtime_source_identity_unavailable', 'runtime image source identity is unavailable'); }
+  if (!stat.isFile() || stat.isSymbolicLink()) fail('runtime_source_identity_unavailable', 'runtime image source identity is invalid');
+  const value = fs.readFileSync(file, 'utf8').trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(value)) fail('runtime_source_identity_unavailable', 'runtime image source identity is invalid');
+  return value;
+}
+
+function filesystemEvidence(root, injected = null) {
+  if (injected) return injected;
+  const rootStat = fs.statSync(root), stat = fs.statfsSync(root);
+  const blockSize = Number(stat.bsize), availableBlocks = Number(stat.bavail), totalBlocks = Number(stat.blocks);
+  if (![blockSize, availableBlocks, totalBlocks].every((value) => Number.isSafeInteger(value) && value >= 0) ||
+      availableBlocks > Math.floor(Number.MAX_SAFE_INTEGER / Math.max(1, blockSize)) ||
+      totalBlocks > Math.floor(Number.MAX_SAFE_INTEGER / Math.max(1, blockSize))) fail('filesystem_size_unsupported', 'filesystem size cannot be represented safely');
+  return { device: String(rootStat.dev), type: String(stat.type), blockSize, totalBytes: totalBlocks * blockSize, availableBytes: availableBlocks * blockSize };
+}
+
+function validateOptions(input, dependencies = {}) {
   const root = path.resolve(String(input.root || ''));
   const fileCount = Number(input.fileCount);
   const bytesPerFile = Number(input.bytesPerFile);
   const production = Boolean(input.production);
   if (!input.root) fail('root_required', 'an explicit rehearsal root is required');
-  if (!Number.isSafeInteger(fileCount) || fileCount < 1 || fileCount > 1_000_000) fail('invalid_file_count', 'file count must be between 1 and 1000000');
+  if (!Number.isSafeInteger(fileCount) || fileCount < 1) fail('invalid_file_count', 'file count must be a positive safe integer');
+  if (!Number.isSafeInteger(bytesPerFile) || bytesPerFile < 1) fail('invalid_file_size', 'bytes per file must be a positive safe integer');
+  if (fileCount > Math.floor(Number.MAX_SAFE_INTEGER / bytesPerFile)) fail('requested_bytes_overflow', 'requested rehearsal bytes exceed safe arithmetic bounds');
+  if (fileCount > MAX_FILE_COUNT || bytesPerFile > MAX_BYTES_PER_FILE) fail('scale_upper_bound_exceeded', 'rehearsal count or file size exceeds the supported upper bound');
   if (production && fileCount < 100_000) fail('production_file_count_too_small', 'production rehearsal requires at least 100000 files');
-  if (!Number.isSafeInteger(bytesPerFile) || bytesPerFile < 1 || bytesPerFile > 16 * 1024 * 1024) fail('invalid_file_size', 'bytes per file must be between 1 and 16777216');
   const sourceCommit = String(input.sourceCommit || '');
   const image = String(input.image || '');
   if (!/^[0-9a-f]{40}$/i.test(sourceCommit)) fail('invalid_source_commit', 'source commit must be a full 40-character Git SHA');
   if (!/^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,255}$/.test(image)) fail('invalid_image', 'image must be a bounded tag or digest without credentials');
+  if (production && !PRODUCTION_IMAGE_PATTERN.test(image)) fail('production_image_not_immutable', 'production image must be the immutable LTDS GHCR Viewer digest');
+  const normalizedCommit = sourceCommit.toLowerCase();
+  const runtimeSourceCommit = production ? String(dependencies.runtimeSourceCommit || readBuildSourceIdentity()).toLowerCase() : null;
+  if (production && (!/^[0-9a-f]{40}$/.test(runtimeSourceCommit) || runtimeSourceCommit !== normalizedCommit)) fail('source_identity_mismatch', 'claimed source commit does not match the runtime image identity');
   const stat = fs.lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail('invalid_root', 'rehearsal root must be a real directory, not a symbolic link');
-  return { root: fs.realpathSync.native(root), fileCount, bytesPerFile, production, sourceCommit: sourceCommit.toLowerCase(), image };
+  const resolvedRoot = fs.realpathSync.native(root);
+  const reserveBytes = input.reserveBytes === undefined || input.reserveBytes === null || input.reserveBytes === '' ? (production ? DEFAULT_PRODUCTION_RESERVE_BYTES : 0) : Number(input.reserveBytes);
+  if (!Number.isSafeInteger(reserveBytes) || reserveBytes < 0) fail('invalid_reserve_bytes', 'reserve bytes must be a non-negative safe integer');
+  const requestedBytes = fileCount * bytesPerFile;
+  const safetyMarginBytes = production ? Math.max(MIN_PRODUCTION_SAFETY_MARGIN_BYTES, Math.ceil(requestedBytes / 20)) : 0;
+  if (requestedBytes > Number.MAX_SAFE_INTEGER - reserveBytes || requestedBytes + reserveBytes > Number.MAX_SAFE_INTEGER - safetyMarginBytes) fail('requested_bytes_overflow', 'requested bytes, reserve, and safety margin exceed safe arithmetic bounds');
+  const requiredBytes = requestedBytes + reserveBytes + safetyMarginBytes;
+  const filesystem = filesystemEvidence(resolvedRoot, dependencies.filesystem || null);
+  if (!Number.isSafeInteger(filesystem.availableBytes) || filesystem.availableBytes < 0) fail('filesystem_size_unsupported', 'filesystem available bytes cannot be represented safely');
+  const preflight = { requestedBytes, reserveBytes, safetyMarginBytes, requiredBytes, availableBytes: filesystem.availableBytes, sufficient: filesystem.availableBytes >= requiredBytes };
+  if (!preflight.sufficient) fail('insufficient_rehearsal_space', 'rehearsal root lacks requested bytes plus reserve and safety margin');
+  return { root: resolvedRoot, fileCount, bytesPerFile, production, sourceCommit: normalizedCommit, runtimeSourceCommit, image, reserveBytes, requestedBytes, filesystem, preflight };
 }
 
 function createDisposableTarget(root) {
@@ -72,8 +114,8 @@ function makeStorageConfig(target, reserveBytes = 0) {
   };
 }
 
-async function runProcessingScaleRehearsal(input) {
-  const options = validateOptions(input);
+async function runProcessingScaleRehearsal(input, dependencies = {}) {
+  const options = validateOptions(input, dependencies);
   const context = createDisposableTarget(options.root);
   const started = process.hrtime.bigint();
   const phases = {};
@@ -82,8 +124,9 @@ async function runProcessingScaleRehearsal(input) {
   let failure = null;
   const report = {
     schemaVersion: 1, ok: false, mode: options.production ? 'production' : 'development',
-    inputs: { fileCount: options.fileCount, bytesPerFile: options.bytesPerFile, image: options.image, sourceCommit: options.sourceCommit },
+    inputs: { fileCount: options.fileCount, bytesPerFile: options.bytesPerFile, reserveBytes: options.reserveBytes, image: options.image, sourceCommit: options.sourceCommit },
     run: { targetName: context.targetName }, phases,
+    preflight: options.preflight,
   };
   const phase = async (name, operation) => {
     const phaseStarted = process.hrtime.bigint();
@@ -93,12 +136,9 @@ async function runProcessingScaleRehearsal(input) {
     return result;
   };
   try {
-    const rootStat = fs.statSync(options.root);
-    const filesystem = fs.statfsSync(options.root);
     report.filesystem = {
-      device: String(rootStat.dev), type: String(filesystem.type), blockSize: Number(filesystem.bsize),
-      totalBytes: Number(filesystem.blocks) * Number(filesystem.bsize),
-      availableBytesAtStart: Number(filesystem.bavail) * Number(filesystem.bsize),
+      device: String(options.filesystem.device), type: String(options.filesystem.type), blockSize: Number(options.filesystem.blockSize),
+      totalBytes: Number(options.filesystem.totalBytes), availableBytesAtStart: Number(options.filesystem.availableBytes),
     };
     const config = makeStorageConfig(context.target);
     const storage = new StorageManager(config);
@@ -178,12 +218,12 @@ function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--production') values.production = true;
-    else if (['--root', '--files', '--bytes-per-file', '--image', '--source-commit'].includes(arg)) {
+    else if (['--root', '--files', '--bytes-per-file', '--reserve-bytes', '--image', '--source-commit'].includes(arg)) {
       if (index + 1 >= argv.length) fail('invalid_arguments', `${arg} requires a value`);
       values[arg.slice(2)] = argv[++index];
     } else fail('invalid_arguments', 'unknown rehearsal argument');
   }
-  return { root: values.root, fileCount: Number(values.files), bytesPerFile: Number(values['bytes-per-file']), image: values.image, sourceCommit: values['source-commit'], production: Boolean(values.production) };
+  return { root: values.root, fileCount: Number(values.files), bytesPerFile: Number(values['bytes-per-file']), reserveBytes: values['reserve-bytes'] === undefined ? undefined : Number(values['reserve-bytes']), image: values.image, sourceCommit: values['source-commit'], production: Boolean(values.production) };
 }
 
 if (require.main === module) {
@@ -192,4 +232,4 @@ if (require.main === module) {
     .catch((error) => { process.stderr.write(`${JSON.stringify({ ok: false, code: error.code || 'rehearsal_failed', cleanup: error.rehearsal?.cleanup || null })}\n`);process.exitCode = 1; });
 }
 
-module.exports = { SENTINEL_NAME, cleanupDisposableTarget, createDisposableTarget, runProcessingScaleRehearsal, validateCleanupTarget, validateOptions };
+module.exports = { SENTINEL_NAME, cleanupDisposableTarget, createDisposableTarget, readBuildSourceIdentity, runProcessingScaleRehearsal, validateCleanupTarget, validateOptions };
