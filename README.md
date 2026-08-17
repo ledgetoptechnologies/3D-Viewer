@@ -70,7 +70,9 @@ already-published viewing.
    hostnames and read-only TrueNAS source paths already have safe defaults in
    `docker-compose.yml`. Back up `Config/viewer.env` securely with the database
    and never copy its populated contents into this repository or logs.
-3. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
+3. Set `VIEWER_IMAGE` to the reviewed `sha-<commit>` tag published by CI (or
+   the exact `@sha256:` digest). `latest` is deliberately rejected by the
+   update helper. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
    that has `read:packages`, then run the commands below. For view-only or
    legacy WebODM compatibility, keep `PROCESSING_PLATFORM_ENABLED=false` and
    run `docker compose --env-file "$VIEWER_ENV" up -d`; this intentionally does not start the profiled
@@ -85,6 +87,14 @@ already-published viewing.
    docker compose --env-file "$VIEWER_ENV" --profile processing up -d
    docker compose --env-file "$VIEWER_ENV" --profile processing ps
    ```
+
+   For subsequent updates, use `scripts/update-truenas.sh . auto`. It derives
+   the processing profile from the persistent environment, refuses nonterminal
+   work unless `VIEWER_UPDATE_ALLOW_ACTIVE=1` is explicitly supplied for an
+   emergency, retains the previous image locally as
+   `ltds-viewer-rollback:previous`, waits for container health, and runs the
+   production readiness check. An explicit `processing` or `view-only` second
+   argument is accepted only when it agrees with `PROCESSING_PLATFORM_ENABLED`.
 
    The API must receive `PROCESSING_PLATFORM_ENABLED=true` through the shared
    persistent environment; the profiled worker reads the same file. The platform is
@@ -133,6 +143,21 @@ has no published port. Container JSON logs rotate at 10 MiB with three files.
 `X_ACCEL_REDIRECT_PREFIX` is empty, so the application performs authorized,
 range-capable asset delivery itself.
 
+On a new volume, confirm Docker copied the image-owned directory skeleton and
+that UID/GID 568 can write it:
+
+```bash
+VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
+  scripts/truenas-storage.sh diagnose
+```
+
+If this bounded check reports an older, incorrectly owned
+`ltds-viewer-storage` volume, stop admission and run
+`scripts/truenas-storage.sh repair-ownership CONFIRM_UID_568`. The command
+stops the Viewer services, changes ownership only inside that exact named
+volume, and restores the services that were previously running. Do not use a
+generic host-path recursive `chown`.
+
 After the container is healthy, run the production readiness check inside it:
 
 ```bash
@@ -165,6 +190,13 @@ docker compose exec -T viewer-api \
 Do not submit a production dataset until this check is green. Provider health
 is deliberately excluded from public `/api/v1/health`, so already-published
 models remain viewable if NodeODM/ClusterODM later becomes unavailable.
+
+The three readiness levels are intentionally different: container/public
+`/api/v1/ready` proves the database and required local mounts only;
+`--require-processing` additionally proves the worker heartbeat, disk/journal
+state, enabled-provider outputs, and that every enabled credential decrypts;
+`--live-capability` exercises an exact protected browser asset path. A green
+public probe does not claim that an upstream processing provider is online.
 
 After the Tunnel is live, exercise that exact model's real protected browser
 path as well:

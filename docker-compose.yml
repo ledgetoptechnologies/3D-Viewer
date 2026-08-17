@@ -1,7 +1,10 @@
 x-runtime: &runtime
-  image: ${VIEWER_IMAGE:-ghcr.io/ledgetoptechnologies/3d-viewer:latest}
+  image: ${VIEWER_IMAGE:?VIEWER_IMAGE must be pinned to a CI sha tag or digest}
   pull_policy: always
   restart: unless-stopped
+  # Updates drain active work first. This gives current database/filesystem
+  # operations time to finish before Docker sends SIGKILL.
+  stop_grace_period: 2m
   init: true
   read_only: true
   # TrueNAS SCALE Apps service identity. Storage is a Docker-managed named

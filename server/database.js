@@ -819,13 +819,18 @@ function applyMigrations(database) {
       applied_at TEXT NOT NULL
     )
   `);
-  const applied = new Set(
-    database.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)),
-  );
   for (const migration of MIGRATIONS) {
-    if (applied.has(migration.version)) continue;
     database.exec('BEGIN IMMEDIATE');
     try {
+      // Re-check only after holding SQLite's write reservation. The API and
+      // worker can start against the same fresh/upgraded volume concurrently;
+      // a pre-lock snapshot would let the waiter apply an already-committed
+      // ALTER TABLE a second time.
+      const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);
+      if (applied) {
+        database.exec('COMMIT');
+        continue;
+      }
       database.exec(migration.sql);
       database.prepare(
         'INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
@@ -842,10 +847,12 @@ function openDatabase(databasePath) {
   if (!databasePath) throw new Error('databasePath is required');
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new DatabaseSync(databasePath);
+  // Set the lock wait before journal-mode initialization so two first-boot
+  // processes do not fail while one establishes the WAL files.
+  database.exec('PRAGMA busy_timeout=5000');
   database.exec('PRAGMA foreign_keys=ON');
   database.exec('PRAGMA journal_mode=WAL');
   database.exec('PRAGMA synchronous=NORMAL');
-  database.exec('PRAGMA busy_timeout=5000');
   applyMigrations(database);
   return database;
 }

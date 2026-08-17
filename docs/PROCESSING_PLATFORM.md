@@ -18,6 +18,14 @@ dropped. The one volume keeps `datasets`, `models`, and `trash` on the same
 filesystem for journaled atomic renames. Preserve and back up the volume across
 image updates or app/project renames.
 
+Run `scripts/truenas-storage.sh diagnose` after first boot. It launches the
+pinned Viewer image as UID/GID 568, verifies each managed directory, and makes
+and removes a bounded write marker. A volume created or populated before the
+rootless layout may retain incompatible ownership because Docker copy-up runs
+only for an empty volume. With processing admission stopped, the explicit
+`repair-ownership CONFIRM_UID_568` command stops the services, repairs only the
+fixed `ltds-viewer-storage` volume, and restarts the services that were running.
+
 WebODM media is mounted read-only from
 `/mnt/Plugins/App_Data/WebODM/Media`; legacy derivatives are also read-only.
 WebODM API discovery is disabled by default and does not require credentials.
@@ -36,6 +44,16 @@ credentials are encrypted at rest and are never returned. Enable a provider
 only after its capability probe confirms the required `pc-ept`, `3d-tiles`,
 and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines,
 not hard version lockouts; unknown compatible versions produce a warning.
+
+`scripts/update-truenas.sh . auto` derives the Compose profile from
+`PROCESSING_PLATFORM_ENABLED`; explicit `processing` or `view-only` modes must
+match it. The helper accepts only a CI `sha-<commit>` image or `@sha256` digest,
+refuses active processing/dataset/storage work by default, preserves the prior
+image under `ltds-viewer-rollback:previous`, waits for health, and runs the
+read-only production readiness check. `VIEWER_UPDATE_ALLOW_ACTIVE=1` is an
+emergency override: interrupted work remains lease/journal recoverable, but the
+normal update path must drain first. Compose grants two minutes after SIGTERM;
+do not force-kill a worker merely because a large operation has not exited yet.
 
 `LOCAL_DERIVATIVES_ENABLED` remains false in the stock image. The production path requests native EPT, GLB, and 3D Tiles outputs from ODM. If local derivatives are explicitly enabled, worker startup fails unless compatible Entwine and Obj2Tiles executables are present. A 3D Tiles result is publishable only after the existing LOD-v2 audit proves the full-detail frontier; otherwise the self-contained full GLB is retained as the safe fallback.
 
@@ -97,6 +115,31 @@ file in source control or ordinary logs. Do not copy only the main database
 while the API or worker is writing. Dataset/model files and the database must
 be captured as one consistent backup.
 
+The supported named-volume backup path stops API and worker before archiving so
+the SQLite WAL and managed bytes form one snapshot, writes a SHA-256 sidecar,
+then restores only the services that were previously running:
+
+```bash
+mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Backups
+VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
+  scripts/truenas-storage.sh backup \
+  /mnt/Plugins/App_Data/Model-Viewer/Backups/viewer-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+```
+
+Test restoration on a non-production copy first. Production restore verifies
+the sidecar and archive paths, stops services, replaces only the exact named
+volume contents, restores ownership to 568, and restarts prior services:
+
+```bash
+VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
+  scripts/truenas-storage.sh restore \
+  /mnt/Plugins/App_Data/Model-Viewer/Backups/viewer-TIMESTAMP.tar.gz \
+  CONFIRM_RESTORE
+```
+
+If extraction fails, services remain stopped for inspection. Never restore a
+volume archive from an untrusted source.
+
 Before maintenance:
 
 1. Stop new processing admission in Ops and wait for active operations or attempts to settle.
@@ -107,7 +150,7 @@ Before maintenance:
 
 Never restore only `models` without the matching database snapshot: published asset rows contain immutable SHA-256 manifests for every GLB, EPT child, and 3D Tiles child. Serving fails closed when files are missing, added, or modified.
 
-After activation, run `node scripts/production-readiness.mjs --verify-mount-options --require-processing`. This opt-in check is read-only: it verifies all processing mounts, the datasets/trash same-filesystem invariant, configured disk reserve, fresh worker heartbeat, enabled provider capability fingerprints and required native outputs, and absence of stale operation leases. It does not probe, enable, or mutate a provider.
+After activation, run `node scripts/production-readiness.mjs --verify-mount-options --require-processing`. This opt-in check is read-only: it verifies all processing mounts, the datasets/trash same-filesystem invariant, configured disk reserve, fresh worker heartbeat, enabled provider credential decryption, capability fingerprints and required native outputs, and absence of stale operation leases. It does not probe, enable, or mutate a provider.
 
 ## Logs and callbacks
 

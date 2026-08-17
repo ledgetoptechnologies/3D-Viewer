@@ -17,6 +17,7 @@ const { ProviderCredentials, validToken } = require('../server/providerCredentia
 const { parseProviderCidrs } = require('../server/providerAdmission');
 const { createProcessingApi } = require('../server/processingApi');
 const { adapterFor } = require('../server/processingWorker');
+const { resolveEnabledProviderCredentials } = require('../server/processingReadiness');
 
 const KEY = '91'.repeat(32);
 const TOKEN = '  node-token-☃-with-spaces  ';
@@ -217,4 +218,25 @@ test('provider credential validation preserves exact safe UTF-8 while bounding s
   assert.equal(validToken('\ud800'), false);
   assert.equal(validToken('é'.repeat(2048)), true);
   assert.equal(validToken('é'.repeat(2049)), false);
+});
+
+test('processing readiness decrypts enabled credentials with overlap and fails closed generically', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-provider-readiness-'));
+  const database = openDatabase(path.join(root, 'viewer.sqlite'));
+  const processing = new ProcessingRepository(database);
+  t.after(() => { database.close();fs.rmSync(root,{recursive:true,force:true}); });
+  const providerId = 'readiness-provider';
+  const old = new ProviderCredentials({ processing, activeKeyId: 'provider-v1', keys: { 'provider-v1': KEY } });
+  const sealed = old.seal(providerId, 'readiness-secret-token');
+  processing.upsertProvider({ id: providerId, type: 'nodeodm', displayName: 'Ready ODM', endpoint: 'http://192.168.50.80:30048', enabled: true, credentialCiphertext: sealed.ciphertext, credentialKeyId: sealed.keyId, credentialUpdatedAt: new Date().toISOString() });
+  const overlap = { processingLogMaxBytes: 1024, providerCredentialsKeyId: 'provider-v2', providerCredentialsKeys: { 'provider-v1': KEY, 'provider-v2': 'a3'.repeat(32) }, processingProviderTokens: {} };
+  assert.deepEqual(resolveEnabledProviderCredentials(database, overlap), [providerId]);
+  const missing = { ...overlap, providerCredentialsKeys: { 'provider-v2': 'a3'.repeat(32) } };
+  assert.throws(() => resolveEnabledProviderCredentials(database, missing), (error) => {
+    assert.equal(error.message, `provider ${providerId} credential is unavailable`);
+    assert.doesNotMatch(error.message, /readiness-secret|ciphertext|provider-v1/);
+    return true;
+  });
+  database.prepare("UPDATE processing_providers SET credential_ciphertext=substr(credential_ciphertext,1,length(credential_ciphertext)-2)||'xx' WHERE id=?").run(providerId);
+  assert.throws(() => resolveEnabledProviderCredentials(database, overlap), { message: `provider ${providerId} credential is unavailable` });
 });

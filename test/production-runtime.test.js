@@ -17,6 +17,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   const environmentTemplate = fs.readFileSync(path.join(repositoryRoot, '.env.example'), 'utf8');
   const externalNginx = fs.readFileSync(path.join(repositoryRoot, 'deploy', 'nginx-viewer.conf.example'), 'utf8');
   const updateScript = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'update-truenas.sh'), 'utf8');
+  const storageScript = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'truenas-storage.sh'), 'utf8');
 
   assert.match(compose, /\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088/);
   assert.match(compose, /PORT:\s*8088/);
@@ -24,7 +25,10 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /env_file:[\s\S]*VIEWER_ENV_FILE:-\/mnt\/Plugins\/App_Data\/Model-Viewer\/Config\/viewer\.env/);
   assert.match(compose, /X_ACCEL_REDIRECT_PREFIX:\s*""/);
   assert.doesNotMatch(compose, /^\s+build:/m);
+  assert.doesNotMatch(compose, /3d-viewer:latest/);
+  assert.match(compose, /VIEWER_IMAGE:\?VIEWER_IMAGE must be pinned/);
   assert.match(compose, /pull_policy:\s*always/);
+  assert.match(compose, /stop_grace_period:\s*2m/);
   assert.match(compose, /read_only:\s*true/);
   assert.match(compose, /cap_drop:\s*\[ALL\]/);
   assert.doesNotMatch(compose, /cap_add:/);
@@ -63,7 +67,18 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(externalNginx, /proxy_cache off/);
   assert.match(externalNginx, /limit_req zone=viewer_share/);
   assert.match(updateScript, /--env-file "\$viewer_config"/);
-  assert.match(updateScript, /--profile processing/);
+  assert.match(updateScript, /PROCESSING_PLATFORM_ENABLED/);
+  assert.match(updateScript, /:sha-/);
+  assert.match(updateScript, /@sha256:/);
+  assert.match(updateScript, /VIEWER_UPDATE_ALLOW_ACTIVE/);
+  assert.match(updateScript, /--wait --wait-timeout 180/);
+  assert.match(updateScript, /ltds-viewer-rollback:previous/);
+  assert.match(updateScript, /production-readiness\.mjs/);
+  assert.match(storageScript, /ltds-viewer-storage/);
+  assert.match(storageScript, /--user 568:568/);
+  assert.match(storageScript, /CONFIRM_UID_568/);
+  assert.match(storageScript, /CONFIRM_RESTORE/);
+  assert.match(storageScript, /sha256sum -c/);
 });
 
 test('runtime image is rootless as the TrueNAS Apps service identity', () => {
