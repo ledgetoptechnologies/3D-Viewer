@@ -64,16 +64,25 @@ with explicit operator approval and a user-supplied small 1-50 image corpus:
 npm run verify:odm-provider -- \
   --provider-type clusterodm \
   --endpoint http://192.168.50.80:3000 \
+  --provider-image opendronemap/clusterodm@sha256:<64-hex-digest> \
   --destructive \
   --corpus /path/to/small-reviewed-corpus \
   --confirm I_UNDERSTAND_PROVIDER_TASKS_WILL_BE_CREATED_AND_REMOVED
 ```
 
-That mode creates an LTDS-assigned UUID, uploads and commits the corpus, polls
-status and bounded output, streams and hashes `all.zip` without retaining it,
+The provider image argument must be an immutable digest for the endpoint being
+tested; mutable tags are rejected. The corpus is limited to 50 top-level image
+files, 512 MiB per file, and 2 GiB total. The aggregate timeout must be an
+integer from one minute through six hours and covers hashing, both uploads,
+processing, download, and cancellation. That mode creates an LTDS-assigned
+UUID, uploads and commits the corpus, polls status and bounded output, streams
+and hashes `all.zip` without retaining it,
 then uploads and commits a second task, verifies that cancelling real queued or
-running work settles at NodeODM status code 50, and removes both tasks in `finally`.
-It has a two-hour default task timeout and never runs without the exact
+running work settles at NodeODM status code 50, and removes both tasks. It
+prints the immutable provider image and corpus count/bytes/content-manifest in
+the result. Success is emitted only after both UUIDs are confirmed absent;
+ambiguous initialization responses and failed removal verification fail the
+gate. It has a two-hour default timeout and never runs without the exact
 confirmation phrase.
 
 ### NodeODM 2.2.3 baseline evidence
