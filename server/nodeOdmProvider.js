@@ -94,7 +94,7 @@ class NodeOdmProvider {
     const info = await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/info`,{}, {}, {signal}),1024*1024);
     if (typeof info?.error === 'string') {
       const error = new Error('ODM task info request failed');
-      error.code = /not found/i.test(info.error) ? 'provider_task_not_found' : 'provider_request_failed';
+      error.code = /not found|no task table entry/i.test(info.error) ? 'provider_task_not_found' : 'provider_request_failed';
       throw error;
     }
     if (!info || info.uuid !== uuid || !info.status || !Number.isFinite(Number(info.status.code))) throw new Error('provider returned an incompatible task response');
