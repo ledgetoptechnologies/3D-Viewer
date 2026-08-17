@@ -100,11 +100,29 @@ pinned to `pierotofy/dataset_banana` commit
 15,294,677 bytes; a sorted `name<TAB>size<TAB>sha256<LF>` manifest hashed to
 `0521a4583c8a9bab746ad5c5f4bf45e82547fa5e9c82e0250407f148f07c4013`.
 
-The task completed, its streamed `all.zip` contained 694,062,035 bytes with
-SHA-256 `ac7ecaf548ca5fc8b932ce4513bc83c04d4bba788ef4789c1e48f2b276f7cddd`,
-and the second committed task settled at `cancelled`. Both assigned tasks were
+The task completed. Its streamed `all.zip` contained 458,039,578 compressed
+bytes with SHA-256
+`0d9b05f801a4179baf65c56a861ce381e79ceb4bdabf9daad5824d341b9561fc`.
+The production ZIP path extracted 265 entries totalling 457,991,174 bytes and
+discovered EPT, GLB, native 3D Tiles, OBJ, orthophoto, and point-cloud outputs.
+The second committed task settled at `cancelled`. Both assigned tasks were
 removed and the provider data directory was empty before the disposable
-container, network, and corpus checkout were removed. This proves the small
-NodeODM baseline workflow and cancel contract. It does not replace a
-representative TrueNAS corpus, GCP/LOD review, restart interruption, or the
-separate ClusterODM 1.5.5 gate.
+container, network, and corpus checkout were removed.
+
+### ClusterODM 1.5.5 baseline evidence
+
+On 2026-08-17 the same gate and corpus completed against immutable image
+`opendronemap/clusterodm@sha256:345cde80cd717cd23b207f99d4b49dac57e969d273861662b56c681f733baa9f`
+with an isolated NodeODM processing node. The image is tagged 1.5.5; its
+runtime API package reports 1.5.3, and the downstream ODM engine reports 3.5.0.
+The streamed `all.zip` contained 458,488,913 compressed bytes with SHA-256
+`fe7c7a6b55938f57667b3fd5c06bffb0236f33d248a5899d36e1597568acc9bc`.
+The production ZIP path extracted 263 entries totalling 458,440,895 bytes and
+discovered EPT, GLB, native 3D Tiles, OBJ, orthophoto, and point-cloud outputs.
+The second committed task settled at `cancelled`; both provider tasks were
+confirmed absent, and both the ClusterODM scheduler and NodeODM task
+inventories were empty before cleanup.
+
+These results prove the small immutable NodeODM and ClusterODM compatibility,
+native-output, cancellation, and cleanup contracts. They do not replace a
+representative TrueNAS corpus, GCP/LOD review, or restart interruption gate.
