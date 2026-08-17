@@ -204,6 +204,12 @@ is deliberately excluded from public `/api/v1/health`, so already-published
 models remain viewable if NodeODM/ClusterODM later becomes unavailable.
 Both public `/api/v1/health` and `/api/v1/ready` explicitly return
 `Cache-Control: no-store` so proxy configuration cannot cache readiness state.
+They also return matching `X-LTDS-Viewer-Revision` and
+`X-LTDS-Viewer-Schema-Version` headers. The revision is read from the
+root-owned source identity baked into the immutable image, while the schema
+version is read after migrations complete. `production-readiness.mjs` verifies
+both routes agree and that the served revision matches the baked identity; the
+JSON bodies remain backwards-compatible.
 
 The three readiness levels are intentionally different: container/public
 `/api/v1/ready` proves the database and required local mounts only;

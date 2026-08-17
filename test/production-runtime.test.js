@@ -217,6 +217,8 @@ test('production gates health/readiness and all routes behind exact proxy host a
   assert.doesNotMatch(await rejected.text(), /test-proxy-secret/);
   const health = await httpRequest(`${baseUrl}/api/v1/health`, proxyHeaders);
   assert.deepEqual(await health.json(), { ok: true });
+  assert.equal(health.headers.get('x-ltds-viewer-revision'), 'unavailable');
+  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '16');
   assert.match(
     health.headers.get('content-security-policy') || '',
     /frame-ancestors 'self' https:\/\/ops\.example\.test https:\/\/client\.example\.test/,

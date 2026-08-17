@@ -21,6 +21,7 @@ const { createProcessingApi } = require('./processingApi');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { createProxyGate } = require('./proxyGate');
 const { ProviderCredentials } = require('./providerCredentials');
+const { runtimeIdentity, setRuntimeIdentityHeaders } = require('./runtimeIdentity');
 
 const problems = validate();
 if (problems.length) {
@@ -46,8 +47,10 @@ let repository;
 let processingRepository;
 let storageManager;
 let providerCredentials;
+let buildIdentity;
 try {
   database = openDatabase(config.databasePath);
+  buildIdentity = runtimeIdentity(database);
   repository = new ViewerRepository(database);
   if (config.processingPlatformEnabled) {
     processingRepository = new ProcessingRepository(database, { logMaxBytes: config.processingLogMaxBytes });
@@ -107,8 +110,12 @@ app.use((_req, res, next) => {
 // proxy's shared header secret and a matching socket source address/CIDR.
 app.use(createProxyGate(config));
 
-app.get('/api/v1/health', (_req, res) => res.set('Cache-Control','no-store').json({ ok: true }));
+app.get('/api/v1/health', (_req, res) => {
+  setRuntimeIdentityHeaders(res, buildIdentity);
+  res.set('Cache-Control','no-store').json({ ok: true });
+});
 app.get('/api/v1/ready', (_req, res) => {
+  setRuntimeIdentityHeaders(res, buildIdentity);
   res.set('Cache-Control','no-store');
   const missing = [];
   try {
