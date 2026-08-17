@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
 import { NodeOdmProvider } from '../server/nodeOdmProvider.js';
+import processingWorker from '../server/processingWorker.js';
+import safeZip from '../server/safeZip.js';
+
+const { discoverOutputs } = processingWorker;
+const { extractZipStream } = safeZip;
 
 const CONFIRMATION = 'I_UNDERSTAND_PROVIDER_TASKS_WILL_BE_CREATED_AND_REMOVED';
 const MAX_CORPUS_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 20 * 1024 * 1024 * 1024;
 const MIN_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 6 * 3600_000;
 const PROVIDER_IMAGE_PATTERN = /^[a-z0-9][a-z0-9._/-]{0,199}@sha256:[0-9a-f]{64}$/;
@@ -126,6 +134,9 @@ if (args.has('--destructive')) {
   if (args.get('--confirm') !== CONFIRMATION) throw new Error(`destructive mode requires --confirm ${CONFIRMATION}`);
   const providerImage = String(args.get('--provider-image') || '');
   if (!PROVIDER_IMAGE_PATTERN.test(providerImage)) throw new Error('destructive mode requires --provider-image with an immutable sha256 digest');
+  const requiredOptions = ['pc-ept', 'gltf', '3d-tiles'];
+  const optionNames = new Set(capability.capabilities.options.map((option) => option.name));
+  if (requiredOptions.some((option) => !optionNames.has(option))) throw new Error('provider lacks one or more required native output options');
   const corpus = await loadCorpus(args.get('--corpus'), deadline);
   const uuid = crypto.randomUUID();
   const cancelUuid = crypto.randomUUID();
@@ -133,6 +144,7 @@ if (args.has('--destructive')) {
   let cancelMayExist = false;
   let result = null;
   let operationError = null;
+  let extractionWorkspace = null;
   const cleanupErrors = [];
   try {
     mainMayExist = true;
@@ -150,12 +162,22 @@ if (args.has('--destructive')) {
     const response = await provider.downloadAll(uuid, {signal:deadlineSignal(deadline, 'provider download')});
     const outputHash = crypto.createHash('sha256');
     let outputBytes = 0;
-    for await (const chunk of response.body) {
+    const meter = new Transform({ transform(chunk, _encoding, callback) {
       outputBytes += chunk.byteLength;
-      if (outputBytes > 20 * 1024 * 1024 * 1024) throw new Error('all.zip exceeded the 20 GiB verification limit');
+      if (outputBytes > MAX_OUTPUT_BYTES) return callback(new Error('all.zip exceeded the 20 GiB verification limit'));
       outputHash.update(chunk);
-    }
+      callback(null, chunk);
+    } });
+    extractionWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-odm-output-'));
+    const extractedOutput = path.join(extractionWorkspace, 'result');
+    const extraction = await extractZipStream(
+      Readable.fromWeb(response.body).pipe(meter), extractedOutput,
+      { maxEntries:100000, maxBytes:MAX_OUTPUT_BYTES, signal:deadlineSignal(deadline, 'provider archive inspection') },
+    );
     if (!outputBytes) throw new Error('all.zip was empty');
+    const outputKinds = [...new Set(discoverOutputs(extractedOutput).map((output) => output.kind))].sort();
+    const requiredKinds = ['glb', 'ept', 'nativeTiles'];
+    if (requiredKinds.some((kind) => !outputKinds.includes(kind))) throw new Error('provider archive is missing one or more required native outputs');
 
     cancelMayExist = true;
     await provider.initialize({ uuid:cancelUuid, name:'LTDS cancellation verification', options:{}, outputs:[] }, {signal:deadlineSignal(deadline, 'cancellation initialization')});
@@ -180,10 +202,20 @@ if (args.has('--destructive')) {
       mode:'destructive', result:'compatible', providerType, providerImage,
       corpus:{fileCount:corpus.fileCount,totalBytes:corpus.totalBytes,manifestSha256:corpus.manifestSha256},
       taskStatus:finalStatus.status, downloadBytes:outputBytes, downloadSha256:outputHash.digest('hex'),
+      archiveEntries:extraction.entries, expandedBytes:extraction.bytes, outputKinds,
       cancelStatus:cancelStatus.status,
     };
   } catch (error) { operationError = error; }
   finally {
+    if (extractionWorkspace) try {
+      fs.rmSync(extractionWorkspace, { recursive:true, force:true });
+      if (fs.existsSync(extractionWorkspace)) throw new Error('provider archive inspection cleanup did not remove its workspace');
+    } catch (error) {
+      const cleanupError = new Error('provider archive inspection cleanup could not be verified');
+      cleanupError.code = 'provider_cleanup_unverified';
+      cleanupError.cause = error;
+      cleanupErrors.push(cleanupError);
+    }
     if (cancelMayExist) try { await removeAndVerify(provider, cancelUuid, 'cancellation task'); } catch (error) { cleanupErrors.push(error); }
     if (mainMayExist) try { await removeAndVerify(provider, uuid, 'processing task'); } catch (error) { cleanupErrors.push(error); }
   }

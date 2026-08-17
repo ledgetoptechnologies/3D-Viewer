@@ -76,11 +76,15 @@ files, 512 MiB per file, and 2 GiB total. The aggregate timeout must be an
 integer from one minute through six hours and covers hashing, both uploads,
 processing, download, and cancellation. That mode creates an LTDS-assigned
 UUID, uploads and commits the corpus, polls status and bounded output, streams
-and hashes `all.zip` without retaining it,
+and hashes `all.zip` without retaining the archive, safely extracts it into an
+ephemeral bounded workspace through the production ZIP path, and requires the
+requested native GLB, EPT, and 3D Tiles outputs,
 then uploads and commits a second task, verifies that cancelling real queued or
 running work settles at NodeODM status code 50, and removes both tasks. It
-prints the immutable provider image and corpus count/bytes/content-manifest in
-the result. Success is emitted only after both UUIDs are confirmed absent;
+prints the immutable provider image, corpus count/bytes/content-manifest,
+archive/expanded byte counts, entry count, and discovered output kinds in the
+result. Success is emitted only after both UUIDs are confirmed absent and the
+ephemeral output workspace is removed;
 ambiguous initialization responses and failed removal verification fail the
 gate. It has a two-hour default timeout and never runs without the exact
 confirmation phrase.
