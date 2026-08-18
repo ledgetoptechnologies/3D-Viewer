@@ -174,7 +174,7 @@ async function bootstrap() {
   populateProjectSwitcher(models);
 
   if (!models.length) {
-    updateLoading('No projects available yet', 'Waiting for the next WebODM sync — check back shortly.');
+    updateLoading('No projects available yet', 'Import or manage a model from the secure Viewer workspace.');
     return;
   }
 
@@ -425,7 +425,7 @@ function applyProjectConfig(p) {
   POINT_CLOUD_URL = p.assets.pointCloud || null;
   POINT_CLOUD_FORMAT = p.assets.pointCloudFormat || null;
   POINT_COUNT = p.pointCount || null;
-  PHOTO_BASE = null;   // original flight-photo archive isn't wired into auto-sync yet (see README)
+  PHOTO_BASE = null;   // original flight-photo archive isn't wired into migrated tasks yet (see README)
 
   RTC = (p.georef && p.georef.rtc) || { e: 0, n: 0, z: 0 };
   C = (p.georef && p.georef.bboxCenter) || { x: 0, y: 0, z: 0 };
@@ -1142,7 +1142,7 @@ function resetPhotoView() {
 function openPhoto(idx) {
   const feat = camFeatures[idx];
   if (!feat) return;
-  if (!PHOTO_BASE) return;   // original flight-photo archive isn't wired into auto-sync yet (see README)
+  if (!PHOTO_BASE) return;   // original flight-photo archive isn't wired into migrated tasks yet (see README)
   resetPhotoView();
   const fn = feat.properties.filename;
   const url = `${PHOTO_BASE}/${encodeURIComponent(fn)}`;

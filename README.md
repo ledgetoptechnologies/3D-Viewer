@@ -192,7 +192,7 @@ The command validates production configuration without printing secret values,
 checks that WebODM/derivatives are read-only and Viewer data is writable, checks
 the public health/ready probes, exact host redirect, disabled legacy admin API,
 and the HMAC-authenticated model catalog. It prints only counts and mount paths.
-Add `--model webodm-PROJECTID-TASKID` to require one exact synced task. Add
+Add `--model webodm-PROJECTID-TASKID` to require one exact registered model. Add
 `--require-lod` only after its derivative directory contains `tileset.json`, a
 full `model.glb`, and conversion-generated `lod-provenance.json`; this makes the
 deployment check fail closed when full-quality LOD provenance is absent.
@@ -597,7 +597,7 @@ WGS84 UTM 16N
   applies node/tile/JSON-RTC transforms, and compares winding-preserving
   triangles, vertex attributes, render material state, samplers, and exact
   texture bytes. It binds every tileset, leaf, and external texture by digest.
-  At sync time the Viewer re-hashes the selected full GLB and every bound
+  During import validation the Viewer re-hashes the selected full GLB and every bound
   artifact before exposing the evidence. Otherwise the client automatically
   loads the actual full mesh. See [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
   for the intentionally fail-closed supported subset and why a tiler that clips
