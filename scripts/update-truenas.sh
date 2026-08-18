@@ -5,6 +5,7 @@ compose_dir="${1:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
 viewer_config="${VIEWER_ENV_FILE:-/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env}"
 requested_mode="${2:-auto}"
 rollback_image="ltds-viewer-rollback:previous"
+official_latest_image="ghcr.io/ledgetoptechnologies/3d-viewer:latest"
 cd -- "$compose_dir"
 
 fail() { echo "viewer update: $*" >&2; exit 1; }
@@ -36,8 +37,8 @@ compose_args=(--env-file "$viewer_config")
 mapfile -t images < <(docker compose "${compose_args[@]}" config --images | sort -u)
 [[ "${#images[@]}" -eq 1 ]] || fail "Compose must resolve exactly one Viewer image"
 target_image="${images[0]}"
-if [[ ! "$target_image" =~ @sha256:[a-fA-F0-9]{64}$ && ! "$target_image" =~ :sha-[a-fA-F0-9]{7,64}$ ]]; then
-  fail "VIEWER_IMAGE must use a CI sha-<commit> tag or an @sha256 digest, not a mutable tag: $target_image"
+if [[ "$target_image" != "$official_latest_image" && ! "$target_image" =~ @sha256:[a-fA-F0-9]{64}$ && ! "$target_image" =~ :sha-[a-fA-F0-9]{7,64}$ ]]; then
+  fail "VIEWER_IMAGE must use $official_latest_image, a CI sha-<commit> tag, or an @sha256 digest: $target_image"
 fi
 
 api_id="$(docker compose "${compose_args[@]}" ps -q viewer-api 2>/dev/null || true)"

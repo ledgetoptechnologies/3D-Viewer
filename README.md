@@ -69,9 +69,11 @@ already-published viewing.
    hostnames and read-only TrueNAS source paths already have safe defaults in
    `docker-compose.yml`. Back up `Config/viewer.env` securely with the database
    and never copy its populated contents into this repository or logs.
-3. Set `VIEWER_IMAGE` to the reviewed `sha-<commit>` tag published by CI (or
-   the exact `@sha256:` digest). `latest` is deliberately rejected by the
-   update helper. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
+3. Set `VIEWER_IMAGE` to
+   `ghcr.io/ledgetoptechnologies/3d-viewer:latest` for normal guarded TrueNAS
+   updates. A reviewed `sha-<commit>` tag published by CI or an exact
+   `@sha256:` digest can freeze a specific release. The update helper accepts
+   no other mutable tag. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
    that has `read:packages`, then run the commands below. This installation
    should set `PROCESSING_PLATFORM_ENABLED=true`, the
    exact NodeODM/ClusterODM `PROCESSING_PROVIDER_ORIGINS`,
@@ -86,9 +88,10 @@ already-published viewing.
    ```
 
    For subsequent updates, use `scripts/update-truenas.sh . auto`. It derives
-   the processing mode from the persistent environment, refuses nonterminal
-   work unless `VIEWER_UPDATE_ALLOW_ACTIVE=1` is explicitly supplied for an
-   emergency, retains the previous image locally as
+   the processing mode from the persistent environment, pulls the configured
+   official `latest` or immutable image, refuses nonterminal work unless
+   `VIEWER_UPDATE_ALLOW_ACTIVE=1` is explicitly supplied for an emergency,
+   retains the previous image ID locally as
    `ltds-viewer-rollback:previous`, waits for container health, and runs the
    production readiness check.
 

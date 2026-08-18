@@ -27,8 +27,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /env_file:[\s\S]*VIEWER_ENV_FILE:-\/mnt\/Plugins\/App_Data\/Model-Viewer\/Config\/viewer\.env/);
   assert.match(compose, /X_ACCEL_REDIRECT_PREFIX:\s*""/);
   assert.doesNotMatch(compose, /^\s+build:/m);
-  assert.doesNotMatch(compose, /3d-viewer:latest/);
-  assert.match(compose, /VIEWER_IMAGE:\?VIEWER_IMAGE must be pinned/);
+  assert.match(compose, /VIEWER_IMAGE:\?VIEWER_IMAGE must use the official latest tag, a CI sha tag, or a digest/);
   assert.match(compose, /pull_policy:\s*always/);
   assert.match(compose, /stop_grace_period:\s*2m/);
   assert.match(compose, /read_only:\s*true/);
@@ -72,9 +71,16 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(updateScript, /PROCESSING_PLATFORM_ENABLED/);
   assert.match(updateScript, /:sha-/);
   assert.match(updateScript, /@sha256:/);
+  assert.match(updateScript, /official_latest_image="ghcr\.io\/ledgetoptechnologies\/3d-viewer:latest"/);
+  assert.match(updateScript, /"\$target_image" != "\$official_latest_image"/);
+  assert.match(environmentTemplate, /^VIEWER_IMAGE=ghcr\.io\/ledgetoptechnologies\/3d-viewer:latest$/m);
+  assert.match(environmentTemplate, /Other mutable tags are rejected/);
   assert.match(updateScript, /VIEWER_UPDATE_ALLOW_ACTIVE/);
   assert.match(updateScript, /--wait --wait-timeout 180/);
   assert.match(updateScript, /ltds-viewer-rollback:previous/);
+  assert.match(updateScript, /docker inspect --format '\{\{\.Image\}\}' "\$api_id"/);
+  assert.match(updateScript, /docker image tag "\$previous_image_id" "\$rollback_image"/);
+  assert.match(updateScript, /VIEWER_IMAGE="\$rollback_image"[\s\S]*--pull never/);
   assert.match(updateScript, /production-readiness\.mjs/);
   assert.match(updateScript, /readiness_args=\(\)/);
   assert.match(updateScript, /mode" == processing.*readiness_args\+=\(--require-processing\)/);
