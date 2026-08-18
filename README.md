@@ -15,7 +15,7 @@ them to NodeODM/ClusterODM for native EPT, 3D Tiles, and GLB production.
   at runtime.
 - **Backend** (`server/`) — a Node/Express API plus a durable worker that:
   - Optionally authenticates to WebODM's REST API and reconciles its catalog
-    when `WEBODM_ENABLED=true`. Direct read-only media import and the processing
+    through mounted task-folder or exported ZIP migration. The processing
     platform do not require WebODM credentials. **It never queries WebODM's
     Postgres database directly.**
   - Verifies which output files actually exist on the read-only WebODM media
@@ -63,20 +63,17 @@ already-published viewing.
    `VIEWER_EVENT_HMAC_SECRET`. `SESSION_SECRET` is an independent Viewer-only
    secret and must not be reused. `PROXY_SHARED_SECRET` and
    `TRUSTED_PROXY_ADDRESSES` are optional follow-up hardening and should remain
-   empty until the matching Nginx changes are ready. WebODM API discovery is
-   disabled by default, so credentials are not required for direct read-only
-   media imports or the processing platform. Configure the dedicated WebODM
-   API user only if `WEBODM_ENABLED=true`. The production Viewer/Ops/client
+   empty until the matching Nginx changes are ready. WebODM migration uses
+   mounted task folders or exported ZIP archives and never needs WebODM API
+   credentials or database access. The production Viewer/Ops/client
    hostnames and read-only TrueNAS source paths already have safe defaults in
    `docker-compose.yml`. Back up `Config/viewer.env` securely with the database
    and never copy its populated contents into this repository or logs.
 3. Set `VIEWER_IMAGE` to the reviewed `sha-<commit>` tag published by CI (or
    the exact `@sha256:` digest). `latest` is deliberately rejected by the
    update helper. If the GHCR package is private, configure TrueNAS/Docker with a GitHub token
-   that has `read:packages`, then run the commands below. For view-only or
-   legacy WebODM compatibility, keep `PROCESSING_PLATFORM_ENABLED=false` and
-   run `docker compose --env-file "$VIEWER_ENV" up -d`; this intentionally does not start the profiled
-   worker. To activate processing, set `PROCESSING_PLATFORM_ENABLED=true`, the
+   that has `read:packages`, then run the commands below. This installation
+   should set `PROCESSING_PLATFORM_ENABLED=true`, the
    exact NodeODM/ClusterODM `PROCESSING_PROVIDER_ORIGINS`,
    `PROVIDER_CREDENTIALS_KEY`, and
    matching `VIEWER_EVENT_URL`/key/secret in `Config/viewer.env`, then run:
@@ -84,20 +81,20 @@ already-published viewing.
    ```bash
    VIEWER_ENV=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env
    docker compose --env-file "$VIEWER_ENV" pull
-   docker compose --env-file "$VIEWER_ENV" --profile processing up -d
-   docker compose --env-file "$VIEWER_ENV" --profile processing ps
+   docker compose --env-file "$VIEWER_ENV" up -d
+   docker compose --env-file "$VIEWER_ENV" ps
    ```
 
    For subsequent updates, use `scripts/update-truenas.sh . auto`. It derives
-   the processing profile from the persistent environment, refuses nonterminal
+   the processing mode from the persistent environment, refuses nonterminal
    work unless `VIEWER_UPDATE_ALLOW_ACTIVE=1` is explicitly supplied for an
    emergency, retains the previous image locally as
    `ltds-viewer-rollback:previous`, waits for container health, and runs the
-   production readiness check. An explicit `processing` or `view-only` second
-   argument is accepted only when it agrees with `PROCESSING_PLATFORM_ENABLED`.
+   production readiness check.
 
    The API must receive `PROCESSING_PLATFORM_ENABLED=true` through the shared
-   persistent environment; the profiled worker reads the same file. The platform is
+   persistent environment; the always-started worker reads the same file and
+   idles safely if the flag is explicitly false. The platform is
    not active unless both `viewer-api` and `viewer-worker` are healthy. The
    production Compose profile always pulls the configured registry image;
    local source builds remain explicit with `docker build` and cannot silently
@@ -123,9 +120,9 @@ already-published viewing.
    For Nginx Proxy Manager, follow the paste-ready GUI instructions and
    verification matrix in [`deploy/NGINX_PROXY_MANAGER.md`](deploy/NGINX_PROXY_MANAGER.md).
 
-When WebODM discovery is enabled, the Viewer syncs on startup and every
-`SYNC_INTERVAL_MINUTES`; Ops can request a provider rescan through the signed
-v1 API. `GET /api/v1/health` is liveness and `GET /api/v1/ready` verifies the
+Mounted WebODM task trees can be rescanned through the authenticated catalog
+API; exported task ZIPs can be imported through the durable task-import API.
+`GET /api/v1/health` is liveness and `GET /api/v1/ready` verifies the
 database and required mounts. The authenticated
 `GET /api/v1/processing/ready` separately reports the durable worker and
 lifecycle journal, so provider failure never makes published viewing unhealthy.
@@ -268,21 +265,7 @@ The Viewer uses the fixed host path
 `/imports/webodm`. It must contain WebODM's Django media tree
 `project/{id}/task/{id}/assets/...` and must not be the WebODM Postgres path.
 
-In addition to the media mount:
-
-- **Optional API discovery**: only when `WEBODM_ENABLED=true`, create a
-  dedicated, least-privilege WebODM user (view-only permission on the projects
-  you want reconciled) and put its credentials in the persistent
-  `Config/viewer.env`. Do not use an admin account. The production Compose file
-  deliberately pins discovery false, so enabling it also requires a reviewed
-  Compose override. The LTDS API default is
-  `http://192.168.50.80:30048` with username `Model-Viewer`, keeping discovery
-  traffic on the LAN. If that address is not routable from the Viewer
-  container, set `WEBODM_API_URL=https://webodm.ledgetopdroneservices.com`.
-  Supply the password only through the mode-`600` persistent
-  `Config/viewer.env` or a TrueNAS secret mechanism; it is intentionally not
-  present in this repository.
-- **Storage**: WebODM's own application must use that same dataset as its media
+WebODM's own application must use that same dataset as its media
   root:
   ```yaml
   webapp:
@@ -296,8 +279,8 @@ In addition to the media mount:
   under top-level `volumes:`, it's unused — every service overrides it with
   the bind mount above via `WO_MEDIA_DIR`/`WO_DB_DIR` env vars.)
 
-  `server/sync.js` walks only this media tree. The Viewer never mounts
-  `WO_DB_DIR`, Redis, WebODM secrets, application source, or the Docker socket.
+The Viewer catalog scanner walks only this media tree. The Viewer never mounts
+`WO_DB_DIR`, Redis, WebODM secrets, application source, or the Docker socket.
 
 ## Multi-project support
 
@@ -350,12 +333,13 @@ origins.
   request rather than trusting a cached session.
 - **`/view/:token`** opens the full toolbar (measurements, camera photos,
   layer switching) for that one project; **`/embed/:token`** is the same
-  model with the sidebar/topbar hidden, meant for `<iframe>` embedding (e.g.
-  from LTDS Ops), leaving only the reset/fullscreen controls and an optional
-  measurement toggle.
-- **Cross-origin embedding requires HTTPS.** Secure cookies remain for
-  top-level compatibility, but embedded session/asset authorization does not
-  depend on third-party cookies. Put this app behind TLS in production.
+  model with the sidebar/topbar hidden for an explicitly embedded public-share
+  surface. Authenticated LTDS `/session/:grant` routes open the full Viewer in
+  a dedicated tab and use an exact-origin/source opener channel for silent
+  one-time-grant renewal. The grant is redeemed immediately and removed from
+  the active URL.
+- **Cross-origin session control requires HTTPS.** Session/asset authorization
+  does not depend on third-party cookies. Put this app behind TLS in production.
 - **Not implemented**: annotations, source-file download controls, and
   original flight-photo access. Pinned-version public shares are rejected
   until pinned-version asset resolution is implemented; `latest` works now.
@@ -376,7 +360,8 @@ capability-protected model assets. Instead:
 2. Keep the Viewer hostname Cloudflare-proxied and apply normal zone WAF/rate
    limiting. There is no public administrator UI at that hostname.
 3. Staff authorization flows from Access-protected Ops through HMAC-signed
-   service requests. Client embeds use an Ops-issued short Viewer session.
+   service requests. Authenticated staff/client tabs use Ops-issued short
+   Viewer sessions; large assets still stream directly from Viewer/Nginx.
 4. Demo viewers use an unguessable, revocable, optionally password-protected
    public-share token. Every API and asset request rechecks the live share or
    Viewer session.
@@ -398,8 +383,10 @@ empty.
 
 ## Known limitations (by design, for this iteration)
 
-- **Processing is opt-in.** `PROCESSING_PLATFORM_ENABLED` defaults to false.
-  Enabling it requires the durable worker, the writable managed storage
+- **Processing remains explicitly controllable.** This Compose deployment
+  defaults `PROCESSING_PLATFORM_ENABLED` to true and always starts the durable
+  worker. An explicit false override leaves the worker healthy but idle. Processing
+  requires the writable managed storage
   volume, disk reserve, and an explicitly allowlisted NodeODM or ClusterODM
   provider. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines; other
   compatible versions are capability-probed and warned, not silently trusted.
@@ -414,22 +401,19 @@ empty.
   state, and texture bytes. If upstream tiling decimates, retriangulates, or
   repacks textures, the LOD claim fails closed and the full GLB remains the
   published close-range fallback.
-- **WebODM release-one import is reference-only.** Direct WebODM media import
-  reads the mounted tree without credentials and never moves or deletes it.
-  Optional API discovery can reconcile legacy WebODM projects when enabled.
+- **WebODM migration is file-based.** Direct WebODM media import reads the
+  mounted tree without credentials and never moves or deletes it. Exported
+  task ZIPs and task folders can be adopted into Viewer-managed storage.
   The durable catalog scanner also discovers supported models under the
   approved Terra drop root. Administrators map each candidate to an existing
   or new LTDS project and either keep an explicit external reference or adopt
   the verified tree into managed storage. Repeat scans are fingerprinted and
   do not duplicate an unchanged mapping.
-- **Legacy WebODM compatibility remains best-effort.** `server/sync.js` still
-  recognizes classic nested and flat WebODM output layouts and may use direct
-  LAS/LAZ/PLY or the read-only Derivatives tree for already-existing models.
-  Direct LAS/LAZ fallback loads the complete file and supports LAS through 1.3,
-  so large field clouds should use EPT. These compatibility paths do not weaken
-  the immutable manifest and publication rules for newly processed models.
+- **Existing published legacy models remain deliverable.** Removing live
+  WebODM synchronization does not delete registry rows or mounted assets.
+  Newly migrated outputs use immutable manifests and publication rules.
 - **Original flight photos** (opening the full-res JPG behind a camera
-  marker) aren't wired into auto-sync yet — camera positions still show from
+  marker) aren't wired into migrated tasks yet — camera positions still show from
   `shots.geojson` when present, but clicking one is a no-op until a photo
   archive location is configured per project.
 - Raw imagery, GCP files, provider archives, logs, and processing internals are
@@ -465,7 +449,6 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
   reused key with different bytes returns `409`. Raw grants and session tokens
   are never returned or audited by this route.
 - `GET|POST /api/v1/models/:id/shares`; `DELETE /api/v1/shares/:id`
-- `POST /api/v1/imports`; `POST /api/v1/imports/rescan`; `GET /api/v1/imports`
 - Admin sessions: `POST /api/v1/admin-grants`; `POST /api/v1/admin-sessions/redeem`
 - Catalog: `/api/v1/projects`, `/api/v1/datasets`, and `/api/v1/tasks`
 - Resumable upload/finalize: `/api/v1/admin/uploads/...`; durable operation
@@ -473,6 +456,8 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
   `POST /api/v1/operations/:id/cancel`
 - Server import: durable `/api/v1/dataset-imports/preview` and
   `/api/v1/dataset-imports/adopt` operations
+- WebODM task migration: durable `POST /api/v1/processing/webodm-task-imports`
+  accepts a task folder or exported ZIP and reports detected asset capabilities
 - Processing: `/api/v1/processing/providers`, `/presets`, task/attempt detail,
   cancel, retry, and publish routes
 - Storage accounting/recovery: `/api/v1/storage`, `/storage/trash/...`, and
@@ -494,12 +479,11 @@ version silently following a newly activated version. Iframe messages use
 
 ## Local development
 
-Run the backend and the Vite dev server side by side. WebODM variables are
-optional unless API discovery is enabled:
+Run the backend and the Vite dev server side by side:
 
 ```bash
 # terminal 1 — backend (reads server/config.js env vars)
-WEBODM_ENABLED=false WEBODM_MEDIA_MOUNT=/path/to/webodm/media \
+WEBODM_MEDIA_MOUNT=/path/to/webodm/media \
 EMERGENCY_ADMIN_ENABLED=true ADMIN_PASSWORD=dev-only-password \
 PORT=8090 npm run server
 
@@ -532,7 +516,7 @@ debugging.
 - `public/pointcloud.html` — isolated Potree 1.8 iframe (EPT, EarthControls with
   the same left/right swap, EDL, budget/size/color toolbar); config (EPT URL,
   title, point count) comes from its query string, set by `main.js`.
-- `server/` — API and durable worker: optional WebODM sync, dataset/import
+- `server/` — API and durable worker: mounted/exported WebODM migration, dataset/import
   manifests, NodeODM/ClusterODM processing, derivative/review publication,
   lifecycle recovery, SQLite migrations, signed v1/legacy compatibility,
   session/share authorization, protected asset delivery, and auth primitives.
@@ -543,8 +527,8 @@ debugging.
 
 ## Georeferencing
 
-Per-project UTM origin (RTC) and zone are parsed by `server/sync.js` from
-WebODM's `coords.txt` (`odm_georeferencing/coords.txt`), e.g.:
+Legacy published records may retain the per-project UTM origin (RTC) and zone
+previously parsed from WebODM's `coords.txt` (`odm_georeferencing/coords.txt`), e.g.:
 
 ```
 WGS84 UTM 16N

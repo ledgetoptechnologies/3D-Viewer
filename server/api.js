@@ -2,9 +2,9 @@
 
 const express = require('express');
 const store = require('./store');
-const sync = require('./sync');
-const { TASK_STATUS } = require('./webodmClient');
 const { requireAdmin } = require('./adminAuth');
+
+const TASK_STATUS = Object.freeze({ QUEUED: 10, RUNNING: 20, FAILED: 30, COMPLETED: 40, CANCELED: 50 });
 
 const router = express.Router();
 
@@ -58,15 +58,6 @@ router.get('/api/models/:id', requireAdmin, (req, res) => {
   const p = store.getById(req.params.id);
   if (!p || !p.available) return res.status(404).json({ error: 'model not found' });
   res.json(toClientConfig(p));
-});
-
-router.post('/api/sync', requireAdmin, async (req, res) => {
-  try {
-    const result = await sync.runSync();
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 module.exports = router;

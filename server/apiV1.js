@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const express = require('express');
 const auth = require('./auth');
 const { config } = require('./config');
-const sync = require('./sync');
 const { requireService } = require('./serviceAuth');
 const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
@@ -112,62 +111,15 @@ function sameSourceAuthorization(left, right) {
   return left.type === right.type && left.id === right.id && left.version === right.version;
 }
 
-function createImportWorker(repository) {
-  let running = false;
-  async function synchronizeWhenAvailable() {
-    for (;;) {
-      const result = await sync.runSync();
-      if (!result.skipped) return result;
-      // The scheduler and event-import worker share the same provider sync.
-      // Wait instead of falsely failing a durable job merely because the
-      // scheduled reconciliation won the startup race.
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-  async function run() {
-    if (running) return;
-    running = true;
-    try {
-      let job;
-      while ((job = repository.claimPendingImport())) {
-        try {
-          if (job.provider !== 'webodm') throw Object.assign(new Error('provider is not implemented'), { code: 'unsupported_provider' });
-          const result = await synchronizeWhenAvailable();
-          if (result.errors && result.errors.length) throw Object.assign(new Error(result.errors.join('; ')), { code: 'provider_sync_failed' });
-          const request = job.request || {};
-          const alias = request.projectId !== undefined && request.taskId !== undefined
-            ? `webodm-${request.projectId}-${request.taskId}`
-            : job.identifier;
-          const model = alias === '*' ? null : repository.getModel(String(alias));
-          if (alias !== '*' && !model) throw Object.assign(new Error('completed dataset was not found after synchronization'), { code: 'model_not_found' });
-          repository.completeImport(job.id, model && model.id);
-          repository.audit({ actorType: 'service', actorId: job.createdBy, action: 'import.ready', entityType: 'import', entityId: job.id });
-        } catch (error) {
-          repository.failImport(job.id, error.code || 'import_failed', error.message || 'Import failed');
-          repository.audit({ actorType: 'service', actorId: job.createdBy, action: 'import.failed', entityType: 'import', entityId: job.id, details: { code: error.code || 'import_failed' } });
-        }
-      }
-    } finally {
-      running = false;
-    }
-  }
-  return { kick() { setImmediate(run); }, run };
-}
-
 function createApiV1(repository) {
   const router = express.Router();
   const serviceOnly = requireService(repository);
   const idempotentService = idempotent(repository);
-  const importWorker = createImportWorker(repository);
   if (config.publishedSessionSourceRevocationEnabled) repository.failClosedUnboundPublishedSessions({
     actorType: 'system',
     action: 'published_session.unbound_revoked',
     entityType: 'source_authorization',
   });
-  // Durable queue rows survive process restarts. Any job claimed by the old
-  // process is returned to pending, then all pending work is resumed.
-  repository.requeueInterruptedImports();
-  importWorker.kick();
 
   function viewerToken(req) {
     const bearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
@@ -487,30 +439,7 @@ function createApiV1(repository) {
     res.json({ share: publicShareSummary(revoked) });
   });
 
-  router.post('/api/v1/imports', serviceOnly, idempotentService, (req, res) => {
-    const body = req.body || {};
-    if (body.provider !== 'webodm') return res.status(422).json({ error: 'only the webodm provider is currently implemented' });
-    const hasIds = body.projectId !== undefined && body.taskId !== undefined;
-    const identifier = hasIds ? `webodm-${body.projectId}-${body.taskId}` : body.identifier;
-    if (typeof identifier !== 'string' || identifier.length < 1 || identifier.length > 240)
-      return res.status(400).json({ error: 'identifier or projectId/taskId is required' });
-    const job = repository.createImportJob({ provider: 'webodm', identifier, request: body, createdBy: req.servicePrincipal.keyId });
-    repository.audit({ actorType: 'service', actorId: req.servicePrincipal.keyId, action: 'import.queued', entityType: 'import', entityId: job.id });
-    importWorker.kick();
-    res.status(202).json({ import: job });
-  });
-
-  router.post('/api/v1/imports/rescan', serviceOnly, idempotentService, (req, res) => {
-    const job = repository.createImportJob({ provider: 'webodm', identifier: '*', request: { rescan: true }, createdBy: req.servicePrincipal.keyId });
-    importWorker.kick();
-    res.status(202).json({ import: job });
-  });
-
-  router.get('/api/v1/imports', serviceOnly, (req, res) => {
-    res.json({ imports: repository.listImportJobs(req.query.limit) });
-  });
-
   return router;
 }
 
-module.exports = { VIEWER_COOKIE, createApiV1, createImportWorker, encodedAssetUrl, permissions, publicShareSummary, toViewerConfig };
+module.exports = { VIEWER_COOKIE, createApiV1, encodedAssetUrl, permissions, publicShareSummary, toViewerConfig };

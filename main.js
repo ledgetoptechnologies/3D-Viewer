@@ -45,7 +45,7 @@ let EPT_URL = null, POINT_COUNT = null;
 // decoded client-side by loadPointCloudDirect() below.
 let POINT_CLOUD_URL = null, POINT_CLOUD_FORMAT = null;
 // RTC = local-model-origin UTM offset, C = model bbox center (both come from
-// coords.txt / an optional derivatives sidecar; see server/sync.js).
+// coords.txt / an optional imported-derivatives sidecar).
 let RTC = { e: 0, n: 0, z: 0 };
 let C = { x: 0, y: 0, z: 0 };
 let UTM_ZONE_LON0 = 0;
@@ -153,7 +153,9 @@ bootstrap();
 // hardcoded constants.
 // ───────────────────────────────────────────────────────────────
 async function bootstrap() {
-  document.body.classList.add(`${VIEW_MODE === 'session' ? 'embed' : VIEW_MODE}-mode`);
+  // Authenticated LTDS sessions are the primary, full Viewer experience. The
+  // separate /embed route remains available only for explicit share embeds.
+  document.body.classList.add(`${VIEW_MODE === 'session' ? 'view' : VIEW_MODE}-mode`);
   bindSharePasswordForm();
   bindAdminControls();
 
@@ -730,9 +732,19 @@ async function currentViewerSession() {
   return body;
 }
 
-function postToAllowedParent(message) {
-  if (window.parent === window) return;
-  for (const origin of sessionAllowedOrigins) window.parent.postMessage(message, origin);
+function sessionControlWindow() {
+  if (window.parent !== window) return window.parent;
+  // A dedicated Viewer tab deliberately retains only this opener channel so
+  // its LTDS control-plane tab can renew one-time grants. Both sides require
+  // the exact Window and an allowlisted origin before acting on a message.
+  if (window.opener && !window.opener.closed) return window.opener;
+  return null;
+}
+
+function postToAllowedController(message) {
+  const controller = sessionControlWindow();
+  if (!controller) return;
+  for (const origin of sessionAllowedOrigins) controller.postMessage(message, origin);
 }
 
 function scheduleSessionRenewal(session) {
@@ -740,7 +752,7 @@ function scheduleSessionRenewal(session) {
   const expiresAtMs = Date.parse(session.expiresAt);
   const delay = Math.max(1000, expiresAtMs - Date.now() - 5 * 60 * 1000);
   sessionRenewalTimer = setTimeout(() => {
-    postToAllowedParent({
+    postToAllowedController({
       version: 1,
       type: 'ltds-viewer:session-expiring',
       modelId: session.model.id,
@@ -759,7 +771,7 @@ function applyViewerSession(session, { initialize = false } = {}) {
     PROJECT = session.model;
     applyProjectConfig(PROJECT);
     init();
-    postToAllowedParent({
+    postToAllowedController({
       version: 1,
       type: 'ltds-viewer:ready',
       modelId: session.model.id,
@@ -789,7 +801,8 @@ async function bootstrapSession() {
 }
 
 window.addEventListener('message', async (event) => {
-  if (VIEW_MODE !== 'session' || event.source !== window.parent || !sessionAllowedOrigins.includes(event.origin)) return;
+  const controller = sessionControlWindow();
+  if (VIEW_MODE !== 'session' || !controller || event.source !== controller || !sessionAllowedOrigins.includes(event.origin)) return;
   if (!event.data || event.data.version !== 1 || event.data.type !== 'ltds-viewer:renew-session') return;
   const grant = event.data.grant;
   if (typeof grant !== 'string' || !/^[0-9a-f-]{36}$/i.test(grant)) return;
@@ -797,7 +810,7 @@ window.addEventListener('message', async (event) => {
     const session = await redeemViewerGrant(grant);
     if (!PROJECT || session.model.id !== PROJECT.id) throw new Error('renewal grant is scoped to a different model');
     applyViewerSession(session);
-    postToAllowedParent({
+    postToAllowedController({
       version: 1,
       type: 'ltds-viewer:session-renewed',
       modelId: session.model.id,
@@ -806,7 +819,7 @@ window.addEventListener('message', async (event) => {
   } catch (error) {
     // Keep the still-live capability and credential-bearing loader URLs.
     // The parent can issue another one-time grant and retry in place.
-    postToAllowedParent({
+    postToAllowedController({
       version: 1,
       type: 'ltds-viewer:session-renewal-failed',
       modelId: PROJECT && PROJECT.id,
@@ -956,7 +969,7 @@ function loadObjDirect() {
 
 // Auto-frame the camera on a freshly loaded object whose bounds aren't known
 // ahead of time (the server may not have a pre-computed bbox center for
-// OBJ-only projects — see server/sync.js).
+// OBJ-only imported projects).
 function frameObjectHome(object3D) {
   const box = new THREE.Box3().setFromObject(object3D);
   if (box.isEmpty()) return;
@@ -2298,7 +2311,7 @@ function loadPointCloudDirect() {
 
 // ────────────────────────────────────────────────
 // Point cloud (Potree in an isolated iframe) — used when this project has a
-// pre-built EPT dataset (see server/sync.js). Config is passed via the
+// pre-built EPT dataset from an imported task. Config is passed via the
 // iframe's query string so pointcloud.html has no hardcoded project data.
 // ────────────────────────────────────────────────
 function showPointCloud() {

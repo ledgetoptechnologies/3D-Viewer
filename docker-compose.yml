@@ -21,7 +21,7 @@ x-runtime: &runtime
   environment: &runtime-env
     PORT: 8088
     EMERGENCY_ADMIN_ENABLED: "false"
-    WEBODM_ENABLED: "false"
+    PROCESSING_PLATFORM_ENABLED: ${PROCESSING_PLATFORM_ENABLED:-true}
     LOCAL_DERIVATIVES_ENABLED: "false"
     DATA_DIR: /app/storage/data
     DATABASE_PATH: /app/storage/data/viewer.sqlite
@@ -52,7 +52,6 @@ services:
 
   viewer-worker:
     <<: *runtime
-    profiles: [processing]
     command: [node, server/worker.js]
     healthcheck:
       test: [CMD, node, -e, "const {config}=require('./server/config');const {openDatabase}=require('./server/database');const db=openDatabase(config.databasePath);const row=db.prepare(\"SELECT value FROM app_state WHERE key='processing_worker_heartbeat'\").get();db.close();const value=row&&JSON.parse(row.value);if(!value||Date.parse(value.at)<=Date.now()-30000)process.exit(1)"]

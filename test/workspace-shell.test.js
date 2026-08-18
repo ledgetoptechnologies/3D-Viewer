@@ -1,0 +1,67 @@
+'use strict';
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const test=require('node:test');
+const root=path.join(__dirname,'..');
+const source=fs.readFileSync(path.join(root,'workspace.js'),'utf8');
+const api=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
+const server=fs.readFileSync(path.join(root,'server','index.js'),'utf8');
+
+test('workspace redeems an Ops grant and removes it from the URL',()=>{
+  assert.match(source,/\/api\/v1\/admin-sessions\/redeem/);
+  assert.match(source,/history\.replaceState\(null,'','\/workspace'\)/);
+  assert.match(source,/sessionStorage\.setItem\(TOKEN_KEY,state\.token\)/);
+});
+test('workspace keeps imports and access modes explicit',()=>{
+  assert.match(source,/all\.zip is an optional shortcut, never a requirement/);
+  assert.match(source,/Client identity stays canonical in LTDS Operations/);
+  assert.match(source,/one supported artifact or any subset/);
+});
+test('workspace management panels issue real bearer API mutations',()=>{
+  for(const route of [
+    '/api/v1/projects','/api/v1/datasets','/api/v1/task-submissions',
+    '/api/v1/processing/providers','/api/v1/processing/webodm-task-imports',
+    '/api/v1/processing/catalog-imports/scans','/review-sessions','/publish',
+    '/api/v1/storage/trash/',
+  ]) assert.ok(source.includes(route),`missing workspace API ${route}`);
+  assert.match(source,/Idempotency-Key/);
+  assert.match(source,/selectedAssetKinds:r\.assetKinds/);
+  assert.doesNotMatch(source,/credential\.token|rootKey/);
+});
+test('workspace supports bounded resumable browser uploads and staff share lifecycle',()=>{
+  for(const value of ['/uploads','/chunks/','/finalize','processingRole','missingChunks','files.length>128','64*1024**2','processing/shares/'])assert.ok(source.includes(value),value);
+  assert.match(source,/crypto\.subtle\.digest/);
+  assert.match(source,/share-form/);
+  assert.match(api,/router\.post\('\/api\/v1\/processing\/outputs\/:id\/shares'/);
+  assert.match(api,/router\.delete\('\/api\/v1\/processing\/shares\/:id'/);
+});
+test('permission denial preserves the valid admin session',()=>{
+  assert.match(source,/if\(r\.status===403\)throw Error/);
+  const forbidden=source.slice(source.indexOf('if(r.status===403'),source.indexOf("if(!r.ok)"));
+  assert.doesNotMatch(forbidden,/removeItem|state\.token=null/);
+});
+test('workspace renders every management section instead of placeholders',()=>{
+  for(const view of ['projects','datasets','jobs','providers','imports','review','sharing','storage'])
+    assert.match(source,new RegExp(`function ${view}\\(`));
+  assert.doesNotMatch(source,/sectionPlaceholder/);
+});
+test('Ops overview is aggregate-only and service authenticated',()=>{
+  assert.match(api,/router\.get\('\/api\/v1\/overview',authorize\('',\{hmacOnly:true\}\)/);
+  const route=api.slice(api.indexOf("router.get('/api/v1/overview'"),api.indexOf("router.get('/api/v1/projects'"));
+  for(const field of ['schemaVersion','generatedAt','projects','models','jobs','providers','storage','platform'])assert.match(route,new RegExp(`${field}:`));
+  assert.doesNotMatch(route,/relativePath|rootKey|credential|token/);
+  assert.match(route,/NOT EXISTS \(SELECT 1 FROM processing_attempts a JOIN model_outputs o ON o\.attempt_id=a\.id WHERE a\.dataset_id=d\.id/);
+  assert.match(route,/o\.storage_mode='adopted'/);
+});
+test('workspace route remains separate from model sessions',()=>{
+  assert.match(server,/app\.get\(\['\/workspace', '\/workspace\/\*'\]/);
+  assert.match(server,/workspace\.html/);
+});
+test('invalid WebODM projects are rejected before durable receipt reservation',()=>{
+  const guard=api.indexOf("router.use('/api/v1/processing/webodm-task-imports'");
+  const route=api.indexOf("router.post('/api/v1/processing/webodm-task-imports'");
+  assert.ok(guard>0&&guard<route);
+  assert.match(api.slice(guard,route),/authorize\('viewer\.datasets\.import'\)/);
+  assert.match(api.slice(guard,route),/!processing\.getProject\(req\.body\.projectId\)/);
+});

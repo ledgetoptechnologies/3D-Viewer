@@ -32,7 +32,6 @@ case "$requested_mode" in
 esac
 
 compose_args=(--env-file "$viewer_config")
-[[ "$mode" == processing ]] && compose_args+=(--profile processing)
 
 mapfile -t images < <(docker compose "${compose_args[@]}" config --images | sort -u)
 [[ "${#images[@]}" -eq 1 ]] || fail "Compose must resolve exactly one Viewer image"
@@ -80,10 +79,6 @@ if [[ -n "$api_id" && "${VIEWER_UPDATE_ALLOW_ACTIVE:-0}" != 1 ]]; then
   '; then
     fail "active durable work exists; keep Ops admission paused and let work settle, or set VIEWER_UPDATE_ALLOW_ACTIVE=1 only for emergency recovery"
   fi
-fi
-if [[ "$mode" == view-only ]]; then
-  docker compose --env-file "$viewer_config" --profile processing stop -t 120 viewer-worker >/dev/null 2>&1 || true
-  docker compose --env-file "$viewer_config" --profile processing rm -f viewer-worker >/dev/null 2>&1 || true
 fi
 docker compose "${compose_args[@]}" up -d --remove-orphans --wait --wait-timeout 180 || rollback startup
 readiness_args=()

@@ -1215,6 +1215,27 @@ const MIGRATIONS = [
           AND datetime(expires_at)>datetime('now') AND source_authorization_id IS NULL;
     `,
   },
+  {
+    version: 18,
+    name: 'durable_webodm_task_migrations',
+    sql: `
+      CREATE TABLE webodm_task_imports (
+        id TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL UNIQUE CHECK(length(source_fingerprint)=64),
+        source_relative_path TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+        attempt_id TEXT NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+        model_id TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+        model_version_id TEXT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
+        asset_kinds_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX webodm_task_imports_project_idx ON webodm_task_imports(project_id,created_at DESC);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

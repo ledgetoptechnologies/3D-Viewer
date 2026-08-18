@@ -131,16 +131,9 @@ const config = {
   emergencyAdminEnabled: bool(process.env.EMERGENCY_ADMIN_ENABLED, !production),
   adminPassword: process.env.ADMIN_PASSWORD || '',
 
-  webodmEnabled: bool(process.env.WEBODM_ENABLED, false),
-  webodmApiUrl: (process.env.WEBODM_API_URL || '').replace(/\/+$/, ''),
-  webodmUsername: process.env.WEBODM_USERNAME || '',
-  webodmPassword: process.env.WEBODM_PASSWORD || '',
   webodmMediaMount: process.env.WEBODM_MEDIA_MOUNT || '',
-  webodmRequestTimeoutMs: Math.min(positiveInteger(process.env.WEBODM_REQUEST_TIMEOUT_MS, 15000), 120000),
   derivativesMount: process.env.DERIVATIVES_MOUNT || '',
   terraImportMount: process.env.TERRA_IMPORT_MOUNT || '',
-  syncIntervalMinutes: Number.parseFloat(process.env.SYNC_INTERVAL_MINUTES || '10'),
-  syncOnStartup: bool(process.env.SYNC_ON_STARTUP, true),
 
   // When set, authorized files are handed to an internal Nginx location via
   // X-Accel-Redirect. When absent, Express sendFile remains available for
@@ -185,8 +178,6 @@ const config = {
 
 function validate() {
   const problems = [];
-  if (!Number.isFinite(config.syncIntervalMinutes) || config.syncIntervalMinutes <= 0)
-    problems.push('SYNC_INTERVAL_MINUTES must be a positive number');
   if (config.production && !config.publicBaseUrl)
     problems.push('PUBLIC_BASE_URL must be an exact HTTPS origin');
   if (config.production && !config.expectedHost)
@@ -216,12 +207,6 @@ function validate() {
     problems.push('SERVICE_AUTH_KEY_ID must contain only letters, numbers, dot, underscore, or hyphen');
   if (config.emergencyAdminEnabled && config.adminPassword.length < 16)
     problems.push('ADMIN_PASSWORD must contain at least 16 characters when emergency admin access is enabled');
-  if (config.webodmEnabled) {
-    if (!config.webodmApiUrl) problems.push('WEBODM_API_URL is required when WEBODM_ENABLED=true');
-    if (!config.webodmUsername) problems.push('WEBODM_USERNAME is required when WEBODM_ENABLED=true');
-    if (!config.webodmPassword) problems.push('WEBODM_PASSWORD is required when WEBODM_ENABLED=true');
-    if (!config.webodmMediaMount) problems.push('WEBODM_MEDIA_MOUNT is required when WEBODM_ENABLED=true');
-  }
   if (config.processingPlatformEnabled) {
     for (const [name, value] of [['DATASETS_MOUNT', config.datasetsMount], ['MODELS_MOUNT', config.modelsMount], ['CACHE_MOUNT', config.cacheMount], ['TRASH_MOUNT', config.trashMount]]) {
       if (!path.isAbsolute(value)) problems.push(`${name} must be an absolute path`);

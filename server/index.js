@@ -9,8 +9,6 @@ const apiRouter = require('./api');
 const assetsRouter = require('./assets');
 const adminAuth = require('./adminAuth');
 const shareApi = require('./shareApi');
-const { startScheduler } = require('./sync');
-const sync = require('./sync');
 const { openDatabase } = require('./database');
 const { ViewerRepository } = require('./repository');
 const { migrateLegacyJson } = require('./legacyMigration');
@@ -64,7 +62,6 @@ try {
   if (!migration.skipped && (migration.models || migration.shares)) {
     console.log('[migration] imported legacy registry:', JSON.stringify(migration));
   }
-  sync.setRepository(repository);
   shareApi.setRepository(repository);
   assetsRouter.setRepository(repository);
 } catch (error) {
@@ -128,13 +125,6 @@ app.get('/api/v1/ready', (_req, res) => {
   } catch {
     missing.push('viewer database');
   }
-  if (config.webodmEnabled) {
-    try {
-      fs.accessSync(config.webodmMediaMount, fs.constants.R_OK);
-    } catch {
-      missing.push('WebODM media mount');
-    }
-  }
   if (config.processingPlatformEnabled) {
     for (const [name, directory] of [['datasets', config.datasetsMount], ['models', config.modelsMount], ['cache', config.cacheMount], ['trash', config.trashMount]]) {
       try { fs.accessSync(directory, fs.constants.R_OK | fs.constants.W_OK); } catch { missing.push(`${name} storage`); }
@@ -180,6 +170,13 @@ app.get(['/index.html', '/admin-login.html'], (_req, res, next) => {
 // login gate in the catch-all route below.
 app.use(express.static(config.distDir, { index: false }));
 
+// Viewer management is entered with a one-time Ops-issued admin grant. The
+// workspace removes the grant from its URL immediately after redemption.
+app.get(['/workspace', '/workspace/*'], (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(config.distDir, 'workspace.html'), (err) => { if (err) next(err); });
+});
+
 // `/view/:token` and `/embed/:token` are public — access control happens
 // API-side via the token (see server/shareApi.js). Normal administration lives
 // in LTDS Ops, so the standalone password shell is reachable only when the
@@ -206,11 +203,9 @@ app.use((error, _req, res, _next) => {
   res.status(error.status || 500).json({ error: error.status && error.status < 500 ? safeMessage : 'request failed', code: error.code || 'request_failed' });
 });
 
-startScheduler();
-
 const server = app.listen(config.port, () => {
   console.log(`LTDS 3D Viewer server listening on :${config.port}`);
-  console.log(`WebODM integration: ${config.webodmEnabled ? 'enabled' : 'disabled'}`);
+  console.log('WebODM migration: mounted task folders and exported ZIP archives');
   if (config.derivativesMount) console.log(`Derivatives mount: ${config.derivativesMount}`);
 });
 

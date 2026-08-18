@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { resolve } from 'node:path';
 
 // In dev, the backend (server/index.js) runs separately (see README) and
 // serves /api and /assets; Vite proxies those paths to it so `npm run dev`
@@ -16,5 +17,11 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
+    rollupOptions: {
+      input: {
+        viewer: resolve(import.meta.dirname, 'index.html'),
+        workspace: resolve(import.meta.dirname, 'workspace.html'),
+      },
+    },
   },
 });
