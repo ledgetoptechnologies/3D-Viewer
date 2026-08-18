@@ -38,18 +38,33 @@ already-published viewing.
 
 ## Running with Docker (production)
 
-1. Create only the fixed TrueNAS configuration path:
+1. Create the fixed TrueNAS configuration and managed-storage paths. Do this
+   before Compose: `create_host_path: false` deliberately prevents Docker from
+   silently creating a root-owned bind target. The Storage commands below are
+   for a fresh installation. If `ltds-viewer-storage` already contains data,
+   use the copy-first migration in the processing runbook instead; its target
+   must contain only the sentinel before the copy.
    ```bash
-   mkdir -p /mnt/Plugins/App_Data/Model-Viewer/Config
-   chmod 700 /mnt/Plugins/App_Data/Model-Viewer/Config
+   sudo install -d -m 0700 /mnt/Plugins/App_Data/Model-Viewer/Config
+   sudo install -d -o 568 -g 568 -m 0700 \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/data \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/datasets \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/models \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/cache \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/trash \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/imports \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/imports/datasets \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/imports/terra
+   sudo install -o 568 -g 568 -m 0600 /dev/null \
+     /mnt/Plugins/App_Data/Model-Viewer/Storage/.ltds-viewer-storage-root
    ```
 
-   Application data uses the fixed Docker-managed volume
-   `ltds-viewer-storage`. Docker creates it automatically on first deployment
-   and initializes its `data`, `datasets`, `models`, `cache`, `trash`, and
-   import directories from the image. This avoids TrueNAS host-path ACL and
-   startup-`chown` failures, while keeping every crash-safe rename on one
-   filesystem. Do not delete this volume during an image update or app rename.
+   `/mnt/Plugins/App_Data/Model-Viewer/Storage` is mounted at `/app/storage` and
+   contains the database, browser imports, adopted datasets, Terra imports,
+   models, cache, and trash on one filesystem. API and worker run as `568:568`.
+   Neither Compose nor the guarded updater creates the bind root, migrates the
+   former volume, deletes managed bytes, or changes host ownership.
 2. Copy `.env.example` to the persistent configuration path, restrict it, and
    set independent generated secrets:
 
@@ -134,9 +149,10 @@ The API and worker run directly as the TrueNAS Apps service identity
 `568:568`; there is no privileged entrypoint or runtime ownership repair.
 Every Linux capability is dropped, privilege escalation is disabled, process
 creation is limited, and the container root is read-only. The fixed
-`ltds-viewer-storage` volume is persistent and writable; `/tmp` is bounded
-in-memory storage. WebODM Media and legacy Derivatives remain read-only host
-mounts. An `adopted` import consumes its verified source after durable
+`/mnt/Plugins/App_Data/Model-Viewer/Storage` bind is persistent and writable;
+`/tmp` is bounded in-memory storage. WebODM Media remains a read-only host
+mount. There is no permanent legacy-derivatives mount. An `adopted` import
+consumes its verified source after durable
 promotion, while `external_reference` never moves or deletes external bytes.
 The Viewer API is the only Compose service published on port `8088`; the worker
 has no published port. Container JSON logs rotate at 10 MiB with three files.
@@ -168,20 +184,22 @@ on every refresh/reactivation/revoke transition, then enable the flag. Once
 enabled, startup atomically removes/revokes any unbound state created during the
 compatibility window, and descriptor-less session creation fails closed.
 
-On a new volume, confirm Docker copied the image-owned directory skeleton and
-that UID/GID 568 can write it:
+After manually creating or migrating the fixed Storage skeleton, confirm its
+sentinel, ownership, managed directories, and UID/GID 568 write access:
 
 ```bash
 VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
   scripts/truenas-storage.sh diagnose
 ```
 
-If this bounded check reports an older, incorrectly owned
-`ltds-viewer-storage` volume, stop admission and run
+If this bounded check reports incorrectly owned files under the exact approved
+Storage path, stop admission, inspect the target, and run
 `scripts/truenas-storage.sh repair-ownership CONFIRM_UID_568`. The command
-stops the Viewer services, changes ownership only inside that exact named
-volume, and restores the services that were previously running. Do not use a
-generic host-path recursive `chown`.
+requires the fixed non-symlink path and sentinel, stops the Viewer services,
+changes ownership only inside it, and restores previously running services.
+Do not use a generic host-path recursive `chown`. See the processing runbook
+for the copy-first migration from the former named volume; the old volume is
+never moved or deleted automatically.
 
 After the container is healthy, run the production readiness check inside it:
 

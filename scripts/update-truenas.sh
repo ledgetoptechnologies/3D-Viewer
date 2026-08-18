@@ -6,6 +6,9 @@ viewer_config="${VIEWER_ENV_FILE:-/mnt/Plugins/App_Data/Model-Viewer/Config/view
 requested_mode="${2:-auto}"
 rollback_image="ltds-viewer-rollback:previous"
 official_latest_image="ghcr.io/ledgetoptechnologies/3d-viewer:latest"
+storage_path=/mnt/Plugins/App_Data/Model-Viewer/Storage
+storage_sentinel=.ltds-viewer-storage-root
+required_storage_paths=(data datasets models cache trash imports imports/datasets imports/terra)
 cd -- "$compose_dir"
 
 fail() { echo "viewer update: $*" >&2; exit 1; }
@@ -17,6 +20,18 @@ env_value() {
 }
 
 [[ -r "$viewer_config" ]] || fail "cannot read $viewer_config"
+[[ -d "$storage_path" ]] || fail "$storage_path does not exist; pre-create it and its managed directories as uid/gid 568 (the updater never creates, moves, deletes, or chowns storage)"
+[[ ! -L "$storage_path" ]] || fail "$storage_path must not be a symlink"
+[[ "$(readlink -f -- "$storage_path")" == "$storage_path" ]] || fail "storage resolves outside the exact approved path: $storage_path"
+[[ -f "$storage_path/$storage_sentinel" ]] || fail "storage sentinel is missing: $storage_path/$storage_sentinel"
+for relative_path in "${required_storage_paths[@]}"; do
+  managed_path="$storage_path/$relative_path"
+  [[ -d "$managed_path" ]] || fail "required managed directory is missing: $managed_path"
+done
+for managed_path in "$storage_path" "$storage_path/$storage_sentinel" "${required_storage_paths[@]/#/$storage_path/}"; do
+  storage_owner="$(stat -c '%u:%g' -- "$managed_path")"
+  [[ "$storage_owner" == 568:568 ]] || fail "$managed_path is owned by $storage_owner; expected 568:568 (the updater will not change ownership)"
+done
 processing_value="$(env_value PROCESSING_PLATFORM_ENABLED)"
 case "${processing_value,,}" in
   1|true|yes|on) derived_mode=processing ;;

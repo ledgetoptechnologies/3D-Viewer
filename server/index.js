@@ -31,8 +31,9 @@ if (config.sessionSecretGenerated) {
     'All admin/share sessions will be invalidated on restart. Set SESSION_SECRET for production.');
 }
 
-// The named volume is empty on first deployment. Create the application-owned
-// directory before readiness checks or metadata/database initialization.
+// Create the application-owned data directory before readiness checks or
+// metadata/database initialization. Production pre-creates the host bind and
+// its managed directory skeleton as UID/GID 568.
 try {
   fs.mkdirSync(config.dataDir, { recursive: true });
 } catch (error) {

@@ -7,8 +7,8 @@ x-runtime: &runtime
   stop_grace_period: 2m
   init: true
   read_only: true
-  # TrueNAS SCALE Apps service identity. Storage is a Docker-managed named
-  # volume initialized with this ownership by the image; no startup chown.
+  # TrueNAS SCALE Apps service identity. The fixed host Storage dataset must
+  # be pre-created and owned by 568:568; startup never changes host ownership.
   user: "568:568"
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
@@ -32,12 +32,14 @@ x-runtime: &runtime
     DATASET_IMPORT_MOUNT: /app/storage/imports/datasets
     TERRA_IMPORT_MOUNT: /app/storage/imports/terra
     WEBODM_MEDIA_MOUNT: /imports/webodm
-    DERIVATIVES_MOUNT: /imports/legacy-derivatives
     X_ACCEL_REDIRECT_PREFIX: ""
   volumes: &runtime-volumes
-    - viewer_storage:/app/storage
+    - type: bind
+      source: /mnt/Plugins/App_Data/Model-Viewer/Storage
+      target: /app/storage
+      bind:
+        create_host_path: false
     - /mnt/Plugins/App_Data/WebODM/Media:/imports/webodm:ro
-    - /mnt/Plugins/App_Data/Model-Viewer/Derivatives:/imports/legacy-derivatives:ro
 
 services:
   viewer-api:
@@ -59,9 +61,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-
-volumes:
-  viewer_storage:
-    # Fixed global name keeps the volume stable across TrueNAS app/project
-    # renames and mirrors Project Alpha's Docker-managed persistence model.
-    name: ltds-viewer-storage

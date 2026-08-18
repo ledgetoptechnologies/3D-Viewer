@@ -391,12 +391,11 @@ async function main() {
   if (config.derivativesMount) access(config.derivativesMount, fs.constants.R_OK, 'derivatives mount');
 
   if (has('--verify-mount-options')) {
-    if (!config.derivativesMount) fail('DERIVATIVES_MOUNT is required when verifying mount options');
     const webodmReadOnly = mountedReadOnly(config.webodmMediaMount);
-    const derivativesReadOnly = mountedReadOnly(config.derivativesMount);
+    const derivativesReadOnly = config.derivativesMount ? mountedReadOnly(config.derivativesMount) : null;
     const dataReadOnly = mountedReadOnly(config.dataDir);
     if (webodmReadOnly !== true) fail('WebODM media mount is not read-only');
-    if (derivativesReadOnly !== true) fail('derivatives mount is not read-only');
+    if (config.derivativesMount && derivativesReadOnly !== true) fail('derivatives mount is not read-only');
     if (dataReadOnly !== false) fail('Viewer data mount is not writable');
   }
 

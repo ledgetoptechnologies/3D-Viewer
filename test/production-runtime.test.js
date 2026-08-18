@@ -18,6 +18,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   const externalNginx = fs.readFileSync(path.join(repositoryRoot, 'deploy', 'nginx-viewer.conf.example'), 'utf8');
   const updateScript = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'update-truenas.sh'), 'utf8');
   const storageScript = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'truenas-storage.sh'), 'utf8');
+  const processingRunbook = fs.readFileSync(path.join(repositoryRoot, 'docs', 'PROCESSING_PLATFORM.md'), 'utf8');
   const indexSource = fs.readFileSync(path.join(repositoryRoot, 'server', 'index.js'), 'utf8');
 
   assert.match(compose, /\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088/);
@@ -40,10 +41,9 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /max-size:\s*10m/);
   assert.match(compose, /max-file:\s*"3"/);
   assert.match(compose, /\/mnt\/Plugins\/App_Data\/WebODM\/Media:\/imports\/webodm:ro/);
-  assert.match(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/Derivatives:\/imports\/legacy-derivatives:ro/);
-  assert.match(compose, /viewer_storage:\/app\/storage/);
-  assert.match(compose, /name:\s*ltds-viewer-storage/);
-  assert.doesNotMatch(compose, /\/mnt\/Plugins\/App_Data\/Model-Viewer\/(?:Data|Datasets|Models|Cache|Trash):/);
+  assert.match(compose, /source:\s*\/mnt\/Plugins\/App_Data\/Model-Viewer\/Storage[\s\S]*target:\s*\/app\/storage[\s\S]*create_host_path:\s*false/);
+  assert.doesNotMatch(compose, /viewer_storage|ltds-viewer-storage/);
+  assert.doesNotMatch(compose, /DERIVATIVES_MOUNT|legacy-derivatives|Model-Viewer\/Derivatives/);
   assert.match(compose, /DATA_DIR:\s*\/app\/storage\/data/);
   assert.match(compose, /DATABASE_PATH:\s*\/app\/storage\/data\/viewer\.sqlite/);
   assert.match(compose, /DATASETS_MOUNT:\s*\/app\/storage\/datasets/);
@@ -87,11 +87,24 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert(updateScript.indexOf(' pull || rollback pull') < updateScript.indexOf('active durable work exists'));
   assert.match(updateScript, /keep Ops admission paused/);
   assert.match(indexSource, /server\.close\(\(error\) =>/);
-  assert.match(storageScript, /ltds-viewer-storage/);
+  assert.match(storageScript, /storage_path=\/mnt\/Plugins\/App_Data\/Model-Viewer\/Storage/);
+  assert.match(storageScript, /\.ltds-viewer-storage-root/);
+  assert.match(storageScript, /readlink -f/);
+  assert.match(storageScript, /! -name \.ltds-viewer-storage-root/);
+  assert.doesNotMatch(storageScript, /docker volume/);
   assert.match(storageScript, /--user 568:568/);
   assert.match(storageScript, /CONFIRM_UID_568/);
   assert.match(storageScript, /CONFIRM_RESTORE/);
   assert.match(storageScript, /sha256sum -c/);
+  assert.match(updateScript, /storage_path=\/mnt\/Plugins\/App_Data\/Model-Viewer\/Storage/);
+  assert.match(updateScript, /expected 568:568/);
+  assert.match(updateScript, /never creates, moves, deletes, or chowns storage/);
+  assert.doesNotMatch(updateScript, /(^|\s)(?:mkdir|install|chown)(?:\s|$)/m);
+  assert.doesNotMatch(fs.readFileSync(path.join(repositoryRoot, 'scripts', 'production-readiness.mjs'), 'utf8'), /DERIVATIVES_MOUNT is required/);
+  assert.match(processingRunbook, /Copy-first migration from the former named volume/);
+  assert.match(processingRunbook, /Do not use `mv`, do not remove the old named volume/);
+  assert.match(processingRunbook, /\.ltds-viewer-storage-root/);
+  assert.doesNotMatch(processingRunbook, /--profile processing/);
 });
 
 test('runtime image is rootless as the TrueNAS Apps service identity', () => {

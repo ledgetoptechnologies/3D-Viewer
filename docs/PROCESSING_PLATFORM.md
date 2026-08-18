@@ -1,6 +1,10 @@
 # LTDS processing platform operations
 
-The processing platform is feature-flagged and off by default. Published Viewer models remain available when NodeODM, ClusterODM, or the durable processing worker is unavailable. Provider health is intentionally excluded from the public Viewer liveness path.
+The processing platform remains feature-flagged but is enabled by default for
+this LTDS deployment. An explicit false keeps the always-started worker idle.
+Published Viewer models remain available when NodeODM, ClusterODM, or the
+durable processing worker is unavailable. Provider health is intentionally
+excluded from the public Viewer liveness path.
 
 ## TrueNAS layout
 
@@ -9,35 +13,70 @@ Production Compose publishes `viewer-api` directly on the configured LAN bind ad
 Runtime settings and secrets live only in the host path
 `/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env` (directory mode `700`,
 file mode `600`) and are shared by API and worker through Compose `env_file`.
-All managed application bytes live in the fixed Docker volume
-`ltds-viewer-storage`, mounted at `/app/storage`. Docker creates the volume on
-first deployment and copies the image's pre-owned directory skeleton into it,
-so no host-path `chown` or privileged bootstrap is needed. The API and worker
-run as the TrueNAS Apps service identity `568:568`, with all capabilities
-dropped. The one volume keeps `datasets`, `models`, and `trash` on the same
-filesystem for journaled atomic renames. Preserve and back up the volume across
-image updates or app/project renames.
+All managed application bytes live below the fixed host path
+`/mnt/Plugins/App_Data/Model-Viewer/Storage`, mounted at `/app/storage` with
+Compose `create_host_path: false`. The operator must create the sentinel and
+directory skeleton shown in the README as UID/GID `568:568` before first boot;
+Docker is not allowed to silently create a root-owned target. This one dataset
+contains the database, browser imports, datasets, Terra imports, models, cache,
+and trash on one filesystem for journaled atomic renames. The API and worker
+run as `568:568`, with all capabilities dropped. Preserve and back up this
+entire dataset across image updates or app/project renames.
 
 Run `scripts/truenas-storage.sh diagnose` after first boot. It launches the
-pinned Viewer image as UID/GID 568, verifies each managed directory, and makes
-and removes a bounded write marker. A volume created or populated before the
-rootless layout may retain incompatible ownership because Docker copy-up runs
-only for an empty volume. With processing admission stopped, the explicit
-`repair-ownership CONFIRM_UID_568` command stops the services, repairs only the
-fixed `ltds-viewer-storage` volume, and restarts the services that were running.
+pinned Viewer image as UID/GID 568, verifies the exact non-symlink host path,
+sentinel, ownership, every managed directory, and a bounded write marker. With
+processing admission stopped, the explicit `repair-ownership CONFIRM_UID_568`
+command stops the services, repairs only that sentinel-marked fixed path, and
+restarts the services that were running.
 
 WebODM media is mounted read-only from
-`/mnt/Plugins/App_Data/WebODM/Media`; legacy derivatives are also read-only.
-WebODM API discovery is disabled by default and does not require credentials.
-Release-one WebODM imports are external references; source media is never
-moved or deleted.
+`/mnt/Plugins/App_Data/WebODM/Media`. There is no permanent legacy-derivatives
+mount or `DERIVATIVES_MOUNT` production dependency. If a future one-time legacy
+derivative migration requires one, use a separately reviewed Compose override
+that adds the exact source to both services read-only and sets
+`DERIVATIVES_MOUNT` to its container target; remove the override afterward.
+WebODM API discovery is disabled and requires no credentials. Release-one
+WebODM imports are external references; source media is never moved or deleted.
+
+### Copy-first migration from the former named volume
+
+The guarded updater never migrates storage. If `ltds-viewer-storage` contains
+existing Viewer data, pause Ops admission and stop both services before the
+first deployment of this bind-mount release. Create only the fixed target and
+sentinel, verify the old volume and empty target, then **copy** the bytes with
+the currently configured Viewer image:
+
+```bash
+VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env
+STORAGE=/mnt/Plugins/App_Data/Model-Viewer/Storage
+sudo install -d -o 568 -g 568 -m 0700 "$STORAGE"
+sudo install -o 568 -g 568 -m 0600 /dev/null "$STORAGE/.ltds-viewer-storage-root"
+docker compose --env-file "$VIEWER_ENV_FILE" stop -t 120 viewer-worker viewer-api
+docker volume inspect ltds-viewer-storage
+test -z "$(find "$STORAGE" -mindepth 1 ! -name .ltds-viewer-storage-root -print -quit)"
+VIEWER_IMAGE="$(docker compose --env-file "$VIEWER_ENV_FILE" config --images | sort -u)"
+docker run --rm --read-only --user 0:0 --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+  --security-opt no-new-privileges \
+  -v ltds-viewer-storage:/source:ro -v "$STORAGE:/target" "$VIEWER_IMAGE" \
+  sh -ceu 'test -f /target/.ltds-viewer-storage-root; test -z "$(find /target -mindepth 1 ! -name .ltds-viewer-storage-root -print -quit)"; cp -a /source/. /target/; chown -R 568:568 /target'
+VIEWER_ENV_FILE="$VIEWER_ENV_FILE" scripts/truenas-storage.sh diagnose
+```
+
+Do not use `mv`, do not remove the old named volume, and do not let an update
+script perform the copy. If any validation or copy step fails, leave services
+stopped and inspect the fixed target; the read-only source volume remains the
+rollback copy. After validation, start the new release and retain the old
+volume until a separate reviewed retention decision. A fresh installation
+should instead create the full skeleton in the README and has nothing to copy.
 
 Set `PROCESSING_PLATFORM_ENABLED=true`, generate the one-time
 `PROVIDER_CREDENTIALS_KEY`, and configure the exact origins and/or private LAN
 boundary in `PROCESSING_PROVIDER_ORIGINS` and
 `PROCESSING_PROVIDER_ALLOWED_CIDRS`. Start with `docker compose --env-file
-/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env --profile processing up
--d`; both API and worker must read the true flag from that file. Thereafter an
+/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env up -d`; both API and worker
+must read the true flag from that file. Thereafter an
 administrator creates nodes, stores or rotates tokens, probes, and enables them
 in Ops without editing the environment or restarting containers. Provider
 credentials are encrypted at rest and are never returned. Enable a provider
@@ -45,7 +84,7 @@ only after its capability probe confirms the required `pc-ept`, `3d-tiles`,
 and `gltf` options. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines,
 not hard version lockouts; unknown compatible versions produce a warning.
 
-`scripts/update-truenas.sh . auto` derives the Compose profile from
+`scripts/update-truenas.sh . auto` derives the processing readiness mode from
 `PROCESSING_PLATFORM_ENABLED`; explicit `processing` or `view-only` modes must
 match it. The helper accepts the exact official
 `ghcr.io/ledgetoptechnologies/3d-viewer:latest` image, a CI `sha-<commit>` tag,
@@ -189,14 +228,15 @@ admin bearer permission plus `Idempotency-Key`.
 ## Backups and recovery
 
 Back up `Config/viewer.env` through a secret-capable backup path together with
-the entire `ltds-viewer-storage` Docker volume, or take a SQLite online backup
+the entire `/mnt/Plugins/App_Data/Model-Viewer/Storage` dataset, or take a
+SQLite online backup
 of `/app/storage/data/viewer.sqlite` after `PRAGMA wal_checkpoint(PASSIVE)` and
 then capture the matching managed bytes. Never put the populated environment
 file in source control or ordinary logs. Do not copy only the main database
 while the API or worker is writing. Dataset/model files and the database must
 be captured as one consistent backup.
 
-The supported named-volume backup path stops API and worker before archiving so
+The supported fixed-bind backup path stops API and worker before archiving so
 the SQLite WAL and managed bytes form one snapshot, writes a SHA-256 sidecar,
 then restores only the services that were previously running:
 
@@ -208,8 +248,9 @@ VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
 ```
 
 Test restoration on a non-production copy first. Production restore verifies
-the sidecar and archive paths, stops services, replaces only the exact named
-volume contents, restores ownership to 568, and restarts prior services:
+the sidecar and archive paths, requires the exact non-symlink host path and
+sentinel, stops services, replaces only that bind's contents while preserving
+the sentinel, restores ownership to 568, and restarts prior services:
 
 ```bash
 VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
@@ -218,15 +259,18 @@ VIEWER_ENV_FILE=/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env \
   CONFIRM_RESTORE
 ```
 
-If extraction fails, services remain stopped for inspection. Never restore a
-volume archive from an untrusted source.
+If extraction fails, services remain stopped for inspection. Restore is the
+only helper operation that deletes existing managed bytes, and it requires the
+explicit `CONFIRM_RESTORE` argument. Never restore an archive from an untrusted
+source.
 
 Before maintenance:
 
 1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the configured official `latest` or immutable image first, then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
 2. Stop the worker, then the API.
 3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client, then back up
-   the complete `ltds-viewer-storage` volume before either service restarts.
+   the complete `/mnt/Plugins/App_Data/Model-Viewer/Storage` dataset before
+   either service restarts.
 4. Restart the API and worker. Confirm `/api/v1/health`, `/api/v1/ready`, and the authenticated `/api/v1/processing/ready` response. Processing readiness reports pending and failed lifecycle journal rows; do not resume admission while a failed row remains.
 
 Never restore only `models` without the matching database snapshot: published asset rows contain immutable SHA-256 manifests for every GLB, EPT child, and 3D Tiles child. Serving fails closed when files are missing, added, or modified.
