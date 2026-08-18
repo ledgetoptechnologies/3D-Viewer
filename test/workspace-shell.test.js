@@ -15,8 +15,16 @@ test('workspace redeems an Ops grant and removes it from the URL',()=>{
 });
 test('workspace keeps imports and access modes explicit',()=>{
   assert.match(source,/all\.zip is an optional shortcut, never a requirement/);
-  assert.match(source,/Client identity stays canonical in LTDS Operations/);
+  assert.match(source,/\/api\/v1\/workspace\/client-grants/);
   assert.match(source,/one supported artifact or any subset/);
+});
+test('workspace client grants are responsive, project-filtered, and preserve public links',()=>{
+  assert.match(source,/client-grant-form/);
+  assert.match(source,/option\.dataset\.projectId!==projectId/);
+  assert.match(source,/revoke-client-grant/);
+  assert.doesNotMatch(source,/ops\.ledgetopdroneservices\.com\/data/);
+  assert.match(source,/share-form/);
+  assert.match(fs.readFileSync(path.join(root,'workspace-management.css'),'utf8'),/@media\(max-width:720px\)/);
 });
 test('workspace management panels issue real bearer API mutations',()=>{
   for(const route of [
