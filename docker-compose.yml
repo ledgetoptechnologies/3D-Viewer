@@ -1,5 +1,5 @@
 x-runtime: &runtime
-  image: ${VIEWER_IMAGE:?VIEWER_IMAGE must use the official latest tag, a CI sha tag, or a digest}
+  image: ghcr.io/ledgetoptechnologies/3d-viewer:latest
   pull_policy: always
   restart: unless-stopped
   # Updates drain active work first. This gives current database/filesystem

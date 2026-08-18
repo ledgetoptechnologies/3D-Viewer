@@ -86,9 +86,9 @@ not hard version lockouts; unknown compatible versions produce a warning.
 
 `scripts/update-truenas.sh . auto` derives the processing readiness mode from
 `PROCESSING_PLATFORM_ENABLED`; explicit `processing` or `view-only` modes must
-match it. The helper accepts the exact official
-`ghcr.io/ledgetoptechnologies/3d-viewer:latest` image, a CI `sha-<commit>` tag,
-or an `@sha256` digest; every other mutable tag is rejected. It refuses active
+match it. Compose fixes the runtime image at
+`ghcr.io/ledgetoptechnologies/3d-viewer:latest`; `viewer.env` cannot redirect
+the deployment to another image. The helper refuses active
 processing/dataset/storage work by default, preserves the prior image ID under
 `ltds-viewer-rollback:previous`, waits for health, and runs the read-only
 production readiness check. `VIEWER_UPDATE_ALLOW_ACTIVE=1` is an
@@ -266,7 +266,7 @@ source.
 
 Before maintenance:
 
-1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the configured official `latest` or immutable image first, then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
+1. Stop new processing admission in Ops and keep it paused for the entire update; wait for active operations or attempts to settle. The updater pulls the fixed official `latest` image first, then rechecks durable work immediately before replacement, but the paused admission boundary is what prevents new work from entering that final interval.
 2. Stop the worker, then the API.
 3. Run `PRAGMA wal_checkpoint(TRUNCATE)` through a SQLite client, then back up
    the complete `/mnt/Plugins/App_Data/Model-Viewer/Storage` dataset before

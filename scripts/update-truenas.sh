@@ -6,6 +6,7 @@ viewer_config="${VIEWER_ENV_FILE:-/mnt/Plugins/App_Data/Model-Viewer/Config/view
 requested_mode="${2:-auto}"
 rollback_image="ltds-viewer-rollback:previous"
 official_latest_image="ghcr.io/ledgetoptechnologies/3d-viewer:latest"
+rollback_compose="$compose_dir/scripts/docker-compose.rollback.yml"
 storage_path=/mnt/Plugins/App_Data/Model-Viewer/Storage
 storage_sentinel=.ltds-viewer-storage-root
 required_storage_paths=(data datasets models cache trash imports imports/datasets imports/terra)
@@ -68,7 +69,7 @@ rollback() {
   echo "viewer update failed during $status" >&2
   if [[ -n "$previous_image_id" ]]; then
     echo "rolling back to $previous_image_id via $rollback_image" >&2
-    VIEWER_IMAGE="$rollback_image" docker compose "${compose_args[@]}" up -d --remove-orphans --pull never --wait --wait-timeout 180 || true
+    VIEWER_ROLLBACK_IMAGE="$rollback_image" docker compose "${compose_args[@]}" -f docker-compose.yml -f "$rollback_compose" up -d --remove-orphans --pull never --wait --wait-timeout 180 || true
   else
     echo "no previous Viewer image was available for automatic rollback" >&2
   fi
