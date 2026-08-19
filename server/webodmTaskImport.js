@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
-const { extractZipStream } = require('./safeZip');
+const { extractZipFile } = require('./safeZip');
 const { discoverAssets } = require('./catalogImport');
 const { validateImportSelection } = require('./importBrowser');
 const { hashFile, hashTree } = require('./storageManager');
@@ -61,7 +61,7 @@ async function stageSource(operation, { storage, config }, signal, progress) {
   if (stat.isDirectory()) await copyTree(source, staging, { maxFiles, maxBytes, signal, progress: (value) => progress(value * 0.25) });
   else {
     if (path.extname(source).toLowerCase() !== '.zip') throw Object.assign(new Error('WebODM task archive must use .zip'), { code: 'invalid_archive_type' });
-    await extractZipStream(fs.createReadStream(source), staging, { maxEntries: maxFiles, maxBytes, workId: operation.id, signal });
+    await extractZipFile(source, staging, { maxEntries: maxFiles, maxBytes, workId: operation.id, signal });
     await progress(0.25);
   }
   return { payload, request, source, staging, stagingRelative };
