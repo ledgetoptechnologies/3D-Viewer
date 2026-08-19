@@ -7,6 +7,7 @@ const { pipeline } = require('node:stream/promises');
 const { extractZipStream } = require('./safeZip');
 const { discoverAssets } = require('./catalogImport');
 const { hashFile, hashTree } = require('./storageManager');
+const { readOdmTaskMetadata } = require('./odmTaskMetadata');
 
 const CAPABILITIES = Object.freeze({
   glb: '3d_model', obj: '3d_model', tiles: '3d_model',
@@ -91,7 +92,8 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     if (['ept', 'tiles'].includes(asset.kind)) { const tree = await hashTree(path.dirname(path.join(datasetRoot, ...asset.relativePath.split('/')))); entry.manifestSha256 = tree.manifestSha256; entry.manifestFiles = tree.files; }
     assets.push(entry);
   }
-  const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${discovered.sourceFingerprint}`, providerVersionId: discovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'ready', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds }, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets, makeActive: false });
+  const odmMetadata = readOdmTaskMetadata(datasetRoot);
+  const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${discovered.sourceFingerprint}`, providerVersionId: discovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'ready', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds, processingMetrics: odmMetadata.processingMetrics }, georef: odmMetadata.georef, pointCount: odmMetadata.pointCount, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets, makeActive: false });
   processing.setAttemptResult(attempt.id, model.id, ids.versionId);
   // Existing accounting assigns adopted/reference trees to the output and
   // excludes their source dataset from the project dataset subtotal.

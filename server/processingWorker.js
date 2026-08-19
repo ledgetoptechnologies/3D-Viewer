@@ -7,6 +7,7 @@ const {NodeOdmProvider}=require('./nodeOdmProvider');
 const {extractZipStream}=require('./safeZip');
 const {hashFile,hashFileChunks,hashTree}=require('./storageManager');
 const {sanitizeLogMessage}=require('./processingSecurity');
+const {readOdmTaskMetadata}=require('./odmTaskMetadata');
 
 function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
@@ -65,7 +66,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const assets=[];for(const asset of candidateAssets){const integrity=asset.kind==='ept'?await hashTree(path.dirname(asset.absolutePath),{signal}):await hashFileChunks(asset.absolutePath,{signal});assets.push({...asset,rootKey:'models',relativePath:`${relative}/${asset.relativePath}`,storageMode:'managed',published:false,sourceAttemptId:attempt.id,...integrity});}
   const needsEpt=assets.some((asset)=>asset.kind==='pointCloud')&&!assets.some((asset)=>asset.kind==='ept'),hasFullMesh=assets.some((asset)=>asset.kind==='glb'||asset.kind==='obj');
   if(needsEpt&&!config.localDerivativesEnabled&&!hasFullMesh)throw Object.assign(new Error('provider did not generate required EPT output'),{code:'missing_required_output'});
-  const model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:attempt.datasetId||task.datasetId},status:'importing',assets,makeActive:false});
+  const odmMetadata=readOdmTaskMetadata(destination);
+  const model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:attempt.datasetId||task.datasetId,processingMetrics:odmMetadata.processingMetrics},georef:odmMetadata.georef,pointCount:odmMetadata.pointCount,status:'importing',assets,makeActive:false});
   const version=repository.database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id,attempt.id);
   if(!processing.setAttemptResultForJob(job.id,job.lease_owner,model.id,version.id))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
   const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:relative,status:'staged',byteSize:tree.byteSize,assetCount:assets.length});

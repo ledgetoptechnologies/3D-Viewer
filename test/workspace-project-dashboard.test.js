@@ -43,7 +43,9 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/download-logs/);
   assert.match(source,/fullscreen-logs/);
   assert.match(source,/artifactActions\(output\)/);
-  for(const field of ['averageGsd:null','surveyedArea:null','sourceImageCount','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
+  for(const field of ['averageGsdM','surveyedAreaM2','sourceImageCount','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
+  assert.ok(source.includes('formatGsd(metrics.averageGsdM,units)'));
+  assert.ok(source.includes('formatArea(metrics.surveyedAreaM2,units)'));
   assert.match(processingApi,/assetKinds:\[\.\.\.new Set/);
   assert.doesNotMatch(processingApi,/requestedBySubject|createdBy\s*===\s*req\.actorId/);
 });
