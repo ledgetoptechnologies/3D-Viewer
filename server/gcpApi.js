@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { GcpRepository } = require('./gcpRepository');
-const { parseGcpInterchange } = require('./gcpImport');
+const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
 
 function onlyKeys(value, allowed) {
@@ -29,7 +29,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
-    if (!onlyKeys(req.body, ['displayName', 'format', 'fileName', 'content', 'sourceFileId']))
+    if (!onlyKeys(req.body, ['displayName', 'format', 'fileName', 'content', 'sourceFileId', 'declarations', 'confirmationToken']))
       return error(res, 400, 'invalid_gcp_import');
     if (typeof req.body.displayName !== 'string' || !req.body.displayName.trim() || req.body.displayName.trim().length > 160)
       return error(res, 400, 'invalid_gcp_set_name');
@@ -38,7 +38,9 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     if (req.body.sourceFileId != null && (typeof req.body.sourceFileId !== 'string' || req.body.sourceFileId.length > 128))
       return error(res, 400, 'invalid_source_file');
     try {
-      const parsed = parseGcpInterchange({ format: req.body.format, content: req.body.content });
+      const parsed = parseGcpInterchange({ format: req.body.format, content: req.body.content, declarations: req.body.declarations });
+      if (req.body.format === 'emlid-all-columns-v1' && req.body.confirmationToken !== confirmationToken(parsed))
+        return error(res, 409, 'gcp_preview_confirmation_required');
       const sourceFileId = req.body.sourceFileId ||
         gcp.findSourceFile(req.params.datasetId, req.body.fileName, parsed.sourceSha256);
       const set = gcp.importSet({
@@ -51,12 +53,25 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         sourceContent:req.body.content,
         crs: parsed.crs,
         elevationUnits: parsed.elevationUnits,
+        provenance: parsed.provenance,
         points: parsed.points,
         createdBy: req.actorId,
       });
       repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_imported', entityType: 'gcp_set', entityId: set.id,
         details: { datasetId: set.datasetId, sourceFormat: set.sourceFormat, pointCount: set.pointCount } });
       return res.status(201).json({ set, points: set.points });
+    } catch (caught) { return fail(caught, res, error); }
+  });
+
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/import-preview', authorize('viewer.gcp.write'), (req, res) => {
+    if (!onlyKeys(req.body, ['format', 'content', 'declarations']) || !gcp.dataset(req.params.datasetId))
+      return error(res, 400, 'invalid_gcp_preview');
+    try {
+      const parsed = parseGcpInterchange(req.body);
+      return res.json({ sourceSha256: parsed.sourceSha256, pointCount: parsed.points.length,
+        columns: { id: 'Name', authoritative: ['Easting', 'Northing', 'Elevation'], crossCheck: ['Latitude', 'Longitude', 'Ellipsoidal height'] },
+        provenance: parsed.provenance, sample: parsed.points.slice(0, 5), warnings: parsed.points.length < 3 ? ['Fewer than 3 control points were supplied.'] : [],
+        confirmationToken: confirmationToken(parsed) });
     } catch (caught) { return fail(caught, res, error); }
   });
 
@@ -100,11 +115,40 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     if (!/^\d{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200)
       return error(res, 400, 'invalid_limit');
     try {
-      const result = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, Number(rawLimit));
+      const mode = String(req.query.mode || 'auto');
+      if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
+      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
+      if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
+      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
+      let images = ranked.images;
+      let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
+      let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
+      if (ranked.selectedPoint && mode === 'auto') {
+        const footprints = images.map((image) => image.footprintRadiusM).filter(Number.isFinite).sort((a, b) => a - b);
+        if (footprints.length >= 5) {
+          appliedRadius = footprints[Math.floor(footprints.length / 2)];
+          reason = 'median_camera_footprint_metadata'; confidence = 'metadata_supported';
+        } else if (images.length >= 5) {
+          const accuracy = Math.max(0, ...images.slice(0, 5).map((image) => image.horizontalAccuracyM || 0));
+          appliedRadius = Math.max(10, Math.min(5000, images[4].distanceM * 1.1 + accuracy));
+          reason = 'adaptive_camera_spacing'; confidence = 'proximity_only';
+        } else {
+          appliedMode = 'nearest_fallback'; reason = 'insufficient_ranked_cameras'; confidence = 'low';
+        }
+      }
+      if (ranked.selectedPoint && mode !== 'nearest') {
+        const inRadius = appliedRadius == null ? [] : images.filter((image) => image.distanceM <= appliedRadius);
+        if (mode === 'radius' || inRadius.length >= 5) images = inRadius;
+        else appliedMode = 'nearest_fallback';
+      }
+      images = images.slice(0, appliedMode === 'nearest_fallback' ? Math.min(requested, 12) : requested);
+      const result = { ...ranked, images };
       return res.json({
         ...result,
         ranking: {
-          basis: result.selectedPoint ? 'camera_gps_proximity' : 'capture_time',
+          basis: result.selectedPoint ? 'adaptive_camera_proximity' : 'capture_time', mode: appliedMode,
+          radiusM: appliedRadius, reason, confidence,
+          targetCount: 5, warnings: images.length < 3 ? ['Fewer than 3 candidate images were found.'] : [],
           visibilityConfirmed: false,
           notice: result.selectedPoint
             ? 'Nearby camera positions are suggestions only; proximity does not prove that the GCP is visible.'

@@ -45,7 +45,7 @@ test('workspace supports bounded resumable browser uploads and staff share lifec
   assert.match(api,/router\.delete\('\/api\/v1\/processing\/shares\/:id'/);
 });
 test('permission denial preserves the valid admin session',()=>{
-  assert.match(source,/if\(r\.status===403\)throw Error/);
+  assert.match(source,/if\(r\.status===403\)throw responseError/);
   const forbidden=source.slice(source.indexOf('if(r.status===403'),source.indexOf("if(!r.ok)"));
   assert.doesNotMatch(forbidden,/removeItem|state\.token=null/);
 });

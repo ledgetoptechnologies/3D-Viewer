@@ -358,6 +358,15 @@ origins.
   a dedicated tab and use an exact-origin/source opener channel for silent
   one-time-grant renewal. The grant is redeemed immediately and removed from
   the active URL.
+- **`/workspace/:grant`** uses the same staff-only opener boundary with a
+  separate version-1 workspace protocol. Viewer trusts only the exact
+  `controllerOrigin` returned by its own admin-session response and the exact
+  captured opener window. It requests a replacement grant five minutes before
+  expiry and again when a due tab becomes visible or focused, redeems with the
+  existing bearer, and requires the same session ID and subject. Retryable
+  failures retain the current token and workspace state; only an authoritative
+  `401` or the recorded expiry locks the workspace. This does not affect client
+  portal or public-share sessions.
 - **Cross-origin session control requires HTTPS.** Session/asset authorization
   does not depend on third-party cookies. Put this app behind TLS in production.
 - **Not implemented**: annotations, source-file download controls, and
@@ -469,7 +478,8 @@ Credential-bearing replay bodies are encrypted at rest and pruned after 24h.
   reused key with different bytes returns `409`. Raw grants and session tokens
   are never returned or audited by this route.
 - `GET|POST /api/v1/models/:id/shares`; `DELETE /api/v1/shares/:id`
-- Admin sessions: `POST /api/v1/admin-grants`; `POST /api/v1/admin-sessions/redeem`
+- Admin sessions: `POST /api/v1/admin-grants`; `POST
+  /api/v1/admin-sessions/redeem`; `GET /api/v1/admin-sessions/current`
 - Catalog: `/api/v1/projects`, `/api/v1/datasets`, and `/api/v1/tasks`
 - Resumable upload/finalize: `/api/v1/admin/uploads/...`; durable operation
   polling: `GET /api/v1/operations/:id`; preview cancellation:
@@ -496,6 +506,10 @@ configured Viewer TTL, and `modelVersionId` prevents an authorization for one
 version silently following a newly activated version. Iframe messages use
 `version: 1` and the `ltds-viewer:ready`, `session-expiring`, `renew-session`,
 `session-renewed`, and `session-renewal-failed` event types.
+The staff workspace uses the separately named `ltds-viewer:workspace-ready`,
+`workspace-session-expiring`, `renew-workspace-session`,
+`workspace-session-renewed`, and `workspace-session-renewal-failed` messages;
+all are exact-key, opener/source, origin, version, session, and request bound.
 
 ## Local development
 
@@ -639,6 +653,16 @@ WGS84 UTM 16N
   Three r124 can't share the page with npm Three); otherwise a direct
   LAZ/LAS (via `@loaders.gl/las`) or PLY point cloud in the main three.js
   scene.
+
+## Operations workspace
+
+The staff workspace is project-first. **Dashboard** loads the complete permission-visible project, dataset, task, and output catalogs through cursor pagination, then filters project names instantly in the browser. The catalog is shared by authorized Viewer staff; creator identity remains audit and notification ownership and does not filter project visibility.
+
+Open a project to manage its datasets and tasks, start or restart processing, import data, work with GCPs, review/publish outputs, and create authenticated client access or public task links. The import dialog separates bounded browser uploads (**This device**) from the managed server import folder; there is no live WebODM scan control. Emlid all-columns GCP files are previewed first, with the exact `CS name`, vertical provenance, units, coordinate mapping, and warnings returned by the server. Import requires explicit confirmation and never substitutes a guessed coordinate system.
+
+Expanded tasks show only authoritative API metrics: processing status/duration, source-image count, reconstructed points, georeferencing CRS, output availability, and task disk usage. Average GSD or surveyed area display **Unavailable** until ingestion supplies those values. Output actions appear only for reported derivative kinds and usable URLs; reviewable map/3D derivatives open through an isolated review session. While an attempt is active, the workspace refreshes its sanitized API log tail every five seconds; the UI keeps the latest 100 entries and offers bounded log-tail download and fullscreen views.
+
+Provider endpoints, hidden credential state, concurrency, probes, and enable/disable controls live in the **Providers & nodes** master-detail dialog. Storage, trash recovery, worker readiness, queue lifecycle, and provider health live under **Diagnostics**.
 
 ## Verification
 

@@ -1236,6 +1236,43 @@ const MIGRATIONS = [
       CREATE INDEX webodm_task_imports_project_idx ON webodm_task_imports(project_id,created_at DESC);
     `,
   },
+  {
+    version: 19,
+    name: 'gcp_provenance_ranking_and_snapshot_integrity',
+    sql: `
+      CREATE TABLE gcp_import_provenance (
+        set_id TEXT PRIMARY KEY REFERENCES gcp_sets(id) ON DELETE CASCADE,
+        adapter TEXT NOT NULL,
+        coordinate_system TEXT NOT NULL,
+        vertical_datum TEXT NOT NULL,
+        linear_unit TEXT NOT NULL CHECK(linear_unit IN ('m','ftUS')),
+        elevation_source TEXT,
+        geographic_cross_check TEXT,
+        source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+        confirmed_by TEXT,
+        confirmed_at TEXT NOT NULL
+      );
+      ALTER TABLE gcp_points ADD COLUMN easting REAL;
+      ALTER TABLE gcp_points ADD COLUMN northing REAL;
+      ALTER TABLE gcp_points ADD COLUMN ellipsoidal_height_m REAL;
+      CREATE TABLE gcp_image_ranking_metadata (
+        dataset_file_id TEXT PRIMARY KEY REFERENCES dataset_files(id) ON DELETE CASCADE,
+        horizontal_accuracy_m REAL CHECK(horizontal_accuracy_m IS NULL OR horizontal_accuracy_m >= 0),
+        heading_deg REAL CHECK(heading_deg IS NULL OR (heading_deg >= 0 AND heading_deg < 360)),
+        field_of_view_deg REAL CHECK(field_of_view_deg IS NULL OR (field_of_view_deg > 0 AND field_of_view_deg < 180)),
+        footprint_radius_m REAL CHECK(footprint_radius_m IS NULL OR footprint_radius_m > 0),
+        source TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TRIGGER processing_attempt_gcp_snapshot_no_update
+      BEFORE UPDATE ON processing_attempt_gcp_snapshots
+      BEGIN SELECT RAISE(ABORT,'gcp_snapshot_immutable'); END;
+      CREATE TRIGGER processing_attempt_gcp_snapshot_no_delete
+      BEFORE DELETE ON processing_attempt_gcp_snapshots
+      WHEN EXISTS (SELECT 1 FROM processing_attempts WHERE id=OLD.attempt_id)
+      BEGIN SELECT RAISE(ABORT,'gcp_snapshot_immutable'); END;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

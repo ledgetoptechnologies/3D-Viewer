@@ -33,9 +33,12 @@ class GcpRepository {
   set(row) {
     return row && {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
-      sourceFormat: row.source_format, sourceFileId: row.source_file_id,
+      sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
       sourceFilename: row.source_filename, sourceSha256: row.source_sha256,
       crs: row.crs, elevationUnits: row.elevation_units,
+      provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
+        verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
+        elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
@@ -46,6 +49,8 @@ class GcpRepository {
       id: row.id, setId: row.set_id, externalId: row.external_id, label: row.label,
       latitude: Number(row.latitude), longitude: Number(row.longitude),
       elevationM: Number(row.elevation_m), description: row.description,
+      easting: row.easting == null ? null : Number(row.easting), northing: row.northing == null ? null : Number(row.northing),
+      ellipsoidalHeightM: row.ellipsoidal_height_m == null ? null : Number(row.ellipsoidal_height_m),
       createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
@@ -70,13 +75,15 @@ class GcpRepository {
   }
 
   listSets(datasetId) {
-    return this.database.prepare(`SELECT sets.*,COUNT(points.id) point_count FROM gcp_sets sets
+    return this.database.prepare(`SELECT sets.*,provenance.*,COUNT(points.id) point_count FROM gcp_sets sets
+      LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=sets.id
       LEFT JOIN gcp_points points ON points.set_id=sets.id WHERE sets.dataset_id=?
       GROUP BY sets.id ORDER BY sets.created_at DESC,sets.id DESC`).all(datasetId).map((row) => this.set(row));
   }
 
   getSet(id, includePoints = false) {
-    const result = this.set(this.database.prepare(`SELECT sets.*,COUNT(points.id) point_count FROM gcp_sets sets
+    const result = this.set(this.database.prepare(`SELECT sets.*,provenance.*,COUNT(points.id) point_count FROM gcp_sets sets
+      LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=sets.id
       LEFT JOIN gcp_points points ON points.set_id=sets.id WHERE sets.id=? GROUP BY sets.id`).get(id));
     if (result && includePoints) result.points = this.database.prepare('SELECT * FROM gcp_points WHERE set_id=? ORDER BY external_id,id').all(id).map((row) => this.point(row));
     return result || null;
@@ -84,7 +91,8 @@ class GcpRepository {
 
   getPoint(id) { return this.point(this.database.prepare('SELECT * FROM gcp_points WHERE id=?').get(id)) || null; }
 
-  importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, points, createdBy }) {
+  importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy }) {
+    provenance ||= { adapter: sourceFormat, coordinateSystem: crs, verticalDatum: 'unspecified', linearUnit: elevationUnits };
     const dataset = this.dataset(datasetId);
     if (!dataset || dataset.status !== 'finalized')
       throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
@@ -101,13 +109,16 @@ class GcpRepository {
     return this.transaction(() => {
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
         source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, datasetId, bounded(displayName, 160), sourceFormat, sourceFileId,
+        .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
           bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp);
+      this.database.prepare(`INSERT INTO gcp_import_provenance(set_id,adapter,coordinate_system,vertical_datum,linear_unit,elevation_source,geographic_cross_check,source_sha256,confirmed_by,confirmed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,provenance.adapter,provenance.coordinateSystem,provenance.verticalDatum,provenance.linearUnit,
+          provenance.elevationSource||null,provenance.geographicCrossCheck||null,sourceSha256,createdBy||null,timestamp);
       const insert = this.database.prepare(`INSERT INTO gcp_points(id,set_id,external_id,label,latitude,longitude,elevation_m,
-        description,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`);
+        description,created_at,updated_at,easting,northing,ellipsoidal_height_m) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const point of points)
         insert.run(pointId(id, point.externalId), id, point.externalId, point.label, point.latitude, point.longitude,
-          point.elevationM, point.description, timestamp, timestamp);
+          point.elevationM, point.description, timestamp, timestamp, point.easting ?? null, point.northing ?? null, point.ellipsoidalHeightM ?? null);
       return this.getSet(id, true);
     });
   }
@@ -142,8 +153,10 @@ class GcpRepository {
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));
-      rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,id ASC LIMIT ?`)
+      rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m FROM dataset_files files
+        LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id
+        WHERE files.dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
+        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ?`)
         .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count);
     } else {
       rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
@@ -154,6 +167,8 @@ class GcpRepository {
       mimeType: row.mime_type || row.content_type, capturedAt: row.captured_at,
       latitude: Number(row.latitude), longitude: Number(row.longitude),
       altitudeM: row.altitude_m == null ? null : Number(row.altitude_m),
+      horizontalAccuracyM: row.horizontal_accuracy_m == null ? null : Number(row.horizontal_accuracy_m),
+      footprintRadiusM: row.footprint_radius_m == null ? null : Number(row.footprint_radius_m),
       width: row.width == null ? null : Number(row.width), height: row.height == null ? null : Number(row.height),
       distanceM: point ? haversineMeters(Number(point.latitude), Number(point.longitude), Number(row.latitude), Number(row.longitude)) : null,
     }));

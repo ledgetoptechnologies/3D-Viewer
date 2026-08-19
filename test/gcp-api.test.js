@@ -26,7 +26,7 @@ async function fixture(t){
   const server=await new Promise((resolve)=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
   const base=`http://127.0.0.1:${server.address().port}`;
   t.after(async()=>{await new Promise((resolve)=>server.close(resolve));database.close();fs.rmSync(root,{recursive:true,force:true});});
-  return {base,dataset,required,imagePath};
+  return {base,dataset,required,imagePath,database};
 }
 
 test('GCP administrative routes enforce dedicated permissions, idempotency middleware, and private DTOs',async(t)=>{
@@ -53,4 +53,26 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
   const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'bad-source'},
     body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceFileId:'missing-file',content:source})});
   assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
+});
+
+test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
+  const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'rank-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const pointId=(await imported.json()).points[0].id,timestamp=new Date().toISOString(),sha='a'.repeat(64);
+  const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude)
+    VALUES (?,?,?,?,?,?,'{}',?,?,?,?)`);
+  for(let index=0;index<15;index+=1)insert.run(`rank-${index}`,dataset.id,`rank-${index}.jpg`,1,sha,'image/jpeg',timestamp,'image/jpeg',44.5+(index+1)*0.00001,-88.1);
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=auto&limit=20`,auth={authorization:'Bearer admin'};
+  const dense=await (await fetch(route,{headers:auth})).json();
+  assert.equal(dense.ranking.reason,'adaptive_camera_spacing');assert.equal(dense.ranking.visibilityConfirmed,false);
+  database.prepare("UPDATE dataset_files SET latitude=44.5+(CAST(substr(id,6) AS INTEGER)+1)*0.001 WHERE id LIKE 'rank-%'").run();
+  const sparse=await (await fetch(route,{headers:auth})).json();
+  assert.ok(sparse.ranking.radiusM>dense.ranking.radiusM);
+  const metadata=database.prepare(`INSERT INTO gcp_image_ranking_metadata(dataset_file_id,horizontal_accuracy_m,source,updated_at) VALUES (?,50,'test',?)`);
+  for(let index=0;index<15;index+=1)metadata.run(`rank-${index}`,timestamp);
+  const accurate=await (await fetch(route,{headers:auth})).json();assert.ok(accurate.ranking.radiusM>sparse.ranking.radiusM);
+  database.prepare('UPDATE gcp_image_ranking_metadata SET footprint_radius_m=1').run();
+  const footprint=await (await fetch(route,{headers:auth})).json();
+  assert.equal(footprint.ranking.reason,'median_camera_footprint_metadata');assert.equal(footprint.ranking.mode,'nearest_fallback');
+  assert.equal(footprint.images.length,12);assert.equal(footprint.ranking.visibilityConfirmed,false);
 });

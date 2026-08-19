@@ -69,7 +69,7 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   const databasePath = temporaryDatabase(t, 'migration-v17-auth');
   const database = new DatabaseSync(databasePath);
   database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
-  for (const migration of MIGRATIONS.slice(0, -2)) {
+  for (const migration of MIGRATIONS.slice(0, -3)) {
     database.exec(migration.sql);
     database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
       .run(migration.version, migration.name, new Date().toISOString());
@@ -99,6 +99,6 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 18);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 19);
   upgraded.close();
 });
