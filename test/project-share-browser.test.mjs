@@ -261,7 +261,7 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     assert.ok(recent.some((item) => item.method === 'DELETE' && item.path === '/api/v1/project-shares/share-created'));
     assert.deepEqual(client.events.filter((event) => event.method === 'Runtime.exceptionThrown'), []);
   } finally {
-    await client.command('Page.close').catch(() => {});
+    await client.command('Page.close', {}, 2_000).catch(() => {});
     client.close();
   }
 }
@@ -271,7 +271,7 @@ async function verifyPublicShare(devTools, origin, viewport) {
   const client = await openTarget(devTools, viewport);
   try {
     await client.command('Page.navigate', { url: `${origin}/project/${token}?task=stale-task` });
-    await waitFor(client, `getComputedStyle(document.querySelector('#share-password-overlay')).display !== 'none'`, `${viewport.name}: password prompt did not open`);
+    await waitFor(client, `document.querySelector('#share-password-overlay') && getComputedStyle(document.querySelector('#share-password-overlay')).display !== 'none'`, `${viewport.name}: password prompt did not open`);
     await client.evaluate(`document.querySelector('#share-password-input').value='browser password'; document.querySelector('#share-password-submit').click()`);
     try {
       await waitFor(client, `document.querySelector('#project-switcher').value === 'task-one'`, `${viewport.name}: stale task query did not recover to the first live task`);
@@ -294,7 +294,7 @@ async function verifyPublicShare(devTools, origin, viewport) {
     await waitFor(client, `document.querySelector('#brand-project')?.textContent.includes('Published task two')`, `${viewport.name}: switched task config did not load`);
     assert.deepEqual(client.events.filter((event) => event.method === 'Runtime.exceptionThrown'), []);
   } finally {
-    await client.command('Page.close').catch(() => {});
+    await client.command('Page.close', {}, 2_000).catch(() => {});
     client.close();
   }
 }
@@ -320,7 +320,7 @@ async function verifyRevokeOnlyStaff(devTools, origin, runtime) {
     assert.ok(runtime.requests.slice(start).some((item) => item.method === 'DELETE' && item.path === '/api/v1/project-shares/share-existing'));
     assert.deepEqual(client.events.filter((event) => event.method === 'Runtime.exceptionThrown'), []);
   } finally {
-    await client.command('Page.close').catch(() => {});
+    await client.command('Page.close', {}, 2_000).catch(() => {});
     client.close();
   }
 }
