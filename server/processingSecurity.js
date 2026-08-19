@@ -26,4 +26,10 @@ function publicDerivativeKind(kind) {
   return new Set(['glb','tiles','ept','ortho','dsm','dtm']).has(kind);
 }
 
-module.exports = { publicDerivativeKind, safeRelativePath, sanitizeLogMessage };
+function adminOutputAssetKind(kind) {
+  // Reports are useful to staff but are not part of the client/public model
+  // derivative allowlist. Raw provider inputs remain excluded from both.
+  return publicDerivativeKind(kind) || kind === 'report';
+}
+
+module.exports = { adminOutputAssetKind, publicDerivativeKind, safeRelativePath, sanitizeLogMessage };

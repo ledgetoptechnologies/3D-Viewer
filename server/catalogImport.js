@@ -13,6 +13,7 @@ const ASSET_RULES = [
   ['ortho', /(^|\/)(odm_)?orthophoto[^/]*\.tiff?$/i, 'tif'],
   ['dsm', /(^|\/)dsm[^/]*\.tiff?$/i, 'tif'],
   ['dtm', /(^|\/)dtm[^/]*\.tiff?$/i, 'tif'],
+  ['report', /(^|\/)odm_report\/(?:report|odm_report)\.pdf$/i, 'pdf', 'application/pdf'],
   ['shots', /(^|\/)shots\.geojson$/i, 'geojson'],
   ['pointCloud', /(^|\/)(odm_)?georeferenced_model\.(laz|las|ply)$/i, null],
 ];
@@ -44,10 +45,10 @@ async function discoverAssets(root) {
   const fileHashes=new Map();
   for(const file of files)fileHashes.set(file.relativePath,await hashFileChunks(file.absolutePath));
   const assets = [];
-  for (const [kind, pattern, format] of ASSET_RULES) {
+  for (const [kind, pattern, format, contentType] of ASSET_RULES) {
     const file = files.find((candidate) => pattern.test(candidate.relativePath));
     if (!file) continue;
-    const integrity=fileHashes.get(file.relativePath);assets.push({ kind, relativePath: file.relativePath, format: format || path.extname(file.relativePath).slice(1).toLowerCase(), byteSize: file.byteSize, sha256: integrity.sha256, chunks:integrity.chunks });
+    const integrity=fileHashes.get(file.relativePath);assets.push({ kind, relativePath: file.relativePath, format: format || path.extname(file.relativePath).slice(1).toLowerCase(), ...(contentType?{contentType}:{}), byteSize: file.byteSize, sha256: integrity.sha256, chunks:integrity.chunks });
   }
   const fingerprint = crypto.createHash('sha256');
   for (const file of files) fingerprint.update(`${file.relativePath}\0${file.byteSize}\0${fileHashes.get(file.relativePath).sha256}\n`);
@@ -143,7 +144,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   const assetRootKey=request.storageMode==='external_reference'?(candidate.provider==='webodm'?'webodm':'terra'):'datasets';
   const assetPrefix=sourceRelativePath;
   const originalRoot=request.storageMode==='external_reference'?storage.resolve(candidate.sourceRootKey,candidate.sourceRelativePath,{mustExist:true}):storage.resolve('datasets',dataset.relativePath,{mustExist:true}),assets=[];
-  for(const asset of candidate.assets){const relativePath=[assetPrefix,asset.relativePath].filter(Boolean).join('/'),entry={kind:asset.kind,rootKey:assetRootKey,relativePath,format:asset.format,byteSize:asset.byteSize,sha256:asset.sha256,chunks:asset.chunks||[],storageMode:request.storageMode,published:false,sourceAttemptId:attempt.id};if(['ept','tiles'].includes(asset.kind)){const tree=await hashTree(path.dirname(path.join(originalRoot,...asset.relativePath.split('/'))));entry.manifestSha256=tree.manifestSha256;entry.manifestFiles=tree.files;}assets.push(entry);}
+  for(const asset of candidate.assets){const relativePath=[assetPrefix,asset.relativePath].filter(Boolean).join('/'),entry={kind:asset.kind,rootKey:assetRootKey,relativePath,format:asset.format,contentType:asset.contentType||null,byteSize:asset.byteSize,sha256:asset.sha256,chunks:asset.chunks||[],storageMode:request.storageMode,published:false,sourceAttemptId:attempt.id};if(['ept','tiles'].includes(asset.kind)){const tree=await hashTree(path.dirname(path.join(originalRoot,...asset.relativePath.split('/'))));entry.manifestSha256=tree.manifestSha256;entry.manifestFiles=tree.files;}assets.push(entry);}
   const model=repository.upsertModelVersion({modelId:ids.modelId,versionId:ids.versionId,provider:candidate.provider,providerModelId:`catalog:${candidate.id}`,providerVersionId:approvedFingerprint,displayName:request.taskDisplayName,status:'ready',metadata:{projectName:project.displayName,taskName:task.displayName,catalogCandidateId:candidate.id,catalogImportOperationId:operation.id},versionMetadata:{catalogImport:true,storageMode:request.storageMode,catalogImportOperationId:operation.id},sourceLocator:{catalogImport:true,projectId:candidate.externalProjectId,taskId:candidate.externalTaskId,sourceRootKey,sourceRelativePath},assets,makeActive:false});
   processing.setAttemptResult(attempt.id,model.id,ids.versionId);
   processing.registerModelOutput({versionId:ids.versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:request.storageMode==='external_reference'?`${assetRootKey}@${ids.versionId}`:assetRootKey,relativePath:sourceRelativePath,storageMode:request.storageMode,byteSize:dataset.byteSize,assetCount:assets.length});

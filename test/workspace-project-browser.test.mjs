@@ -1,0 +1,412 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const token = 'browser_workspace_token_1234567890abcdef';
+
+const fixtures = {
+  projects: [
+    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active' },
+    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active' },
+  ],
+  datasets: [
+    { id: 'dataset-johnson', projectId: 'project-johnson', displayName: 'Johnson imagery', status: 'finalized', fileCount: 48, byteSize: 7340032 },
+  ],
+  tasks: [
+    {
+      id: 'task-johnson', projectId: 'project-johnson', datasetId: 'dataset-johnson', displayName: 'Johnson reconstruction',
+      status: 'processing', createdAt: '2026-08-19T12:00:00.000Z',
+      metrics: { sourceImageCount: 48 },
+      latestAttempt: {
+        id: 'attempt-johnson', providerId: 'provider-nodeodm', status: 'running',
+        createdAt: '2026-08-19T12:00:00.000Z', startedAt: '2026-08-19T12:01:00.000Z', updatedAt: '2026-08-19T12:05:00.000Z',
+      },
+    },
+  ],
+  providers: [
+    {
+      id: 'provider-nodeodm', displayName: 'TrueNAS NodeODM', type: 'nodeodm', endpoint: 'https://nodeodm.example.test',
+      enabled: true, admissionLimit: 2, runtimeHealth: 'healthy', capabilityFingerprint: 'browser-fingerprint', credential: { configured: true, mode: 'token' },
+      capabilities: {
+        providerType: 'nodeodm', apiVersion: '2.2.3', engine: 'ODM', engineVersion: '3.5.0', taskQueueCount: 1,
+        maxParallelTasks: 2, options: [{ name: 'orthophoto-resolution', type: 'integer', value: 5 }],
+      },
+    },
+  ],
+  presets: [{ id: 'preset-fast', displayName: 'Fast', description: '', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', options: {}, enabled: true, builtIn: false }],
+  outputs: [{
+    id: 'output-johnson', taskId: 'task-johnson', modelId: 'model-johnson', displayName: 'Johnson output',
+    status: 'published', activePublished: true, byteSize: 4096, assetCount: 2, assetKinds: ['glb', 'report'],
+    downloadUrl: '/api/v1/processing/outputs/output-johnson/assets/glb',
+    reportUrl: '/api/v1/processing/outputs/output-johnson/assets/report',
+    viewSessionUrl: '/api/v1/processing/outputs/output-johnson/view-sessions',
+  }],
+};
+
+function browserPath() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    process.env.EDGE_PATH,
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ].filter(Boolean);
+  return candidates.find(existsSync) || null;
+}
+
+function json(response, status = 200) {
+  return { status, body: Buffer.from(JSON.stringify(response)), type: 'application/json; charset=utf-8' };
+}
+
+function apiResponse(url, runtime, method = 'GET', body = {}) {
+  const pathname = url.pathname;
+  if (pathname === '/api/v1/admin-sessions/current') {
+    return json({
+      controllerOrigin: 'https://ops.example.test',
+      session: {
+        id: 'browser-session', subject: 'ops:browser-audit', displayUnits: 'imperial',
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      },
+    });
+  }
+  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects, nextCursor: null });
+  if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
+  if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks, nextCursor: null });
+  if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/probe' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
+  if (pathname === '/api/v1/processing/presets' && method === 'GET') return json({ presets: fixtures.presets });
+  if (pathname === '/api/v1/processing/presets' && method === 'POST') return json({ preset: { id: 'preset-new', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', ...body } }, 201);
+  if (pathname.startsWith('/api/v1/processing/presets/') && ['PATCH', 'DELETE'].includes(method)) return method === 'DELETE' ? { status: 204, body: Buffer.alloc(0), type: 'application/json' } : json({ preset: { ...fixtures.presets[0], ...body } });
+  if (pathname === '/api/v1/processing/outputs') return json({ outputs: fixtures.outputs, nextCursor: null });
+  if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
+  if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-published-grant' }, 201);
+  if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
+  if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
+  if (pathname === '/api/v1/storage') return json({ storage: {}, trash: { items: [{ id: 'trash-johnson', entityId: 'dataset-trash', entityType: 'dataset', displayName: 'Discarded draft', byteSize: 0 }] } });
+  if (pathname === '/api/v1/storage/trash/trash-johnson' && method === 'DELETE') return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
+  if (pathname === '/api/v1/processing/ready') return json({ ok: true });
+  if (pathname === '/api/v1/workspace/client-grants') return json({ projects: [], associations: [], grants: [] });
+  if (pathname === '/api/v1/tasks/task-johnson') {
+    return json({ task: { ...fixtures.tasks[0], metrics: {
+      averageGsdM: 0.021, surveyedAreaM2: 18000, sourceImageCount: 48, reconstructedPointCount: 1250000,
+      georeferencingCrs: 'EPSG:32616', processingDurationMs: 240000, processingStatus: 'running', outputCount: 1,
+      taskDiskUsageBytes: 9437184,
+    }, outputs: fixtures.outputs } });
+  }
+  if (pathname === '/api/v1/tasks/task-johnson/storage') return json({ task: { totalBytes: 9437184 } });
+  if (pathname === '/api/v1/tasks/task-johnson/attempts') return json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: null });
+  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
+  const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
+  if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint] });
+  if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
+  if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'POST') {
+    const correspondence = { id: 'gcp-mark-1', ...body };
+    runtime.correspondences = [correspondence];
+    return json({ correspondence }, 201);
+  }
+  if (pathname === '/api/v1/gcp-correspondences/gcp-mark-1' && method === 'PATCH') {
+    runtime.correspondences = runtime.correspondences.map(item => ({ ...item, ...body }));
+    return json({ correspondence: runtime.correspondences[0] });
+  }
+  if (pathname === '/api/v1/gcp-correspondences/gcp-mark-1' && method === 'DELETE') {
+    runtime.correspondences = [];
+    return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
+  }
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images') return json({ images: [{ id: 'image-1', relativePath: 'DJI_0001.JPG', distanceM: 4.2, width: 100, height: 80 }], ranking: { mode: 'auto', notice: 'Adaptive camera spacing', warnings: [] } });
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-images/image-1/content') return { status: 200, body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80"><rect width="100" height="80" fill="#555"/></svg>'), type: 'image/svg+xml' };
+  if (pathname === '/api/v1/attempts/attempt-johnson') {
+    const sequence = ++runtime.logSequence;
+    return json({
+      attempt: fixtures.tasks[0].latestAttempt,
+      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `browser refresh ${sequence}` }],
+    });
+  }
+  return json({ error: `Unhandled fixture route: ${pathname}` }, 404);
+}
+
+function startFixtureServer() {
+  const runtime = { logSequence: 0, correspondences: [], requests: [] };
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url || '/', 'http://127.0.0.1');
+    let result;
+    if (url.pathname.startsWith('/api/')) {
+      if (request.headers.authorization !== `Bearer ${token}`) result = json({ error: 'authorization_required' }, 401);
+      else {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        const raw = Buffer.concat(chunks).toString();
+        let body = {};
+        if (raw) try { body = JSON.parse(raw); } catch {}
+        runtime.requests.push({ method: request.method, path: url.pathname, body });
+        result = apiResponse(url, runtime, request.method, body);
+      }
+    } else {
+      const relative = url.pathname === '/workspace' || url.pathname === '/' ? 'workspace.html' : decodeURIComponent(url.pathname.slice(1));
+      const absolute = path.resolve(root, relative);
+      if (!absolute.startsWith(root + path.sep) || !existsSync(absolute)) result = json({ error: 'not_found' }, 404);
+      else {
+        const extension = path.extname(absolute);
+        const type = extension === '.html' ? 'text/html; charset=utf-8'
+          : extension === '.css' ? 'text/css; charset=utf-8'
+            : ['.js', '.mjs'].includes(extension) ? 'text/javascript; charset=utf-8'
+              : 'application/octet-stream';
+        result = { status: 200, body: readFileSync(absolute), type };
+      }
+    }
+    response.writeHead(result.status, { 'Content-Type': result.type, 'Cache-Control': 'no-store' });
+    response.end(result.body);
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve({ server, runtime, origin: `http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
+class CdpClient {
+  constructor(socket) {
+    this.socket = socket;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.events = [];
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(event.data);
+      if (message.id) {
+        const pending = this.pending.get(message.id);
+        if (!pending) return;
+        this.pending.delete(message.id);
+        if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
+        else pending.resolve(message.result || {});
+      } else {
+        this.events.push(message);
+      }
+    });
+  }
+
+  static async connect(url) {
+    const socket = new WebSocket(url);
+    await new Promise((resolve, reject) => {
+      socket.addEventListener('open', resolve, { once: true });
+      socket.addEventListener('error', reject, { once: true });
+    });
+    return new CdpClient(socket);
+  }
+
+  command(method, params = {}) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, method });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  async evaluate(expression) {
+    const result = await this.command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+    return result.result?.value;
+  }
+
+  close() {
+    this.socket.close();
+  }
+}
+
+async function waitFor(client, expression, message, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  let last;
+  while (Date.now() < deadline) {
+    last = await client.evaluate(expression);
+    if (last) return last;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const diagnostics = await client.evaluate(`({
+    readyState: document.readyState,
+    title: document.title,
+    content: document.querySelector('#workspace-content')?.textContent?.trim().slice(0, 240),
+    tokenPresent: Boolean(sessionStorage.getItem('ltds-viewer-admin-token')),
+  })`).catch(error => ({ evaluationError: error.message }));
+  const exceptions = client.events
+    .filter(event => event.method === 'Runtime.exceptionThrown')
+    .map(event => ({
+      description: event.params?.exceptionDetails?.exception?.description || event.params?.exceptionDetails?.text,
+      url: event.params?.exceptionDetails?.url,
+      line: event.params?.exceptionDetails?.lineNumber,
+      column: event.params?.exceptionDetails?.columnNumber,
+    }))
+    .slice(-3);
+  throw new Error(`${message}; last result: ${JSON.stringify(last)}; diagnostics: ${JSON.stringify(diagnostics)}; exceptions: ${JSON.stringify(exceptions)}`);
+}
+
+async function waitForRequest(runtime, start, method, pathname, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (runtime.requests.slice(start).some(item => item.method === method && item.path === pathname)) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error(`missing browser mutation ${method} ${pathname}`);
+}
+
+async function waitForDevTools(profile) {
+  const activePortFile = path.join(profile, 'DevToolsActivePort');
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (existsSync(activePortFile)) {
+      const port = readFileSync(activePortFile, 'utf8').split(/\r?\n/, 1)[0];
+      if (port) return `http://127.0.0.1:${port}`;
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error('Browser did not expose a DevTools endpoint');
+}
+
+async function verifyViewport(devTools, origin, viewport, runtime) {
+  const requestStart = runtime.requests.length;
+  const targetResponse = await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' });
+  assert.equal(targetResponse.ok, true, `create browser target for ${viewport.name}`);
+  const target = await targetResponse.json();
+  const client = await CdpClient.connect(target.webSocketDebuggerUrl);
+  try {
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Log.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', {
+      width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: viewport.mobile,
+      screenWidth: viewport.width, screenHeight: viewport.height,
+    });
+    await client.command('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(token)});
+        window.__viewerActions=[];
+        window.__promptValue='dataset-trash';
+        window.confirm=()=>true;
+        window.prompt=()=>window.__promptValue;
+        window.open=()=>({opener:null,closed:false,location:{replace:url=>window.__viewerActions.push({type:'open',url})},close(){}});
+        const originalAnchorClick=HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click=function(){window.__viewerActions.push({type:'download',name:this.download});};
+      `,
+    });
+    await client.command('Page.navigate', { url: `${origin}/workspace` });
+    await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
+
+    const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
+
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [
+      { name: 'johnson road survey', hidden: false },
+      { name: 'alpha quarry', hidden: true },
+    ], `${viewport.name}: project search result visibility`);
+
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
+    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey project'", `${viewport.name}: project selection failed`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: selected project overflows horizontally`);
+
+    await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
+    await waitFor(client, "document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: task details did not expand`);
+    const firstLog = await client.evaluate(`document.querySelector('.task-detail .log-tail').textContent`);
+    await waitFor(client, `document.querySelector('.task-detail .log-tail')?.textContent !== ${JSON.stringify(firstLog)}`, `${viewport.name}: running-task log tail did not refresh`, 7_000);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: expanded task overflows horizontally`);
+
+    await waitFor(client, "document.querySelector('[data-action=\"gcp-open-image\"][data-id=\"image-1\"]') !== null", `${viewport.name}: GCP image candidates did not load`);
+    await client.evaluate(`document.querySelector('[data-action="gcp-open-image"][data-id="image-1"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-mark-form') !== null", `${viewport.name}: private GCP image did not open`);
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='12'; form.elements.pixelY.value='14'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 12, y 14')", `${viewport.name}: GCP correspondence was not created`);
+    await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='13'; form.elements.pixelY.value='15'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
+    await client.evaluate(`document.querySelector('[data-action="gcp-delete-mark"]').click()`);
+    await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
+
+    await client.evaluate(`document.querySelector('[data-action="download-report"]').click()`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
+    await client.evaluate(`document.querySelector('[data-action="view-output"]').click()`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-published-grant')", `${viewport.name}: published output session did not open`);
+
+    await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
+    await client.evaluate(`document.querySelector('[data-action="open-provider"][data-id="provider-nodeodm"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: provider modal did not open`);
+    assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider modal selection`);
+    await client.evaluate(`document.querySelector('[data-action="edit-provider"]').click()`);
+    await waitFor(client, "document.querySelector('#provider-edit-form') !== null", `${viewport.name}: provider edit form did not open`);
+    await client.evaluate(`(() => { const form=document.querySelector('#provider-edit-form'); form.elements.admissionLimit.value='3'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitFor(client, "document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to node detail`);
+    await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);
+    await waitFor(client, "document.querySelector('#provider-token-form') !== null", `${viewport.name}: provider token form did not open`);
+    await client.evaluate(`(() => { const form=document.querySelector('#provider-token-form'); form.elements.token.value='browser-secret-token'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitFor(client, "document.querySelector('[data-action=\"new-preset\"]') !== null", `${viewport.name}: provider token update did not return to node detail`);
+    await client.evaluate(`document.querySelector('[data-action="new-preset"]').click()`);
+    await waitFor(client, "document.querySelector('#preset-form') !== null", `${viewport.name}: preset form did not open`);
+    await client.evaluate(`(() => { const form=document.querySelector('#preset-form'); form.elements.displayName.value='Browser preset'; form.elements.options.value='{}'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await waitFor(client, "document.querySelector('[data-action=\"delete-preset\"]') !== null", `${viewport.name}: preset creation did not return to node detail`);
+    await client.evaluate(`document.querySelector('[data-action="delete-preset"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: preset deletion did not return to node detail`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: provider modal overflows horizontally`);
+
+    await client.evaluate(`document.querySelector('.modal-close').click(); document.querySelector('[data-section="diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"purge-trash\"]') !== null", `${viewport.name}: trash lifecycle controls did not render`);
+    assert.deepEqual(await client.evaluate(`({ entityId: document.querySelector('[data-action="purge-trash"]').dataset.entityId, promptValue: window.prompt('test') })`),
+      { entityId: 'dataset-trash', promptValue: 'dataset-trash' }, `${viewport.name}: trash confirmation contract`);
+    await client.evaluate(`document.querySelector('[data-action="purge-trash"]').click()`);
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/storage/trash/trash-johnson');
+
+    const recent = runtime.requests.slice(requestStart);
+    for (const expected of [
+      ['POST', '/api/v1/tasks/task-johnson/gcp-correspondences'],
+      ['PATCH', '/api/v1/gcp-correspondences/gcp-mark-1'],
+      ['DELETE', '/api/v1/gcp-correspondences/gcp-mark-1'],
+      ['POST', '/api/v1/processing/outputs/output-johnson/view-sessions'],
+      ['PATCH', '/api/v1/processing/providers/provider-nodeodm'],
+      ['PUT', '/api/v1/processing/providers/provider-nodeodm/credential'],
+      ['POST', '/api/v1/processing/presets'],
+      ['DELETE', '/api/v1/processing/presets/preset-fast'],
+      ['DELETE', '/api/v1/storage/trash/trash-johnson'],
+    ]) assert.ok(recent.some(item => item.method === expected[0] && item.path === expected[1]), `${viewport.name}: missing browser mutation ${expected.join(' ')}`);
+
+    const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown');
+    assert.deepEqual(exceptions, [], `${viewport.name}: uncaught browser exceptions`);
+  } finally {
+    await client.command('Page.close').catch(() => {});
+    client.close();
+  }
+}
+
+test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 60_000 }, async t => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Set CHROME_PATH or EDGE_PATH to a Chromium-family browser to run the real browser verification.');
+    return;
+  }
+
+  const { server, runtime, origin } = await startFixtureServer();
+  const profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
+  const browser = spawn(executable, [
+    '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+    '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
+  ], { windowsHide: true, stdio: 'ignore' });
+  try {
+    const devTools = await waitForDevTools(profile);
+    for (const viewport of [
+      { name: 'desktop', width: 1440, height: 900, mobile: false },
+      { name: '390px mobile', width: 390, height: 844, mobile: true },
+      { name: '320px mobile', width: 320, height: 720, mobile: true },
+    ]) await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime));
+  } finally {
+    const exited = new Promise(resolve => browser.once('exit', resolve));
+    browser.kill();
+    await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+    await new Promise(resolve => server.close(resolve));
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

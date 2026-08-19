@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const test=require('node:test');
 const root=path.join(__dirname,'..');
-const source=fs.readFileSync(path.join(root,'workspace.js'),'utf8');
+const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8');
 const api=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
 const server=fs.readFileSync(path.join(root,'server','index.js'),'utf8');
 
@@ -14,9 +14,11 @@ test('workspace redeems an Ops grant and removes it from the URL',()=>{
   assert.match(source,/sessionStorage\.setItem\(TOKEN_KEY,state\.token\)/);
 });
 test('workspace keeps imports and access modes explicit',()=>{
-  assert.match(source,/all\.zip is an optional shortcut, never a requirement/);
+  assert.match(source,/This immediately queues a durable import from the managed server folder/);
+  assert.match(source,/there is no preview step/);
+  assert.match(source,/\/api\/v1\/processing\/server-task-imports/);
   assert.match(source,/\/api\/v1\/workspace\/client-grants/);
-  assert.match(source,/one supported artifact or any subset/);
+  assert.doesNotMatch(source,/Scan WebODM mount/);
 });
 test('workspace client grants are responsive, project-filtered, and preserve public links',()=>{
   assert.match(source,/client-grant-form/);
@@ -29,12 +31,12 @@ test('workspace client grants are responsive, project-filtered, and preserve pub
 test('workspace management panels issue real bearer API mutations',()=>{
   for(const route of [
     '/api/v1/projects','/api/v1/datasets','/api/v1/task-submissions',
-    '/api/v1/processing/providers','/api/v1/processing/webodm-task-imports',
-    '/api/v1/processing/catalog-imports/scans','/review-sessions','/publish',
+    '/api/v1/processing/providers','/api/v1/processing/server-task-imports',
+    '/review-sessions','/publish',
     '/api/v1/storage/trash/',
   ]) assert.ok(source.includes(route),`missing workspace API ${route}`);
   assert.match(source,/Idempotency-Key/);
-  assert.match(source,/selectedAssetKinds:r\.assetKinds/);
+  assert.match(source,/selectedAssetKinds:result\.assetKinds/);
   assert.doesNotMatch(source,/credential\.token|rootKey/);
 });
 test('workspace supports bounded resumable browser uploads and staff share lifecycle',()=>{
@@ -45,12 +47,12 @@ test('workspace supports bounded resumable browser uploads and staff share lifec
   assert.match(api,/router\.delete\('\/api\/v1\/processing\/shares\/:id'/);
 });
 test('permission denial preserves the valid admin session',()=>{
-  assert.match(source,/if\(r\.status===403\)throw responseError/);
-  const forbidden=source.slice(source.indexOf('if(r.status===403'),source.indexOf("if(!r.ok)"));
+  assert.match(source,/if\(response\.status===403\)throw responseError/);
+  const forbidden=source.slice(source.indexOf('if(response.status===403'),source.indexOf("if(!response.ok)"));
   assert.doesNotMatch(forbidden,/removeItem|state\.token=null/);
 });
 test('workspace renders every management section instead of placeholders',()=>{
-  for(const view of ['projects','datasets','jobs','providers','imports','review','sharing','storage'])
+  for(const view of ['dashboard','selectedProject','providers','diagnostics'])
     assert.match(source,new RegExp(`function ${view}\\(`));
   assert.doesNotMatch(source,/sectionPlaceholder/);
 });
@@ -66,10 +68,11 @@ test('workspace route remains separate from model sessions',()=>{
   assert.match(server,/app\.get\(\['\/workspace', '\/workspace\/\*'\]/);
   assert.match(server,/workspace\.html/);
 });
-test('invalid WebODM projects are rejected before durable receipt reservation',()=>{
-  const guard=api.indexOf("router.use('/api/v1/processing/webodm-task-imports'");
-  const route=api.indexOf("router.post('/api/v1/processing/webodm-task-imports'");
+test('invalid server task-import projects are rejected before durable receipt reservation',()=>{
+  const guard=api.indexOf('router.use(serverTaskImportPaths');
+  const route=api.indexOf('router.post(serverTaskImportPaths');
   assert.ok(guard>0&&guard<route);
+  assert.match(api,/serverTaskImportPaths=\['\/api\/v1\/processing\/server-task-imports','\/api\/v1\/processing\/webodm-task-imports'\]/);
   assert.match(api.slice(guard,route),/authorize\('viewer\.datasets\.import'\)/);
   assert.match(api.slice(guard,route),/!processing\.getProject\(req\.body\.projectId\)/);
 });
