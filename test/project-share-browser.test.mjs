@@ -10,6 +10,7 @@ import { createServer as createViteServer } from 'vite';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adminToken = 'project_share_browser_admin_token_1234567890';
+const revokeOnlyToken = 'project_share_browser_revoke_token_123456789';
 
 function browserPath() {
   return [
@@ -61,13 +62,15 @@ function taskConfig(taskId) {
 function fixtureApi(url, request, body, runtime) {
   const pathname = url.pathname;
   const method = request.method || 'GET';
-  const authorized = request.headers.authorization === `Bearer ${adminToken}`;
+  const authorized = [`Bearer ${adminToken}`, `Bearer ${revokeOnlyToken}`].includes(request.headers.authorization);
   if (pathname.startsWith('/api/v1/') && !authorized) return response({ error: 'authorization_required' }, 401);
   if (pathname === '/api/v1/admin-sessions/current') return response({
     controllerOrigin: 'https://ops.example.test',
     session: {
       id: 'project-share-browser-session', subject: 'ops:project-share-browser', displayUnits: 'imperial',
-      permissions: ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read', 'viewer.shares.read', 'viewer.shares.create', 'viewer.shares.revoke'],
+      permissions: request.headers.authorization === `Bearer ${revokeOnlyToken}`
+        ? ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read', 'viewer.shares.revoke']
+        : ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read', 'viewer.shares.read', 'viewer.shares.create', 'viewer.shares.revoke'],
       expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     },
   });
@@ -88,9 +91,10 @@ function fixtureApi(url, request, body, runtime) {
     runtime.projectShares = [...runtime.projectShares.filter((item) => item.id !== created.id), created];
     return response({ share: created, viewUrl: `${runtime.origin}/project/created-project-token` }, 201);
   }
-  if (pathname === '/api/v1/project-shares/share-created' && method === 'DELETE') {
-    runtime.projectShares = runtime.projectShares.map((item) => item.id === 'share-created' ? { ...item, revokedAt: new Date().toISOString() } : item);
-    return response({ share: runtime.projectShares.find((item) => item.id === 'share-created') });
+  const revokeMatch = pathname.match(/^\/api\/v1\/project-shares\/(share-created|share-existing)$/);
+  if (revokeMatch && method === 'DELETE') {
+    runtime.projectShares = runtime.projectShares.map((item) => item.id === revokeMatch[1] ? { ...item, revokedAt: new Date().toISOString() } : item);
+    return response({ share: runtime.projectShares.find((item) => item.id === revokeMatch[1]) });
   }
   const unlockMatch = pathname.match(/^\/api\/project-share\/([^/]+)\/unlock$/);
   if (unlockMatch && method === 'POST') {
@@ -289,6 +293,32 @@ async function verifyPublicShare(devTools, origin, viewport) {
   }
 }
 
+async function verifyRevokeOnlyStaff(devTools, origin, runtime) {
+  runtime.projectShares = [projectShare('share-existing', 'Existing link')];
+  const start = runtime.requests.length;
+  const client = await openTarget(devTools, { name: 'revoke-only desktop', width: 1440, height: 900, mobile: false });
+  try {
+    await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `
+      sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(revokeOnlyToken)});
+      window.confirm=()=>true;
+    ` });
+    await client.command('Page.navigate', { url: `${origin}/workspace` });
+    await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, 'revoke-only: workspace did not load');
+    await client.evaluate(`document.querySelector('[data-action="open-project"]').click()`);
+    await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, 'revoke-only: Share button was hidden');
+    await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
+    await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`, 'revoke-only: project link row was not listed');
+    assert.equal(await client.evaluate(`document.querySelector('.project-share-form') === null`), true, 'revoke-only: create form was exposed');
+    await client.evaluate(`document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]').click()`);
+    await waitFor(client, `!document.querySelector('#workspace').hasAttribute('aria-busy')`, 'revoke-only: revoke did not settle');
+    assert.ok(runtime.requests.slice(start).some((item) => item.method === 'DELETE' && item.path === '/api/v1/project-shares/share-existing'));
+    assert.deepEqual(client.events.filter((event) => event.method === 'Runtime.exceptionThrown'), []);
+  } finally {
+    await client.command('Page.close').catch(() => {});
+    client.close();
+  }
+}
+
 test('whole-project public sharing works in real desktop and mobile browsers', { timeout: 90_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) {
@@ -311,6 +341,7 @@ test('whole-project public sharing works in real desktop and mobile browsers', {
       await t.test(`${viewport.name} staff controls`, () => verifyStaffShare(devTools, runtime.origin, viewport, runtime));
       await t.test(`${viewport.name} public project`, () => verifyPublicShare(devTools, runtime.origin, viewport));
     }
+    await t.test('revoke-only staff project-link controls', () => verifyRevokeOnlyStaff(devTools, runtime.origin, runtime));
   } finally {
     const exited = new Promise((resolve) => browser.once('exit', resolve));
     browser.kill();
