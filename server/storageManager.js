@@ -62,7 +62,7 @@ class StorageManager {
     if(config.webodmMediaMount)this.roots.webodm=config.webodmMediaMount;
     if(config.terraImportMount)this.roots.terra_import=config.terraImportMount;
   }
-  initialize() { for(const key of ['datasets','models','cache','trash']) fs.mkdirSync(this.roots[key],{recursive:true}); }
+  initialize() { for(const key of ['datasets','models','cache','trash','dataset_import','terra_import']) if(this.roots[key])fs.mkdirSync(this.roots[key],{recursive:true}); }
   resolve(rootKey,relativePath,{mustExist=false}={}) {
     const aliased=String(rootKey||'').match(/^(webodm|terra_import)@[0-9a-f-]{36}$/i),root=this.roots[rootKey]||(aliased&&this.roots[aliased[1]]), rel=safeRelativePath(relativePath); if(!root||!rel)throw Object.assign(new Error('invalid storage location'),{code:'invalid_storage_location'});
     const resolvedRoot=fs.realpathSync.native(root), candidate=path.resolve(resolvedRoot,...rel.split('/'));

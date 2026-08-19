@@ -6,6 +6,7 @@ const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { extractZipStream } = require('./safeZip');
 const { discoverAssets } = require('./catalogImport');
+const { validateImportSelection } = require('./importBrowser');
 const { hashFile, hashTree } = require('./storageManager');
 const { readOdmTaskMetadata } = require('./odmTaskMetadata');
 
@@ -47,6 +48,7 @@ async function copyTree(source, destination, { maxFiles, maxBytes, signal, progr
 
 async function stageSource(operation, { storage, config }, signal, progress) {
   const payload = JSON.parse(operation.payload_json || '{}'), request = payload.request || {};
+  validateImportSelection(storage, request.sourceRelativePath);
   const source = storage.resolve('dataset_import', request.sourceRelativePath, { mustExist: true });
   const stat = fs.lstatSync(source);
   if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Object.assign(new Error('WebODM task source must be a folder or ZIP archive'), { code: 'invalid_import_source' });

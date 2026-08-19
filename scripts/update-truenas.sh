@@ -21,15 +21,13 @@ env_value() {
 }
 
 [[ -r "$viewer_config" ]] || fail "cannot read $viewer_config"
-[[ -d "$storage_path" ]] || fail "$storage_path does not exist; pre-create it and its managed directories as uid/gid 568 (the updater never creates, moves, deletes, or chowns storage)"
+[[ -d "$storage_path" ]] || fail "$storage_path does not exist; pre-create the persistent Storage dataset as uid/gid 568"
 [[ ! -L "$storage_path" ]] || fail "$storage_path must not be a symlink"
 [[ "$(readlink -f -- "$storage_path")" == "$storage_path" ]] || fail "storage resolves outside the exact approved path: $storage_path"
 [[ -f "$storage_path/$storage_sentinel" ]] || fail "storage sentinel is missing: $storage_path/$storage_sentinel"
-for relative_path in "${required_storage_paths[@]}"; do
-  managed_path="$storage_path/$relative_path"
-  [[ -d "$managed_path" ]] || fail "required managed directory is missing: $managed_path"
-done
-for managed_path in "$storage_path" "$storage_path/$storage_sentinel" "${required_storage_paths[@]/#/$storage_path/}"; do
+# The updater never creates, moves, deletes, or chowns storage. The container,
+# running as 568:568, creates only known subdirectories after root validation.
+for managed_path in "$storage_path" "$storage_path/$storage_sentinel"; do
   storage_owner="$(stat -c '%u:%g' -- "$managed_path")"
   [[ "$storage_owner" == 568:568 ]] || fail "$managed_path is owned by $storage_owner; expected 568:568 (the updater will not change ownership)"
 done
@@ -98,6 +96,11 @@ if [[ -n "$api_id" && "${VIEWER_UPDATE_ALLOW_ACTIVE:-0}" != 1 ]]; then
   fi
 fi
 docker compose "${compose_args[@]}" up -d --remove-orphans --wait --wait-timeout 180 || rollback startup
+for relative_path in "${required_storage_paths[@]}"; do
+  managed_path="$storage_path/$relative_path"
+  [[ -d "$managed_path" ]] || rollback "managed directory creation ($relative_path)"
+  [[ "$(stat -c '%u:%g' -- "$managed_path")" == 568:568 ]] || rollback "managed directory ownership ($relative_path)"
+done
 readiness_args=()
 [[ "$mode" == processing ]] && readiness_args+=(--require-processing)
 docker compose "${compose_args[@]}" exec -T viewer-api node scripts/production-readiness.mjs "${readiness_args[@]}" || rollback readiness
