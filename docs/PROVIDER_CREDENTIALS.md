@@ -26,7 +26,7 @@ All mutations require a Viewer admin bearer session with `viewer.providers.write
 
 Provider mutation idempotency fingerprints are keyed with a domain-separated derivative of the installation credential key. This preserves replay/conflict behavior without leaving a database-only verifier for low-entropy credential bodies.
 
-- `POST /api/v1/processing/providers` accepts the provider metadata and optional `credential: { "token": "..." }`. Creation always leaves the provider disabled, even if the request includes `enabled: true`.
+- `POST /api/v1/processing/providers` accepts a label, bare endpoint, and optional `credential: { "token": "..." }`. The operator does not select NodeODM versus ClusterODM. Viewer probes `/info` and `/options` before storing anything, classifies a positively identified direct NodeODM 2.x API or the official ClusterODM 1.x proxy signature, and rejects malformed, unsupported, or ambiguous responses without creating a row. Creation always leaves the provider disabled.
 - `PUT /api/v1/processing/providers/:id/credential` with `{ "token": "..." }` installs or rotates a credential.
 - `DELETE /api/v1/processing/providers/:id/credential` removes it.
 - `PATCH /api/v1/processing/providers/:id` changes metadata and enablement; it never accepts credential material.
@@ -44,7 +44,7 @@ Provider DTOs expose only:
 }
 ```
 
-Tokens are accepted as exact UTF-8 strings between 1 and 4096 bytes. NUL, carriage return, and line feed characters are rejected. The implementation does not trim or normalize accepted token bytes.
+Tokens are accepted as exact UTF-8 strings between 1 and 4096 bytes. NUL, carriage return, and line feed characters are rejected. The implementation does not trim or normalize accepted token bytes. A successful probe with no token records an explicit private no-auth marker; that is distinct from a credential that was later cleared or cannot be decrypted, both of which continue to fail closed.
 
 ## Legacy environment map
 
