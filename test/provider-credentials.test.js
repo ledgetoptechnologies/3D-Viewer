@@ -22,13 +22,13 @@ const { resolveEnabledProviderCredentials } = require('../server/processingReadi
 const KEY = '91'.repeat(32);
 const TOKEN = '  node-token-☃-with-spaces  ';
 
-async function odmServer(t, { beforeInfo } = {}) {
+async function odmServer(t, { beforeInfo, info = { version: '2.2.3', engine: 'odm', engineVersion: '3', taskQueueCount: 0, maxImages: null } } = {}) {
   const seen = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     seen.push({ path: url.pathname, token: url.searchParams.get('token') });
     res.setHeader('content-type', 'application/json');
-    if (url.pathname === '/info') { if (beforeInfo) await beforeInfo();return res.end(JSON.stringify({ version: '2.2.3', engine: 'odm', engineVersion: '3', taskQueueCount: 0 })); }
+    if (url.pathname === '/info') { if (beforeInfo) await beforeInfo();return res.end(JSON.stringify(info)); }
     if (url.pathname === '/options') return res.end(JSON.stringify([{ name: 'pc-ept', type: 'bool', value: true }]));
     res.statusCode = 404;
     return res.end('{}');
@@ -74,18 +74,22 @@ async function request(context, route, { method = 'GET', body, key } = {}) {
   });
 }
 
-test('provider tokens are encrypted, private, restart-safe, probed before enable, rotatable and clearable', async (t) => {
+test('provider tokens are encrypted, private, restart-safe, auto-detected before storage, rotatable and clearable', async (t) => {
   const odm = await odmServer(t);
   const c = await fixture(t, { providerFetch: odm.fetchImpl });
   const oldCidrs = [...config.processingProviderAllowedCidrs];
   config.processingProviderAllowedCidrs.splice(0, config.processingProviderAllowedCidrs.length, ...parseProviderCidrs('192.168.50.0/24'));
   t.after(() => config.processingProviderAllowedCidrs.splice(0, config.processingProviderAllowedCidrs.length, ...oldCidrs));
 
-  const createBody = { type: 'nodeodm', displayName: 'Primary ODM', endpoint: odm.origin, enabled: true, credential: { token: TOKEN } };
+  const createBody = { displayName: 'Primary ODM', endpoint: odm.origin, credential: { token: TOKEN } };
   const created = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-create-0002', body: createBody });
   assert.equal(created.status, 201);
   const payload = await created.json();
   assert.equal(payload.provider.enabled, false);
+  assert.equal(payload.provider.type, 'nodeodm');
+  assert.equal(payload.provider.capabilities.apiVersion, '2.2.3');
+  assert.equal(payload.provider.lastHealth, 'healthy');
+  assert.equal(payload.detection.providerType, 'nodeodm');
   assert.deepEqual(payload.provider.credential, { configured: true, updatedAt: payload.provider.credential.updatedAt });
   assert.equal(typeof payload.provider.credential.updatedAt, 'string');
   const serialized = JSON.stringify(payload);
@@ -114,9 +118,9 @@ test('provider tokens are encrypted, private, restart-safe, probed before enable
   assert.equal(conflict.status, 409);
   assert.equal((await conflict.json()).code, 'idempotency_conflict');
 
-  const enableBeforeProbe = await request(c, `/api/v1/processing/providers/${payload.provider.id}`, { method: 'PATCH', key: 'provider-enable-0001', body: { enabled: true } });
-  assert.equal(enableBeforeProbe.status, 409);
-  assert.equal((await enableBeforeProbe.json()).code, 'provider_probe_required');
+  const suppliedType = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-create-type', body: { ...createBody, type: 'clusterodm' } });
+  assert.equal(suppliedType.status, 400);
+  assert.equal((await suppliedType.json()).code, 'invalid_request');
   const probe = await request(c, `/api/v1/processing/providers/${payload.provider.id}/capabilities/probe`, { method: 'POST', key: 'provider-probe-0001', body: {} });
   assert.equal(probe.status, 200);
   assert.ok(odm.seen.length >= 2);
@@ -150,6 +154,55 @@ test('provider tokens are encrypted, private, restart-safe, probed before enable
   assert.equal(cleared.status, 200);
   assert.deepEqual((await cleared.json()).provider.credential, { configured: false, updatedAt: null });
   assert.throws(() => c.credentials.resolve(payload.provider.id), { code: 'provider_credential_unavailable' });
+  const enableAfterClear = await request(c, `/api/v1/processing/providers/${payload.provider.id}`, { method: 'PATCH', key: 'provider-enable-cleared', body: { enabled: true } });
+  assert.equal(enableAfterClear.status, 409);
+  assert.equal((await enableAfterClear.json()).code, 'provider_credential_required');
+});
+
+test('a successfully probed unauthenticated node has an explicit no-auth mode and can be enabled', async (t) => {
+  const odm = await odmServer(t);
+  const c = await fixture(t, { providerFetch: odm.fetchImpl });
+  const oldOrigins = [...config.processingProviderOrigins];
+  config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, odm.origin);
+  t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
+
+  const created = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-no-auth-create', body: { displayName: 'Open ODM', endpoint: odm.origin } });
+  assert.equal(created.status, 201);
+  const provider = (await created.json()).provider;
+  assert.deepEqual(provider.credential, { configured:false,updatedAt:null,mode:'none' });
+  assert.equal(c.credentials.resolve(provider.id), '');
+  assert.ok(odm.seen.every((entry) => entry.token === null));
+  const enabled = await request(c, `/api/v1/processing/providers/${provider.id}`, { method: 'PATCH', key: 'provider-no-auth-enable', body: { enabled: true } });
+  assert.equal(enabled.status, 200);
+  const enabledProvider = (await enabled.json()).provider;
+  assert.equal(enabledProvider.enabled, true);
+  assert.equal(adapterFor(enabledProvider, { processingProviderTransferTimeoutMs:30_000 }, c.credentials).token, '');
+});
+
+test('provider creation detects ClusterODM and stores nothing for an ambiguous compatible endpoint', async (t) => {
+  const cluster = await odmServer(t, { info: { version: '1.5.3', engine: 'odm', engineVersion: '3.5', taskQueueCount: 0, maxImages: null, totalMemory: 99999999999, availableMemory: 99999999999, cpuCores: 99999999999, maxParallelTasks: 99999999999 } });
+  const ambiguous = await odmServer(t, { info: { version: '1.5.3', engine: 'odm', engineVersion: '3.5', taskQueueCount: 0, maxImages: null } });
+  const clusterContext = await fixture(t, { providerFetch: cluster.fetchImpl });
+  const ambiguousContext = await fixture(t, { providerFetch: ambiguous.fetchImpl });
+  const oldOrigins = [...config.processingProviderOrigins];
+  config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, cluster.origin, ambiguous.origin);
+  t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
+
+  const detected = await request(clusterContext, '/api/v1/processing/providers', { method: 'POST', key: 'provider-cluster-detect', body: { displayName: 'Cluster', endpoint: cluster.origin, credential: { token: 'cluster-secret-token' } } });
+  assert.equal(detected.status, 201);
+  const detectedBody = await detected.json();
+  assert.equal(detectedBody.provider.type, 'clusterodm');
+  assert.equal(detectedBody.provider.admissionLimit, 4);
+  assert.equal(detectedBody.provider.capabilities.providerType, 'clusterodm');
+  assert.equal(detectedBody.detection.apiVersion, '1.5.3');
+  assert.doesNotMatch(JSON.stringify(detectedBody), /cluster-secret-token/);
+
+  const rejected = await request(ambiguousContext, '/api/v1/processing/providers', { method: 'POST', key: 'provider-ambiguous-detect', body: { displayName: 'Ambiguous', endpoint: ambiguous.origin, credential: { token: 'ambiguous-secret-token' } } });
+  assert.equal(rejected.status, 422);
+  const rejectedBody = await rejected.json();
+  assert.equal(rejectedBody.code, 'provider_probe_ambiguous');
+  assert.doesNotMatch(JSON.stringify(rejectedBody), /ambiguous-secret-token/);
+  assert.equal(ambiguousContext.processing.listProviders().length, 0);
 });
 
 test('credential mutation blocks every nonterminal attempt and tampering fails closed', async (t) => {
@@ -175,12 +228,13 @@ test('a concurrent credential rotation cannot certify a stale probe', async (t) 
   const blocked = new Promise((resolve) => { releaseInfo = resolve; });
   let infoStarted;
   const started = new Promise((resolve) => { infoStarted = resolve; });
-  const odm = await odmServer(t, { beforeInfo: async () => { infoStarted();await blocked; } });
+  let infoCalls = 0;
+  const odm = await odmServer(t, { beforeInfo: async () => { infoCalls += 1;if (infoCalls === 2) { infoStarted();await blocked; } } });
   const c = await fixture(t, { providerFetch: odm.fetchImpl });
   const oldOrigins = [...config.processingProviderOrigins];
   config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, odm.origin);
   t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
-  const created = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-race-create', body: { type: 'nodeodm', displayName: 'Race ODM', endpoint: odm.origin, credential: { token: 'old-token' } } });
+  const created = await request(c, '/api/v1/processing/providers', { method: 'POST', key: 'provider-race-create', body: { displayName: 'Race ODM', endpoint: odm.origin, credential: { token: 'old-token' } } });
   const provider = (await created.json()).provider;
   const probing = request(c, `/api/v1/processing/providers/${provider.id}/capabilities/probe`, { method: 'POST', key: 'provider-race-probe', body: {} });
   await infoStarted;

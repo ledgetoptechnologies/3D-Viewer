@@ -417,8 +417,9 @@ empty.
   worker. An explicit false override leaves the worker healthy but idle. Processing
   requires the writable managed storage
   volume, disk reserve, and an explicitly allowlisted NodeODM or ClusterODM
-  provider. NodeODM 2.2.3 and ClusterODM 1.5.5 are tested baselines; other
-  compatible versions are capability-probed and warned, not silently trusted.
+  provider. NodeODM API 2.2.3 is the direct-node baseline. ClusterODM is
+  accepted only when its 1.x API response includes the official proxy resource
+  sentinels; a merely API-compatible 1.x response is ambiguous and rejected.
 - **Production derivatives come from ODM's native stages.** Provider
   capabilities must include `pc-ept`, `3d-tiles`, and `gltf`; the Viewer
   requests those outputs and verifies their manifests before review/publish.
@@ -662,7 +663,7 @@ Open a project to manage its datasets and tasks, start or restart processing, im
 
 Expanded tasks show only authoritative API metrics: processing status/duration, source-image count, reconstructed points, georeferencing CRS, output availability, and task disk usage. Average GSD or surveyed area display **Unavailable** until ingestion supplies those values. Output actions appear only for reported derivative kinds and usable URLs; reviewable map/3D derivatives open through an isolated review session. While an attempt is active, the workspace refreshes its sanitized API log tail every five seconds; the UI keeps the latest 100 entries and offers bounded log-tail download and fullscreen views.
 
-Provider endpoints, hidden credential state, concurrency, probes, and enable/disable controls live in the **Providers & nodes** master-detail dialog. Storage, trash recovery, worker readiness, queue lifecycle, and provider health live under **Diagnostics**.
+Provider endpoints, hidden credential state, concurrency, probes, and enable/disable controls live in the **Providers & nodes** master-detail dialog. Adding a node asks only for a label, endpoint, and an API token when the endpoint requires one. Viewer probes `/info` and `/options` before storing the provider, classifies direct NodeODM 2.x versus the ClusterODM 1.x proxy signature, and rejects unsupported or ambiguous responses. A successful no-token probe is persisted as an explicit no-auth mode, distinct from a missing or cleared credential. The detail pane shows the detected provider type, API and processing-engine versions, queue/slot values, and the bounded provider-options catalog. Storage, trash recovery, worker readiness, queue lifecycle, and provider health live under **Diagnostics**.
 
 ## Verification
 

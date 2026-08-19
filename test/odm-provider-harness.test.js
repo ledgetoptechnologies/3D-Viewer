@@ -34,7 +34,7 @@ async function fakeProvider({ loseFirstInitResponse=false, rejectRemove=false, o
   let lost = false;
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://provider.test');
-    if (request.method === 'GET' && url.pathname === '/info') return respondJson(response, 200, { version:'2.2.3',engine:'odm',engineVersion:'3.5.0' });
+    if (request.method === 'GET' && url.pathname === '/info') return respondJson(response, 200, { version:'2.2.3',engine:'odm',engineVersion:'3.5.0',taskQueueCount:0,maxImages:null });
     if (request.method === 'GET' && url.pathname === '/options') return respondJson(response, 200, [
       { name:'pc-ept',type:'bool',value:true }, { name:'gltf',type:'bool',value:true }, { name:'3d-tiles',type:'bool',value:true },
     ]);

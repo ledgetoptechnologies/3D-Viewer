@@ -51,6 +51,16 @@ test('task details render authoritative metrics and bounded sanitized API log ta
 test('providers are master-detail and diagnostics owns storage health and trash',()=>{
   assert.match(source,/provider-master-detail/);
   assert.match(source,/API token/);
+  assert.match(source,/Detect & add node/);
+  assert.match(source,/API token \(if required\)/);
+  assert.match(source,/Not required/);
+  assert.match(source,/Detected engine/);
+  assert.match(source,/API version/);
+  assert.match(source,/Processing engine/);
+  assert.match(source,/Queue/);
+  assert.match(source,/provider-option-list/);
+  assert.doesNotMatch(source,/select\('Type','type'/);
+  assert.doesNotMatch(source,/name="admissionLimit"/);
   assert.match(source,/Secrets are write-only/);
   assert.match(source,/function diagnostics/);
   assert.match(source,/Storage trash & recovery/);

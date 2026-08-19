@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { NO_AUTH_MARKER } = require('./providerAuth');
 
 const ALGORITHM = 'aes-256-gcm';
 const VERSION = 1;
@@ -119,6 +120,7 @@ class ProviderCredentials {
       credential: {
         configured: this.configured(provider.id),
         updatedAt: record?.credentialUpdatedAt || null,
+        ...(record?.authEnvKey === NO_AUTH_MARKER ? { mode:'none' } : {}),
       },
     };
   }
@@ -126,6 +128,7 @@ class ProviderCredentials {
   resolveWithRevision(providerId) {
     const record = this.processing.getProviderCredential(providerId);
     if (!record) throw credentialError();
+    if (record.authEnvKey === NO_AUTH_MARKER) return { token:'', revision:record.credentialRevision };
     if (record.credentialCiphertext) return { token: this.open(providerId, record), revision: record.credentialRevision };
     if (!record.credentialCleared && validToken(this.legacyTokens[providerId])) return { token: this.legacyTokens[providerId], revision: record.credentialRevision };
     throw credentialError();
@@ -147,4 +150,4 @@ class ProviderCredentials {
   }
 }
 
-module.exports = { ProviderCredentials, credentialError, decodeKey, validToken };
+module.exports = { ProviderCredentials, credentialError, decodeKey, validToken, NO_AUTH_MARKER };

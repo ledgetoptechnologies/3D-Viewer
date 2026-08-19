@@ -14,8 +14,32 @@ function optionArray(options) {
 }
 function typedDefault(type,value){if(type==='bool'&&typeof value==='string')return value.toLowerCase()==='true';if(type==='int'){const n=Number(value);return Number.isInteger(n)?n:value;}if(type==='float'){const n=Number(value);return Number.isFinite(n)?n:value;}return value;}
 
+function providerCapabilityError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function detectProviderType(info) {
+  const validInfo = info && typeof info === 'object' && !Array.isArray(info)
+    && typeof info.version === 'string' && /^\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.test(info.version)
+    && typeof info.engine === 'string' && info.engine.length > 0 && info.engine.length <= 120
+    && typeof info.engineVersion === 'string' && info.engineVersion.length > 0 && info.engineVersion.length <= 120
+    && Number.isSafeInteger(info.taskQueueCount) && info.taskQueueCount >= 0
+    && Object.hasOwn(info, 'maxImages') && (info.maxImages === null || (Number.isSafeInteger(info.maxImages) && info.maxImages >= 1));
+  if (!validInfo) throw providerCapabilityError('provider_probe_unsupported', 'Endpoint does not expose the supported NodeODM capability schema.');
+
+  // ClusterODM's official proxy deliberately reports these three sentinel
+  // resource values from /info. Combined with its 1.x API line this is
+  // positive proxy evidence, not a guess based only on a version number.
+  const clusterSentinel = info.totalMemory === 99999999999
+    && info.availableMemory === 99999999999
+    && info.cpuCores === 99999999999;
+  if (/^1\./.test(info.version) && clusterSentinel) return 'clusterodm';
+  if (/^2\./.test(info.version) && !clusterSentinel) return 'nodeodm';
+  throw providerCapabilityError('provider_probe_ambiguous', 'The endpoint is NodeODM-compatible, but its engine type cannot be identified safely.');
+}
+
 class NodeOdmProvider {
-  constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = 'nodeodm' }) {
+  constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = null }) {
     const url = new URL(endpoint);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid provider endpoint');
     this.endpoint = url.toString().replace(/\/$/, '');
@@ -49,18 +73,18 @@ class NodeOdmProvider {
     const [infoResponse, optionsResponse] = await Promise.all([this.request('/info'), this.request('/options')]);
     if (!String(infoResponse.headers.get('content-type')||'').includes('json') || !String(optionsResponse.headers.get('content-type')||'').includes('json')) throw new Error('provider returned an unexpected content type');
     const info = JSON.parse(await boundedText(infoResponse,1024*1024)); const options = JSON.parse(await boundedText(optionsResponse,4*1024*1024));
-    if (!info || typeof info.version !== 'string' || !Array.isArray(options)) throw new Error('provider returned an incompatible capability response');
+    if (!Array.isArray(options)) throw providerCapabilityError('provider_probe_unsupported', 'Endpoint returned an incompatible processing-options response.');
+    const detectedType = detectProviderType(info);
+    if (this.providerType && detectedType !== this.providerType) throw providerCapabilityError('provider_type_mismatch', 'The detected provider engine no longer matches the configured engine type.');
     const normalizedOptions = options.slice(0,1000).map((item) => {const type=String(item.type||'string');return { name:String(item.name).slice(0,120),type,domain:item.domain??null,help:String(item.help||'').slice(0,4000),value:typedDefault(type,item.value),rawDefault:item.value };});
     const capabilities = {
       apiVersion: info.version, engine: info.engine, engineVersion: info.engineVersion,
       maxImages: info.maxImages ?? null, maxParallelTasks: info.maxParallelTasks ?? null,
       taskQueueCount: Number(info.taskQueueCount || 0), totalMemory: info.totalMemory ?? null,
       availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
-      providerType: this.providerType, options: normalizedOptions,
-      testedBaseline: this.providerType === 'clusterodm' ? '1.5.5' : '2.2.3',
-      compatibilityWarning: this.providerType === 'nodeodm' && !String(info.version).startsWith('2.')
-        ? `NodeODM API ${info.version} is outside the tested 2.x range`
-        : (this.providerType === 'clusterodm' && !String(info.version).startsWith('1.') ? `ClusterODM API ${info.version} is outside the tested 1.x range` : null),
+      providerType: detectedType, detectionMethod: 'capability-signature', options: normalizedOptions,
+      testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
+      compatibilityWarning: null,
     };
     const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
@@ -110,4 +134,4 @@ class NodeOdmProvider {
   async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
 }
 
-module.exports = { NodeOdmProvider, STATUS, boundedJson, boundedText, optionArray, typedDefault };
+module.exports = { NodeOdmProvider, STATUS, boundedJson, boundedText, optionArray, typedDefault, detectProviderType };
