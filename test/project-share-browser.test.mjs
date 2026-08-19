@@ -160,6 +160,7 @@ class CdpClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
+      clearTimeout(pending.timer);
       if (message.error) pending.reject(new Error(`${pending.method}: ${message.error.message}`));
       else pending.resolve(message.result || {});
     });
@@ -172,10 +173,14 @@ class CdpClient {
     });
     return new CdpClient(socket);
   }
-  command(method, params = {}) {
+  command(method, params = {}, timeoutMs = 15_000) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        reject(new Error(`${method}: no DevTools response within ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, method, timer });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
   }
