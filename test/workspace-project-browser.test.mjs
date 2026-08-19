@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const token = 'browser_workspace_token_1234567890abcdef';
@@ -451,20 +452,22 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   }
 }
 
-test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 60_000 }, async t => {
+test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 180_000 }, async t => {
   const executable = browserPath();
   if (!executable) {
     t.skip('Set CHROME_PATH or EDGE_PATH to a Chromium-family browser to run the real browser verification.');
     return;
   }
 
-  const { server, runtime, origin } = await startFixtureServer();
-  const profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
-  const browser = spawn(executable, [
-    '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
-    '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
-  ], { windowsHide: true, stdio: 'ignore' });
+  const releaseBrowserLock = await acquireBrowserHarnessLock({ root });
+  let server, runtime, origin, profile, browser;
   try {
+    ({ server, runtime, origin } = await startFixtureServer());
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
+    ], { windowsHide: true, stdio: 'ignore' });
     const devTools = await waitForDevTools(profile);
     for (const viewport of [
       { name: 'desktop', width: 1440, height: 900, mobile: false },
@@ -472,10 +475,16 @@ test('project-first workspace is interactive and overflow-free in real desktop a
       { name: '320px mobile', width: 320, height: 720, mobile: true },
     ]) await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime));
   } finally {
-    const exited = new Promise(resolve => browser.once('exit', resolve));
-    browser.kill();
-    await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
-    await new Promise(resolve => server.close(resolve));
-    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    try {
+      if (browser) {
+        const exited = new Promise(resolve => browser.once('exit', resolve));
+        browser.kill();
+        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+      }
+    } finally {
+      releaseBrowserLock();
+    }
+    if (server) await new Promise(resolve => server.close(resolve));
+    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

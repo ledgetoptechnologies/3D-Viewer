@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
+import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const adminToken = 'project_share_browser_admin_token_1234567890';
@@ -319,19 +320,21 @@ async function verifyRevokeOnlyStaff(devTools, origin, runtime) {
   }
 }
 
-test('whole-project public sharing works in real desktop and mobile browsers', { timeout: 90_000 }, async (t) => {
+test('whole-project public sharing works in real desktop and mobile browsers', { timeout: 180_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) {
     t.skip('Set CHROME_PATH or EDGE_PATH to a Chromium-family browser to run the real browser verification.');
     return;
   }
-  const { server, vite, runtime } = await startFixtureServer();
-  const profile = mkdtempSync(path.join(tmpdir(), 'ltds-project-share-browser-'));
-  const browser = spawn(executable, [
-    '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
-    '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
-  ], { windowsHide: true, stdio: 'ignore' });
+  const releaseBrowserLock = await acquireBrowserHarnessLock({ root });
+  let server, vite, runtime, profile, browser;
   try {
+    ({ server, vite, runtime } = await startFixtureServer());
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-project-share-browser-'));
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
+    ], { windowsHide: true, stdio: 'ignore' });
     const devTools = await waitForDevTools(profile);
     for (const viewport of [
       { name: 'desktop', width: 1440, height: 900, mobile: false },
@@ -343,11 +346,17 @@ test('whole-project public sharing works in real desktop and mobile browsers', {
     }
     await t.test('revoke-only staff project-link controls', () => verifyRevokeOnlyStaff(devTools, runtime.origin, runtime));
   } finally {
-    const exited = new Promise((resolve) => browser.once('exit', resolve));
-    browser.kill();
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
-    await new Promise((resolve) => server.close(resolve));
-    await vite.close();
-    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    try {
+      if (browser) {
+        const exited = new Promise((resolve) => browser.once('exit', resolve));
+        browser.kill();
+        await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+      }
+    } finally {
+      releaseBrowserLock();
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
