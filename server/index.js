@@ -9,6 +9,7 @@ const apiRouter = require('./api');
 const assetsRouter = require('./assets');
 const adminAuth = require('./adminAuth');
 const shareApi = require('./shareApi');
+const { createProjectShareApi } = require('./projectShareApi');
 const { openDatabase } = require('./database');
 const { ViewerRepository } = require('./repository');
 const { migrateLegacyJson } = require('./legacyMigration');
@@ -65,6 +66,7 @@ try {
   }
   shareApi.setRepository(repository);
   assetsRouter.setRepository(repository);
+  if (processingRepository) assetsRouter.setProcessingRepository(processingRepository);
 } catch (error) {
   console.error(`Cannot initialize viewer database: ${error.message}`);
   process.exit(1);
@@ -151,6 +153,7 @@ app.use((req, res, next) => {
 
 app.use(adminAuth.router);
 app.use(shareApi);
+if (processingRepository) app.use(createProjectShareApi({ repository, processing: processingRepository }));
 app.use(createApiV1(repository));
 if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
 app.use(apiRouter);
@@ -186,6 +189,7 @@ app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/assets/') || req.path.startsWith('/session-assets/')) return next();
   const isShareRoute = req.path.startsWith('/view/')
     || req.path.startsWith('/embed/')
+    || req.path.startsWith('/project/')
     || req.path === '/session'
     || req.path.startsWith('/session/');
   if (!isShareRoute && !config.emergencyAdminEnabled) {

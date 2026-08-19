@@ -225,6 +225,22 @@ Catalog and accounting routes used by Ops are:
 All list routes use capped keyset pagination, and every mutation requires an
 admin bearer permission plus `Idempotency-Key`.
 
+The staff workspace applies those same permission and state checks before it
+renders project, task, dataset, output, trash, or mutation-retry controls.
+Archived projects and tasks remain inspectable but are read-only. Diagnostics
+paginates all recoverable trash and all failed storage mutations rather than
+showing only the first page.
+
+Whole-project public links use a separate `public_project_shares` record and
+`/project/:token` flow; they do not reuse the single-model `public_shares`,
+authenticated client grants, or staff review sessions. Each catalog, selected
+task, and asset request revalidates the active project and the task's current
+published model/output version. A publication replacement invalidates the old
+asset capability immediately. Only published public derivatives (GLB, tiles,
+EPT, ortho, DSM, and DTM) can cross this boundary; reports, raw inputs, logs,
+datasets, provider paths, and unpublished assets cannot. Project-link expiry,
+revocation, and project archive are also checked on every asset request.
+
 ## Backups and recovery
 
 Back up `Config/viewer.env` through a secret-capable backup path together with

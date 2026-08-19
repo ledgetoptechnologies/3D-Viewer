@@ -78,6 +78,21 @@ function newShareToken() {
   return { token, tokenHash: hashToken(token) };
 }
 
+// Idempotent administrative creation must be able to return the same
+// one-time share identifier after response loss without storing that raw
+// identifier in a receipt. A keyed, domain-separated PRF preserves the same
+// 256-bit unpredictability as a random token while making the exact receipt
+// inputs sufficient to reconstruct it.
+function idempotentShareToken({ scope, sessionId, idempotencyKey, requestHash }) {
+  const parts = [scope, sessionId, idempotencyKey, requestHash];
+  if (parts.some((value) => typeof value !== 'string' || !value)) throw new Error('invalid idempotent share token input');
+  const framed = parts.map((value) => `${Buffer.byteLength(value)}:${value}`).join('|');
+  return crypto.createHmac('sha256', config.sessionSecret)
+    .update('ltds-idempotent-public-share-v1\0')
+    .update(framed)
+    .digest('base64url');
+}
+
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -134,6 +149,7 @@ module.exports = {
   verifyPassword,
   constantTimeEqual,
   newShareToken,
+  idempotentShareToken,
   hashToken,
   rateLimited,
   cookieAttrs,

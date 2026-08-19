@@ -258,9 +258,10 @@
     body.embed-mode #topbar, body.embed-mode #sidebar, body.embed-mode #sidebar-toggle,
     body.embed-mode #statusbar { display: none !important; }
     body.view-mode #project-switcher, body.view-mode #admin-controls,
-    body.embed-mode #project-switcher, body.embed-mode #admin-controls { display: none !important; }
+    body.embed-mode #project-switcher, body.embed-mode #admin-controls,
+    body.project-mode #admin-controls { display: none !important; }
 
-    /* Share password prompt (view/embed modes) */
+    /* Share password prompt (view/embed/project modes) */
     #share-password-overlay {
       position: fixed; inset: 0; z-index: 500; display: none;
       align-items: center; justify-content: center;

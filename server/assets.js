@@ -19,9 +19,13 @@ let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const router = express.Router();
 let canonicalRepository = null;
+let processingRepository = null;
 
 function setRepository(repository) {
   canonicalRepository = repository;
+}
+function setProcessingRepository(repository) {
+  processingRepository = repository;
 }
 function setSourceAuthorizationValidator(validator){sourceAuthorizationValidator=validator;}
 
@@ -118,12 +122,15 @@ function resolveProject(projectId, rootKey) {
 // A scoped Viewer capability is authorization for one published model version,
 // not for an entire storage mount. Metadata files for EPT and 3D Tiles are
 // roots for their relative child requests; every other asset is a single file.
-function publishedAssetMatch(model, rootKey, relPath, { review = false } = {}) {
+function publishedAssetMatch(model, rootKey, relPath, { review = false, publicOnly = false } = {}) {
   if (!model?.activeVersion || model.status !== 'ready') return false;
   const requested = String(relPath || '').replaceAll('\\', '/');
   const hierarchical = new Set(['ept', 'tiles']);
   return model.activeVersion.assets.find((asset) => {
-    if ((review ? !publicDerivativeKind(asset.kind) : !asset.published) || asset.rootKey !== rootKey) return false;
+    const disallowed = publicOnly
+      ? (!asset.published || !publicDerivativeKind(asset.kind))
+      : (review ? !publicDerivativeKind(asset.kind) : !asset.published);
+    if (disallowed || asset.rootKey !== rootKey) return false;
     const published = String(asset.relativePath || '').replaceAll('\\', '/');
     if (requested === published) return true;
     if (!hierarchical.has(asset.kind)) return false;
@@ -171,6 +178,18 @@ async function pathTokenAuthorization(req, projectId) {
     const share = shareStore.getById(payload.shareId);
     return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false } : false;
   }
+  if (payload.kind === 'project-share-asset' && processingRepository) {
+    const share = canonicalRepository.getProjectShare(payload.shareId);
+    const selected = share && processingRepository.getActivePublishedProjectTask(share.projectId, payload.taskId);
+    const model = selected ? canonicalRepository.getModel(selected.modelId) : null;
+    const allowed = canonicalRepository.projectShareLive(share)
+      && share.projectId === payload.projectId
+      && payload.modelId === requestedModelId
+      && selected?.modelId === requestedModelId
+      && selected.modelVersionId === payload.modelVersionId
+      && model?.activeVersion?.id === payload.modelVersionId;
+    return allowed ? { model, review: false, publicOnly: true } : false;
+  }
   return false;
 }
 
@@ -194,7 +213,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -203,7 +222,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false } = 
   if (!rootPath) return res.status(404).json({ error: 'unknown asset root' });
 
   const rel = req.params[0] || '';
-  const publishedAsset = project.activeVersion ? publishedAssetMatch(project, req.params.root, rel, { review }) : null;
+  const publishedAsset = project.activeVersion ? publishedAssetMatch(project, req.params.root, rel, { review, publicOnly }) : null;
   if (project.activeVersion && !publishedAsset) {
     return res.status(404).json({ error: 'asset not found' });
   }
@@ -248,11 +267,12 @@ router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
   if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res, authorization.model, { review: authorization.review }).catch(next);
+  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly }).catch(next);
 });
 
 module.exports = router;
 module.exports.setRepository = setRepository;
+module.exports.setProcessingRepository = setProcessingRepository;
 module.exports.setSourceAuthorizationValidator = setSourceAuthorizationValidator;
 module.exports.safeResolve = safeResolve;
 module.exports.safeExistingFile = safeExistingFile;

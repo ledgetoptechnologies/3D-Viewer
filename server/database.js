@@ -1273,6 +1273,37 @@ const MIGRATIONS = [
       BEGIN SELECT RAISE(ABORT,'gcp_snapshot_immutable'); END;
     `,
   },
+  {
+    version: 20,
+    name: 'public_project_shares',
+    sql: `
+      CREATE TABLE public_project_shares (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        public_id_hash TEXT NOT NULL UNIQUE CHECK(length(public_id_hash)=64),
+        password_hash TEXT,
+        permissions_json TEXT NOT NULL,
+        label TEXT,
+        version_policy TEXT NOT NULL DEFAULT 'active'
+          CHECK(version_policy='active'),
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT,
+        display_units TEXT NOT NULL DEFAULT 'imperial'
+          CHECK(display_units IN ('imperial','metric')),
+        revoked_at TEXT,
+        revoked_by TEXT,
+        revoke_reason TEXT,
+        access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0),
+        last_accessed_at TEXT
+      );
+      CREATE INDEX public_project_shares_project_idx
+        ON public_project_shares(project_id,created_at DESC);
+      CREATE INDEX public_project_shares_live_idx
+        ON public_project_shares(project_id,revoked_at,expires_at);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

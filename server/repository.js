@@ -477,6 +477,85 @@ class ViewerRepository {
     ).run(timestamp, timestamp, id);
   }
 
+  projectShare(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      publicIdHash: row.public_id_hash,
+      hasPassword: Boolean(row.password_hash),
+      passwordHash: row.password_hash,
+      permissions: parseJson(row.permissions_json, {}),
+      label: row.label,
+      versionPolicy: row.version_policy || 'active',
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      expiresAt: row.expires_at,
+      displayUnits: row.display_units,
+      revokedAt: row.revoked_at,
+      revokedBy: row.revoked_by,
+      revokeReason: row.revoke_reason,
+      accessCount: Number(row.access_count || 0),
+      lastAccessedAt: row.last_accessed_at,
+    };
+  }
+
+  createProjectShare(input) {
+    const id = input.id || crypto.randomUUID();
+    const timestamp = now();
+    this.database.prepare(`INSERT INTO public_project_shares(
+      id,project_id,public_id_hash,password_hash,permissions_json,label,version_policy,created_by,
+      created_at,updated_at,expires_at,display_units
+    ) VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)`).run(
+      id,
+      input.projectId,
+      input.publicIdHash,
+      input.passwordHash || null,
+      JSON.stringify(input.permissions || {}),
+      input.label || null,
+      input.createdBy || null,
+      timestamp,
+      timestamp,
+      input.expiresAt || null,
+      input.displayUnits || 'imperial',
+    );
+    return this.getProjectShare(id);
+  }
+
+  getProjectShare(id) {
+    return this.projectShare(this.database.prepare('SELECT * FROM public_project_shares WHERE id=?').get(id));
+  }
+
+  getProjectShareByHash(hash) {
+    return this.projectShare(this.database.prepare('SELECT * FROM public_project_shares WHERE public_id_hash=?').get(hash));
+  }
+
+  listProjectShares(projectId) {
+    return this.database.prepare('SELECT * FROM public_project_shares WHERE project_id=? ORDER BY created_at DESC')
+      .all(projectId).map((row) => this.projectShare(row));
+  }
+
+  projectShareLive(share, at = Date.now()) {
+    if (!share || share.revokedAt) return false;
+    return !share.expiresAt || Date.parse(share.expiresAt) > at;
+  }
+
+  revokeProjectShare(id, { actorId = null, reason = 'revoked' } = {}) {
+    const timestamp = now();
+    const result = this.database.prepare(`UPDATE public_project_shares SET
+      revoked_at=COALESCE(revoked_at,?),revoked_by=COALESCE(revoked_by,?),revoke_reason=COALESCE(revoke_reason,?),updated_at=?
+      WHERE id=?`).run(timestamp, actorId, String(reason).slice(0, 240), timestamp, id);
+    return result.changes === 1 ? this.getProjectShare(id) : null;
+  }
+
+  recordProjectShareAccess(id) {
+    const timestamp = now();
+    this.database.prepare(`UPDATE public_project_shares SET
+      access_count=access_count+1,last_accessed_at=?,updated_at=? WHERE id=?`
+    ).run(timestamp, timestamp, id);
+  }
+
   createSessionGrant({ modelId, modelVersionId = null, reviewAttemptId = null, sessionMode = 'published', sourceAuthorization: authorization = null, subject, audience, permissions, displayUnits = 'imperial', expiresAt }) {
     this.pruneAuthState();
     const id = crypto.randomUUID();

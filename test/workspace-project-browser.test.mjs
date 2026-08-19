@@ -17,6 +17,7 @@ const fixtures = {
   ],
   datasets: [
     { id: 'dataset-johnson', projectId: 'project-johnson', displayName: 'Johnson imagery', status: 'finalized', fileCount: 48, byteSize: 7340032 },
+    { id: 'dataset-quarry', projectId: 'project-quarry', displayName: 'Quarry imagery', status: 'finalized', fileCount: 12, byteSize: 1048576 },
   ],
   tasks: [
     {
@@ -27,6 +28,11 @@ const fixtures = {
         id: 'attempt-johnson', providerId: 'provider-nodeodm', status: 'running',
         createdAt: '2026-08-19T12:00:00.000Z', startedAt: '2026-08-19T12:01:00.000Z', updatedAt: '2026-08-19T12:05:00.000Z',
       },
+    },
+    {
+      id: 'task-quarry', projectId: 'project-quarry', datasetId: 'dataset-quarry', displayName: 'Quarry reconstruction',
+      status: 'failed', createdAt: '2026-08-18T12:00:00.000Z', metrics: { sourceImageCount: 12 },
+      latestAttempt: { id: 'attempt-quarry', providerId: 'provider-nodeodm', status: 'failed', createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:05:00.000Z' },
     },
   ],
   providers: [
@@ -46,6 +52,9 @@ const fixtures = {
     downloadUrl: '/api/v1/processing/outputs/output-johnson/assets/glb',
     reportUrl: '/api/v1/processing/outputs/output-johnson/assets/report',
     viewSessionUrl: '/api/v1/processing/outputs/output-johnson/view-sessions',
+  }, {
+    id: 'output-johnson-archived', taskId: 'task-johnson', modelId: 'model-johnson-old', displayName: 'Johnson archived output',
+    status: 'archived', activePublished: false, byteSize: 2048, assetCount: 1, assetKinds: [],
   }],
 };
 
@@ -74,13 +83,14 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       controllerOrigin: 'https://ops.example.test',
       session: {
         id: 'browser-session', subject: 'ops:browser-audit', displayUnits: 'imperial',
+        permissions: ['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage'],
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       },
     });
   }
-  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects, nextCursor: null });
+  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.map(item=>runtime.archivedProjects.has(item.id)?{...item,status:'archived'}:item), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
-  if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks, nextCursor: null });
+  if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.map(item=>runtime.archivedTasks.has(item.id)?{...item,status:'archived'}:item), nextCursor: null });
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
@@ -93,7 +103,18 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-published-grant' }, 201);
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
-  if (pathname === '/api/v1/storage') return json({ storage: {}, trash: { items: [{ id: 'trash-johnson', entityId: 'dataset-trash', entityType: 'dataset', displayName: 'Discarded draft', byteSize: 0 }] } });
+  if (pathname === '/api/v1/processing/outputs/output-johnson/archive' && method === 'POST') return json({ output: fixtures.outputs[0] });
+  if (pathname === '/api/v1/processing/outputs/output-johnson-archived' && method === 'DELETE') return json({ output: fixtures.outputs[1], trash: { id: 'trash-output' } });
+  if (pathname === '/api/v1/projects/project-quarry/archive' && method === 'POST') { runtime.archivedProjects.add('project-quarry'); return json({ project: { ...fixtures.projects[1], status: 'archived' } }); }
+  if (pathname === '/api/v1/tasks/task-quarry/archive' && method === 'POST') { runtime.archivedTasks.add('task-quarry'); return json({ task: { ...fixtures.tasks[1], status: 'archived' } }); }
+  if (pathname === '/api/v1/datasets/dataset-johnson/archive' && method === 'POST') return json({ dataset: fixtures.datasets[0] });
+  if (pathname === '/api/v1/datasets/dataset-johnson' && method === 'DELETE') return json({ trash: { id: 'trash-dataset' } });
+  if (pathname === '/api/v1/storage') return url.searchParams.get('cursor')
+    ? json({ storage: {}, trash: { items: [{ id: 'trash-second-page', entityId: 'output-trash', entityType: 'output', displayName: 'Old output', byteSize: 1024 }], nextCursor: null } })
+    : json({ storage: {}, trash: { items: [{ id: 'trash-johnson', entityId: 'dataset-trash', entityType: 'dataset', displayName: 'Discarded draft', byteSize: 0 }], nextCursor: 'trash-page-two' } });
+  if (pathname === '/api/v1/storage/mutations') return json({ mutations: [{ id: 'mutation-failed', type: 'restore', entityType: 'output', entityId: 'output-conflict', status: 'failed', errorCode: 'storage_conflict', errorMessage: 'destination conflicts with the recorded item' }], nextCursor: null });
+  if (pathname === '/api/v1/storage/mutations/mutation-failed/retry' && method === 'POST') return json({ mutation: { id: 'mutation-failed', status: 'complete' } });
+  if (pathname === '/api/v1/storage/trash/trash-johnson/restore' && method === 'POST') return json({ dataset: { id: 'dataset-trash', status: 'archived' } });
   if (pathname === '/api/v1/storage/trash/trash-johnson' && method === 'DELETE') return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
   if (pathname === '/api/v1/processing/ready') return json({ ok: true });
   if (pathname === '/api/v1/workspace/client-grants') return json({ projects: [], associations: [], grants: [] });
@@ -104,8 +125,11 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       taskDiskUsageBytes: 9437184,
     }, outputs: fixtures.outputs } });
   }
+  if (pathname === '/api/v1/tasks/task-quarry') return json({ task: { ...fixtures.tasks[1], status: runtime.archivedTasks.has('task-quarry')?'archived':'failed', metrics: { sourceImageCount: 12, processingStatus: 'failed', outputCount: 0 }, outputs: [] } });
   if (pathname === '/api/v1/tasks/task-johnson/storage') return json({ task: { totalBytes: 9437184 } });
+  if (pathname === '/api/v1/tasks/task-quarry/storage') return json({ task: { totalBytes: 1048576 } });
   if (pathname === '/api/v1/tasks/task-johnson/attempts') return json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: null });
+  if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
   const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
@@ -137,7 +161,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, correspondences: [], requests: [] };
+  const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set() };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
@@ -271,6 +295,8 @@ async function waitForDevTools(profile) {
 }
 
 async function verifyViewport(devTools, origin, viewport, runtime) {
+  runtime.archivedProjects.clear();
+  runtime.archivedTasks.clear();
   const requestStart = runtime.requests.length;
   const targetResponse = await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' });
   assert.equal(targetResponse.ok, true, `create browser target for ${viewport.name}`);
@@ -333,6 +359,34 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="view-output"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-published-grant')", `${viewport.name}: published output session did not open`);
 
+    await client.evaluate(`document.querySelector('[data-action="archive-output"][data-id="output-johnson"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/archive');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output archive did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="trash-output"][data-id="output-johnson-archived"]').click()`);
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/outputs/output-johnson-archived');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output trash did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="archive-dataset"][data-id="dataset-johnson"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/datasets/dataset-johnson/archive');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset archive did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="trash-dataset"][data-id="dataset-johnson"]').click()`);
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/datasets/dataset-johnson');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
+
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
+    await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry project'", `${viewport.name}: terminal project selection failed`);
+    await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"archive-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task archive was not reachable`);
+    await client.evaluate(`document.querySelector('[data-action="archive-task"][data-id="task-quarry"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/tasks/task-quarry/archive');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: task archive did not settle`);
+    await waitFor(client, "document.querySelector('[data-action=\"archive-task\"][data-id=\"task-quarry\"]') === null && document.querySelector('.task-detail')?.textContent.includes('archived and read-only')", `${viewport.name}: archived task remained mutable`);
+    await client.evaluate(`document.querySelector('[data-action="archive-project"][data-id="project-quarry"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/projects/project-quarry/archive');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: project archive did not settle`);
+    await waitFor(client, "document.querySelector('.project-detail')?.textContent.includes('project is archived and read-only') && document.querySelector('[data-action=\"project-process\"]') === null", `${viewport.name}: archived project remained mutable`);
+
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
     await client.evaluate(`document.querySelector('[data-action="open-provider"][data-id="provider-nodeodm"]').click()`);
@@ -356,6 +410,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('.modal-close').click(); document.querySelector('[data-section="diagnostics"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"purge-trash\"]') !== null", `${viewport.name}: trash lifecycle controls did not render`);
+    assert.equal(await client.evaluate(`document.querySelectorAll('[data-action="restore-trash"]').length`), 2, `${viewport.name}: paginated trash was not fully rendered`);
+    await client.evaluate(`document.querySelector('[data-action="restore-trash"][data-id="trash-johnson"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/trash/trash-johnson/restore');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: trash restore did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="retry-storage-mutation"][data-id="mutation-failed"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/mutations/mutation-failed/retry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: lifecycle retry did not settle`);
     assert.deepEqual(await client.evaluate(`({ entityId: document.querySelector('[data-action="purge-trash"]').dataset.entityId, promptValue: window.prompt('test') })`),
       { entityId: 'dataset-trash', promptValue: 'dataset-trash' }, `${viewport.name}: trash confirmation contract`);
     await client.evaluate(`document.querySelector('[data-action="purge-trash"]').click()`);
@@ -367,10 +428,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['PATCH', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['DELETE', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['POST', '/api/v1/processing/outputs/output-johnson/view-sessions'],
+      ['POST', '/api/v1/processing/outputs/output-johnson/archive'],
+      ['DELETE', '/api/v1/processing/outputs/output-johnson-archived'],
+      ['POST', '/api/v1/datasets/dataset-johnson/archive'],
+      ['DELETE', '/api/v1/datasets/dataset-johnson'],
+      ['POST', '/api/v1/tasks/task-quarry/archive'],
+      ['POST', '/api/v1/projects/project-quarry/archive'],
       ['PATCH', '/api/v1/processing/providers/provider-nodeodm'],
       ['PUT', '/api/v1/processing/providers/provider-nodeodm/credential'],
       ['POST', '/api/v1/processing/presets'],
       ['DELETE', '/api/v1/processing/presets/preset-fast'],
+      ['POST', '/api/v1/storage/trash/trash-johnson/restore'],
+      ['POST', '/api/v1/storage/mutations/mutation-failed/retry'],
       ['DELETE', '/api/v1/storage/trash/trash-johnson'],
     ]) assert.ok(recent.some(item => item.method === expected[0] && item.path === expected[1]), `${viewport.name}: missing browser mutation ${expected.join(' ')}`);
 

@@ -92,7 +92,7 @@ test('production readiness verifies the live policy and signed catalog without e
   assert.deepEqual(output, {
     ok: true,
     host: 'viewer.example.test',
-    build: { revision: 'unavailable', schemaVersion: 19 },
+    build: { revision: 'unavailable', schemaVersion: 20 },
     webodmMount: '',
     derivativesMount: null,
     models: 0,

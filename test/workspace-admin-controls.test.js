@@ -16,7 +16,7 @@ test('staff output actions keep the admin bearer on downloads and mint published
   assert.match(source,/window\.open\('about:blank','_blank'\)/);
   assert.match(source,/target\.opener=null/);
   assert.match(source,/target\.location\.replace\(result\.embedUrl\)/);
-  assert.match(source,/output\.activePublished\?button\('share-output'/);
+  assert.match(source,/output\.activePublished.*button\('share-output'/);
   assert.match(source,/state\.outputs\.filter\(output=>output\.activePublished\)/);
   assert.doesNotMatch(source,/<a[^>]+href="\$\{esc\(output\.(?:download|report)Url\)\}/);
 });
@@ -39,10 +39,21 @@ test('node administration supports metadata credential and capability-bound pres
 });
 
 test('trash lifecycle keeps permanent deletion behind exact typed confirmation',()=>{
-  assert.match(source,/data-action="purge-trash"|button\('purge-trash'/);
+  assert.match(source,/data-action="purge-trash"|(?:button|dangerButton)\('purge-trash'/);
   assert.match(source,/typed!==entityId/);
   assert.match(source,/body:\{typedId:typed\}/);
   assert.match(source,/Permanent deletion cannot be undone/);
+});
+
+test('project-first lifecycle exposes only guarded archive, trash, restore and retry actions',()=>{
+  for(const action of ['archive-project','archive-task','archive-dataset','trash-dataset','archive-output','trash-output','restore-trash','purge-trash','retry-storage-mutation'])assert.ok(source.includes(action),action);
+  for(const permission of ['viewer.projects.write','viewer.datasets.write','viewer.storage.purge','viewer.processing.write','viewer.processing.publish'])assert.ok(source.includes(`can('${permission}')`),permission);
+  assert.match(source,/function confirmedMutation/);
+  assert.match(source,/project is archived and read-only/);
+  assert.match(source,/task\.status==='archived'\?'task':'project'\} is archived and read-only/);
+  assert.match(source,/pagedStorage/);
+  assert.match(source,/storage\/mutations\?status=failed/);
+  assert.match(source,/\/storage\/mutations\/\$\{encodeURIComponent\(id\)\}\/retry/);
 });
 
 test('server-folder copy is explicit about immediate durable import without a preview',()=>{

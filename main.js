@@ -91,11 +91,13 @@ const dom = {};
 
 // Resolved once at startup from the URL path: 'admin' (internal browsing,
 // requires a server-side admin login — see server/index.js), 'view' (full
-// toolbar via /view/:token), or 'embed' (minimal chrome via /embed/:token).
+// toolbar via /view/:token), 'project' (one link with a published-task
+// chooser), or 'embed' (minimal chrome via /embed/:token).
 const VIEW_MODE = location.pathname.startsWith('/embed/') ? 'embed'
   : location.pathname.startsWith('/view/') ? 'view'
+  : location.pathname.startsWith('/project/') ? 'project'
   : location.pathname.startsWith('/session') ? 'session' : 'admin';
-const SHARE_TOKEN = VIEW_MODE === 'view' || VIEW_MODE === 'embed'
+const SHARE_TOKEN = VIEW_MODE === 'view' || VIEW_MODE === 'embed' || VIEW_MODE === 'project'
   ? decodeURIComponent(location.pathname.split('/')[2] || '') : null;
 const SESSION_PATH_PARTS = location.pathname.split('/');
 const ACTIVE_SESSION_ID = VIEW_MODE === 'session' && SESSION_PATH_PARTS[2] === 'active'
@@ -104,6 +106,7 @@ const SESSION_GRANT = VIEW_MODE === 'session' && !ACTIVE_SESSION_ID
   ? decodeURIComponent(SESSION_PATH_PARTS[2] || '') : null;
 const SESSION_STORAGE_PREFIX = 'ltds-viewer-access-token:';
 let sessionStorageKey = ACTIVE_SESSION_ID ? `${SESSION_STORAGE_PREFIX}${ACTIVE_SESSION_ID}` : null;
+let PROJECT_SHARE_CATALOG = null;
 // What the active share link allows; stays fully-open in admin mode.
 let SHARE_PERMISSIONS = { measure: true, cameras: true };
 
@@ -160,6 +163,7 @@ async function bootstrap() {
   bindAdminControls();
 
   if (VIEW_MODE === 'session') return bootstrapSession();
+  if (VIEW_MODE === 'project') return bootstrapProjectShare();
   if (VIEW_MODE !== 'admin') return bootstrapShare();
 
   let models = [];
@@ -193,6 +197,64 @@ async function bootstrap() {
 
   applyProjectConfig(PROJECT);
   init();
+}
+
+async function fetchProjectShareCatalog(initial = null) {
+  const tasks = [];
+  let page = initial;
+  let cursor = null;
+  for (let count = 0; count < 100; count += 1) {
+    if (!page) {
+      const query = cursor ? `?limit=50&cursor=${encodeURIComponent(cursor)}` : '?limit=50';
+      const response = await fetch(`/api/project-share/${encodeURIComponent(SHARE_TOKEN)}${query}`);
+      if (response.status === 401) {
+        const body = await response.json().catch(() => ({}));
+        if (body.requiresPassword) return { requiresPassword: true };
+      }
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw Object.assign(new Error(body.error || `HTTP ${response.status}`), { status: response.status });
+      page = body;
+    }
+    tasks.push(...(page.tasks || []));
+    cursor = page.nextCursor;
+    if (!cursor) return { ...page, tasks };
+    page = null;
+  }
+  throw new Error('This project contains too many task pages to display safely.');
+}
+
+async function applyProjectShareCatalog(catalog) {
+  PROJECT_SHARE_CATALOG = catalog;
+  SHARE_PERMISSIONS = catalog.permissions || { measure: true, cameras: true };
+  setDisplayUnits(catalog.displayUnits);
+  const options = catalog.tasks.map((task) => ({ id: task.id, title: task.displayName || task.modelTitle || 'Published task' }));
+  populateProjectSwitcher(options, { queryKey: 'task' });
+  if (!options.length) {
+    updateLoading('No published tasks', 'This project link is active, but no task currently has a published model.');
+    return;
+  }
+  const requested = new URLSearchParams(location.search).get('task');
+  const taskId = options.some((task) => task.id === requested) ? requested : options[0].id;
+  if (dom.projectSwitcher) dom.projectSwitcher.value = taskId;
+  const url = new URL(location.href);
+  url.searchParams.set('task', taskId);
+  history.replaceState(null, '', url.toString());
+  const response = await fetch(`/api/project-share/${encodeURIComponent(SHARE_TOKEN)}/tasks/${encodeURIComponent(taskId)}`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(body.error || `HTTP ${response.status}`), { status: response.status });
+  applyShareResult(body);
+}
+
+async function bootstrapProjectShare() {
+  if (!SHARE_TOKEN) { updateLoading('Invalid link', 'No project share token was found in this URL.'); return; }
+  updateLoading('Loading shared project...', '');
+  try {
+    const catalog = await fetchProjectShareCatalog();
+    if (catalog.requiresPassword) { showSharePasswordPrompt(); return; }
+    await applyProjectShareCatalog(catalog);
+  } catch (error) {
+    updateLoading(error.status === 410 ? 'Link expired' : 'Could not load this project link', String(error.message || error));
+  }
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -239,7 +301,10 @@ function bindSharePasswordForm() {
     dom.sharePasswordError.textContent = '';
     dom.sharePasswordSubmit.disabled = true;
     try {
-      const res = await fetch(`/api/share/${encodeURIComponent(SHARE_TOKEN)}/unlock`, {
+      const endpoint = VIEW_MODE === 'project'
+        ? `/api/project-share/${encodeURIComponent(SHARE_TOKEN)}/unlock?limit=50`
+        : `/api/share/${encodeURIComponent(SHARE_TOKEN)}/unlock`;
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: dom.sharePasswordInput.value }),
@@ -253,7 +318,8 @@ function bindSharePasswordForm() {
         return;
       }
       hideSharePasswordPrompt();
-      applyShareResult(body);
+      if (VIEW_MODE === 'project') await applyProjectShareCatalog(await fetchProjectShareCatalog(body));
+      else applyShareResult(body);
     } catch (err) {
       dom.sharePasswordError.textContent = 'Could not reach the server.';
       dom.sharePasswordSubmit.disabled = false;
@@ -386,13 +452,13 @@ async function createShareLink() {
   }
 }
 
-function populateProjectSwitcher(models) {
+function populateProjectSwitcher(models, { queryKey = 'project' } = {}) {
   if (!dom.projectSwitcher) return;
   dom.projectSwitcher.innerHTML = models.map((m) => `<option value="${m.id}">${m.title}</option>`).join('');
   dom.projectSwitcher.style.display = models.length > 1 ? '' : 'none';
   dom.projectSwitcher.addEventListener('change', () => {
     const url = new URL(location.href);
-    url.searchParams.set('project', dom.projectSwitcher.value);
+    url.searchParams.set(queryKey, dom.projectSwitcher.value);
     location.href = url.toString();
   });
 }

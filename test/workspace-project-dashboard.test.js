@@ -23,6 +23,10 @@ test('workspace is project-first with an instant responsive project filter',()=>
 
 test('project detail owns import processing GCP outputs review and sharing',()=>{
   for(const value of ['project-import','project-process','project-share','gcp-import-form','Outputs and review','Review & publish','client-grant-form','share-form'])assert.ok(source.includes(value),value);
+  for(const permission of ['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'])assert.match(source,new RegExp(`'${permission.replaceAll('.','\\.')}'`));
+  assert.match(source,/\['viewer\.shares\.create','viewer\.shares\.read','viewer\.shares\.revoke','viewer\.client_grants\.manage'\]\.some\(can\)/);
+  assert.match(source,/if\(can\('viewer\.shares\.read'\)\|\|can\('viewer\.shares\.revoke'\)\)/);
+  assert.match(source,/const list=mayRead\|\|mayRevoke\?/);
   assert.match(source,/This device/);
   assert.match(source,/Server import folder/);
   assert.doesNotMatch(source,/Scan WebODM mount|scan-webodm/);
@@ -42,7 +46,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/Live tail refreshes every five seconds/);
   assert.match(source,/download-logs/);
   assert.match(source,/fullscreen-logs/);
-  assert.match(source,/artifactActions\(output\)/);
+  assert.match(source,/artifactActions\(output,/);
   for(const field of ['averageGsdM','surveyedAreaM2','sourceImageCount','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
   assert.ok(source.includes('formatGsd(metrics.averageGsdM,units)'));
   assert.ok(source.includes('formatArea(metrics.surveyedAreaM2,units)'));

@@ -19,9 +19,12 @@ function encodedAssetUrl(modelId, asset, assetToken = null) {
   return `${prefix}/${encodeURIComponent(modelId)}/${encodeURIComponent(asset.rootKey)}/${relative}`;
 }
 
-function toViewerConfig(model, { assetToken = null } = {}) {
+function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
   if (!model || !model.activeVersion) return null;
-  const byKind = Object.fromEntries(model.activeVersion.assets.map((asset) => [asset.kind, asset]));
+  const visibleAssets = typeof assetFilter === 'function'
+    ? model.activeVersion.assets.filter(assetFilter)
+    : model.activeVersion.assets;
+  const byKind = Object.fromEntries(visibleAssets.map((asset) => [asset.kind, asset]));
   const pointCloud = byKind.pointCloud;
   return {
     id: model.id,
