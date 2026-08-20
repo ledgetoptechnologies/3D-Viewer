@@ -39,8 +39,13 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
 });
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
-  for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Output availability','Task disk usage'])assert.ok(source.includes(label),label);
+  for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Outputs','Task disk usage'])assert.ok(source.includes(label),label);
   assert.match(source,/Unavailable means the processing API did not provide an authoritative value/);
+  assert.match(source,/class="task-facts"/);
+  assert.doesNotMatch(source,/class="task-metrics"/);
+  for(const disclosure of ['Details and controls','Processing history','Ground control points','Outputs and review','Task output'])assert.ok(source.includes(disclosure),disclosure);
+  assert.match(source,/aria-controls=/);
+  assert.match(css,/prefers-reduced-motion/);
   assert.match(source,/logLimit=100/);
   assert.match(source,/\.slice\(-100\)/);
   assert.match(source,/Live tail refreshes every five seconds/);
@@ -52,6 +57,33 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.ok(source.includes('formatArea(metrics.surveyedAreaM2,units)'));
   assert.match(processingApi,/assetKinds:\[\.\.\.new Set/);
   assert.doesNotMatch(processingApi,/requestedBySubject|createdBy\s*===\s*req\.actorId/);
+});
+
+test('published orthophoto previews use the real authenticated derivative and fail closed',()=>{
+  assert.match(source,/output\.activePublished&&output\.status==='published'/);
+  assert.match(source,/output\.assetKinds\.includes\('ortho'\)/);
+  assert.match(source,/openGeoTiff\(`\/api\/v1\/processing\/outputs\/\$\{encodeURIComponent\(outputId\)\}\/assets\/ortho`/);
+  assert.match(source,/Authorization:`Bearer \$\{state\.token\}`/);
+  assert.match(source,/allowFullFile:false/);
+  assert.match(source,/image\.readRGB/);
+  assert.match(source,/Preview unavailable/);
+  assert.doesNotMatch(source,/placeholder.*orthophoto|mock.*orthophoto/i);
+});
+
+test('server imports hand off to a persistent workspace activity feed',()=>{
+  assert.match(source,/pagedApi\('\/api\/v1\/operations','operations'\)/);
+  assert.match(source,/id="import-activity"/);
+  assert.match(source,/Import activity/);
+  assert.match(source,/Source: \$\{esc\(operationSource\(operation\)\)\}/);
+  assert.match(source,/Phase: \$\{esc\(progress\.phase\)\}/);
+  assert.match(source,/Worker heartbeat/);
+  assert.match(source,/data-action="retry-operation"/);
+  assert.match(source,/\/api\/v1\/operations\/\$\{encodeURIComponent\(id\)\}\/retry/);
+  assert.match(source,/rememberOperation\(result\.operation\);modal\.close\(\)/);
+  assert.match(source,/scheduleOperationRefresh\(500\)/);
+  assert.doesNotMatch(source,/while\(modal\.open\)/);
+  assert.match(css,/\.import-activity/);
+  assert.match(css,/\.operation-progress/);
 });
 
 test('providers are master-detail and diagnostics owns storage health and trash',()=>{

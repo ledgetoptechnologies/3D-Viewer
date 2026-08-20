@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const path = require('node:path');
+const { validCameraFilename } = require('./cameraPhotos');
 
 function now() {
   return new Date().toISOString();
@@ -151,6 +153,17 @@ class ViewerRepository {
   }
   getModelAssetChunks(assetId,relativePath=''){return this.database.prepare('SELECT chunk_index,byte_offset,byte_size,sha256 FROM model_asset_chunks WHERE asset_id=? AND relative_path=? ORDER BY chunk_index').all(assetId,relativePath).map((row)=>({chunkIndex:row.chunk_index,byteOffset:row.byte_offset,byteSize:row.byte_size,sha256:row.sha256}));}
 
+  getCameraPhoto(versionId, filename) {
+    const safe = validCameraFilename(filename);
+    if (!safe) return null;
+    const row = this.database.prepare('SELECT filename,root_key,relative_path,content_type,byte_size,sha256 FROM model_camera_photos WHERE version_id=? AND filename=?').get(versionId, safe);
+    return row ? { filename: row.filename, rootKey: row.root_key, relativePath: row.relative_path, contentType: row.content_type, byteSize: row.byte_size, sha256: row.sha256 } : null;
+  }
+
+  listCameraPhotos(versionId) {
+    return this.database.prepare('SELECT filename,root_key,relative_path,content_type,byte_size,sha256 FROM model_camera_photos WHERE version_id=? ORDER BY filename').all(versionId).map((row) => ({ filename: row.filename, rootKey: row.root_key, relativePath: row.relative_path, contentType: row.content_type, byteSize: row.byte_size, sha256: row.sha256 }));
+  }
+
   publishModelVersion(modelId, versionId, selectedKinds) {
     const allowed = new Set(selectedKinds);
     const timestamp = now();
@@ -171,6 +184,12 @@ class ViewerRepository {
   upsertModelVersion(input) {
     const timestamp = now();
     return this.transaction(() => {
+      // Upgrade reconciliation tests and interrupted rolling starts can open a
+      // repository against an older schema before the remaining migrations
+      // are applied. Existing model writes remain compatible, but camera
+      // links must never be silently discarded when their table is absent.
+      const cameraPhotoLinksAvailable = Boolean(this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='model_camera_photos'").get());
+      if ((input.cameraPhotos || []).length && !cameraPhotoLinksAvailable) throw new Error('camera photo link schema is unavailable');
       let model = this.database.prepare(
         'SELECT * FROM models WHERE provider=? AND provider_model_id=?',
       ).get(input.provider, input.providerModelId);
@@ -232,6 +251,7 @@ class ViewerRepository {
           versionId,
         );
         this.database.prepare('DELETE FROM model_assets WHERE version_id=?').run(versionId);
+        if (cameraPhotoLinksAvailable) this.database.prepare('DELETE FROM model_camera_photos WHERE version_id=?').run(versionId);
       }
 
       const insertAsset = this.database.prepare(`INSERT INTO model_assets(
@@ -259,6 +279,21 @@ class ViewerRepository {
         );
         for(const chunk of asset.chunks||[])insertAssetChunk.run(assetId,'',chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);
         for (const file of asset.manifestFiles || asset.files || []){insertAssetFile.run(assetId,file.relativePath,file.byteSize,file.sha256);for(const chunk of file.chunks||[])insertAssetChunk.run(assetId,file.relativePath,chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);}
+      }
+
+      const insertCameraPhoto = cameraPhotoLinksAvailable ? this.database.prepare(`INSERT INTO model_camera_photos(
+        version_id,filename,root_key,relative_path,content_type,byte_size,sha256,created_at
+      ) VALUES (?,?,?,?,?,?,?,?)`) : null;
+      for (const photo of input.cameraPhotos || []) {
+        const filename = validCameraFilename(photo.filename);
+        const rawRelativePath = String(photo.relativePath || '');
+        const relativePath = path.posix.normalize(rawRelativePath);
+        const rootKey = String(photo.rootKey || '');
+        if (!filename || !rootKey || rawRelativePath.includes('\\') || relativePath !== rawRelativePath
+          || path.posix.isAbsolute(relativePath) || !relativePath || relativePath === '..' || relativePath.startsWith('../')
+          || photo.contentType !== 'image/jpeg' || !Number.isSafeInteger(photo.byteSize) || photo.byteSize < 0
+          || typeof photo.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(photo.sha256)) throw new TypeError('invalid camera photo link');
+        insertCameraPhoto.run(versionId, filename, rootKey, relativePath, photo.contentType, photo.byteSize, photo.sha256, timestamp);
       }
 
       if (input.aliasId) {

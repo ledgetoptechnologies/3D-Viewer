@@ -23,7 +23,9 @@ function publicDerivativeKind(kind) {
   // Original datasets, provider archives, OBJ sources, LAZ/PLY point clouds,
   // logs and processing internals are administrative assets. Only selected,
   // reviewed derivatives may become client/public assets.
-  return new Set(['glb','tiles','ept','ortho','dsm','dtm']).has(kind);
+  // Camera positions are a reviewed display companion. Their linked photos
+  // remain separately authorized by exact filename and integrity record.
+  return new Set(['glb','tiles','ept','ortho','dsm','dtm','shots']).has(kind);
 }
 
 function adminOutputAssetKind(kind) {

@@ -15,6 +15,7 @@ const { SHARE_COOKIE } = require('./shareApi');
 const { VIEWER_COOKIE } = require('./apiV1');
 const { config } = require('./config');
 const { publicDerivativeKind } = require('./processingSecurity');
+const { validCameraFilename } = require('./cameraPhotos');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const router = express.Router();
@@ -99,6 +100,7 @@ function canonicalAssetRoot(model, rootKey) {
   if (source.catalogImport && rootKey === 'webodm') return config.webodmMediaMount;
   if (source.catalogImport && rootKey === 'terra') return config.terraImportMount;
   if (source.catalogImport && rootKey === 'datasets') return config.datasetsMount;
+  if (source.webodmTaskImport && rootKey === 'datasets') return config.datasetsMount;
   if (model.provider === 'webodm' && source.projectId !== null && source.taskId !== null) {
     if (rootKey === 'webodm') {
       return path.join(config.webodmMediaMount, 'project', String(source.projectId), 'task', String(source.taskId), 'assets');
@@ -159,7 +161,7 @@ async function pathTokenAuthorization(req, projectId) {
       && viewer.modelId === requestedModelId
       && model?.status === 'ready'
       && (review ? model.activeVersion?.id === viewer.modelVersionId : model.activeVersionId === viewer.modelVersionId);
-    return allowed ? { model, review } : false;
+    return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false } : false;
   }
   const payload = auth.verify(req.params.token);
   if (!payload) return false;
@@ -173,10 +175,10 @@ async function pathTokenAuthorization(req, projectId) {
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
-      return allowed ? { model, review: false } : false;
+      return allowed ? { model, review: false, cameras: share.permissions?.cameras !== false } : false;
     }
     const share = shareStore.getById(payload.shareId);
-    return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false } : false;
+    return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false, cameras: share.permissions?.cameras !== false } : false;
   }
   if (payload.kind === 'project-share-asset' && processingRepository) {
     const share = canonicalRepository.getProjectShare(payload.shareId);
@@ -188,7 +190,7 @@ async function pathTokenAuthorization(req, projectId) {
       && selected?.modelId === requestedModelId
       && selected.modelVersionId === payload.modelVersionId
       && model?.activeVersion?.id === payload.modelVersionId;
-    return allowed ? { model, review: false, publicOnly: true } : false;
+    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false } : false;
   }
   return false;
 }
@@ -213,7 +215,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -226,6 +228,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   if (project.activeVersion && !publishedAsset) {
     return res.status(404).json({ error: 'asset not found' });
   }
+  if (publishedAsset?.kind === 'shots' && !cameras) return res.status(403).json({ error: 'not authorized' });
   const abs = safeExistingFile(rootPath, rel);
   if (!abs) return res.status(404).json({ error: 'asset not found' });
   if (project.activeVersion) {
@@ -267,7 +270,30 @@ router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
   if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly }).catch(next);
+  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras }).catch(next);
+});
+
+router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next) => {
+  try {
+    if(canonicalRepository?.rateLimited(`camera-photo:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,1200,5*60_000))return res.status(429).json({error:'too many photo requests'});
+    const authorization = await pathTokenAuthorization(req, req.params.id);
+    if (!authorization || !authorization.cameras) return res.status(403).json({ error: 'not authorized' });
+    const filename = validCameraFilename(req.params.filename), model = authorization.model;
+    const shots = model?.activeVersion?.assets?.find((asset) => asset.kind === 'shots' && (authorization.review || asset.published));
+    if (!filename || !shots) return res.status(404).json({ error: 'photo not found' });
+    const photo = canonicalRepository.getCameraPhoto(model.activeVersion.id, filename);
+    if (!photo) return res.status(404).json({ error: 'photo not found' });
+    const rootPath = canonicalAssetRoot(model, photo.rootKey), absolute = rootPath && safeExistingFile(rootPath, photo.relativePath);
+    if (!absolute) return res.status(404).json({ error: 'photo not found' });
+    const stat = fs.statSync(absolute);
+    if (stat.size !== photo.byteSize || await sha256File(absolute) !== photo.sha256) return res.status(404).json({ error: 'photo not found' });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Content-Type', photo.contentType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    const accelerated = xAccelLocation(absolute);
+    if (accelerated) { res.setHeader('X-Accel-Redirect', accelerated); return res.end(); }
+    return res.sendFile(absolute, (error) => { if (error && !res.headersSent) res.status(error.status || 404).json({ error: 'photo not found' }); });
+  } catch (error) { return next(error); }
 });
 
 module.exports = router;

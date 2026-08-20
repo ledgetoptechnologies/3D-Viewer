@@ -46,6 +46,7 @@ test('admin output URLs expose only exact derived files and issue a published vi
   const relativeRoot = `${task.id}/${attempt.id}`;
   const files = {
     glb: { relativePath: `${relativeRoot}/model.glb`, body: Buffer.from('derived-mesh') },
+    ortho: { relativePath: `${relativeRoot}/orthophoto.tif`, body: Buffer.from('AAAABBBBCCCC') },
     report: { relativePath: `${relativeRoot}/odm_report/report.pdf`, body: Buffer.from('%PDF-safe-report') },
     pointCloud: { relativePath: `${relativeRoot}/raw.laz`, body: Buffer.from('private-point-cloud') },
     obj: { relativePath: `${relativeRoot}/source.obj`, body: Buffer.from('private-source-mesh') },
@@ -60,6 +61,7 @@ test('admin output URLs expose only exact derived files and issue a published vi
     displayName: task.displayName, status: 'ready', sourceLocator: { taskId: task.id, attemptId: attempt.id },
     assets: [
       { kind: 'glb', rootKey: 'models', relativePath: files.glb.relativePath, format: 'glb', byteSize: files.glb.body.length, sha256: sha256(files.glb.body), published: true },
+      { kind: 'ortho', rootKey: 'models', relativePath: files.ortho.relativePath, format: 'tif', contentType: 'image/tiff', byteSize: files.ortho.body.length, sha256: sha256(files.ortho.body), chunks: [0, 4, 8].map((byteOffset, chunkIndex) => { const body = files.ortho.body.subarray(byteOffset, byteOffset + 4); return { chunkIndex, byteOffset, byteSize: body.length, sha256: sha256(body) }; }), published: false },
       { kind: 'report', rootKey: 'models', relativePath: files.report.relativePath, format: 'pdf', contentType: 'application/pdf', byteSize: files.report.body.length, sha256: sha256(files.report.body), published: false },
       { kind: 'pointCloud', rootKey: 'models', relativePath: files.pointCloud.relativePath, format: 'laz', byteSize: files.pointCloud.body.length, sha256: sha256(files.pointCloud.body), published: false },
       { kind: 'obj', rootKey: 'models', relativePath: files.obj.relativePath, format: 'obj', byteSize: files.obj.body.length, sha256: sha256(files.obj.body), published: false },
@@ -89,8 +91,8 @@ test('admin output URLs expose only exact derived files and issue a published vi
   const listedResponse = await fetch(`${base}/api/v1/processing/outputs`, { headers });
   assert.equal(listedResponse.status, 200);
   const output = (await listedResponse.json()).outputs[0];
-  assert.deepEqual(output.assetKinds, ['glb', 'report']);
-  assert.deepEqual(output.assets.map((asset) => asset.kind), ['glb', 'report']);
+  assert.deepEqual(output.assetKinds, ['glb', 'ortho', 'report']);
+  assert.deepEqual(output.assets.map((asset) => asset.kind), ['glb', 'ortho', 'report']);
   assert.equal(output.assets.some((asset) => 'relativePath' in asset || 'rootKey' in asset), false);
   assert.equal(output.downloadUrl, `/api/v1/processing/outputs/${versionId}/assets/glb`);
   assert.equal(output.reportUrl, `/api/v1/processing/outputs/${versionId}/assets/report`);
@@ -109,6 +111,17 @@ test('admin output URLs expose only exact derived files and issue a published vi
   const glb = await fetch(`${base}${output.downloadUrl}`, { headers });
   assert.equal(glb.status, 200);
   assert.equal(await glb.text(), files.glb.body.toString());
+
+  const orthoUrl = `/api/v1/processing/outputs/${versionId}/assets/ortho`;
+  let ortho = await fetch(`${base}${orthoUrl}`, { headers: { ...headers, range: 'bytes=0-3' } });
+  assert.equal(ortho.status, 206);
+  assert.equal(ortho.headers.get('content-range'), `bytes 0-3/${files.ortho.body.length}`);
+  assert.equal(await ortho.text(), 'AAAA');
+  fs.writeFileSync(path.join(config.modelsMount, ...files.ortho.relativePath.split('/')), Buffer.from('AAAAXBBBCCCC'));
+  ortho = await fetch(`${base}${orthoUrl}`, { headers: { ...headers, range: 'bytes=0-3' } });
+  assert.equal(ortho.status, 206, 'a changed non-requested chunk does not force a whole-file read');
+  assert.equal(await ortho.text(), 'AAAA');
+  assert.equal((await fetch(`${base}${orthoUrl}`, { headers: { ...headers, range: 'bytes=4-7' } })).status, 409, 'tampering inside the requested chunk fails closed');
 
   const viewResponse = await fetch(`${base}${output.viewSessionUrl}`, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json', 'idempotency-key': 'published-output-view-0001' }, body: '{}',

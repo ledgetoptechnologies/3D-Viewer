@@ -9,6 +9,7 @@ const { discoverAssets } = require('./catalogImport');
 const { validateImportSelection } = require('./importBrowser');
 const { hashFile, hashTree } = require('./storageManager');
 const { readOdmTaskMetadata } = require('./odmTaskMetadata');
+const { discoverCameraPhotoLinks } = require('./cameraPhotos');
 
 const CAPABILITIES = Object.freeze({
   glb: '3d_model', obj: '3d_model', tiles: '3d_model',
@@ -61,8 +62,10 @@ async function stageSource(operation, { storage, config }, signal, progress) {
   if (stat.isDirectory()) await copyTree(source, staging, { maxFiles, maxBytes, signal, progress: (value) => progress(value * 0.25) });
   else {
     if (path.extname(source).toLowerCase() !== '.zip') throw Object.assign(new Error('WebODM task archive must use .zip'), { code: 'invalid_archive_type' });
-    await extractZipFile(source, staging, { maxEntries: maxFiles, maxBytes, workId: operation.id, signal });
-    await progress(0.25);
+    await extractZipFile(source, staging, {
+      maxEntries: maxFiles, maxBytes, workId: operation.id, signal,
+      onProgress: (value) => progress(value * 0.25),
+    });
   }
   return { payload, request, source, staging, stagingRelative };
 }
@@ -72,6 +75,7 @@ function manifestHash(files) { return crypto.createHash('sha256').update(JSON.st
 async function importWebodmTask(operation, { processing, repository, storage, config }, progress = async () => {}, signal = null) {
   const { payload, request, staging, stagingRelative } = await stageSource(operation, { storage, config }, signal, progress);
   const ids = payload.ids || {}, discovered = await discoverAssets(staging), summary = capabilitySummary(discovered.assets);
+  const discoveredCameraPhotos = discoverCameraPhotoLinks(staging, discovered);
   if (!summary.assetKinds.length) { fs.rmSync(staging, { recursive: true, force: true }); throw Object.assign(new Error('No supported WebODM task artifacts were found'), { code: 'no_supported_assets' }); }
   const duplicate = processing.getWebodmTaskImportByFingerprint(discovered.sourceFingerprint);
   if (duplicate) { fs.rmSync(staging, { recursive: true, force: true }); throw Object.assign(new Error('This WebODM task output was already imported'), { code: 'duplicate_import', details: duplicate }); }
@@ -95,7 +99,8 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     assets.push(entry);
   }
   const odmMetadata = readOdmTaskMetadata(datasetRoot);
-  const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${discovered.sourceFingerprint}`, providerVersionId: discovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'ready', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds, processingMetrics: odmMetadata.processingMetrics }, georef: odmMetadata.georef, pointCount: odmMetadata.pointCount, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets, makeActive: false });
+  const cameraPhotos = discoveredCameraPhotos.map((photo) => ({ ...photo, rootKey: 'datasets', relativePath: `${dataset.relativePath}/${photo.relativePath}` }));
+  const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${discovered.sourceFingerprint}`, providerVersionId: discovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'ready', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds, processingMetrics: odmMetadata.processingMetrics }, georef: odmMetadata.georef, pointCount: odmMetadata.pointCount, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets, cameraPhotos, makeActive: false });
   processing.setAttemptResult(attempt.id, model.id, ids.versionId);
   // Existing accounting assigns adopted/reference trees to the output and
   // excludes their source dataset from the project dataset subtotal.

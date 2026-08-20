@@ -1304,6 +1304,25 @@ const MIGRATIONS = [
         ON public_project_shares(project_id,revoked_at,expires_at);
     `,
   },
+  {
+    version: 21,
+    name: 'camera_photo_links',
+    sql: `
+      CREATE TABLE model_camera_photos (
+        version_id TEXT NOT NULL REFERENCES model_versions(id) ON DELETE CASCADE,
+        filename TEXT NOT NULL,
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        content_type TEXT NOT NULL CHECK(content_type='image/jpeg'),
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(version_id,filename)
+      );
+      CREATE INDEX model_camera_photos_version_idx
+        ON model_camera_photos(version_id,filename);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

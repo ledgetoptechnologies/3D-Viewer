@@ -24,6 +24,7 @@ import {
 import { EarthLikeControls } from './earth-controls.js';
 import { hasMeshSource, localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
+import { fetchAssetArrayBufferByRange } from './range-fetch.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -80,7 +81,7 @@ const dom = {};
  'three-container','leaflet-map','cloud-container','fps','mem-display','coords',
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-img','photo-title',
- 'photo-meta','photo-close','photo-download','photo-spinner','cam-tooltip','labels-container',
+ 'photo-meta','photo-close','photo-download','photo-spinner','photo-empty','cam-tooltip','labels-container',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
@@ -491,7 +492,7 @@ function applyProjectConfig(p) {
   POINT_CLOUD_URL = p.assets.pointCloud || null;
   POINT_CLOUD_FORMAT = p.assets.pointCloudFormat || null;
   POINT_COUNT = p.pointCount || null;
-  PHOTO_BASE = null;   // original flight-photo archive isn't wired into migrated tasks yet (see README)
+  PHOTO_BASE = p.assets.cameraPhotos || null;
 
   RTC = (p.georef && p.georef.rtc) || { e: 0, n: 0, z: 0 };
   C = (p.georef && p.georef.bboxCenter) || { x: 0, y: 0, z: 0 };
@@ -942,7 +943,7 @@ function topDownView() {
 // ───────────────────────────────────────────────────────────────
 // Full-res GLB (on demand)
 // ───────────────────────────────────────────────────────────────
-function loadGLB() {
+async function loadGLB() {
   if (state.glbLoaded) { glbParent.visible = true; return; }
   if (state.glbLoading) return;
   state.glbLoading = true;
@@ -957,7 +958,15 @@ function loadGLB() {
   const loader = new GLTFLoader();
   loader.setDRACOLoader(draco);
 
-  loader.load(GLB_URL, (gltf) => {
+  try {
+    const glb = await fetchAssetArrayBufferByRange(GLB_URL, {
+      onProgress: (loaded, total) => {
+        const pct = ((loaded / total) * 100).toFixed(0);
+        updateLoading('Loading full-resolution Draco mesh...', `${pct}% (${(loaded / 1048576).toFixed(0)} MB)`);
+      },
+    });
+    updateLoading('Decoding full-resolution Draco mesh...', '100%');
+    const gltf = await loader.parseAsync(glb, '');
     gltf.scene.traverse((child) => {
       if (child.isMesh) {
         child.material.side = THREE.FrontSide;   // WebODM-style see-through from below
@@ -971,12 +980,7 @@ function loadGLB() {
     applyMeshLayer();
     hideLoading();
     draco.dispose();
-  }, (xhr) => {
-    if (xhr.total) {
-      const pct = ((xhr.loaded / xhr.total) * 100).toFixed(0);
-      updateLoading('Loading full-resolution Draco mesh...', `${pct}% (${(xhr.loaded / 1048576).toFixed(0)} MB)`);
-    }
-  }, (err) => {
+  } catch (err) {
     console.error('GLB load error', err);
     state.glbLoading = false;
     draco.dispose();
@@ -985,7 +989,7 @@ function loadGLB() {
     document.getElementById('layer-glb').classList.remove('active');
     document.getElementById('layer-tiles').classList.add('active');
     applyMeshLayer();   // rebuilds the disposed tiles renderer
-  });
+  }
 }
 
 // ────────────────────────────────────────────────
@@ -1208,35 +1212,52 @@ function resetPhotoView() {
 function openPhoto(idx) {
   const feat = camFeatures[idx];
   if (!feat) return;
-  if (!PHOTO_BASE) return;   // original flight-photo archive isn't wired into migrated tasks yet (see README)
   resetPhotoView();
-  const fn = feat.properties.filename;
-  const url = `${PHOTO_BASE}/${encodeURIComponent(fn)}`;
+  const fn = typeof feat.properties?.filename === 'string' ? feat.properties.filename : '';
   const altitude = formatElevation(feat.geometry?.coordinates?.[2] || 0, DISPLAY_UNITS);
   const time = feat.properties.capture_time
     ? new Date(feat.properties.capture_time * 1000).toLocaleString()
     : '';
-  dom.photoTitle.textContent = fn;
+  dom.photoTitle.textContent = fn || 'Camera photo';
   dom.photoMeta.textContent = `Altitude ${altitude} MSL${time ? '  ·  ' + time : ''}`;
-  dom.photoSpinner.style.display = 'block';
+  dom.photoModal.style.display = 'flex';
+  dom.photoSpinner.style.display = 'none';
+  dom.photoEmpty.style.display = 'none';
+  dom.photoImg.style.display = 'none';
   dom.photoImg.style.opacity = '0';
+  dom.photoImg.onload = null;
+  dom.photoImg.onerror = null;
+  dom.photoImg.removeAttribute('src');
+  dom.photoDownload.style.display = 'none';
+  dom.photoDownload.removeAttribute('href');
+  if (!PHOTO_BASE || !fn || fn.includes('/') || fn.includes('\\')) {
+    dom.photoEmpty.textContent = 'No photo available';
+    dom.photoEmpty.style.display = 'flex';
+    return;
+  }
+  const url = `${PHOTO_BASE}/${encodeURIComponent(fn)}`;
+  dom.photoSpinner.style.display = 'block';
+  dom.photoImg.style.display = '';
   dom.photoImg.onload = () => {
     dom.photoSpinner.style.display = 'none';
     dom.photoImg.style.opacity = '1';
+    if (SHARE_PERMISSIONS.download) dom.photoDownload.style.display = '';
   };
   dom.photoImg.onerror = () => {
     dom.photoSpinner.style.display = 'none';
-    dom.photoMeta.textContent = 'Photo not available — original images not served yet.';
+    dom.photoImg.style.display = 'none';
+    dom.photoEmpty.textContent = 'No photo available';
+    dom.photoEmpty.style.display = 'flex';
   };
   dom.photoImg.src = url;
   dom.photoDownload.href = url;
   dom.photoDownload.download = fn;
-  dom.photoModal.style.display = 'flex';
 }
 
 function closePhoto() {
   dom.photoModal.style.display = 'none';
-  dom.photoImg.src = '';
+  dom.photoImg.removeAttribute('src');
+  dom.photoEmpty.style.display = 'none';
   resetPhotoView();
 }
 

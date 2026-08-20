@@ -6,10 +6,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeArrayBuffer } from 'geotiff';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const token = 'browser_workspace_token_1234567890abcdef';
+const orthophotoFixture = Buffer.from(writeArrayBuffer(new Uint8Array([
+  238,80,7, 255,150,48,
+  34,97,74, 109,190,140,
+]), { width:2, height:2, SamplesPerPixel:3, BitsPerSample:[8,8,8], PhotometricInterpretation:2, PlanarConfiguration:1 }));
 
 const fixtures = {
   projects: [
@@ -49,13 +54,22 @@ const fixtures = {
   presets: [{ id: 'preset-fast', displayName: 'Fast', description: '', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', options: {}, enabled: true, builtIn: false }],
   outputs: [{
     id: 'output-johnson', taskId: 'task-johnson', modelId: 'model-johnson', displayName: 'Johnson output',
-    status: 'published', activePublished: true, byteSize: 4096, assetCount: 2, assetKinds: ['glb', 'report'],
+    status: 'published', activePublished: true, byteSize: 4096, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
     downloadUrl: '/api/v1/processing/outputs/output-johnson/assets/glb',
     reportUrl: '/api/v1/processing/outputs/output-johnson/assets/report',
     viewSessionUrl: '/api/v1/processing/outputs/output-johnson/view-sessions',
   }, {
     id: 'output-johnson-archived', taskId: 'task-johnson', modelId: 'model-johnson-old', displayName: 'Johnson archived output',
     status: 'archived', activePublished: false, byteSize: 2048, assetCount: 1, assetKinds: [],
+  }],
+  operations: [{
+    id: 'operation-running', type: 'webodm_task_import', subject: 'server import', projectId: 'project-johnson',
+    status: 'leased', phase: 'adopting', progress: .35, source: { kind: 'server_zip', browserTransferRequired: false, transferComplete: true },
+    attemptCount: 1, heartbeatAt: '2026-08-19T13:04:00.000Z', createdAt: '2026-08-19T13:00:00.000Z', updatedAt: '2026-08-19T13:04:00.000Z',
+  }, {
+    id: 'operation-failed', type: 'webodm_task_import', subject: 'failed import', projectId: 'project-quarry',
+    status: 'failed', phase: 'failed', progress: .25, source: { kind: 'server_folder', browserTransferRequired: false, transferComplete: true },
+    attemptCount: 1, errorCode: 'invalid_archive', errorMessage: 'The archive could not be imported.', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z',
   }],
 };
 
@@ -103,6 +117,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
   if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-published-grant' }, 201);
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
+  if (pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho') return { status: 200, body: orthophotoFixture, type: 'image/tiff' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/archive' && method === 'POST') return json({ output: fixtures.outputs[0] });
   if (pathname === '/api/v1/processing/outputs/output-johnson-archived' && method === 'DELETE') return json({ output: fixtures.outputs[1], trash: { id: 'trash-output' } });
@@ -119,6 +134,17 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/storage/trash/trash-johnson' && method === 'DELETE') return { status: 204, body: Buffer.alloc(0), type: 'application/json' };
   if (pathname === '/api/v1/processing/ready') return json({ ok: true });
   if (pathname === '/api/v1/workspace/client-grants') return json({ projects: [], associations: [], grants: [] });
+  if (pathname === '/api/v1/operations' && method === 'GET') return json({ operations: runtime.operations, nextCursor: null });
+  if (pathname === '/api/v1/operations/operation-failed/retry' && method === 'POST') {
+    runtime.operations = runtime.operations.map(operation => operation.id === 'operation-failed' ? { ...operation, status: 'queued', phase: 'queued', progress: 0, heartbeatAt: null, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() } : operation);
+    return json({ operation: runtime.operations.find(operation => operation.id === 'operation-failed') }, 202);
+  }
+  if (pathname === '/api/v1/processing/server-task-imports/browse' && method === 'GET') return json({ path: '', entries: [{ name: 'church-backup.zip', relativePath: 'church-backup.zip', kind: 'zip', byteSize: 4096 }], nextCursor: null });
+  if (pathname === '/api/v1/processing/server-task-imports' && method === 'POST') {
+    const operation = { id: 'operation-new', type: 'webodm_task_import', subject: body.taskDisplayName, projectId: body.projectId, status: 'queued', phase: 'queued', progress: 0, source: { kind: 'server_zip', browserTransferRequired: false, transferComplete: true }, attemptCount: 0, heartbeatAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    runtime.operations = [operation, ...runtime.operations];
+    return json({ operation }, 202);
+  }
   if (pathname === '/api/v1/tasks/task-johnson') {
     return json({ task: { ...fixtures.tasks[0], metrics: {
       averageGsdM: 0.021, surveyedAreaM2: 18000, sourceImageCount: 48, reconstructedPointCount: 1250000,
@@ -162,7 +188,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set() };
+  const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), operations: structuredClone(fixtures.operations) };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
@@ -190,7 +216,12 @@ function startFixtureServer() {
         result = { status: 200, body: readFileSync(absolute), type };
       }
     }
-    response.writeHead(result.status, { 'Content-Type': result.type, 'Cache-Control': 'no-store' });
+    const range = request.headers.range?.match(/^bytes=(\d+)-(\d+)$/);
+    if (result.status === 200 && range) {
+      const start = Number(range[1]), end = Math.min(Number(range[2]), result.body.length - 1);
+      if (start <= end) result = { ...result, status: 206, body: result.body.subarray(start, end + 1), headers: { 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${result.body.length}` } };
+    }
+    response.writeHead(result.status, { 'Content-Type': result.type, 'Cache-Control': 'no-store', ...(result.headers || {}) });
     response.end(result.body);
   });
   return new Promise((resolve, reject) => {
@@ -298,6 +329,7 @@ async function waitForDevTools(profile) {
 async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
+  runtime.operations = structuredClone(fixtures.operations);
   const requestStart = runtime.requests.length;
   const targetResponse = await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' });
   assert.equal(targetResponse.ok, true, `create browser target for ${viewport.name}`);
@@ -326,6 +358,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
 
+    await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 2", `${viewport.name}: persistent import activity did not load`);
+    const activityText = await client.evaluate(`document.querySelector('#import-activity').textContent`);
+    for (const expected of ['Import activity', '35%', 'Server ZIP', 'Phase: adopting', 'Worker heartbeat', 'The archive could not be imported.']) assert.ok(activityText.includes(expected), `${viewport.name}: missing operation detail ${expected}`);
+    assert.equal(activityText.includes('server import'), false, `${viewport.name}: internal operation subject leaked into the activity title`);
+    await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-failed"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-failed/retry');
+    await waitFor(client, "document.querySelector('[data-operation-id=\"operation-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed import retry did not return to queued`);
+
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
 
@@ -339,12 +379,28 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey project'", `${viewport.name}: project selection failed`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: selected project overflows horizontally`);
 
+    await client.evaluate(`document.querySelector('[data-action="project-import"][data-id="project-johnson"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true", `${viewport.name}: import dialog did not open`);
+    await client.evaluate(`document.querySelector('[data-import-tab="server"]').click()`);
+    await waitFor(client, "document.querySelector('[data-select-path=\"church-backup.zip\"]') !== null", `${viewport.name}: server import browser did not load`);
+    await client.evaluate(`document.querySelector('[data-select-path="church-backup.zip"]').click()`);
+    await client.evaluate(`document.querySelector('#server-import-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/server-task-imports');
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-operation-id=\"operation-new\"]')?.textContent.includes('queued')", `${viewport.name}: modal import did not hand off to persistent activity`);
+
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: task details did not expand`);
+    assert.equal(await client.evaluate(`document.querySelector('[data-task-disclosure="logs"]').open`), false, `${viewport.name}: task output was not progressively disclosed`);
+    await client.evaluate(`document.querySelector('[data-task-disclosure="logs"] summary').click()`);
+    await waitFor(client, "document.querySelector('[data-task-disclosure=\"logs\"]')?.open === true", `${viewport.name}: task output disclosure did not open`);
     const firstLog = await client.evaluate(`document.querySelector('.task-detail .log-tail').textContent`);
     await waitFor(client, `document.querySelector('.task-detail .log-tail')?.textContent !== ${JSON.stringify(firstLog)}`, `${viewport.name}: running-task log tail did not refresh`, 7_000);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: expanded task overflows horizontally`);
+    await waitFor(client, "document.querySelector('.task-ortho-preview canvas')?.getAttribute('aria-label') === 'Published orthophoto preview' || document.querySelector('.task-ortho-preview img') !== null", `${viewport.name}: real orthophoto preview did not render`);
+    assert.equal(await client.evaluate(`(() => { const canvas=document.querySelector('.task-ortho-preview canvas'); if(!canvas)return true; return [...canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data].some(value=>value>0) })()`), true, `${viewport.name}: orthophoto preview canvas is empty`);
 
+    await client.evaluate(`document.querySelector('[data-task-disclosure="gcp"] summary').click()`);
+    await waitFor(client, "document.querySelector('[data-task-disclosure=\"gcp\"]')?.open === true", `${viewport.name}: GCP disclosure did not open`);
     await waitFor(client, "document.querySelector('[data-action=\"gcp-open-image\"][data-id=\"image-1\"]') !== null", `${viewport.name}: GCP image candidates did not load`);
     await client.evaluate(`document.querySelector('[data-action="gcp-open-image"][data-id="image-1"]').click()`);
     await waitFor(client, "document.querySelector('.gcp-mark-form') !== null", `${viewport.name}: private GCP image did not open`);
@@ -355,6 +411,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="gcp-delete-mark"]').click()`);
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
 
+    await client.evaluate(`document.querySelector('[data-task-disclosure="outputs"] summary').click()`);
+    await waitFor(client, "document.querySelector('[data-task-disclosure=\"outputs\"]')?.open === true", `${viewport.name}: output disclosure did not open`);
     await client.evaluate(`document.querySelector('[data-action="download-report"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
     await client.evaluate(`document.querySelector('[data-action="view-output"]').click()`);
@@ -390,6 +448,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
+    assert.equal(await client.evaluate(`document.querySelector('[data-operation-id="operation-new"]')?.textContent.includes('queued')`), true, `${viewport.name}: activity did not persist across navigation`);
     await client.evaluate(`document.querySelector('[data-action="open-provider"][data-id="provider-nodeodm"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: provider modal did not open`);
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider modal selection`);

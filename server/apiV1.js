@@ -47,6 +47,9 @@ function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
       dsm: encodedAssetUrl(model.id, byKind.dsm, assetToken),
       dtm: encodedAssetUrl(model.id, byKind.dtm, assetToken),
       shots: encodedAssetUrl(model.id, byKind.shots, assetToken),
+      cameraPhotos: assetToken && byKind.shots
+        ? `/session-camera-photos/${encodeURIComponent(assetToken)}/${encodeURIComponent(model.id)}`
+        : null,
       pointCloud: encodedAssetUrl(model.id, pointCloud, assetToken),
       pointCloudFormat: pointCloud ? pointCloud.format : null,
     },

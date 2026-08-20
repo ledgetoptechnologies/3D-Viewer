@@ -43,7 +43,7 @@ function walkFiles(root, maxFiles = 100000) {
 async function discoverAssets(root) {
   const files = walkFiles(root);
   const fileHashes=new Map();
-  for(const file of files)fileHashes.set(file.relativePath,await hashFileChunks(file.absolutePath));
+  for(const file of files){const integrity=await hashFileChunks(file.absolutePath);fileHashes.set(file.relativePath,integrity);file.sha256=integrity.sha256;file.chunks=integrity.chunks;}
   const assets = [];
   for (const [kind, pattern, format, contentType] of ASSET_RULES) {
     const file = files.find((candidate) => pattern.test(candidate.relativePath));

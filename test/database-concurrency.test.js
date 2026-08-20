@@ -99,6 +99,6 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 20);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 21);
   upgraded.close();
 });
