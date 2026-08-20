@@ -55,6 +55,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   for(const field of ['averageGsdM','surveyedAreaM2','sourceImageCount','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
   assert.ok(source.includes('formatGsd(metrics.averageGsdM,units)'));
   assert.ok(source.includes('formatArea(metrics.surveyedAreaM2,units)'));
+  assert.match(source,/groupedNumber\(value\)/);
   assert.match(processingApi,/assetKinds:\[\.\.\.new Set/);
   assert.doesNotMatch(processingApi,/requestedBySubject|createdBy\s*===\s*req\.actorId/);
 });
@@ -78,7 +79,13 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/Phase: \$\{esc\(progress\.phase\)\}/);
   assert.match(source,/Worker heartbeat/);
   assert.match(source,/data-action="retry-operation"/);
+  assert.match(source,/\['background','↻','Background work'\]/);
+  assert.match(source,/background-work-count/);
+  assert.match(source,/function background\(\)/);
   assert.match(source,/\/api\/v1\/operations\/\$\{encodeURIComponent\(id\)\}\/retry/);
+  assert.match(source,/\/api\/v1\/processing\/derivatives\?limit=100/);
+  assert.match(source,/\/api\/v1\/processing\/derivatives\/\$\{encodeURIComponent\(id\)\}\/retry/);
+  assert.match(source,/The original model remains available/);
   assert.match(source,/rememberOperation\(result\.operation\);modal\.close\(\)/);
   assert.match(source,/scheduleOperationRefresh\(500\)/);
   assert.doesNotMatch(source,/while\(modal\.open\)/);

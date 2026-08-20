@@ -420,12 +420,17 @@ empty.
   provider. NodeODM API 2.2.3 is the direct-node baseline. ClusterODM is
   accepted only when its 1.x API response includes the official proxy resource
   sentinels; a merely API-compatible 1.x response is ambiguous and rejected.
-- **Production derivatives come from ODM's native stages.** Provider
-  capabilities must include `pc-ept`, `3d-tiles`, and `gltf`; the Viewer
-  requests those outputs and verifies their manifests before review/publish.
-  `LOCAL_DERIVATIVES_ENABLED` remains false because the stock image does not
-  ship Entwine or Obj2Tiles. If explicitly enabled in a custom image, startup
-  fails unless compatible executables are present.
+- **Production derivatives prefer ODM's native stages.** Provider
+  capabilities request `pc-ept`, `3d-tiles`, and `gltf`, and the Viewer audits
+  existing tile manifests before reuse. The production image pins and verifies
+  Obj2Tiles 1.6.2 for textured-OBJ mesh fallback while Entwine remains disabled.
+  Missing or invalid mesh tiles queue one optional background generation attempt;
+  failure leaves the original full mesh available and requires an authorized
+  manual Retry. A bounded maintenance cursor applies the same policy to existing
+  review-ready imports. Verified generation requires both the textured OBJ as
+  converter input and its companion GLB as the independent equivalence source
+  and fallback. OBJ-only or GLB-only models remain explicit full-mesh fallbacks;
+  the Viewer does not claim streaming LOD that it cannot validate.
 - **Native 3D Tiles do not automatically prove lossless full detail.** The
   schema-v2 LOD audit must bind the exact full GLB, leaf geometry, material
   state, and texture bytes. If upstream tiling decimates, retriangulates, or
@@ -442,10 +447,9 @@ empty.
 - **Existing published legacy models remain deliverable.** Removing live
   WebODM synchronization does not delete registry rows or mounted assets.
   Newly migrated outputs use immutable manifests and publication rules.
-- **Original flight photos** (opening the full-res JPG behind a camera
-  marker) aren't wired into migrated tasks yet — camera positions still show from
-  `shots.geojson` when present, but clicking one is a no-op until a photo
-  archive location is configured per project.
+- **Original flight photos** are linked to imported `shots.geojson` positions
+  when an exact, integrity-checked source JPG exists. Camera positions remain
+  visible when no image is available, and the marker dialog says so explicitly.
 - Raw imagery, GCP files, provider archives, logs, and processing internals are
   administrative assets and are never client-shareable by default.
 - Annotations and source-file download controls are not implemented. Legacy

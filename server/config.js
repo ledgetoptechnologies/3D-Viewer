@@ -174,6 +174,7 @@ const config = {
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
+  meshDerivativesEnabled: bool(process.env.MESH_DERIVATIVES_ENABLED, bool(process.env.LOCAL_DERIVATIVES_ENABLED, false)),
 };
 
 function validate() {

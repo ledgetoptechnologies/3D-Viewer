@@ -7,6 +7,10 @@ import { inspectLodTileset } from '../../lod-policy.mjs';
 export const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v1';
 export const DEFAULT_TOLERANCE = 1e-6;
 
+export function auditFailureExitCode(error) {
+  return typeof error?.code === 'string' && error.code ? 4 : 3;
+}
+
 const COMPONENTS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT4: 16 };
 const COMPONENT_BYTES = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 };
 const IDENTITY = new Matrix4();
@@ -376,7 +380,17 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
 
   function bindArtifact(filePath, knownBytes = null) {
     const relative = path.relative(derivativeDir, filePath).split(path.sep).join('/');
-    const bytes = knownBytes || fs.readFileSync(filePath);
+    let bytes = knownBytes;
+    if (!bytes) {
+      try {
+        bytes = fs.readFileSync(filePath);
+      } catch (error) {
+        if (['ENOENT', 'ENOTDIR', 'EISDIR'].includes(error?.code)) {
+          throw new Error(`required tile artifact is missing or invalid (${relative})`);
+        }
+        throw error;
+      }
+    }
     artifacts.set(relative, { uri: relative, sha256: sha256(bytes), byteLength: bytes.length });
     return bytes;
   }
@@ -465,10 +479,10 @@ function compareAudits(source, leaves, tolerance) {
   return { maxNumericDelta, equivalenceSha256: sha256(stable(canonical)) };
 }
 
-export async function auditLodEquivalence({ derivativeDir, sourceGlb, tolerance = DEFAULT_TOLERANCE }) {
+export async function auditLodEquivalence({ derivativeDir, sourceGlb, tolerance = DEFAULT_TOLERANCE, allowExternalSource = false }) {
   derivativeDir = path.resolve(derivativeDir);
   sourceGlb = path.resolve(sourceGlb);
-  if (!inside(derivativeDir, sourceGlb)) {
+  if (!allowExternalSource && !inside(derivativeDir, sourceGlb)) {
     throw new Error('source GLB must be inside the derivative directory so the runtime can bind it to the audit');
   }
   if (!/\.glb$/i.test(sourceGlb)) throw new Error('v1 equivalence auditing supports a GLB source only');
@@ -507,8 +521,8 @@ export async function auditLodEquivalence({ derivativeDir, sourceGlb, tolerance 
   };
 }
 
-export async function writeLodProvenance({ derivativeDir, sourceGlb, tolerance = DEFAULT_TOLERANCE, output }) {
-  const provenance = await auditLodEquivalence({ derivativeDir, sourceGlb, tolerance });
+export async function writeLodProvenance({ derivativeDir, sourceGlb, tolerance = DEFAULT_TOLERANCE, output, allowExternalSource = false }) {
+  const provenance = await auditLodEquivalence({ derivativeDir, sourceGlb, tolerance, allowExternalSource });
   const outputPath = path.resolve(output || path.join(derivativeDir, 'lod-provenance.json'));
   if (!inside(path.resolve(derivativeDir), outputPath)) throw new Error('provenance output must stay inside the derivative directory');
   const temporary = `${outputPath}.${process.pid}.tmp`;

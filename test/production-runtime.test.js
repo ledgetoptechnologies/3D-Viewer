@@ -12,6 +12,16 @@ const test = require('node:test');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 
+test('production image pins the mesh converter and patches classic Potree EPT fail closed', () => {
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /ARG OBJ2TILES_VERSION=1\.6\.2/);
+  assert.match(dockerfile, /Obj2Tiles-Linux64\.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0/);
+  assert.match(dockerfile, /Obj2Tiles-LinuxArm64\.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5/);
+  assert.match(dockerfile, /raw\.githubusercontent\.com\/OpenDroneMap\/Obj2Tiles\/v\$\{OBJ2TILES_VERSION\}\/LICENSE\.md/);
+  assert.match(dockerfile, /COPY --from=obj2tiles \/opt\/obj2tiles \/opt\/obj2tiles/);
+  assert.match(dockerfile, /node scripts\/patch-potree-ept\.mjs public\/potree\/build\/potree\/potree\.js/);
+});
+
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
   const compose = fs.readFileSync(path.join(repositoryRoot, 'docker-compose.yml'), 'utf8');
   const environmentTemplate = fs.readFileSync(path.join(repositoryRoot, '.env.example'), 'utf8');
@@ -52,6 +62,8 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /TRASH_MOUNT:\s*\/app\/storage\/trash/);
   assert.match(compose, /EMERGENCY_ADMIN_ENABLED:\s+"false"/);
   assert.match(compose, /LOCAL_DERIVATIVES_ENABLED:\s+"false"/);
+  assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+"true"/);
+  assert.match(compose, /OBJ2TILES_BIN:\s+\/opt\/obj2tiles\/Obj2Tiles/);
   assert.match(compose, /viewer-worker:[\s\S]*processing_worker_heartbeat/);
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);
   assert.doesNotMatch(compose, /^\s{2}gateway:/m);

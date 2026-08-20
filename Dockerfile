@@ -29,6 +29,28 @@ RUN curl -fsSL -o potree.zip \
     && test -s /potree/libs/copc/index.js \
     && test -s /potree/libs/plasio/js/laslaz.js
 
+# Pinned official OpenDroneMap Obj2Tiles release. Release assets are verified
+# against the SHA-256 digests published by GitHub before entering the image.
+FROM debian:bookworm-slim AS obj2tiles
+ARG TARGETARCH
+ARG OBJ2TILES_VERSION=1.6.2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && case "$TARGETARCH" in \
+      amd64) asset=Obj2Tiles-Linux64.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0 ;; \
+      arm64) asset=Obj2Tiles-LinuxArm64.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5 ;; \
+      *) echo "unsupported Obj2Tiles architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/obj2tiles.zip "https://github.com/OpenDroneMap/Obj2Tiles/releases/download/v${OBJ2TILES_VERSION}/${asset}" \
+    && echo "$digest  /tmp/obj2tiles.zip" | sha256sum -c - \
+    && mkdir -p /opt/obj2tiles \
+    && unzip -q /tmp/obj2tiles.zip -d /opt/obj2tiles \
+    && test -x /opt/obj2tiles/Obj2Tiles \
+    && /opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "${OBJ2TILES_VERSION}" \
+    && curl -fsSL -o /opt/obj2tiles/LICENSE.md "https://raw.githubusercontent.com/OpenDroneMap/Obj2Tiles/v${OBJ2TILES_VERSION}/LICENSE.md" \
+    && echo "b46d5156399774c9ba728b3d3f93c8ebf8da20dcebd5f67b5cd813aba2ec81cc  /opt/obj2tiles/LICENSE.md" | sha256sum -c -
+
 # ---------------------------------------------------------------------------
 # Stage 2: build the Vite frontend (bundles main.js, copies public/ incl.
 # the fetched Potree build into dist/).
@@ -39,6 +61,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 COPY --from=potree /potree ./public/potree
+RUN node scripts/patch-potree-ept.mjs public/potree/build/potree/potree.js
 RUN npx vite build
 
 # ---------------------------------------------------------------------------
@@ -48,6 +71,7 @@ RUN npx vite build
 FROM node:24-bookworm-slim AS runtime
 ARG VIEWER_SOURCE_COMMIT=unknown
 ENV NODE_ENV=production
+ENV OBJ2TILES_BIN=/opt/obj2tiles/Obj2Tiles
 LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
@@ -56,6 +80,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
+COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
 COPY --from=build /app/dist ./dist
 RUN printf '%s\n' "${VIEWER_SOURCE_COMMIT}" > /app/source-commit.txt \
     && chmod 0444 /app/source-commit.txt \

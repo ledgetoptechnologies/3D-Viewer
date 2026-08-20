@@ -8,6 +8,7 @@ const {extractZipStream}=require('./safeZip');
 const {hashFile,hashFileChunks,hashTree}=require('./storageManager');
 const {sanitizeLogMessage}=require('./processingSecurity');
 const {readOdmTaskMetadata}=require('./odmTaskMetadata');
+const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
 
 function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
@@ -73,10 +74,13 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:relative,status:'staged',byteSize:tree.byteSize,assetCount:assets.length});
   const derivatives=[];
   if(needsEpt&&config.localDerivativesEnabled)derivatives.push({type:'ept'});
-  if(nativeTiles&&hasFullMesh)derivatives.push({type:'lod_audit',request:{tilesRelativePath:`${relative}/${path.posix.dirname(nativeTiles.relativePath)}`}});
-  else if(hasFullMesh&&config.localDerivativesEnabled)derivatives.push({type:'mesh_tiles'});
-  if(derivatives.length){const activated=processing.completeIngestAndEnqueueDerivatives(job.id,job.lease_owner,attempt.id,derivatives,{ingestedAt:new Date().toISOString()});if(!activated)throw Object.assign(new Error('processing lease was lost or ingest state changed'),{code:'lease_lost'});}
-  else{const ready=processing.completeOutputForReview(attempt.id,{jobId:job.id,owner:job.lease_owner,ingestedAt:new Date().toISOString(),event:{eventId:`processing-ready-${attempt.id}`,schemaVersion:1,type:'processing.ready_for_review',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'ready_for_review',reviewUrl:`${config.opsBaseUrl}/operations/processing?attemptId=${encodeURIComponent(attempt.id)}`}});if(!ready)throw Object.assign(new Error('processing lease was lost or staged output changed'),{code:'lease_lost'});}
+  derivatives.push(...lodDerivativeSpecs([
+    ...assets,
+    ...(nativeTiles?[{...nativeTiles,rootKey:'models',relativePath:`${relative}/${nativeTiles.relativePath}`}]:[]),
+  ],{meshDerivativesEnabled:config.meshDerivativesEnabled}));
+  const readyEvent={eventId:`processing-ready-${attempt.id}`,schemaVersion:1,type:'processing.ready_for_review',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'ready_for_review',reviewUrl:`${config.opsBaseUrl}/operations/processing?attemptId=${encodeURIComponent(attempt.id)}`};
+  if(derivatives.length&&derivatives.some((spec)=>!spec.request?.optional)){const activated=processing.completeIngestAndEnqueueDerivatives(job.id,job.lease_owner,attempt.id,derivatives,{ingestedAt:new Date().toISOString()});if(!activated)throw Object.assign(new Error('processing lease was lost or ingest state changed'),{code:'lease_lost'});}
+  else{const ready=processing.completeOutputForReview(attempt.id,{jobId:job.id,owner:job.lease_owner,ingestedAt:new Date().toISOString(),event:readyEvent});if(!ready)throw Object.assign(new Error('processing lease was lost or staged output changed'),{code:'lease_lost'});if(derivatives.length&&!processing.enqueueOptionalDerivatives(attempt.id,derivatives))throw Object.assign(new Error('optional derivatives could not be queued'),{code:'derivative_activation_conflict'});}
 }
 
 async function processOne(deps,owner=crypto.randomUUID()){

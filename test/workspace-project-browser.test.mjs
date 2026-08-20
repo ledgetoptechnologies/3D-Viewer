@@ -71,6 +71,7 @@ const fixtures = {
     status: 'failed', phase: 'failed', progress: .25, source: { kind: 'server_folder', browserTransferRequired: false, transferComplete: true },
     attemptCount: 1, errorCode: 'invalid_archive', errorMessage: 'The archive could not be imported.', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z',
   }],
+  derivatives: [{ id: 'derivative-failed', attemptId: 'attempt-johnson', type: 'mesh_tiles', status: 'failed', optional: true, result: { error: 'Tile conversion failed; the original model remains available.' }, taskId: 'task-johnson', taskDisplayName: 'Johnson task', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z' }],
 };
 
 function browserPath() {
@@ -135,6 +136,11 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/ready') return json({ ok: true });
   if (pathname === '/api/v1/workspace/client-grants') return json({ projects: [], associations: [], grants: [] });
   if (pathname === '/api/v1/operations' && method === 'GET') return json({ operations: runtime.operations, nextCursor: null });
+  if (pathname === '/api/v1/processing/derivatives' && method === 'GET') return json({ derivatives: runtime.derivatives });
+  if (pathname === '/api/v1/processing/derivatives/derivative-failed/retry' && method === 'POST') {
+    runtime.derivatives = runtime.derivatives.map(job => job.id === 'derivative-failed' ? { ...job, status: 'pending', result: {} } : job);
+    return json({ derivative: runtime.derivatives.find(job => job.id === 'derivative-failed') }, 202);
+  }
   if (pathname === '/api/v1/operations/operation-failed/retry' && method === 'POST') {
     runtime.operations = runtime.operations.map(operation => operation.id === 'operation-failed' ? { ...operation, status: 'queued', phase: 'queued', progress: 0, heartbeatAt: null, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() } : operation);
     return json({ operation: runtime.operations.find(operation => operation.id === 'operation-failed') }, 202);
@@ -188,7 +194,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), operations: structuredClone(fixtures.operations) };
+  const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -331,6 +337,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
   runtime.operations = structuredClone(fixtures.operations);
+  runtime.derivatives = structuredClone(fixtures.derivatives);
   const requestStart = runtime.requests.length;
   const targetResponse = await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' });
   assert.equal(targetResponse.ok, true, `create browser target for ${viewport.name}`);
@@ -359,13 +366,19 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
 
-    await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 2", `${viewport.name}: persistent import activity did not load`);
+    await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '1'", `${viewport.name}: background work count did not load`);
+    await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
+    await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 2", `${viewport.name}: dedicated import activity did not load`);
     const activityText = await client.evaluate(`document.querySelector('#import-activity').textContent`);
     for (const expected of ['Import activity', '35%', 'Server ZIP', 'Phase: adopting', 'Worker heartbeat', 'The archive could not be imported.']) assert.ok(activityText.includes(expected), `${viewport.name}: missing operation detail ${expected}`);
     assert.equal(activityText.includes('server import'), false, `${viewport.name}: internal operation subject leaked into the activity title`);
     await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-failed/retry');
     await waitFor(client, "document.querySelector('[data-operation-id=\"operation-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed import retry did not return to queued`);
+    await waitFor(client, "document.querySelector('[data-action=\"retry-derivative\"][data-id=\"derivative-failed\"]')", `${viewport.name}: failed optional derivative did not expose manual retry`);
+    await client.evaluate(`document.querySelector('[data-action="retry-derivative"][data-id="derivative-failed"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-failed/retry');
+    await client.evaluate(`document.querySelector('[data-section="dashboard"]').click()`);
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
@@ -387,7 +400,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-select-path="church-backup.zip"]').click()`);
     await client.evaluate(`document.querySelector('#server-import-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/server-task-imports');
-    await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-operation-id=\"operation-new\"]')?.textContent.includes('queued')", `${viewport.name}: modal import did not hand off to persistent activity`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && Number(document.querySelector('#background-work-count')?.textContent) >= 1", `${viewport.name}: modal import did not update the background work count`);
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: task details did not expand`);
@@ -449,7 +462,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
-    assert.equal(await client.evaluate(`document.querySelector('[data-operation-id="operation-new"]')?.textContent.includes('queued')`), true, `${viewport.name}: activity did not persist across navigation`);
+    assert.equal(await client.evaluate(`Number(document.querySelector('#background-work-count')?.textContent) >= 1`), true, `${viewport.name}: background count did not persist across navigation`);
     await client.evaluate(`document.querySelector('[data-action="open-provider"][data-id="provider-nodeodm"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: provider modal did not open`);
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider modal selection`);
