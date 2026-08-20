@@ -7,12 +7,12 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\" \"test/*.test.mjs\"",
+    "test": "vite build && node --test \"test/*.test.js\" \"test/*.test.mjs\"",
     "dev": "vite --host 0.0.0.0 --port 8080",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 8080",
     "server": "node server/index.js",
-    "check": "npm test && npm run build",
+    "check": "npm test",
     "audit:lod": "node scripts/audit-lod-equivalence.mjs",
     "validate:lod": "node scripts/validate-lod.mjs",
     "verify:production": "node scripts/production-readiness.mjs",

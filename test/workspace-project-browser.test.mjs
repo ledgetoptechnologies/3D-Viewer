@@ -189,6 +189,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 
 function startFixtureServer() {
   const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), operations: structuredClone(fixtures.operations) };
+  const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
@@ -205,8 +206,8 @@ function startFixtureServer() {
       }
     } else {
       const relative = url.pathname === '/workspace' || url.pathname === '/' ? 'workspace.html' : decodeURIComponent(url.pathname.slice(1));
-      const absolute = path.resolve(root, relative);
-      if (!absolute.startsWith(root + path.sep) || !existsSync(absolute)) result = json({ error: 'not_found' }, 404);
+      const absolute = path.resolve(builtRoot, relative);
+      if (!absolute.startsWith(builtRoot + path.sep) || !existsSync(absolute)) result = json({ error: 'not_found' }, 404);
       else {
         const extension = path.extname(absolute);
         const type = extension === '.html' ? 'text/html; charset=utf-8'
