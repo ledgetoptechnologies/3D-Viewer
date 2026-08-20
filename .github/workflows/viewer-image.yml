@@ -79,17 +79,61 @@ jobs:
           sbom: true
 
       - name: Verify published immutable image
+        id: verify
         if: github.event_name == 'push'
         shell: bash
         env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
+          EXPECTED_SCHEMA_VERSION: "21"
+          EXPECTED_OBJ2TILES_VERSION: "1.6.2"
+          EXPECTED_POTREE_VERSION: "1.8.2"
         run: |
           set -euo pipefail
-          test -n "${PUBLISHED_IMAGE##*@}"
+          [[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$PUBLISHED_IMAGE" = "$IMAGE_NAME@$IMAGE_DIGEST"
           docker pull "$PUBLISHED_IMAGE"
           test "$(docker inspect --format '{{.Config.User}}' "$PUBLISHED_IMAGE")" = "568:568"
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$PUBLISHED_IMAGE")" = "$EXPECTED_REVISION"
           docker run --rm --entrypoint sh -e EXPECTED_REVISION="$EXPECTED_REVISION" "$PUBLISHED_IMAGE" -c \
             'test "$(cat /app/source-commit.txt)" = "$EXPECTED_REVISION" && test "$(stat -c %a /app/source-commit.txt)" = 444'
-          printf 'Verified immutable image `%s`\n' "$PUBLISHED_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          docker run --rm --entrypoint sh -e EXPECTED_OBJ2TILES_VERSION="$EXPECTED_OBJ2TILES_VERSION" "$PUBLISHED_IMAGE" -c \
+            '/opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "$EXPECTED_OBJ2TILES_VERSION" >/dev/null'
+          docker run --rm --entrypoint node "$PUBLISHED_IMAGE" -e '
+            const fs=require("node:fs");
+            const file="/app/dist/potree/build/potree/potree.js";
+            const source=fs.readFileSync(file,"utf8");
+            const start=source.indexOf("class EptLoader");
+            const end=source.indexOf("class CopcLoader",start+1);
+            const ept="new Potree.PointCloudEptGeometryNode(geometry)";
+            const copc="new Potree.PointCloudCopcGeometryNode(geometry)";
+            if(start<0||end<=start)process.exit(2);
+            const block=source.slice(start,end);
+            if((block.split(ept).length-1)!==1||block.includes(copc)||!source.slice(end).includes(copc))process.exit(3);
+          '
+          VIEWER_SCHEMA_VERSION="$(docker run --rm --entrypoint node "$PUBLISHED_IMAGE" -e '
+            const {openDatabase}=require("./server/database");
+            const db=openDatabase("/tmp/release-attestation.sqlite");
+            try{process.stdout.write(String(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get().version));}
+            finally{db.close();}
+          ')"
+          test "$VIEWER_SCHEMA_VERSION" = "$EXPECTED_SCHEMA_VERSION"
+          export VIEWER_SCHEMA_VERSION
+          node scripts/write-image-attestation.mjs viewer-image-attestation.json
+          sha256sum viewer-image-attestation.json > viewer-image-attestation.json.sha256
+          printf 'Verified immutable image `%s`\n\n' "$PUBLISHED_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Release attestation SHA-256: `%s`\n' "$(cut -d' ' -f1 viewer-image-attestation.json.sha256)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release attestation
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v6
+        with:
+          name: viewer-image-attestation-${{ github.sha }}
+          path: |
+            viewer-image-attestation.json
+            viewer-image-attestation.json.sha256
+          if-no-files-found: error
+          retention-days: 90

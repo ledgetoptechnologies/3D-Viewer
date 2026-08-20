@@ -138,10 +138,20 @@ test('release-candidate image tags cannot move latest', () => {
   assert.match(workflow, /type=ref,event=tag/);
   assert.match(workflow, /type=sha,prefix=sha-/);
   assert.match(workflow, /id:\s*build[\s\S]*Verify published immutable image/);
+  assert.match(workflow, /\[\[ "\$IMAGE_DIGEST" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]/);
+  assert.match(workflow, /\[\[ "\$EXPECTED_REVISION" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
   assert.match(workflow, /docker pull "\$PUBLISHED_IMAGE"/);
   assert.match(workflow, /\.Config\.User[\s\S]*568:568/);
   assert.match(workflow, /org\.opencontainers\.image\.revision/);
   assert.match(workflow, /source-commit\.txt[\s\S]*stat -c %a[\s\S]*444/);
+  assert.match(workflow, /Obj2Tiles --version[\s\S]*EXPECTED_OBJ2TILES_VERSION/);
+  assert.match(workflow, /PointCloudEptGeometryNode[\s\S]*PointCloudCopcGeometryNode/);
+  assert.match(workflow, /SELECT MAX\(version\) AS version FROM schema_migrations/);
+  assert.match(workflow, /test "\$VIEWER_SCHEMA_VERSION" = "\$EXPECTED_SCHEMA_VERSION"/);
+  assert.match(workflow, /node scripts\/write-image-attestation\.mjs viewer-image-attestation\.json/);
+  assert.match(workflow, /sha256sum viewer-image-attestation\.json > viewer-image-attestation\.json\.sha256/);
+  assert.match(workflow, /uses:\s*actions\/upload-artifact@v6[\s\S]*viewer-image-attestation-\$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /if-no-files-found:\s*error/);
 });
 
 test('live ODM compatibility cancellation exercises committed work and waits for status 50', () => {

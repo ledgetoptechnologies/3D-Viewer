@@ -96,7 +96,17 @@ emergency override: interrupted work remains lease/journal recoverable, but the
 normal update path must drain first. Compose grants two minutes after SIGTERM;
 do not force-kill a worker merely because a large operation has not exited yet.
 
-`LOCAL_DERIVATIVES_ENABLED` remains false in the stock image. The production path requests native EPT, GLB, and 3D Tiles outputs from ODM. If local derivatives are explicitly enabled, worker startup fails unless compatible Entwine and Obj2Tiles executables are present. A 3D Tiles result is publishable only after the existing LOD-v2 audit proves the full-detail frontier; otherwise the self-contained full GLB is retained as the safe fallback.
+`LOCAL_DERIVATIVES_ENABLED` remains false in the stock image, so local Entwine
+point-cloud conversion stays disabled. Mesh fallback is a separate bounded
+path: the production image pins Obj2Tiles 1.6.2 and Compose sets
+`MESH_DERIVATIVES_ENABLED=true` with `OBJ2TILES_BIN` fixed to the bundled
+executable. The production path still prefers native EPT, GLB, and 3D Tiles
+outputs from ODM. Missing or invalid tiles receive one optional background
+generation attempt only when both a textured OBJ and independent companion GLB
+are present; existing review-ready imports are covered by the same bounded
+backfill cursor. Failure retains the self-contained full GLB and requires an
+authorized manual retry. Any native or generated 3D Tiles result is exposed
+only after the LOD-v2 audit proves the full-detail frontier.
 
 ## Dataset lifecycle
 

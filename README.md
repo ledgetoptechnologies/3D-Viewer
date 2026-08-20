@@ -369,9 +369,12 @@ origins.
   portal or public-share sessions.
 - **Cross-origin session control requires HTTPS.** Session/asset authorization
   does not depend on third-party cookies. Put this app behind TLS in production.
-- **Not implemented**: annotations, source-file download controls, and
-  original flight-photo access. Pinned-version public shares are rejected
-  until pinned-version asset resolution is implemented; `latest` works now.
+- **Not implemented**: annotations and source-file download controls.
+  Integrity-checked original flight photos are available to authorized camera
+  markers when an exact imported JPEG link exists; positions remain visible
+  with an explicit unavailable-photo state otherwise. Pinned-version public
+  shares are rejected until pinned-version asset resolution is implemented;
+  `latest` works now.
 
 ### Cloudflare edge layout
 
