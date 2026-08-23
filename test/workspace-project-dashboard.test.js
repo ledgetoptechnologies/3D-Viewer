@@ -21,6 +21,16 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(css,/@media\(max-width:720px\)/);
 });
 
+test('workspace route preserves the section project and expanded task across history and reauthorization',()=>{
+  assert.match(source,/new URLSearchParams\(\{section:/);
+  for(const parameter of ["params.set('project'","params.set('task'"])assert.ok(source.includes(parameter),parameter);
+  assert.match(source,/history\[mode==='push'\?'pushState':'replaceState'\]/);
+  assert.match(source,/addEventListener\('popstate'/);
+  assert.match(source,/view:workspaceView\(\)/);
+  assert.match(source,/if\(valid&&pending\?\.view\)applyWorkspaceView\(pending\.view\)/);
+  assert.match(source,/validateWorkspaceView\(\);syncWorkspaceView\('replace'\)/);
+});
+
 test('project detail owns import processing GCP outputs review and sharing',()=>{
   for(const value of ['project-import','project-process','project-share','gcp-import-form','Outputs and review','Review & publish','client-grant-form','share-form'])assert.ok(source.includes(value),value);
   for(const permission of ['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'])assert.match(source,new RegExp(`'${permission.replaceAll('.','\\.')}'`));
@@ -36,6 +46,8 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
   assert.match(source,/emlid-all-columns-v1/);
   assert.match(source,/confirmationToken:preview\.confirmationToken/);
   assert.doesNotMatch(source,/NAD83 \/ Wisconsin Central|value="NAVD88"/);
+  assert.doesNotMatch(source,/card\('Project datasets'/);
+  assert.match(source,/project-columns single-column/);
 });
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
@@ -52,6 +64,15 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/download-logs/);
   assert.match(source,/fullscreen-logs/);
   assert.match(source,/artifactActions\(output,/);
+  assert.match(source,/function taskQuickActions\(task\)/);
+  assert.match(source,/activePublished&&item\.status==='published'\)\|\|outputs\.find\(item=>item\.status==='ready'&&item\.attemptId\)/);
+  assert.match(source,/output\.status==='ready'&&output\.attemptId&&can\('viewer\.processing\.publish'\)/);
+  assert.match(source,/button\('open-review',output\.attemptId,'View',true\)/);
+  assert.match(source,/if\(published&&\(can\('viewer\.shares\.create'\)\|\|can\('viewer\.client_grants\.manage'\)\)\)/);
+  for(const label of ["'View'","'Download'","'Report'","'Share'"])assert.ok(source.includes(label),label);
+  assert.match(source,/class="task-quick-actions row-actions"/);
+  assert.match(source,/class="task-summary-toggle"/);
+  assert.match(css,/\.task-quick-actions .*min-height:46px/);
   for(const field of ['averageGsdM','surveyedAreaM2','sourceImageCount','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
   assert.ok(source.includes('formatGsd(metrics.averageGsdM,units)'));
   assert.ok(source.includes('formatArea(metrics.surveyedAreaM2,units)'));
@@ -67,6 +88,11 @@ test('published orthophoto previews use the real authenticated derivative and fa
   assert.match(source,/Authorization:`Bearer \$\{state\.token\}`/);
   assert.match(source,/allowFullFile:false/);
   assert.match(source,/image\.readRGB/);
+  assert.match(source,/enableAlpha:true/);
+  assert.match(source,/parseFiniteGdalNoData\(image\.getGDALNoData\(\)\)/);
+  assert.match(source,/isRgbNoData\(/);
+  assert.match(source,/toDataURL\('image\/png'\)/);
+  assert.doesNotMatch(source,/pixels\.data\[target\+3\]=255/);
   assert.match(source,/Preview unavailable/);
   assert.doesNotMatch(source,/placeholder.*orthophoto|mock.*orthophoto/i);
 });

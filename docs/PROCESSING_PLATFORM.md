@@ -97,16 +97,21 @@ normal update path must drain first. Compose grants two minutes after SIGTERM;
 do not force-kill a worker merely because a large operation has not exited yet.
 
 `LOCAL_DERIVATIVES_ENABLED` remains false in the stock image, so local Entwine
-point-cloud conversion stays disabled. Mesh fallback is a separate bounded
-path: the production image pins Obj2Tiles 1.6.2 and Compose sets
-`MESH_DERIVATIVES_ENABLED=true` with `OBJ2TILES_BIN` fixed to the bundled
-executable. The production path still prefers native EPT, GLB, and 3D Tiles
-outputs from ODM. Missing or invalid tiles receive one optional background
-generation attempt only when both a textured OBJ and independent companion GLB
-are present; existing review-ready imports are covered by the same bounded
-backfill cursor. Failure retains the self-contained full GLB and requires an
-authorized manual retry. Any native or generated 3D Tiles result is exposed
-only after the LOD-v2 audit proves the full-detail frontier.
+point-cloud conversion stays disabled. Mesh generation is separately gated:
+the production image pins Obj2Tiles 1.6.2, but Compose keeps
+`MESH_DERIVATIVES_ENABLED` false unless an operator explicitly opts into the
+experimental path. The production path prefers verified native 3D Tiles and
+retains the original GLB as the full-resolution fallback. When explicitly
+enabled, missing or invalid tiles receive one optional background generation
+attempt only when both a textured OBJ and independent companion GLB are
+present; existing review-ready imports use the same bounded backfill cursor.
+Failure retains the full GLB and requires an authorized manual retry; failed
+work is never automatically requeued. GLB-only and OBJ-only sources remain
+fail-closed because the image has no pinned interchange converter capable of
+supplying independently auditable preservation evidence. Native or generated
+3D Tiles are exposed only after the LOD-v2 audit proves the full-detail
+frontier. Current Obj2Tiles output retriangulates partition boundaries, so its
+generated result does not pass that proof and cannot silently replace the GLB.
 
 ## Dataset lifecycle
 

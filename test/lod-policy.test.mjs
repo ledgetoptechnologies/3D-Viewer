@@ -78,7 +78,7 @@ test('full-quality claim requires provenance for the exact active full mesh', ()
     textures: 'byte-identical-material-equivalence',
     leafGeometricError: 0,
     audit: {
-      algorithm: 'ltds-glb-leaf-equivalence-v1',
+      algorithm: 'ltds-glb-leaf-equivalence-v2',
       coordinateTolerance: 1e-6,
       maxNumericDelta: 0,
       triangleCount: 42,

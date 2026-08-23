@@ -310,6 +310,7 @@ export class EarthLikeControls {
   _zoomTowards(hit, s) {
     const cam = this.camera;
     const offset = new THREE.Vector3().subVectors(cam.position, hit);
+    if (!Number.isFinite(s) || s <= 0 || offset.lengthSq() <= 1e-12) return;
     let d = offset.length() * s;
     d = THREE.MathUtils.clamp(d, this.minDistance, this.maxDistance);
     offset.setLength(d);

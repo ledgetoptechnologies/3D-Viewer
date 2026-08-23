@@ -213,8 +213,8 @@ test('production readiness exercises an exact protected Ops browser capability w
   assert.deepEqual(output.protectedCapability, {
     ok: true,
     audience: 'ops',
-    assetKinds: ['glb', 'tiles', 'tiles-child', 'ept', 'ept-hierarchy', 'ept-node'],
-    rangeChecks: 3,
+    assetKinds: ['glb', 'ept', 'ept-hierarchy', 'ept-node'],
+    rangeChecks: 2,
     failClosedChecks: 6,
   });
   assert.equal(output.models, 1);

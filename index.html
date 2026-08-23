@@ -159,6 +159,7 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #loading-text { color: #aaa; font-size: 13px; letter-spacing: 0.4px; }
     #loading-progress { color: var(--brand-orange); font-size: 13px; font-weight: 700; min-height: 18px; }
+    #loading-cancel { display: none; pointer-events: auto; min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; background: #25252b; color: #fff; cursor: pointer; }
 
     #floating-controls { position: absolute; top: 14px; right: 14px; z-index: 120; display: flex; gap: 8px; }
     .icon-btn {
@@ -186,6 +187,10 @@
     }
     #error-panel h2 { color: #ff6666; font-size: 16px; margin-bottom: 8px; }
     #error-panel p { color: #ddd; font-size: 13px; line-height: 1.5; }
+    #error-actions { display: none; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+    #error-actions button { min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; cursor: pointer; }
+    #error-retry { background: #ee5007; color: #fff; }
+    #error-lod { background: #25252b; color: #fff; }
 
     .leaflet-control-zoom a { background: var(--brand-panel) !important; color: #fff !important; border-color: var(--panel-border) !important; }
     .leaflet-control-attribution { background: rgba(10,10,12,0.85) !important; color: #999 !important; }
@@ -552,12 +557,17 @@
           <div class="spinner"></div>
           <div id="loading-text">Loading viewer...</div>
           <div id="loading-progress"></div>
+          <button id="loading-cancel" type="button">Cancel full mesh</button>
         </div>
       </div>
 
       <div id="error-panel">
         <h2>Viewer Error</h2>
         <p id="error-message">Check the console for details.</p>
+        <div id="error-actions">
+          <button id="error-retry" type="button">Retry full mesh</button>
+          <button id="error-lod" type="button">Continue with LOD</button>
+        </div>
       </div>
 
       <div id="dem-legend">

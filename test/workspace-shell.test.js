@@ -10,7 +10,8 @@ const server=fs.readFileSync(path.join(root,'server','index.js'),'utf8');
 
 test('workspace redeems an Ops grant and removes it from the URL',()=>{
   assert.match(source,/\/api\/v1\/admin-sessions\/redeem/);
-  assert.match(source,/history\.replaceState\(null,'','\/workspace'\)/);
+  assert.match(source,/syncWorkspaceView\('replace'\)/);
+  assert.match(source,/return`\/workspace\?\$\{params\}`/);
   assert.match(source,/sessionStorage\.setItem\(TOKEN_KEY,state\.token\)/);
 });
 test('workspace keeps imports and access modes explicit',()=>{

@@ -80,6 +80,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
+COPY lod-policy.mjs ./lod-policy.mjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
 COPY --from=build /app/dist ./dist
 RUN printf '%s\n' "${VIEWER_SOURCE_COMMIT}" > /app/source-commit.txt \

@@ -214,7 +214,7 @@ the public health/ready probes, exact host redirect, disabled legacy admin API,
 and the HMAC-authenticated model catalog. It prints only counts and mount paths.
 Add `--model webodm-PROJECTID-TASKID` to require one exact registered model. Add
 `--require-lod` only after its derivative directory contains `tileset.json`, a
-full `model.glb`, and conversion-generated `lod-provenance.json`; this makes the
+    full `model.glb`, and audit-generated `lod-provenance.json`; this makes the
 deployment check fail closed when full-quality LOD provenance is absent.
 `--require-point-cloud` accepts either streamed EPT or a whole-file LAS/LAZ/PLY
 fallback. For a browser-scalable production cloud, also pass `--require-ept`.
@@ -426,14 +426,15 @@ empty.
 - **Production derivatives prefer ODM's native stages.** Provider
   capabilities request `pc-ept`, `3d-tiles`, and `gltf`, and the Viewer audits
   existing tile manifests before reuse. The production image pins and verifies
-  Obj2Tiles 1.6.2 for textured-OBJ mesh fallback while Entwine remains disabled.
-  Missing or invalid mesh tiles queue one optional background generation attempt;
-  failure leaves the original full mesh available and requires an authorized
-  manual Retry. A bounded maintenance cursor applies the same policy to existing
-  review-ready imports. Verified generation requires both the textured OBJ as
-  converter input and its companion GLB as the independent equivalence source
-  and fallback. OBJ-only or GLB-only models remain explicit full-mesh fallbacks;
-  the Viewer does not claim streaming LOD that it cannot validate.
+  Obj2Tiles 1.6.2 for controlled experiments while Entwine and automatic mesh
+  generation both default off. Imported native tiles are quarantined until an
+  audit binds them to the companion GLB. The original GLB remains available
+  when that proof is missing or fails. Explicitly enabling mesh generation
+  permits one bounded background attempt and one authorized manual retry, but
+  current Obj2Tiles output retriangulates partition boundaries and therefore
+  cannot activate under the exact v2 proof. OBJ-only or GLB-only models remain
+  explicit full-mesh fallbacks; the Viewer never claims streaming LOD that it
+  cannot validate.
 - **Native 3D Tiles do not automatically prove lossless full detail.** The
   schema-v2 LOD audit must bind the exact full GLB, leaf geometry, material
   state, and texture bytes. If upstream tiling decimates, retriangulates, or
@@ -605,7 +606,8 @@ WGS84 UTM 16N
 
   Production LOD sets therefore require `lod-provenance.json` beside
   `tileset.json`. Without a valid record, the viewer safely switches to the
-  actual full mesh (or disables the invalid LOD layer if no full mesh exists):
+  actual full mesh when the runtime memory guard permits it (or disables the
+  invalid LOD layer when no safe full-mesh path exists):
 
   Generate the record with the offline equivalence audit; never hand-author it:
 
@@ -625,7 +627,7 @@ WGS84 UTM 16N
     "textures": "byte-identical-material-equivalence",
     "leafGeometricError": 0,
     "audit": {
-      "algorithm": "ltds-glb-leaf-equivalence-v1",
+      "algorithm": "ltds-glb-leaf-equivalence-v2",
       "coordinateTolerance": 0.000001,
       "maxNumericDelta": 0,
       "triangleCount": 123456,
@@ -640,10 +642,11 @@ WGS84 UTM 16N
   triangles, vertex attributes, render material state, samplers, and exact
   texture bytes. It binds every tileset, leaf, and external texture by digest.
   During import validation the Viewer re-hashes the selected full GLB and every bound
-  artifact before exposing the evidence. Otherwise the client automatically
-  loads the actual full mesh. See [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
+  artifact before exposing the evidence. Otherwise the client attempts the
+  actual full mesh only within its device/heap-aware decode budget. See
+  [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
   for the intentionally fail-closed supported subset and why a tiler that clips
-  or retriangulates partition boundaries cannot receive an exact v1 proof.
+  or retriangulates partition boundaries cannot receive an exact v2 proof.
 - **Camera positions**: one `InstancedMesh` of view-frustum pyramids, gold
   highlight on hover, tooltip with filename. Size slider.
 - **Measurements**: distance / area / volume with CSS2D labels pinned to the

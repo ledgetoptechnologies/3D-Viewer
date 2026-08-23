@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const digestCache = new Map();
-const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v1';
+const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIT_ARTIFACTS = 100_000;
 
@@ -149,7 +149,12 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
       artifactCount: audit.artifacts.length,
     },
   } : null;
-  return { verified: errors.length === 0, errors, provenance: sanitized };
+  const artifacts = errors.length === 0 ? audit.artifacts.map((artifact) => ({
+    uri: artifact.uri,
+    sha256: artifact.sha256.toLowerCase(),
+    byteLength: artifact.byteLength,
+  })) : null;
+  return { verified: errors.length === 0, errors, provenance: sanitized, artifacts };
 }
 
 module.exports = { sha256File, verifyLodProvenance };

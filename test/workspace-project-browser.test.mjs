@@ -37,8 +37,8 @@ const fixtures = {
     },
     {
       id: 'task-quarry', projectId: 'project-quarry', datasetId: 'dataset-quarry', displayName: 'Quarry reconstruction',
-      status: 'failed', createdAt: '2026-08-18T12:00:00.000Z', metrics: { sourceImageCount: 12 },
-      latestAttempt: { id: 'attempt-quarry', providerId: 'provider-nodeodm', status: 'failed', createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:05:00.000Z' },
+      status: 'ready_for_review', createdAt: '2026-08-18T12:00:00.000Z', metrics: { sourceImageCount: 12 },
+      latestAttempt: { id: 'attempt-quarry', providerId: 'provider-nodeodm', status: 'ready_for_review', createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:05:00.000Z' },
     },
   ],
   providers: [
@@ -61,6 +61,11 @@ const fixtures = {
   }, {
     id: 'output-johnson-archived', taskId: 'task-johnson', modelId: 'model-johnson-old', displayName: 'Johnson archived output',
     status: 'archived', activePublished: false, byteSize: 2048, assetCount: 1, assetKinds: [],
+  }, {
+    id: 'output-quarry-ready', taskId: 'task-quarry', modelId: 'model-quarry', attemptId: 'attempt-quarry', displayName: 'Quarry ready output',
+    status: 'ready', activePublished: false, byteSize: 3072, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
+    downloadUrl: '/api/v1/processing/outputs/output-quarry-ready/assets/glb',
+    reportUrl: '/api/v1/processing/outputs/output-quarry-ready/assets/report',
   }],
   operations: [{
     id: 'operation-running', type: 'webodm_task_import', subject: 'server import', projectId: 'project-johnson',
@@ -86,6 +91,29 @@ function browserPath() {
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   ].filter(Boolean);
   return candidates.find(existsSync) || null;
+}
+
+async function removeBrowserProfile(profile, t) {
+  if (!profile) return;
+  const resolved = path.resolve(profile);
+  const expectedPrefix = path.resolve(tmpdir(), 'ltds-viewer-browser-');
+  if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
+  let lastError;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(resolved, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
+  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(lastError?.code)) {
+    t.diagnostic(`Windows retained a lock on temporary browser profile ${resolved}; functional browser assertions completed.`);
+    return;
+  }
+  throw lastError;
 }
 
 function json(response, status = 200) {
@@ -117,6 +145,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/outputs') return json({ outputs: fixtures.outputs, nextCursor: null });
   if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
   if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-published-grant' }, 201);
+  if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-review-grant', assetKinds: ['glb', 'ortho', 'report'] }, 201);
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho') return { status: 200, body: orthophotoFixture, type: 'image/tiff' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
@@ -158,7 +187,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       taskDiskUsageBytes: 9437184,
     }, outputs: fixtures.outputs } });
   }
-  if (pathname === '/api/v1/tasks/task-quarry') return json({ task: { ...fixtures.tasks[1], status: runtime.archivedTasks.has('task-quarry')?'archived':'failed', metrics: { sourceImageCount: 12, processingStatus: 'failed', outputCount: 0 }, outputs: [] } });
+  if (pathname === '/api/v1/tasks/task-quarry') return json({ task: { ...fixtures.tasks[1], status: runtime.archivedTasks.has('task-quarry')?'archived':'ready_for_review', metrics: { sourceImageCount: 12, processingStatus: 'ready_for_review', outputCount: 1 }, outputs: [fixtures.outputs[2]] } });
   if (pathname === '/api/v1/tasks/task-johnson/storage') return json({ task: { totalBytes: 9437184 } });
   if (pathname === '/api/v1/tasks/task-quarry/storage') return json({ task: { totalBytes: 1048576 } });
   if (pathname === '/api/v1/tasks/task-johnson/attempts') return json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: null });
@@ -391,6 +420,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey project'", `${viewport.name}: project selection failed`);
+    assert.equal(await client.evaluate(`new URL(location.href).searchParams.get('project')`), 'project-johnson', `${viewport.name}: selected project was not encoded in the URL`);
+    assert.equal(await client.evaluate(`document.body.textContent.includes('Project datasets')`), false, `${viewport.name}: redundant project datasets card remained visible`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: selected project overflows horizontally`);
 
     await client.evaluate(`document.querySelector('[data-action="project-import"][data-id="project-johnson"]').click()`);
@@ -404,6 +435,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: task details did not expand`);
+    assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
+      { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
+      ['View', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts`);
+    assert.equal(await client.evaluate(`document.querySelectorAll('button button').length`), 0, `${viewport.name}: task shortcuts were nested inside a button`);
+    assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].every(button=>button.getBoundingClientRect().height>=44)`), true, `${viewport.name}: task shortcuts have sub-44px targets`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('project')==='project-johnson' && !new URL(location.href).searchParams.has('task') && document.querySelector('[data-action=\"toggle-task\"][data-id=\"task-johnson\"]')?.getAttribute('aria-expanded')==='false'", `${viewport.name}: browser Back did not collapse the task in place`);
+    await client.evaluate(`history.forward()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"toggle-task\"][data-id=\"task-johnson\"]')?.getAttribute('aria-expanded')==='true'", `${viewport.name}: browser Forward did not restore the task`);
+    await client.command('Page.reload');
+    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: refresh did not restore the selected project and expanded task`);
     assert.equal(await client.evaluate(`document.querySelector('[data-task-disclosure="logs"]').open`), false, `${viewport.name}: task output was not progressively disclosed`);
     await client.evaluate(`document.querySelector('[data-task-disclosure="logs"] summary').click()`);
     await waitFor(client, "document.querySelector('[data-task-disclosure=\"logs\"]')?.open === true", `${viewport.name}: task output disclosure did not open`);
@@ -425,12 +468,16 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="gcp-delete-mark"]').click()`);
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
 
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="download-report"]').click()`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="view-output"]').click()`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-published-grant')", `${viewport.name}: published output session did not open`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="share-output"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.share-form')?.dataset.outputId === 'output-johnson'", `${viewport.name}: task Share shortcut did not target the published output`);
+    await client.evaluate(`document.querySelector('.modal-close').click()`);
+
     await client.evaluate(`document.querySelector('[data-task-disclosure="outputs"] summary').click()`);
     await waitFor(client, "document.querySelector('[data-task-disclosure=\"outputs\"]')?.open === true", `${viewport.name}: output disclosure did not open`);
-    await client.evaluate(`document.querySelector('[data-action="download-report"]').click()`);
-    await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
-    await client.evaluate(`document.querySelector('[data-action="view-output"]').click()`);
-    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-published-grant')", `${viewport.name}: published output session did not open`);
 
     await client.evaluate(`document.querySelector('[data-action="archive-output"][data-id="output-johnson"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/archive');
@@ -438,6 +485,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="trash-output"][data-id="output-johnson-archived"]').click()`);
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/outputs/output-johnson-archived');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output trash did not settle`);
+    await client.evaluate(`document.querySelector('[data-task-disclosure="advanced"] summary').click()`);
+    await waitFor(client, "document.querySelector('[data-task-disclosure=\"advanced\"]')?.open === true", `${viewport.name}: advanced task controls did not open`);
     await client.evaluate(`document.querySelector('[data-action="archive-dataset"][data-id="dataset-johnson"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/datasets/dataset-johnson/archive');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset archive did not settle`);
@@ -449,6 +498,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry project'", `${viewport.name}: terminal project selection failed`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
+      ['View', 'Download', 'Report'], `${viewport.name}: ready output did not expose review/download/report shortcuts or exposed Share before publish`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="open-review"]').click()`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-review-grant')", `${viewport.name}: ready output View did not open its isolated review session`);
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"archive-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task archive was not reachable`);
     await client.evaluate(`document.querySelector('[data-action="archive-task"][data-id="task-quarry"]').click()`);
@@ -558,6 +611,6 @@ test('project-first workspace is interactive and overflow-free in real desktop a
       releaseBrowserLock();
     }
     if (server) await new Promise(resolve => server.close(resolve));
-    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await removeBrowserProfile(profile, t);
   }
 });

@@ -25,6 +25,18 @@ import { EarthLikeControls } from './earth-controls.js';
 import { hasMeshSource, localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
 import { fetchAssetArrayBufferByRange } from './range-fetch.mjs';
+import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
+import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
+import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
+import {
+  fullMeshByteLimit,
+  fullMeshDecodeTimeoutMs,
+  fullMeshFailureDisposition,
+  fullMeshUserMessage,
+  isRetryableFullMeshError,
+  meshRuntimeError,
+  withDecodeWatchdog,
+} from './full-mesh-runtime.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -82,6 +94,7 @@ const dom = {};
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','photo-empty','cam-tooltip','labels-container',
+ 'error-actions','error-retry','error-lod','loading-cancel',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
@@ -130,6 +143,7 @@ let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
+let activeGlbLoad = null;
 let camGroupParent, camInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
@@ -649,7 +663,7 @@ function initThree() {
     minPolar: 0.02,
     maxPolar: Math.PI - 0.03,      // full range: orbit under the model like WebODM
     fallbackPlaneY: 18,            // ~avg terrain height in world frame
-    minDistance: 0.4,
+    minDistance: closeZoomDistanceForDiameter(1000, { cameraNear: camera.near }),
     maxDistance: 6000
   });
   scene.add(controls.pivotIndicator);
@@ -943,52 +957,119 @@ function topDownView() {
 // ───────────────────────────────────────────────────────────────
 // Full-res GLB (on demand)
 // ───────────────────────────────────────────────────────────────
+function disposeThreeObject(root) {
+  root?.traverse?.((child) => {
+    child.geometry?.dispose?.();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (!material) continue;
+      for (const value of Object.values(material)) if (value?.isTexture) value.dispose?.();
+      material.dispose?.();
+    }
+  });
+}
+
+function cancelGLBLoad() {
+  const attempt = activeGlbLoad;
+  if (!attempt) return;
+  attempt.cancelled = true;
+  attempt.controller.abort();
+  attempt.draco.dispose();
+  activeGlbLoad = null;
+  state.glbLoading = false;
+  hideLoading();
+}
+
+function selectStreamingLod() {
+  if (!TILES_URL) return;
+  cancelGLBLoad();
+  document.getElementById('layer-glb').classList.remove('active');
+  document.getElementById('layer-tiles').classList.add('active');
+  applyMeshLayer();
+}
+
+function retryFullMesh() {
+  cancelGLBLoad();
+  state.glbLoaded = false;
+  document.getElementById('layer-glb').classList.add('active');
+  document.getElementById('layer-tiles').classList.remove('active');
+  applyMeshLayer();
+}
+
 async function loadGLB() {
   if (state.glbLoaded) { glbParent.visible = true; return; }
-  if (state.glbLoading) return;
+  if (state.glbLoading || !GLB_URL) return;
   state.glbLoading = true;
-  // Free the ~2.5GB tile cache BEFORE the 898MB Draco decode — both at once
-  // OOM-killed the renderer process (observed heap ~2.7GB at crash).
+  // Free the tile cache before the memory-heavy fallback decode.
   disposeTiles();
   tilesParent.visible = false;
-  updateLoading('Loading full-resolution Draco mesh...', '0%');
+  updateLoading('Downloading full-resolution mesh...', 'Preparing secure range download...', true);
 
   const draco = new DRACOLoader();
   draco.setDecoderPath('/draco/');
+  draco.setWorkerLimit(Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)));
   const loader = new GLTFLoader();
   loader.setDRACOLoader(draco);
+  const attempt = { controller: new AbortController(), draco, cancelled: false };
+  activeGlbLoad = attempt;
+  let totalBytes = 0;
 
   try {
     const glb = await fetchAssetArrayBufferByRange(GLB_URL, {
+      signal: attempt.controller.signal,
+      maxBytes: fullMeshByteLimit(navigator.deviceMemory, performance.memory?.jsHeapSizeLimit),
+      onMetadata: (total) => { totalBytes = total; },
       onProgress: (loaded, total) => {
         const pct = ((loaded / total) * 100).toFixed(0);
-        updateLoading('Loading full-resolution Draco mesh...', `${pct}% (${(loaded / 1048576).toFixed(0)} MB)`);
+        updateLoading('Downloading full-resolution mesh...', `${pct}% (${(loaded / 1048576).toFixed(0)} of ${(total / 1048576).toFixed(0)} MB)`, true);
       },
     });
-    updateLoading('Decoding full-resolution Draco mesh...', '100%');
-    const gltf = await loader.parseAsync(glb, '');
+    if (activeGlbLoad !== attempt || attempt.cancelled) throw meshRuntimeError('full_mesh_cancelled', 'Full-resolution mesh loading was cancelled');
+    updateLoading('Decoding full-resolution mesh...', 'Download complete · preparing geometry and textures', true);
+    const decode = loader.parseAsync(glb, '');
+    decode.then((late) => {
+      if (activeGlbLoad !== attempt || attempt.cancelled) disposeThreeObject(late.scene);
+    }).catch(() => {});
+    const gltf = await withDecodeWatchdog(decode, {
+      timeoutMs: fullMeshDecodeTimeoutMs(totalBytes || glb.byteLength),
+      onTimeout: () => { attempt.controller.abort(); draco.dispose(); },
+    });
+    if (activeGlbLoad !== attempt || attempt.cancelled) {
+      disposeThreeObject(gltf.scene);
+      throw meshRuntimeError('full_mesh_cancelled', 'Full-resolution mesh loading was cancelled');
+    }
     gltf.scene.traverse((child) => {
       if (child.isMesh) {
-        child.material.side = THREE.FrontSide;   // WebODM-style see-through from below
+        child.material.side = THREE.FrontSide;
         if (child.material.map) child.material.map.colorSpace = THREE.SRGBColorSpace;
         queueBVH(child);
       }
     });
     glbOffset.add(gltf.scene);
+    frameObjectHome(gltf.scene);
     state.glbLoaded = true;
     state.glbLoading = false;
+    activeGlbLoad = null;
     applyMeshLayer();
     hideLoading();
     draco.dispose();
   } catch (err) {
-    console.error('GLB load error', err);
-    state.glbLoading = false;
+    const wasCancelled = attempt.cancelled || err?.name === 'AbortError' || err?.code === 'full_mesh_cancelled';
+    if (!wasCancelled) console.error('Full-resolution mesh load failed', err?.code || err?.name || 'unknown_error');
+    const disposition = fullMeshFailureDisposition(activeGlbLoad, attempt, { cancelled: wasCancelled });
+    if (disposition.clearSharedState) {
+      activeGlbLoad = null;
+      state.glbLoading = false;
+      hideLoading();
+    }
     draco.dispose();
-    hideLoading();
-    showError(`Failed to load full-res mesh from ${GLB_URL}.`);
-    document.getElementById('layer-glb').classList.remove('active');
-    document.getElementById('layer-tiles').classList.add('active');
-    applyMeshLayer();   // rebuilds the disposed tiles renderer
+    if (!disposition.recover) return;
+    if (TILES_URL) selectStreamingLod();
+    showError(fullMeshUserMessage(err, { hasLod: Boolean(TILES_URL) }), {
+      persistent: true,
+      retry: isRetryableFullMeshError(err) ? retryFullMesh : null,
+      returnToLod: TILES_URL ? selectStreamingLod : null,
+    });
   }
 }
 
@@ -1045,6 +1126,7 @@ function frameObjectHome(object3D) {
   if (box.isEmpty()) return;
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3()).length();
+  controls.minDistance = closeZoomDistanceForDiameter(size, { cameraNear: camera.near });
   const dist = Math.max(20, size * 0.9);
   homeView = {
     position: new THREE.Vector3(center.x, center.y + dist * 0.55, center.z + dist * 0.75),
@@ -1080,7 +1162,13 @@ async function loadCameras() {
     const res = await fetch(SHOTS_URL);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const geojson = await res.json();
-    camFeatures = geojson.features;
+    camFeatures = normalizeCameraFeatureCollection(geojson, { latLonToProjected: latLonToUtm });
+    camWorldPos = null;
+    if (!camFeatures.length) {
+      state.camerasLoaded = true;
+      window.__ltdsCams = 0;
+      return;
+    }
 
     const geo = buildFrustumGeometry();
     const mat = new THREE.MeshBasicMaterial({
@@ -1213,8 +1301,12 @@ function openPhoto(idx) {
   const feat = camFeatures[idx];
   if (!feat) return;
   resetPhotoView();
-  const fn = typeof feat.properties?.filename === 'string' ? feat.properties.filename : '';
-  const altitude = formatElevation(feat.geometry?.coordinates?.[2] || 0, DISPLAY_UNITS);
+  const photoKey = normalizeCameraPhotoKey(feat.properties?.photoKey);
+  const fn = photoKey ? photoKey.split('/').at(-1) : '';
+  const geometryAltitude = Number(feat.geometry?.coordinates?.[2]);
+  const translationAltitude = Number(feat.properties?.translation?.[2]);
+  const altitude = formatElevation(Number.isFinite(geometryAltitude) ? geometryAltitude
+    : (Number.isFinite(translationAltitude) ? translationAltitude : 0), DISPLAY_UNITS);
   const time = feat.properties.capture_time
     ? new Date(feat.properties.capture_time * 1000).toLocaleString()
     : '';
@@ -1230,12 +1322,12 @@ function openPhoto(idx) {
   dom.photoImg.removeAttribute('src');
   dom.photoDownload.style.display = 'none';
   dom.photoDownload.removeAttribute('href');
-  if (!PHOTO_BASE || !fn || fn.includes('/') || fn.includes('\\')) {
+  if (!PHOTO_BASE || !photoKey) {
     dom.photoEmpty.textContent = 'No photo available';
     dom.photoEmpty.style.display = 'flex';
     return;
   }
-  const url = `${PHOTO_BASE}/${encodeURIComponent(fn)}`;
+  const url = `${PHOTO_BASE}/${encodeURIComponent(photoKey)}`;
   dom.photoSpinner.style.display = 'block';
   dom.photoImg.style.display = '';
   dom.photoImg.onload = () => {
@@ -1657,7 +1749,7 @@ function onPointerMove(e) {
     const idx = pickCameraInstance(ndc);
     highlightCam(idx);
     if (idx >= 0) {
-      dom.camTooltip.textContent = camFeatures[idx].properties.filename;
+      dom.camTooltip.textContent = camFeatures[idx].properties.filename || 'Camera position';
       dom.camTooltip.style.display = 'block';
       dom.camTooltip.style.left = (e.clientX + 14) + 'px';
       dom.camTooltip.style.top = (e.clientY + 10) + 'px';
@@ -1738,7 +1830,7 @@ async function getDataset(url, isDem) {
     minE, minN, maxE, maxN,
     llCorners: cLL,                                   // NW, NE, SW, SE in lat/lon (warped)
     llBounds: [[minLat, minLon], [maxLat, maxLon]],   // encloses all 4 warped corners
-    nodata: parseFloat(image.fileDirectory?.GDAL_NODATA ?? 'NaN'),
+    nodata: parseFiniteGdalNoData(image.getGDALNoData()),
     _ovCache: null                                    // cached overview raster for recolor w/o refetch
   };
   if (isDem) {
@@ -1880,10 +1972,20 @@ function warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, la
         const cx0 = Math.max(0, Math.min(rw-1, x0)), cx1 = Math.max(0, Math.min(rw-1, x0+1));
         const i00 = cy0 * rw + cx0, i01 = cy0 * rw + cx1, i10 = cy1 * rw + cx0, i11 = cy1 * rw + cx1;
         const w00 = (1-tx)*(1-ty), w01 = tx*(1-ty), w10 = (1-tx)*ty, w11 = tx*ty;
-        data[o]   = sr[i00]*w00 + sr[i01]*w01 + sr[i10]*w10 + sr[i11]*w11;
-        data[o+1] = sg[i00]*w00 + sg[i01]*w01 + sg[i10]*w10 + sg[i11]*w11;
-        data[o+2] = sb[i00]*w00 + sb[i01]*w01 + sb[i10]*w10 + sb[i11]*w11;
-        data[o+3] = sa ? (sa[i00]*w00 + sa[i01]*w01 + sa[i10]*w10 + sa[i11]*w11) : 255;
+        if (sa) {
+          data[o]   = sr[i00]*w00 + sr[i01]*w01 + sr[i10]*w10 + sr[i11]*w11;
+          data[o+1] = sg[i00]*w00 + sg[i01]*w01 + sg[i10]*w10 + sg[i11]*w11;
+          data[o+2] = sb[i00]*w00 + sb[i01]*w01 + sb[i10]*w10 + sb[i11]*w11;
+          data[o+3] = sa[i00]*w00 + sa[i01]*w01 + sa[i10]*w10 + sa[i11]*w11;
+        } else {
+          const sample = maskedRgbBilinear(
+            sr, sg, sb,
+            [i00, i01, i10, i11],
+            [w00, w01, w10, w11],
+            ds.nodata,
+          );
+          data[o] = sample.r; data[o+1] = sample.g; data[o+2] = sample.b; data[o+3] = sample.a;
+        }
       }
     }
   } else {
@@ -1933,7 +2035,7 @@ function renderOrthoTile(raster, w, h, ds, warp) {
   const a = raster.length >= 4 ? raster[3] : null;
   for (let i = 0; i < w * h; i++) {
     img.data[i*4] = r[i]; img.data[i*4+1] = g[i]; img.data[i*4+2] = b[i];
-    img.data[i*4+3] = a ? a[i] : 255;
+    img.data[i*4+3] = a ? a[i] : (isRgbNoData(r[i], g[i], b[i], ds.nodata) ? 0 : 255);
   }
   ctx.putImageData(img, 0, 0);
   return cvs;
@@ -2413,8 +2515,20 @@ function showPointCloud() {
     dom.cloudContainer.appendChild(iframe);
     state.pcIframeLoaded = true;
   }
-  dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts (EPT)` : 'Cloud: EPT';
+  dom.cloudStatus.textContent = 'Cloud: connecting…';
 }
+
+window.addEventListener('message', (event) => {
+  const iframe = document.getElementById('pc-iframe');
+  if (!iframe || event.origin !== location.origin || event.source !== iframe.contentWindow) return;
+  const message = event.data;
+  if (!message || message.source !== 'ltds-pointcloud') return;
+  if (message.type === 'ready' && message.code === 'points_visible') {
+    dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready';
+  } else if (message.type === 'error') {
+    dom.cloudStatus.textContent = 'Cloud: unavailable';
+  }
+});
 
 // Bridge to the Potree iframe's control API (null until the iframe is ready)
 function pcApi() {
@@ -2506,6 +2620,7 @@ function bindUI() {
   // mesh source: tiles/obj (layer-tiles, repurposed per state.meshSource) OR
   // full-res GLB (radio behavior) — see applyAvailability()
   document.getElementById('layer-tiles').addEventListener('click', () => {
+    cancelGLBLoad();
     document.getElementById('layer-tiles').classList.add('active');
     document.getElementById('layer-glb').classList.remove('active');
     applyMeshLayer();
@@ -2514,6 +2629,11 @@ function bindUI() {
     document.getElementById('layer-glb').classList.add('active');
     document.getElementById('layer-tiles').classList.remove('active');
     applyMeshLayer();
+  });
+  dom.loadingCancel.addEventListener('click', () => {
+    if (!activeGlbLoad) return;
+    cancelGLBLoad();
+    if (TILES_URL) selectStreamingLod();
   });
 
   // cameras
@@ -2614,6 +2734,7 @@ function restoreMeshVisibility() {
 }
 
 function switchMode(mode) {
+  if (mode !== 'model') cancelGLBLoad();
   rememberMapView(state.activeMode);   // keep the view of the tab we're leaving
   const prevMode = state.activeMode;
   // disarm any active measure tool in the tab we're leaving (measurements persist)
@@ -2654,6 +2775,7 @@ function switchMode(mode) {
     updateStatus('Mode: 3D Model');
     if (pointCloudParent) pointCloudParent.visible = false;
     restoreMeshVisibility();
+    if (glbParent.visible && !state.glbLoaded && !state.glbLoading) loadGLB();
     if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for direct-cloud mode)
     onResize();
   } else if (isPotreeCloud) {
@@ -2677,16 +2799,30 @@ function switchMode(mode) {
 }
 
 function updateStatus(t) { dom.modeStatus.textContent = t; }
-function updateLoading(t, p) {
+function updateLoading(t, p, cancellable = false) {
   dom.loadingOverlay.classList.remove('hidden');
   dom.loadingText.textContent = t;
   dom.loadingProgress.textContent = p || '';
+  dom.loadingCancel.style.display = cancellable ? '' : 'none';
 }
-function hideLoading() { dom.loadingOverlay.classList.add('hidden'); }
-function showError(msg) {
+function hideLoading() { dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none'; }
+let errorHideTimer = null;
+function hideError() {
+  if (errorHideTimer) clearTimeout(errorHideTimer);
+  errorHideTimer = null;
+  dom.errorPanel.style.display = 'none';
+  dom.errorActions.style.display = 'none';
+}
+function showError(msg, { persistent = false, retry = null, returnToLod = null } = {}) {
+  if (errorHideTimer) clearTimeout(errorHideTimer);
   dom.errorMessage.textContent = msg;
   dom.errorPanel.style.display = 'block';
-  setTimeout(() => { dom.errorPanel.style.display = 'none'; }, 10000);
+  dom.errorRetry.style.display = retry ? '' : 'none';
+  dom.errorLod.style.display = returnToLod ? '' : 'none';
+  dom.errorActions.style.display = retry || returnToLod ? 'flex' : 'none';
+  dom.errorRetry.onclick = retry ? () => { hideError(); retry(); } : null;
+  dom.errorLod.onclick = returnToLod ? () => { hideError(); returnToLod(); } : null;
+  if (!persistent || (!retry && !returnToLod)) errorHideTimer = setTimeout(hideError, 10000);
 }
 function toggleFullscreen() {
   if (!document.fullscreenElement) document.documentElement.requestFullscreen();

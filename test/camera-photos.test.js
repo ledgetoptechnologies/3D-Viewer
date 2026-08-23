@@ -42,7 +42,8 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'assets', 'odm_report'), { recursive: true });
   fs.writeFileSync(path.join(root, 'DJI_0001.JPG'), 'photo-one');
-  fs.writeFileSync(path.join(root, 'nested.jpg'), 'wrong-level');
+  fs.mkdirSync(path.join(root, 'images'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'images', 'nested.jpg'), 'nested-photo');
   const document = {
     type: 'FeatureCollection',
     features: [
@@ -50,6 +51,7 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
       { type: 'Feature', properties: { filename: 'missing.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 201] } },
       { type: 'Feature', properties: { filename: '../escape.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 202] } },
       { type: 'Feature', properties: { filename: 'DJI_0001.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 203] } },
+      { type: 'Feature', properties: { filename: 'images/nested.jpg' }, geometry: { type: 'Point', coordinates: [-87, 44, 204] } },
     ],
   };
   const shotsBody = JSON.stringify(document);
@@ -58,16 +60,20 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
     assets: [{ kind: 'shots', relativePath: 'assets/odm_report/shots.geojson', byteSize: Buffer.byteLength(shotsBody) }],
     files: [
       { relativePath: 'DJI_0001.JPG', byteSize: 9, sha256: digest('photo-one') },
-      { relativePath: 'folder/nested.jpg', byteSize: 11, sha256: digest('wrong-level') },
+      { relativePath: 'images/nested.jpg', byteSize: 12, sha256: digest('nested-photo') },
     ],
   };
   assert.deepEqual(discoverCameraPhotoLinks(root, discovered), [{
     filename: 'DJI_0001.JPG', relativePath: 'DJI_0001.JPG', byteSize: 9,
     sha256: digest('photo-one'), contentType: 'image/jpeg',
+  }, {
+    filename: 'images/nested.jpg', relativePath: 'images/nested.jpg', byteSize: 12,
+    sha256: digest('nested-photo'), contentType: 'image/jpeg',
   }]);
-  assert.equal(document.features.length, 4, 'link discovery never removes camera positions when a photo is absent');
+  assert.equal(document.features.length, 5, 'link discovery never removes camera positions when a photo is absent');
   assert.equal(validCameraFilename('../escape.JPG'), null);
-  assert.equal(validCameraFilename('folder/photo.jpg'), null);
+  assert.equal(validCameraFilename('folder/photo.jpg'), 'folder/photo.jpg');
+  assert.equal(validCameraFilename('folder/../photo.jpg'), null);
   assert.equal(validCameraFilename('photo.png'), null);
   assert.equal(validCameraFilename('photo.jpeg'), 'photo.jpeg');
 
@@ -83,8 +89,11 @@ test('a scoped camera capability serves an integrity-checked linked photo withou
   const directory = path.join(config.datasetsMount, datasetId);
   fs.mkdirSync(path.join(directory, 'assets', 'odm_report'), { recursive: true });
   const photo = Buffer.from('authenticated-camera-photo');
+  const nestedPhoto = Buffer.from('nested-authenticated-camera-photo');
   const shots = Buffer.from(JSON.stringify({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { filename: 'DJI_0001.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 200] } }] }));
   fs.writeFileSync(path.join(directory, 'DJI_0001.JPG'), photo);
+  fs.mkdirSync(path.join(directory, 'images'), { recursive: true });
+  fs.writeFileSync(path.join(directory, 'images', 'DJI_0002.JPG'), nestedPhoto);
   fs.writeFileSync(path.join(directory, 'assets', 'odm_report', 'shots.geojson'), shots);
   const database = openDatabase(path.join(root, 'viewer.sqlite'));
   const repository = new ViewerRepository(database);
@@ -93,7 +102,10 @@ test('a scoped camera capability serves an integrity-checked linked photo withou
     providerModelId: 'task-import:camera', providerVersionId: 'camera', displayName: 'Camera model', status: 'ready',
     sourceLocator: { webodmTaskImport: true },
     assets: [{ kind: 'shots', rootKey: 'datasets', relativePath: `${datasetId}/assets/odm_report/shots.geojson`, contentType: 'application/geo+json', byteSize: shots.length, sha256: digest(shots), published: true }],
-    cameraPhotos: [{ filename: 'DJI_0001.JPG', rootKey: 'datasets', relativePath: `${datasetId}/DJI_0001.JPG`, contentType: 'image/jpeg', byteSize: photo.length, sha256: digest(photo) }],
+    cameraPhotos: [
+      { filename: 'DJI_0001.JPG', rootKey: 'datasets', relativePath: `${datasetId}/DJI_0001.JPG`, contentType: 'image/jpeg', byteSize: photo.length, sha256: digest(photo) },
+      { filename: 'images/DJI_0002.JPG', rootKey: 'datasets', relativePath: `${datasetId}/images/DJI_0002.JPG`, contentType: 'image/jpeg', byteSize: nestedPhoto.length, sha256: digest(nestedPhoto) },
+    ],
   });
   const token = 'camera-session-token-000000000000000000';
   repository.createViewerSession({ tokenHash: auth.hashToken(token), modelId: model.id, modelVersionId: model.activeVersionId, subject: 'ops:camera', audience: 'ops', permissions: { view: true, cameras: true, download: false }, expiresAt: new Date(Date.now() + 60_000).toISOString() });
@@ -117,6 +129,9 @@ test('a scoped camera capability serves an integrity-checked linked photo withou
   assert.equal(response.headers.get('content-type'), 'image/jpeg');
   assert.equal(response.headers.get('cache-control'), 'private, no-store');
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), photo);
+  const nestedResponse = await fetch(`${base}/session-camera-photos/${encodeURIComponent(token)}/${model.id}/${encodeURIComponent('images/DJI_0002.JPG')}`);
+  assert.equal(nestedResponse.status, 200);
+  assert.deepEqual(Buffer.from(await nestedResponse.arrayBuffer()), nestedPhoto);
   assert.equal((await fetch(`${base}/session-camera-photos/${encodeURIComponent(token)}/${model.id}/missing.JPG`)).status, 404);
   assert.equal((await fetch(`${base}/session-camera-photos/${encodeURIComponent(deniedToken)}/${model.id}/DJI_0001.JPG`)).status, 403);
 

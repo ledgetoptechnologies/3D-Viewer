@@ -26,6 +26,16 @@
       transition: opacity 0.4s ease; pointer-events: none;
     }
     #pc-loading.hidden { opacity: 0; }
+    #pc-loading.failed { pointer-events: auto; }
+    #pc-retry {
+      min-width: 92px; min-height: 40px; padding: 8px 16px;
+      border: 1px solid rgba(238,80,7,0.75); border-radius: 7px;
+      background: #EE5007; color: white; font: inherit; font-weight: 700;
+      cursor: pointer;
+    }
+    #pc-retry:hover { background: #ff641d; }
+    #pc-retry:focus-visible { outline: 3px solid white; outline-offset: 2px; }
+    #pc-retry[hidden] { display: none; }
     .spinner {
       width: 50px; height: 50px; border-radius: 50%;
       border: 4px solid rgba(238,80,7,0.12); border-top-color: #EE5007;
@@ -39,26 +49,55 @@
   <div id="potree_sidebar_container"></div>
 
   <div id="pc-status">Loading…</div>
-  <div id="pc-loading"><div class="spinner"></div><div id="pc-loading-text">Streaming point cloud…</div></div>
+  <div id="pc-loading" role="status" aria-live="polite">
+    <div class="spinner"></div>
+    <div id="pc-loading-text">Streaming point cloud…</div>
+    <button id="pc-retry" type="button" hidden>Retry</button>
+  </div>
 
   <script>
     // Surface bootstrap/resource failures instead of leaving the viewer on an
     // endless loading spinner. This runs before Potree and its dependencies.
-    function showPointCloudBootstrapError(message) {
+    function showPointCloudBootstrapError() {
+      if (window.__pointCloudHealth) {
+        window.__pointCloudHealth.fail('resource_failed');
+        return;
+      }
       const loadingText = document.getElementById('pc-loading-text');
       const status = document.getElementById('pc-status');
-      if (loadingText) loadingText.textContent = `Point cloud failed to load: ${message}`;
-      if (status) status.textContent = 'Point cloud unavailable';
+      const loading = document.getElementById('pc-loading');
+      const retry = document.getElementById('pc-retry');
+      if (loadingText) loadingText.textContent = 'A point-cloud viewer component failed to load. Retry, then check the Viewer image if this continues.';
+      if (status) status.textContent = 'Point cloud failed to load';
+      loading?.classList.add('failed');
+      if (retry) {
+        retry.hidden = false;
+        retry.onclick = () => location.reload();
+      }
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ source: 'ltds-pointcloud', type: 'error', code: 'resource_failed' }, location.origin);
+      }
     }
     window.addEventListener('error', (event) => {
-      const source = event.target && event.target !== window
-        ? (event.target.src || event.target.href)
-        : null;
-      showPointCloudBootstrapError(source ? `resource ${source}` : (event.message || 'unknown error'));
+      const isResourceError = event.target && event.target !== window;
+      if (window.__pointCloudHealth) window.__pointCloudHealth.fail(isResourceError ? 'resource_failed' : 'runtime_error');
+      else showPointCloudBootstrapError();
     }, true);
     window.addEventListener('unhandledrejection', (event) => {
-      showPointCloudBootstrapError(event.reason?.message || String(event.reason || 'unknown error'));
+      if (window.__pointCloudHealth) window.__pointCloudHealth.fail('runtime_error');
+      else showPointCloudBootstrapError();
     });
+  </script>
+
+  <script src="/pointcloud-health.js"></script>
+  <script>
+    if (!window.LtdsPointCloudHealth?.createPointCloudHealth) {
+      showPointCloudBootstrapError();
+      throw new Error('point-cloud health runtime unavailable');
+    }
+    const pointCloudHealth = window.LtdsPointCloudHealth.createPointCloudHealth({ window, document });
+    window.__pointCloudHealth = pointCloudHealth;
+    pointCloudHealth.beginStartup();
   </script>
 
   <script src="/potree/libs/jquery/jquery-3.1.1.min.js"></script>
@@ -175,6 +214,9 @@
     setInterval(() => {
       const pc = viewer.scene.pointclouds[0];
       if (pc && pc.numVisiblePoints) budgetState.points = pc.numVisiblePoints;
+      if (pc && (pc.numVisiblePoints > 0 || (Array.isArray(pc.visibleNodes) && pc.visibleNodes.length > 0))) {
+        pointCloudHealth.pointsVisible();
+      }
     }, 500);
 
     // --------------------------------------------------------------------
@@ -247,6 +289,7 @@
 
     const statusEl = document.getElementById('pc-status');
     function renderStatus() {
+      if (pointCloudHealth.phase() !== 'ready') return;
       const vis = budgetState.points
         ? (budgetState.points >= 1e6
           ? (budgetState.points / 1e6).toFixed(1) + 'M'
@@ -588,13 +631,12 @@
     const pcControls = new PCPointerControls(viewer);
 
     if (!EPT_URL) {
-      statusEl.textContent = 'No point cloud configured for this project.';
-      document.getElementById('pc-loading').classList.add('hidden');
+      pointCloudHealth.fail('not_configured', { retryable: false });
     } else {
+    pointCloudHealth.beginLoad();
     Potree.loadPointCloud(EPT_URL, PROJECT_TITLE, (e) => {
       if (e.type === 'loading_failed') {
-        statusEl.textContent = 'Failed to load EPT point cloud — check that its asset URL is reachable.';
-        document.getElementById('pc-loading').classList.add('hidden');
+        pointCloudHealth.fail('metadata_failed');
         return;
       }
       const pc = e.pointcloud;
@@ -615,7 +657,7 @@
       const cam = viewer.scene.getActiveCamera();
       cam.near = 0.1; cam.far = 100000; cam.updateProjectionMatrix();
 
-      document.getElementById('pc-loading').classList.add('hidden');
+      pointCloudHealth.metadataReady();
       if (POINT_COUNT) cloudMeta.total = POINT_COUNT;
       renderStatus();
     });

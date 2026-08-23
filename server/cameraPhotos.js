@@ -10,14 +10,16 @@ function cameraPhotoContentType(filename) {
 }
 
 function validCameraFilename(value) {
-  if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > 255) return null;
-  if (value === '.' || value === '..' || value.includes('\0') || value.includes('/') || value.includes('\\')) return null;
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value, 'utf8') > 1024) return null;
+  if (value.includes('\0') || value.includes('\\') || value.startsWith('/') || value.endsWith('/')) return null;
+  const segments = value.split('/');
+  if (!segments.length || segments.some((segment) => !segment || segment === '.' || segment === '..')) return null;
   return cameraPhotoContentType(value) ? value : null;
 }
 
-// WebODM task backups keep source photos at the backup root and reference
-// them by basename from assets/odm_report/shots.geojson. Only exact, safe,
-// root-level matches become links; missing photos never remove shot features.
+// Most WebODM task backups keep photos at the backup root. Some preserve a
+// nested images/ path in both the file inventory and shots.geojson. Match the
+// exact normalized key in either case; never guess between duplicate basenames.
 function discoverCameraPhotoLinks(root, discovered) {
   const shots = discovered?.assets?.find((asset) => asset.kind === 'shots');
   if (!shots || !Number.isSafeInteger(shots.byteSize) || shots.byteSize > MAX_SHOTS_BYTES) return [];
@@ -32,11 +34,11 @@ function discoverCameraPhotoLinks(root, discovered) {
   }
   if (!document || document.type !== 'FeatureCollection' || !Array.isArray(document.features)) return [];
 
-  const rootPhotos = new Map();
+  const photosByKey = new Map();
   for (const file of discovered.files || []) {
     const filename = validCameraFilename(file.relativePath);
     if (!filename || !file.sha256 || !Number.isSafeInteger(file.byteSize) || file.byteSize < 0) continue;
-    rootPhotos.set(filename, file);
+    photosByKey.set(filename, file);
   }
   const links = [];
   const seen = new Set();
@@ -44,7 +46,7 @@ function discoverCameraPhotoLinks(root, discovered) {
     const filename = validCameraFilename(feature?.properties?.filename);
     if (!filename || seen.has(filename)) continue;
     seen.add(filename);
-    const file = rootPhotos.get(filename);
+    const file = photosByKey.get(filename);
     if (!file) continue;
     links.push({
       filename,

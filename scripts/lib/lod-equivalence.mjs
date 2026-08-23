@@ -1,11 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import draco3d from 'draco3d';
 import { Matrix3, Matrix4, Quaternion, Vector3 } from 'three';
 import { inspectLodTileset } from '../../lod-policy.mjs';
 
-export const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v1';
+export const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 export const DEFAULT_TOLERANCE = 1e-6;
+
+const dracoDecoderModule = draco3d.createDecoderModule({});
 
 export function auditFailureExitCode(error) {
   return typeof error?.code === 'string' && error.code ? 4 : 3;
@@ -82,18 +85,29 @@ function parseB3dm(buffer, label) {
   const btBinLength = buffer.readUInt32LE(24);
   const glbOffset = 28 + ftJsonLength + ftBinLength + btJsonLength + btBinLength;
   if (glbOffset >= buffer.length) throw new Error(`${label}: embedded GLB is missing`);
+  if (glbOffset + 12 > buffer.length || buffer.readUInt32LE(glbOffset) !== 0x46546c67) {
+    throw new Error(`${label}: embedded GLB header is missing`);
+  }
+  const glbLength = buffer.readUInt32LE(glbOffset + 8);
+  if (glbLength < 20 || glbOffset + glbLength > buffer.length) {
+    throw new Error(`${label}: embedded GLB byteLength is invalid`);
+  }
+  const trailing = buffer.subarray(glbOffset + glbLength);
+  if (trailing.length > 7 || trailing.some((value) => value !== 0 && value !== 0x20)) {
+    throw new Error(`${label}: embedded GLB has invalid B3DM alignment padding`);
+  }
   let rtc = null;
   if (ftJsonLength) {
     const feature = JSON.parse(buffer.subarray(28, 28 + ftJsonLength).toString('utf8').trim());
     if (feature.RTC_CENTER !== undefined) {
       if (!Array.isArray(feature.RTC_CENTER) || feature.RTC_CENTER.length !== 3
         || feature.RTC_CENTER.some((value) => !Number.isFinite(value))) {
-        throw new Error(`${label}: binary or malformed RTC_CENTER is not supported by v1`);
+        throw new Error(`${label}: binary or malformed RTC_CENTER is not supported by v2`);
       }
       rtc = feature.RTC_CENTER;
     }
   }
-  return { glb: buffer.subarray(glbOffset), rtc };
+  return { glb: buffer.subarray(glbOffset, glbOffset + glbLength), rtc };
 }
 
 function nodeMatrix(node) {
@@ -125,6 +139,107 @@ function readComponent(buffer, offset, type, normalized) {
   if (type === 5121) return value / 255;
   if (type === 5122) return Math.max(value / 32767, -1);
   return value / 65535;
+}
+
+function normalizeComponent(value, type, normalized) {
+  if (!normalized || type === 5126 || type === 5125) return value;
+  if (type === 5120) return Math.max(value / 127, -1);
+  if (type === 5121) return value / 255;
+  if (type === 5122) return Math.max(value / 32767, -1);
+  return value / 65535;
+}
+
+async function dracoPrimitiveValues(asset, primitive, label) {
+  const extension = primitive.extensions?.KHR_draco_mesh_compression;
+  if (!extension) return null;
+  const view = asset.json.bufferViews?.[extension.bufferView];
+  if (!view || (view.buffer ?? 0) !== 0 || view.extensions?.EXT_meshopt_compression) {
+    throw new Error(`${label}: Draco bufferView is missing, external, or nested-compressed`);
+  }
+  const start = view.byteOffset || 0;
+  const end = start + view.byteLength;
+  if (start < 0 || end > asset.bin.length) throw new Error(`${label}: Draco bufferView exceeds the GLB buffer`);
+
+  const module = await dracoDecoderModule;
+  const decoder = new module.Decoder();
+  const decoderBuffer = new module.DecoderBuffer();
+  const mesh = new module.Mesh();
+  let status = null;
+  try {
+    const encoded = asset.bin.subarray(start, end);
+    decoderBuffer.Init(new Int8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength), encoded.byteLength);
+    if (decoder.GetEncodedGeometryType(decoderBuffer) !== module.TRIANGULAR_MESH) {
+      throw new Error(`${label}: Draco primitive is not a triangular mesh`);
+    }
+    status = decoder.DecodeBufferToMesh(decoderBuffer, mesh);
+    if (!status?.ok?.()) throw new Error(`${label}: Draco decode failed (${status?.error_msg?.() || 'unknown error'})`);
+
+    const attributes = {};
+    const decodedMethods = {
+      5120: ['DracoInt8Array', 'GetAttributeInt8ForAllPoints'],
+      5121: ['DracoUInt8Array', 'GetAttributeUInt8ForAllPoints'],
+      5122: ['DracoInt16Array', 'GetAttributeInt16ForAllPoints'],
+      5123: ['DracoUInt16Array', 'GetAttributeUInt16ForAllPoints'],
+      5125: ['DracoUInt32Array', 'GetAttributeUInt32ForAllPoints'],
+      5126: ['DracoFloat32Array', 'GetAttributeFloatForAllPoints'],
+    };
+    for (const [semantic, uniqueId] of Object.entries(extension.attributes || {})) {
+      const accessorIndex = primitive.attributes?.[semantic];
+      const accessor = asset.json.accessors?.[accessorIndex];
+      const componentCount = COMPONENTS[accessor?.type];
+      const method = decodedMethods[accessor?.componentType];
+      if (!Number.isInteger(accessorIndex) || !accessor || accessor.sparse || !componentCount || !method
+        || !Number.isInteger(accessor.count) || accessor.count !== mesh.num_points()) {
+        throw new Error(`${label}: Draco attribute ${semantic} has an unsupported or inconsistent accessor`);
+      }
+      const attribute = decoder.GetAttributeByUniqueId(mesh, uniqueId);
+      if (!attribute?.ptr || attribute.num_components() !== componentCount) {
+        throw new Error(`${label}: Draco attribute ${semantic} is missing or has the wrong width`);
+      }
+      const values = new module[method[0]]();
+      try {
+        if (!decoder[method[1]](mesh, attribute, values)) throw new Error(`${label}: Draco attribute ${semantic} could not be decoded`);
+        if (values.size() !== accessor.count * componentCount) throw new Error(`${label}: Draco attribute ${semantic} has the wrong decoded length`);
+        attributes[semantic] = Array.from({ length: accessor.count }, (_, row) => (
+          Array.from({ length: componentCount }, (_, component) => normalizeComponent(
+            values.GetValue(row * componentCount + component),
+            accessor.componentType,
+            accessor.normalized,
+          ))
+        ));
+      } finally {
+        module.destroy(values);
+      }
+    }
+    const expectedAttributes = Object.keys(primitive.attributes || {}).sort();
+    if (expectedAttributes.some((semantic) => !attributes[semantic])) {
+      throw new Error(`${label}: Draco extension does not bind every primitive attribute`);
+    }
+
+    const indexAccessor = asset.json.accessors?.[primitive.indices];
+    if (!Number.isInteger(primitive.indices) || !indexAccessor || indexAccessor.type !== 'SCALAR'
+      || !Number.isInteger(indexAccessor.count) || indexAccessor.count !== mesh.num_faces() * 3) {
+      throw new Error(`${label}: Draco indices accessor is missing or inconsistent`);
+    }
+    const face = new module.DracoInt32Array();
+    const indices = [];
+    try {
+      for (let faceIndex = 0; faceIndex < mesh.num_faces(); faceIndex += 1) {
+        if (!decoder.GetFaceFromMesh(mesh, faceIndex, face) || face.size() !== 3) {
+          throw new Error(`${label}: Draco face ${faceIndex} could not be decoded`);
+        }
+        for (let component = 0; component < 3; component += 1) indices.push(face.GetValue(component));
+      }
+    } finally {
+      module.destroy(face);
+    }
+    return { attributes, indices };
+  } finally {
+    if (status) module.destroy(status);
+    module.destroy(mesh);
+    module.destroy(decoderBuffer);
+    module.destroy(decoder);
+  }
 }
 
 function accessorValues(asset, index, label) {
@@ -183,7 +298,7 @@ function textureDescriptor(asset, index, label) {
   const texture = asset.json.textures?.[index];
   if (!texture) throw new Error(`${label}: texture ${index} is missing`);
   if (texture.extensions?.KHR_texture_basisu || texture.extensions?.EXT_texture_webp) {
-    throw new Error(`${label}: alternate compressed texture sources are not supported by v1`);
+    throw new Error(`${label}: alternate compressed texture sources are not supported by v2`);
   }
   const sampler = asset.json.samplers?.[texture.sampler] || {};
   return {
@@ -285,7 +400,7 @@ function triangleCompare(a, b, tolerance = 0) {
   return 0;
 }
 
-function extractTriangles(asset, rootTransform, label) {
+async function extractTriangles(asset, rootTransform, label) {
   const triangles = [];
   const nodes = asset.json.nodes || [];
   const childNodes = new Set(nodes.flatMap((node) => node.children || []));
@@ -293,12 +408,12 @@ function extractTriangles(asset, rootTransform, label) {
   const roots = scene?.nodes || nodes.map((_, index) => index).filter((index) => !childNodes.has(index));
   const active = new Set();
 
-  function visit(nodeIndex, parent) {
+  async function visit(nodeIndex, parent) {
     if (active.has(nodeIndex)) throw new Error(`${label}: node hierarchy contains a cycle`);
     const node = nodes[nodeIndex];
     if (!node) throw new Error(`${label}: node ${nodeIndex} is missing`);
     if (node.skin !== undefined || node.weights || node.extensions?.EXT_mesh_gpu_instancing) {
-      throw new Error(`${label}: skinned, morphed, or instanced geometry is not supported by v1`);
+      throw new Error(`${label}: skinned, morphed, or instanced geometry is not supported by v2`);
     }
     active.add(nodeIndex);
     const world = parent.clone().multiply(nodeMatrix(node));
@@ -307,13 +422,11 @@ function extractTriangles(asset, rootTransform, label) {
       if (!mesh) throw new Error(`${label}: mesh ${node.mesh} is missing`);
       for (const primitive of mesh.primitives || []) {
         if ((primitive.mode ?? 4) !== 4) throw new Error(`${label}: only TRIANGLES primitives are auditable`);
-        if (primitive.targets?.length || primitive.extensions?.KHR_draco_mesh_compression) {
-          throw new Error(`${label}: morph targets and Draco-compressed primitives are not supported by v1`);
-        }
+        if (primitive.targets?.length) throw new Error(`${label}: morph targets are not supported by v2`);
         if (!Number.isInteger(primitive.attributes?.POSITION)) throw new Error(`${label}: primitive has no POSITION accessor`);
         const suppliedAttributeNames = Object.keys(primitive.attributes).sort();
         if (suppliedAttributeNames.some((name) => name.startsWith('JOINTS_') || name.startsWith('WEIGHTS_'))) {
-          throw new Error(`${label}: skinned attributes are not supported by v1`);
+          throw new Error(`${label}: skinned attributes are not supported by v2`);
         }
         const attributeNames = suppliedAttributeNames.filter((name) => (
           name === 'POSITION' || name === 'NORMAL' || name === 'TANGENT'
@@ -321,12 +434,13 @@ function extractTriangles(asset, rootTransform, label) {
         ));
         const unsupported = suppliedAttributeNames.filter((name) => !attributeNames.includes(name) && !name.startsWith('_'));
         if (unsupported.length) throw new Error(`${label}: unsupported render attribute ${unsupported[0]}`);
-        const attributes = Object.fromEntries(attributeNames.map((name) => [name, accessorValues(asset, primitive.attributes[name], label)]));
+        const draco = await dracoPrimitiveValues(asset, primitive, label);
+        const attributes = draco?.attributes || Object.fromEntries(attributeNames.map((name) => [name, accessorValues(asset, primitive.attributes[name], label)]));
         const vertexCount = attributes.POSITION.length;
         if (Object.values(attributes).some((values) => values.length !== vertexCount)) throw new Error(`${label}: primitive attributes have different counts`);
-        const indices = Number.isInteger(primitive.indices)
+        const indices = draco?.indices || (Number.isInteger(primitive.indices)
           ? accessorValues(asset, primitive.indices, label).map((value) => value[0])
-          : Array.from({ length: vertexCount }, (_, index) => index);
+          : Array.from({ length: vertexCount }, (_, index) => index));
         if (indices.length % 3) throw new Error(`${label}: triangle index count is not divisible by three`);
         const determinant = world.determinant();
         if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-15) throw new Error(`${label}: singular or invalid geometry transform`);
@@ -345,7 +459,7 @@ function extractTriangles(asset, rootTransform, label) {
         }
       }
     }
-    for (const child of node.children || []) visit(child, world);
+    for (const child of node.children || []) await visit(child, world);
     active.delete(nodeIndex);
   }
 
@@ -357,7 +471,7 @@ function extractTriangles(asset, rootTransform, label) {
     }
     assetTransform = rootTransform.clone().multiply(new Matrix4().makeTranslation(...cesiumRtc));
   }
-  for (const root of roots) visit(root, assetTransform);
+  for (const root of roots) await visit(root, assetTransform);
   return triangles;
 }
 
@@ -368,9 +482,10 @@ function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null
     throw new Error(`${label}: only a single embedded GLB buffer is supported`);
   }
   const supportedExtension = (name) => name === 'CESIUM_RTC' || name === 'KHR_mesh_quantization'
+    || name === 'KHR_draco_mesh_compression'
     || name === 'KHR_texture_transform' || (/^KHR_materials_/.test(name) && name !== 'KHR_materials_variants');
   const unsupportedRequired = (parsed.json.extensionsRequired || []).find((name) => !supportedExtension(name));
-  if (unsupportedRequired) throw new Error(`${label}: required extension ${unsupportedRequired} is not supported by v1`);
+  if (unsupportedRequired) throw new Error(`${label}: required extension ${unsupportedRequired} is not supported by v2`);
   return { ...parsed, root, baseDir: path.dirname(filePath), bindExternal };
 }
 
@@ -395,7 +510,7 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
     return bytes;
   }
 
-  function walkTileset(filePath, inheritedTransform = IDENTITY) {
+  async function walkTileset(filePath, inheritedTransform = IDENTITY) {
     const absolute = path.resolve(filePath);
     if (!inside(derivativeDir, absolute)) throw new Error(`external tileset escapes the derivative directory (${filePath})`);
     const visitKey = `${absolute}:${inheritedTransform.elements.join(',')}`;
@@ -406,8 +521,10 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
     const report = inspectLodTileset(tileset);
     if (!report.valid) throw new Error(`${path.basename(absolute)}: ${report.errors[0]}`);
 
-    function walkTile(tile, parentTransform) {
-      if (tile.transform !== undefined && (!Array.isArray(tile.transform) || tile.transform.length !== 16
+    async function walkTile(tile, parentTransform) {
+      // Obj2Tiles emits `null` for inherited transforms. Treat that the same
+      // as an omitted transform; both mean the parent's transform applies.
+      if (tile.transform != null && (!Array.isArray(tile.transform) || tile.transform.length !== 16
         || tile.transform.some((value) => !Number.isFinite(value)))) {
         throw new Error('tile transform must contain 16 finite numbers');
       }
@@ -415,7 +532,7 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
       const world = parentTransform.clone().multiply(local);
       const children = Array.isArray(tile.children) ? tile.children : [];
       if (children.length) {
-        for (const child of children) walkTile(child, world);
+        for (const child of children) await walkTile(child, world);
         return;
       }
       const uri = tile?.content?.uri || tile?.content?.url;
@@ -423,7 +540,7 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
       const contentPath = localPath(derivativeDir, path.dirname(absolute), uri);
       if (!contentPath) throw new Error(`data URI tile content is unsupported (${uri})`);
       if (/\.json$/i.test(contentPath)) {
-        walkTileset(contentPath, world);
+        await walkTileset(contentPath, world);
         return;
       }
       const content = bindArtifact(contentPath);
@@ -433,18 +550,18 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
       else if (!/\.glb$/i.test(contentPath)) throw new Error(`unsupported leaf content type (${uri})`);
       const tileContentTransform = rtc ? world.clone().multiply(new Matrix4().makeTranslation(...rtc)) : world;
       const contentTransform = TILE_TO_GLTF.clone().multiply(tileContentTransform).multiply(GLTF_TO_TILE);
-      triangles.push(...extractTriangles(
+      triangles.push(...await extractTriangles(
         loadGlbAsset(contentPath, derivativeDir, glb, bindArtifact),
         contentTransform,
         uri,
       ));
     }
 
-    walkTile(tileset.root, inheritedTransform);
+    await walkTile(tileset.root, inheritedTransform);
     visitedTilesets.delete(visitKey);
   }
 
-  walkTileset(path.join(derivativeDir, 'tileset.json'));
+  await walkTileset(path.join(derivativeDir, 'tileset.json'));
   return { triangles, artifacts: [...artifacts.values()].sort((a, b) => a.uri.localeCompare(b.uri)) };
 }
 
@@ -495,7 +612,7 @@ export async function auditLodEquivalence({ derivativeDir, sourceGlb, tolerance 
     artifactMap.set(relative, { uri: relative, sha256: sha256(bytes), byteLength: bytes.length });
     return bytes;
   };
-  const source = extractTriangles(
+  const source = await extractTriangles(
     loadGlbAsset(sourceGlb, derivativeDir, sourceBytes, bindExternal),
     IDENTITY,
     path.basename(sourceGlb),

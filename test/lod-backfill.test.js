@@ -14,6 +14,7 @@ const {processOneDerivative}=require('../server/derivativeWorker');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {ViewerRepository}=require('../server/repository');
 const {StorageManager}=require('../server/storageManager');
+const {toViewerConfig}=require('../server/apiV1');
 
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-lod-backfill-'));
@@ -54,6 +55,20 @@ test('legacy OBJ backfill queues once without taking the ready model offline',t=
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).n,1);
 });
 
+test('legacy WebODM backups with the georeferenced OBJ and companion GLB enter backfill without native tiles',t=>{
+  const c=fixture(t),item=readyModel(c);
+  c.db.prepare("UPDATE model_assets SET relative_path=? WHERE version_id=? AND kind='obj'").run('legacy/assets/odm_texturing/odm_textured_model_geo.obj',item.versionId);
+  c.db.prepare("UPDATE model_assets SET relative_path=? WHERE version_id=? AND kind='glb'").run('legacy/assets/odm_texturing/odm_textured_model_geo.glb',item.versionId);
+
+  const result=reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true,limit:20});
+  assert.deepEqual(result,{scanned:1,queued:1,conflict:false});
+  const job=c.db.prepare('SELECT derivative_type,status,request_json FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id);
+  assert.equal(job.derivative_type,'mesh_tiles');
+  assert.equal(job.status,'pending');
+  assert.deepEqual(JSON.parse(job.request_json),{optional:true});
+  assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
+});
+
 test('optional LOD failure is terminal until audited manual retry and preserves readiness',t=>{
   const c=fixture(t),item=readyModel(c);
   c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'mesh_tiles',request:{optional:true}}]);
@@ -74,6 +89,7 @@ test('failed imported tile audit quarantines tiles while preserving the GLB fall
   const c=fixture(t),item=readyModel(c,{assets:['glb']});
   c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64)});
   c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'lod_audit',request:{optional:true,tilesRootKey:'models',tilesRelativePath:'legacy/tiles'}}]);
+  assert.deepEqual(c.processing.modelAssetsForVersion(item.versionId).map(asset=>asset.kind),['glb'],'enqueue atomically quarantines the tile row');
   const claimed=c.processing.claimDerivative('lod-worker');
   assert.equal(c.processing.completeOptionalDerivative(claimed.id,'lod-worker',{verified:false,fallback:'glb'}),true);
   assert.deepEqual(c.processing.modelAssetsForVersion(item.versionId).map(asset=>asset.kind),['glb']);
@@ -81,7 +97,8 @@ test('failed imported tile audit quarantines tiles while preserving the GLB fall
   assert.equal(c.processing.getModelOutput(item.versionId).status,'ready');
   assert.equal(c.db.prepare('SELECT status FROM model_versions WHERE id=?').get(item.versionId).status,'ready');
   const audit=c.db.prepare("SELECT details_json FROM audit_events WHERE action='derivative.optional_complete' AND entity_id=?").get(claimed.id);
-  assert.deepEqual(JSON.parse(audit.details_json).invalidatedAssetKinds,['tiles']);
+  assert.deepEqual(JSON.parse(audit.details_json).invalidatedAssetKinds,[]);
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative.tiles_quarantined'").get().n>0,true);
 });
 
 test('the derivative worker executes a real external-GLB tile audit and registers verified tiles',async t=>{
@@ -94,6 +111,7 @@ test('the derivative worker executes a real external-GLB tile audit and register
   fs.mkdirSync(path.dirname(glbPath),{recursive:true});
   fs.copyFileSync(fixtureSource,glbPath);
   fs.rmSync(fixtureSource);
+  c.db.prepare("UPDATE model_assets SET sha256=? WHERE version_id=? AND kind='glb'").run(crypto.createHash('sha256').update(fs.readFileSync(glbPath)).digest('hex'),item.versionId);
   c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'lod_audit',request:{optional:true,tilesRootKey:'models',tilesRelativePath}}]);
 
   assert.equal(await processOneDerivative({processing:c.processing,storage:c.storage,config:{opsBaseUrl:'https://ops.example',meshDerivativesEnabled:true}},'lod-worker'),true);
@@ -103,6 +121,11 @@ test('the derivative worker executes a real external-GLB tile audit and register
   const tiles=c.processing.modelAssetsForVersion(item.versionId).find(asset=>asset.kind==='tiles');
   assert.ok(tiles);
   assert.equal(tiles.relativePath,`${tilesRelativePath}/tileset.json`);
+  const candidate=c.repository.getModelVersion(item.model.id,item.versionId),provenance=candidate.activeVersion.metadata.lodProvenance;
+  assert.equal(provenance.schemaVersion,2);
+  assert.equal(provenance.sourceSha256,candidate.activeVersion.assets.find(asset=>asset.kind==='glb').sha256);
+  assert.equal(provenance.tilesManifestSha256,tiles.manifestSha256);
+  assert.ok(toViewerConfig(candidate).assets.tiles);
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
   assert.equal(c.processing.getModelOutput(item.versionId).status,'ready');
   assert.equal(c.db.prepare('SELECT status FROM model_versions WHERE id=?').get(item.versionId).status,'ready');
@@ -131,7 +154,7 @@ test('failed regeneration cannot leave proven-invalid imported tiles registered'
   assert.equal(c.db.prepare('SELECT status FROM model_versions WHERE id=?').get(item.versionId).status,'ready');
 });
 
-test('an ENOSPC audit-evidence failure preserves native tiles for manual retry',async t=>{
+test('an ENOSPC audit-evidence failure preserves native tile bytes but keeps the asset quarantined',async t=>{
   const c=fixture(t),item=readyModel(c,{assets:['glb']}),tilesRelativePath=`${crypto.randomUUID()}/tiles`;
   const glbPath=path.join(c.root,'datasets','legacy','model.glb'),tilesDir=path.join(c.root,'models',...tilesRelativePath.split('/'));
   fs.mkdirSync(path.dirname(glbPath),{recursive:true});fs.writeFileSync(glbPath,'glb');
@@ -144,7 +167,8 @@ test('an ENOSPC audit-evidence failure preserves native tiles for manual retry',
 
   await processOneDerivative({processing:c.processing,storage:c.storage,config:{opsBaseUrl:'https://ops.example',meshDerivativesEnabled:true},lodAuditScript:auditScript},'lod-worker');
   assert.equal(c.db.prepare('SELECT status FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).status,'failed');
-  assert.equal(c.processing.modelAssetsForVersion(item.versionId).some(asset=>asset.kind==='tiles'),true);
+  assert.equal(c.processing.modelAssetsForVersion(item.versionId).some(asset=>asset.kind==='tiles'),false);
+  assert.equal(fs.existsSync(path.join(tilesDir,'tileset.json')),true);
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
 });
 
@@ -165,6 +189,34 @@ test('GLB-only legacy models stay on explicit full-mesh fallback',t=>{
   assert.equal(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true}).queued,0);
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).n,0);
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
+});
+
+test('review and publish authority omit tiles whose v2 provenance is missing or not bound to the exact GLB',async t=>{
+  const c=fixture(t),item=readyModel(c,{assets:['glb']}),token='lod-publish-token-000000000000000000';
+  c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{schemaVersion:2,sourceAsset:'model.glb',sourceSha256:'e'.repeat(64),tilesManifestSha256:'d'.repeat(64),geometry:'bounded-triangle-equivalence',textures:'byte-identical-material-equivalence',leafGeometricError:0,audit:{algorithm:'ltds-glb-leaf-equivalence-v2',artifactCount:2}}}),item.versionId);
+  assert.equal(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.tiles,null);
+  assert.equal(c.processing.publishAttemptAtomic(item.attempt.id,['tiles'],{actorId:'ops:test'}),null);
+  c.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:publish',permissions:['viewer.processing.read','viewer.processing.publish'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+  const app=express();app.use(express.json());app.use(createProcessingApi({repository:c.repository,processing:c.processing,storage:c.storage}));
+  const server=await new Promise(resolve=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const headers={authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},base=`http://127.0.0.1:${server.address().port}`;
+  const review=await fetch(`${base}/api/v1/attempts/${item.attempt.id}/review-sessions`,{method:'POST',headers,body:'{}'});
+  assert.equal(review.status,201);
+  assert.deepEqual((await review.json()).assetKinds,['glb']);
+  const publish=await fetch(`${base}/api/v1/attempts/${item.attempt.id}/publish`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:JSON.stringify({selectedAssetKinds:['tiles']})});
+  assert.equal(publish.status,400);
+  assert.equal((await publish.json()).code,'published_asset_unavailable');
+});
+
+test('verified tiles can only be published with their exact GLB proof source',t=>{
+  const c=fixture(t),item=readyModel(c,{assets:['glb']});
+  c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{schemaVersion:2,sourceAsset:'model.glb',sourceSha256:'b'.repeat(64),tilesManifestSha256:'d'.repeat(64),geometry:'bounded-triangle-equivalence',textures:'byte-identical-material-equivalence',leafGeometricError:0,audit:{algorithm:'ltds-glb-leaf-equivalence-v2',artifactCount:2}}}),item.versionId);
+  assert.ok(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.tiles);
+  assert.equal(c.processing.publishAttemptAtomic(item.attempt.id,['tiles'],{actorId:'ops:test'}),null);
+  assert.ok(c.processing.publishAttemptAtomic(item.attempt.id,['glb','tiles'],{actorId:'ops:test'}));
 });
 
 test('transient backfill conflict is retried instead of skipped',t=>{

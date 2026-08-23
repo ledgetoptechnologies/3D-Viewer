@@ -19,7 +19,9 @@ test('production image pins the mesh converter and patches classic Potree EPT fa
   assert.match(dockerfile, /Obj2Tiles-LinuxArm64\.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5/);
   assert.match(dockerfile, /raw\.githubusercontent\.com\/OpenDroneMap\/Obj2Tiles\/v\$\{OBJ2TILES_VERSION\}\/LICENSE\.md/);
   assert.match(dockerfile, /COPY --from=obj2tiles \/opt\/obj2tiles \/opt\/obj2tiles/);
+  assert.match(dockerfile, /COPY lod-policy\.mjs \.\/lod-policy\.mjs/);
   assert.match(dockerfile, /node scripts\/patch-potree-ept\.mjs public\/potree\/build\/potree\/potree\.js/);
+  const worker = fs.readFileSync(path.join(repositoryRoot, 'server', 'derivativeWorker.js'), 'utf8');
 });
 
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
@@ -62,7 +64,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /TRASH_MOUNT:\s*\/app\/storage\/trash/);
   assert.match(compose, /EMERGENCY_ADMIN_ENABLED:\s+"false"/);
   assert.match(compose, /LOCAL_DERIVATIVES_ENABLED:\s+"false"/);
-  assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+"true"/);
+  assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+\$\{MESH_DERIVATIVES_ENABLED:-false\}/);
   assert.match(compose, /OBJ2TILES_BIN:\s+\/opt\/obj2tiles\/Obj2Tiles/);
   assert.match(compose, /viewer-worker:[\s\S]*processing_worker_heartbeat/);
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);

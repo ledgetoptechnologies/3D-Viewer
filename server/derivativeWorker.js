@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { hashFile, hashTree } = require('./storageManager');
+const { verifyLodProvenance } = require('./lodProvenance');
 
 function stopProcessTree(child) {
   if (!child?.pid) return;
@@ -80,7 +81,37 @@ async function registerTreeAsset(processing, input, directory, manifestName) {
   });
 }
 
-async function generateMeshTiles({ processing, storage, config, attempt, job, task, obj, glb, audit, signal }) {
+function assertLodArtifactsMatchSnapshot(artifacts, integrity) {
+  const snapshot = new Map(integrity.files.map((file) => [file.relativePath, file]));
+  for (const artifact of artifacts) {
+    const file = snapshot.get(artifact.uri);
+    if (!file || file.byteSize !== artifact.byteLength || file.sha256 !== artifact.sha256) {
+      throw Object.assign(new Error(`LOD artifact changed before registration (${artifact.uri})`), { code: 'lod_provenance_invalid' });
+    }
+  }
+  const tileset = snapshot.get('tileset.json');
+  if (!tileset) throw Object.assign(new Error('verified LOD tree has no tileset.json'), { code: 'lod_provenance_invalid' });
+  return tileset;
+}
+
+async function verifiedLodAsset(input, directory, fullMeshPath) {
+  const checked = await verifyLodProvenance(path.join(directory, 'lod-provenance.json'), fullMeshPath);
+  if (!checked.verified) throw Object.assign(new Error(`LOD provenance verification failed: ${checked.errors.join('; ')}`), { code: 'lod_provenance_invalid' });
+  const integrity = await hashTree(directory);
+  const tileset = assertLodArtifactsMatchSnapshot(checked.artifacts, integrity);
+  return {
+    asset: {
+      ...input,
+      sha256: tileset.sha256,
+      byteSize: tileset.byteSize,
+      manifestSha256: integrity.manifestSha256,
+      manifestFiles: integrity.files,
+    },
+    provenance: checked.provenance,
+  };
+}
+
+async function generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal }) {
   if (!config.meshDerivativesEnabled) throw Object.assign(new Error('mesh derivative fallback is disabled'), { code: 'derivative_unavailable' });
   if (!obj || !glb) throw Object.assign(new Error('verified Obj2Tiles generation requires both OBJ and GLB mesh sources'), { code: 'unsupported_mesh_derivative_source' });
   const base = storage.resolve('models', `${task.id}/${attempt.id}`);
@@ -95,16 +126,18 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ta
     await run(process.execPath, [audit, incomplete, auditSource, '--external-source'], { signal });
     fs.rmSync(output, { recursive: true, force: true });
     fs.renameSync(incomplete, output);
-    await registerTreeAsset(processing, {
+    const verified = await verifiedLodAsset({
       versionId: attempt.resultModelVersionId,
-      kind: 'tiles',
       rootKey: 'models',
       relativePath: `${task.id}/${attempt.id}/tiles/tileset.json`,
       format: '3dtiles',
       contentType: 'application/json',
       byteSize: fs.statSync(path.join(output, 'tileset.json')).size,
       attemptId: attempt.id,
-    }, output, 'tileset.json');
+    }, output, auditSource);
+    if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance)) {
+      throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
+    }
   } catch (error) {
     fs.rmSync(incomplete, { recursive: true, force: true });
     throw error;
@@ -144,16 +177,18 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
         const source = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
         try {
           await run(process.execPath, [audit, tiles, source, '--external-source'], { signal: controller.signal });
-          await registerTreeAsset(processing, {
+          const verified = await verifiedLodAsset({
             versionId: attempt.resultModelVersionId,
-            kind: 'tiles',
             rootKey: tilesRootKey,
             relativePath: path.posix.join(request.tilesRelativePath, 'tileset.json'),
             format: '3dtiles',
             contentType: 'application/json',
             byteSize: fs.statSync(path.join(tiles, 'tileset.json')).size,
             attemptId: attempt.id,
-          }, tiles, 'tileset.json');
+          }, tiles, source);
+          if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance)) {
+            throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
+          }
           derivativeResult = { verified: true, reused: true };
         } catch (error) {
           if (error.code === 'lease_lost') throw error;
@@ -162,7 +197,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
             throw Object.assign(new Error('derivative lease was lost during tile quarantine'), { code: 'lease_lost' });
           }
           if (request.generateFromObjOnFailure && obj) {
-            await generateMeshTiles({ processing, storage, config, attempt, job, task, obj, glb, audit, signal: controller.signal });
+            await generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal: controller.signal });
             derivativeResult = { verified: true, reused: false, replacedInvalidTiles: true };
           } else derivativeResult = { verified: false, fallback: 'glb', reason: sanitizeLogMessage(error.message).slice(0, 500) };
         }
@@ -197,7 +232,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       }
       derivativeResult = { verified: true };
     } else if (job.derivative_type === 'mesh_tiles') {
-      await generateMeshTiles({ processing, storage, config, attempt, job, task, obj, glb, audit, signal: controller.signal });
+      await generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal: controller.signal });
       derivativeResult = { verified: true, reused: false };
     } else throw new Error('unsupported derivative type');
 
@@ -218,4 +253,4 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
   }
 }
 
-module.exports = { generateMeshTiles, processOneDerivative, run, stopProcessTree };
+module.exports = { assertLodArtifactsMatchSnapshot, generateMeshTiles, processOneDerivative, run, stopProcessTree };

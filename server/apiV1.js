@@ -7,6 +7,7 @@ const { config } = require('./config');
 const { requireService } = require('./serviceAuth');
 const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
+const { verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
 
 const VIEWER_COOKIE = 'ltds_viewer';
 
@@ -21,10 +22,12 @@ function encodedAssetUrl(modelId, asset, assetToken = null) {
 
 function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
   if (!model || !model.activeVersion) return null;
+  const eligibleAssets = viewerEligibleAssets(model.activeVersion.metadata, model.activeVersion.assets);
   const visibleAssets = typeof assetFilter === 'function'
-    ? model.activeVersion.assets.filter(assetFilter)
-    : model.activeVersion.assets;
+    ? eligibleAssets.filter(assetFilter)
+    : eligibleAssets;
   const byKind = Object.fromEntries(visibleAssets.map((asset) => [asset.kind, asset]));
+  const lodProvenance = verifiedLodProvenance(model.activeVersion.metadata, visibleAssets);
   const pointCloud = byKind.pointCloud;
   return {
     id: model.id,
@@ -37,7 +40,7 @@ function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
     provider: model.provider,
     georef: model.activeVersion.georef || {},
     pointCount: model.activeVersion.pointCount ?? null,
-    lodProvenance: model.metadata.lodProvenance || model.activeVersion.metadata.lodProvenance || null,
+    lodProvenance,
     assets: {
       glb: encodedAssetUrl(model.id, byKind.glb, assetToken),
       tiles: encodedAssetUrl(model.id, byKind.tiles, assetToken),

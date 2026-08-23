@@ -36,9 +36,29 @@ preservation assertion:
 npm run audit:lod -- /path/to/derivatives/project-task /path/to/derivatives/project-task/model.glb
 ```
 
-Only after the audit has parsed and compared the source GLB with the aggregate
-zero-error leaf frontier does it atomically write `lod-provenance.json` beside
-`tileset.json`:
+The bundled, checksum-pinned converter accepts textured OBJ. Experimental
+generation requires both the OBJ (including its MTL/textures) and an independent
+companion GLB. Standard WebODM task backups commonly satisfy this source
+contract with `assets/odm_texturing/odm_textured_model_geo.obj` and
+`assets/odm_texturing/odm_textured_model_geo.glb`. Native imported tiles are
+quarantined, audited, and registered only after the proof succeeds. Automatic
+generation and legacy generation backfill remain default-off; an explicit
+operator opt-in permits a single bounded attempt and a manual retry.
+
+GLB-only and OBJ-only inputs deliberately remain on their available full-mesh
+fallback. The runtime image does not contain a pinned mesh interchange
+converter, and format conversion alone is not proof that node transforms,
+materials, samplers, UVs, texture bytes, and coordinates survived. Do not add a
+best-effort conversion or declare generated tiles valid without an independent
+source mesh that the audit can compare. Supporting a single-format source needs
+a separately pinned converter, conversion-preservation tests for representative
+textured and georeferenced fixtures, and the same fail-closed LOD audit before
+registration.
+
+Only after the v2 audit has parsed and compared the source GLB (including
+checksum-locked Draco decoding when `KHR_draco_mesh_compression` is required)
+with the aggregate zero-error leaf frontier does it atomically write
+`lod-provenance.json` beside `tileset.json`:
 
 ```json
 {
@@ -49,7 +69,7 @@ zero-error leaf frontier does it atomically write `lod-provenance.json` beside
   "textures": "byte-identical-material-equivalence",
   "leafGeometricError": 0,
   "audit": {
-    "algorithm": "ltds-glb-leaf-equivalence-v1",
+    "algorithm": "ltds-glb-leaf-equivalence-v2",
     "coordinateTolerance": 0.000001,
     "maxNumericDelta": 0,
     "triangleCount": 123456,
@@ -78,7 +98,9 @@ as far as `1e-3`; choose a bound appropriate for the source coordinate units.
 
 ### Deliberately unsupported proof cases
 
-The v1 algorithm fails closed for Draco/meshopt-compressed geometry, sparse
+The v2 algorithm decodes `KHR_draco_mesh_compression` through the repository's
+locked `draco3d` dependency and fails closed on malformed accessor/semantic
+bindings. It still fails closed for meshopt-compressed geometry, sparse
 accessors, morphs, skins, GPU instancing, non-triangle primitives, external GLB
 buffers, alternate compressed texture-source extensions, binary
 `RTC_CENTER`, or remote URLs. Decode these into the supported GLB/B3DM subset
@@ -89,8 +111,20 @@ triangles. If a tiler clips triangles at tile boundaries or retriangulates the
 surface, triangle topology differs and this algorithm cannot prove exact
 equivalence even when the rendered surfaces look the same. Likewise, texture
 atlas repacking or lossless re-encoding changes texture bytes and is rejected.
-Those cases require a separately designed and versioned surface/texture proof;
-do not loosen the v1 result or manually change the provenance file.
+The production Obj2Tiles invocation deliberately uses a bounded texture-atlas
+contract instead of `--keeptextures`: on a representative 2.53 GiB textured
+WebODM model, `--keeptextures` duplicated source textures into more than 157
+GiB before completion. The bounded invocation completed in about three minutes
+and produced a 0.89 GiB hierarchy, but its full-detail frontier retriangulated
+the 1,148,233 source triangles into 1,270,357 leaf triangles, so the v2 audit
+correctly rejected it. `MESH_DERIVATIVES_ENABLED` therefore defaults to false.
+Verified imported tiles may stream. The original GLB remains a guarded fallback
+only when the browser's reported memory or Chromium heap ceiling leaves enough
+decode headroom; an oversized GLB with no verified tiles is explicitly
+unavailable instead of risking a tab crash.
+Automatic generation must stay opt-in/experimental until a separately
+versioned surface-and-appearance proof is implemented; do not loosen the v2
+result or manually change the provenance file.
 
 ## Validate before deployment
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import draco3d from 'draco3d';
 
 function align4(value) {
   return (value + 3) & ~3;
@@ -22,6 +23,8 @@ function floatBytes(values) {
 export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture'), {
   texcoordTransform = (x, y) => [x, y],
   imageUri = null,
+  unlit = false,
+  cesiumRtc = null,
 } = {}) {
   const positions = [];
   const normals = [];
@@ -45,7 +48,7 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0 }],
     meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, material: 0 }] }],
-    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
+    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, ...(unlit ? { extensions: { KHR_materials_unlit: {} } } : {}) }],
     textures: [{ source: 0 }],
     images: [imageUri ? { uri: imageUri, mimeType: 'image/png' } : { bufferView: 3, mimeType: 'image/png' }],
     accessors: [
@@ -55,6 +58,8 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
     ],
     bufferViews: [positionView, normalView, texcoordView, ...(imageView ? [imageView] : [])],
     buffers: [{ byteLength: bin.length }],
+    ...(unlit ? { extensionsUsed: ['KHR_materials_unlit'], extensionsRequired: ['KHR_materials_unlit'] } : {}),
+    ...(cesiumRtc ? { extensions: { CESIUM_RTC: { center: cesiumRtc } }, extensionsUsed: [...(unlit ? ['KHR_materials_unlit'] : []), 'CESIUM_RTC'] } : {}),
   };
   let jsonBytes = Buffer.from(JSON.stringify(json));
   const paddedJson = Buffer.alloc(align4(jsonBytes.length), 0x20);
@@ -71,6 +76,96 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
   output.writeUInt32LE(0x004e4942, binHeader + 4);
   bin.copy(output, binHeader + 8);
   return output;
+}
+
+export async function makeDracoGlb(triangles, textureBytes = Buffer.from('fixture-texture'), {
+  unlit = false,
+  cesiumRtc = null,
+} = {}) {
+  const positions = [];
+  const normals = [];
+  const texcoords = [];
+  for (const triangle of triangles) {
+    for (const [x, y, z] of triangle) {
+      positions.push(x, y, z);
+      normals.push(0, 0, 1);
+      texcoords.push(x, y);
+    }
+  }
+  const module = await draco3d.createEncoderModule({});
+  const builder = new module.MeshBuilder();
+  const encoder = new module.Encoder();
+  const mesh = new module.Mesh();
+  const encoded = new module.DracoInt8Array();
+  try {
+    const vertexCount = positions.length / 3;
+    builder.AddFacesToMesh(mesh, triangles.length, Uint32Array.from({ length: vertexCount }, (_, index) => index));
+    const positionId = builder.AddFloatAttributeToMesh(mesh, module.POSITION, vertexCount, 3, new Float32Array(positions));
+    const normalId = builder.AddFloatAttributeToMesh(mesh, module.NORMAL, vertexCount, 3, new Float32Array(normals));
+    const texcoordId = builder.AddFloatAttributeToMesh(mesh, module.TEX_COORD, vertexCount, 2, new Float32Array(texcoords));
+    encoder.SetSpeedOptions(5, 5);
+    encoder.SetAttributeQuantization(module.POSITION, 14);
+    encoder.SetAttributeQuantization(module.NORMAL, 10);
+    encoder.SetAttributeQuantization(module.TEX_COORD, 12);
+    const encodedLength = encoder.EncodeMeshToDracoBuffer(mesh, encoded);
+    if (encodedLength <= 0) throw new Error('test Draco encoding failed');
+    const dracoBytes = Buffer.alloc(encodedLength);
+    for (let index = 0; index < encodedLength; index += 1) dracoBytes[index] = encoded.GetValue(index);
+    const parts = [];
+    const dracoView = append(parts, dracoBytes);
+    const imageView = append(parts, textureBytes);
+    const bin = Buffer.concat(parts);
+    const extensionsUsed = ['KHR_draco_mesh_compression', ...(unlit ? ['KHR_materials_unlit'] : []), ...(cesiumRtc ? ['CESIUM_RTC'] : [])];
+    const decodedVertexCount = new Set(Array.from({ length: vertexCount }, (_, index) => (
+      `${positions.slice(index * 3, index * 3 + 3).join(',')}|${normals.slice(index * 3, index * 3 + 3).join(',')}|${texcoords.slice(index * 2, index * 2 + 2).join(',')}`
+    ))).size;
+    const json = {
+      asset: { version: '2.0', generator: 'LTDS deterministic Draco test fixture' },
+      scene: 0,
+      scenes: [{ nodes: [0] }],
+      nodes: [{ mesh: 0 }],
+      meshes: [{ primitives: [{
+        attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 },
+        indices: 3,
+        material: 0,
+        extensions: { KHR_draco_mesh_compression: { bufferView: 0, attributes: { POSITION: positionId, NORMAL: normalId, TEXCOORD_0: texcoordId } } },
+      }] }],
+      materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, ...(unlit ? { extensions: { KHR_materials_unlit: {} } } : {}) }],
+      textures: [{ source: 0 }],
+      images: [{ bufferView: 1, mimeType: 'image/png' }],
+      accessors: [
+        { componentType: 5126, count: decodedVertexCount, type: 'VEC3' },
+        { componentType: 5126, count: decodedVertexCount, type: 'VEC3' },
+        { componentType: 5126, count: decodedVertexCount, type: 'VEC2' },
+        { componentType: 5125, count: triangles.length * 3, type: 'SCALAR' },
+      ],
+      bufferViews: [dracoView, imageView],
+      buffers: [{ byteLength: bin.length }],
+      extensionsUsed,
+      extensionsRequired: ['KHR_draco_mesh_compression', ...(unlit ? ['KHR_materials_unlit'] : [])],
+      ...(cesiumRtc ? { extensions: { CESIUM_RTC: { center: cesiumRtc } } } : {}),
+    };
+    let jsonBytes = Buffer.from(JSON.stringify(json));
+    const paddedJson = Buffer.alloc(align4(jsonBytes.length), 0x20);
+    jsonBytes.copy(paddedJson);
+    const output = Buffer.alloc(12 + 8 + paddedJson.length + 8 + bin.length);
+    output.writeUInt32LE(0x46546c67, 0);
+    output.writeUInt32LE(2, 4);
+    output.writeUInt32LE(output.length, 8);
+    output.writeUInt32LE(paddedJson.length, 12);
+    output.writeUInt32LE(0x4e4f534a, 16);
+    paddedJson.copy(output, 20);
+    const binHeader = 20 + paddedJson.length;
+    output.writeUInt32LE(bin.length, binHeader);
+    output.writeUInt32LE(0x004e4942, binHeader + 4);
+    bin.copy(output, binHeader + 8);
+    return output;
+  } finally {
+    module.destroy(encoded);
+    module.destroy(mesh);
+    module.destroy(encoder);
+    module.destroy(builder);
+  }
 }
 
 export function makeB3dm(glb, featureTable = null) {

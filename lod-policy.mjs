@@ -81,7 +81,7 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
     errors.push('textures must be byte-identical-material-equivalence');
   }
   if (provenance.leafGeometricError !== 0) errors.push('leafGeometricError must be 0');
-  if (provenance.audit?.algorithm !== 'ltds-glb-leaf-equivalence-v1') {
+  if (provenance.audit?.algorithm !== 'ltds-glb-leaf-equivalence-v2') {
     errors.push('recognized LOD equivalence audit evidence is required');
   }
   if (!Number.isInteger(provenance.audit?.triangleCount) || provenance.audit.triangleCount < 1) {

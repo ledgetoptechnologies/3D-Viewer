@@ -26,6 +26,29 @@ function browserPath() {
   ].filter(Boolean).find(existsSync) || null;
 }
 
+async function removeBrowserProfile(profile, t) {
+  if (!profile) return;
+  const resolved = path.resolve(profile);
+  const expectedPrefix = path.resolve(tmpdir(), 'ltds-project-share-browser-');
+  if (!resolved.startsWith(expectedPrefix)) throw new Error(`refusing to remove unexpected browser profile: ${resolved}`);
+  let lastError;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(resolved, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(lastError?.code)) {
+    t.diagnostic(`Windows retained a lock on temporary browser profile ${resolved}; functional browser assertions completed.`);
+    return;
+  }
+  throw lastError;
+}
+
 function response(body, status = 200, headers = {}) {
   return { status, body: Buffer.from(JSON.stringify(body)), headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers } };
 }
@@ -362,6 +385,6 @@ test('whole-project public sharing works in real desktop and mobile browsers', {
     }
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
-    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await removeBrowserProfile(profile, t);
   }
 });

@@ -105,6 +105,17 @@ test('applies tile transforms and accepts small bounded floating-point deltas', 
   assert.ok(evidence.audit.maxNumericDelta <= evidence.audit.coordinateTolerance);
 });
 
+test('treats an explicit null tile transform as inherited', (t) => {
+  const { directory, source } = fixture(t);
+  const manifestPath = path.join(directory, 'tileset.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.root.children[0].transform = null;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+  const result = spawnSync(process.execPath, [cli, directory, source], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('binds external texture payloads so post-audit changes invalidate provenance', async (t) => {
   const { directory, source } = fixture(t, { externalTexture: true });
   const result = spawnSync(process.execPath, [cli, directory, source], { encoding: 'utf8' });
@@ -128,6 +139,18 @@ test('applies a JSON B3DM RTC_CENTER to the audited leaf coordinate frame', (t) 
     leafARtc: [2, 0, 0],
     leafATexcoordTransform: (x, y) => [x + 2, y],
   });
+  const result = spawnSync(process.execPath, [cli, directory, source], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('accepts bounded space padding after an embedded B3DM GLB', (t) => {
+  const { directory, source } = fixture(t);
+  const leafPath = path.join(directory, 'leaf-a.b3dm');
+  const leaf = fs.readFileSync(leafPath);
+  const padded = Buffer.concat([leaf, Buffer.alloc(4, 0x20)]);
+  padded.writeUInt32LE(padded.length, 8);
+  fs.writeFileSync(leafPath, padded);
+
   const result = spawnSync(process.execPath, [cli, directory, source], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 });
