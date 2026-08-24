@@ -29,6 +29,7 @@ import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDe
 import { fetchAssetArrayBufferByRange } from './range-fetch.mjs';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
+import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import {
   fullMeshByteLimit,
@@ -67,7 +68,7 @@ let UTM_ZONE_LON0 = 0;
 
 const METERS_TO_FT = 3.28084;
 let DISPLAY_UNITS = 'imperial';
-function setDisplayUnits(value){DISPLAY_UNITS=normalizeUnits(value);const suffix=DISPLAY_UNITS==='metric'?'m':'ft';if(dom.demMinLabel)dom.demMinLabel.textContent=`Min ${suffix}`;if(dom.demMaxLabel)dom.demMaxLabel.textContent=`Max ${suffix}`;if(dom.demLegendUnit)dom.demLegendUnit.textContent=`Elevation (${suffix})`;}
+function setDisplayUnits(value){DISPLAY_UNITS=normalizeUnits(value);const suffix=DISPLAY_UNITS==='metric'?'m':'ft';if(dom.demMinLabel)dom.demMinLabel.textContent=`Min ${suffix}`;if(dom.demMaxLabel)dom.demMaxLabel.textContent=`Max ${suffix}`;if(dom.demLegendUnit)dom.demLegendUnit.textContent=`Elevation (${suffix})`;const volumeUnit=document.getElementById('map-volume-custom-unit');if(volumeUnit)volumeUnit.textContent=suffix;}
 function elevationInputMeters(value){return DISPLAY_UNITS==='metric'?value:value/METERS_TO_FT;}
 
 // world (three.js Y-up, model centered at origin) <-> UTM
@@ -150,6 +151,8 @@ let camGroupParent, camInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
 let mapViews = {};            // per-tab map center/zoom retention
+let mapMeasure = null;        // active Leaflet distance/area sketch
+let mapMeasurements = [];     // completed Leaflet layer groups
 // WebODM-style DEM rendering settings (shared by DSM/DTM, like WebODM's layer panel)
 const demSettings = {
   cmap: 'viridis',
@@ -1453,6 +1456,9 @@ function lineMaterial() {
 }
 
 function setTool(tool) {
+  if (state.activeMode === 'ortho' || state.activeMode === 'dsm' || state.activeMode === 'dtm') {
+    return setMapTool(tool);
+  }
   if (state.activeMode === 'cloud') {
     // route to the Potree iframe (same buttons drive both viewers)
     const api = pcApi();
@@ -1485,6 +1491,200 @@ function setTool(tool) {
   } else {
     dom.measureOutput.textContent = '';
   }
+}
+
+function isMapMode(mode = state.activeMode) {
+  return mode === 'ortho' || mode === 'dsm' || mode === 'dtm';
+}
+
+function setMapTool(tool) {
+  if (!map) return;
+  if (tool === 'clear') {
+    cancelMapMeasure();
+    mapMeasurements.forEach((layer) => map.removeLayer(layer));
+    mapMeasurements = [];
+    tool = 'none';
+  }
+  if (mapMeasure) cancelMapMeasure();
+  if (tool === 'volume' && !selectedVolumeDataset()) {
+    state.activeTool = 'none';
+    dom.measureOutput.innerHTML = '<b>Load an elevation surface first.</b><br><span class="sub">Open DSM or DTM once, then select that surface here. Orthophoto pixels alone contain no height.</span>';
+    syncMeasureButtons();
+    return;
+  }
+  state.activeTool = tool;
+  syncMeasureButtons();
+  map.doubleClickZoom[tool === 'none' ? 'enable' : 'disable']();
+  dom.leafletMap.classList.toggle('measuring', tool !== 'none');
+  if (tool === 'none') { dom.measureOutput.textContent = ''; return; }
+  mapMeasure = { tool, points: [], group: L.layerGroup().addTo(map), shape: null, preview: null };
+  dom.measureOutput.textContent = tool === 'distance'
+    ? 'Click the first point on the map.'
+    : 'Click to add points (3 or more). Double-click, Enter, or right-click to finish.';
+}
+
+function syncMeasureButtons() {
+  document.querySelectorAll('#panel-measure .tool-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.tool === state.activeTool);
+  });
+}
+
+function projectedMapPoints(points) {
+  return points.map((p) => latLonToUtm(p.lat, p.lng));
+}
+
+function mapDistanceMeters(points) {
+  const p = projectedMapPoints(points);
+  let total = 0;
+  for (let i = 1; i < p.length; i++) total += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]);
+  return total;
+}
+
+function mapAreaSquareMeters(points) {
+  const p = projectedMapPoints(points);
+  let twice = 0;
+  for (let i = 0; i < p.length; i++) {
+    const a = p[i], b = p[(i + 1) % p.length];
+    twice += a[0] * b[1] - b[0] * a[1];
+  }
+  return Math.abs(twice) / 2;
+}
+
+function redrawMapMeasure(cursor = null) {
+  const m = mapMeasure;
+  if (!m) return;
+  if (m.shape) m.group.removeLayer(m.shape);
+  if (m.preview) m.group.removeLayer(m.preview);
+  m.shape = null; m.preview = null;
+  if (m.points.length >= 2) {
+    m.shape = (m.tool === 'area' || m.tool === 'volume') && m.points.length >= 3
+      ? L.polygon(m.points, { color: '#F8CB2E', weight: 3, fillColor: '#EE5007', fillOpacity: 0.2 })
+      : L.polyline(m.points, { color: '#F8CB2E', weight: 3 });
+    m.shape.addTo(m.group);
+  }
+  if (cursor && m.points.length) {
+    m.preview = L.polyline([m.points[m.points.length - 1], cursor], { color: '#fff', weight: 2, dashArray: '6 6' }).addTo(m.group);
+  }
+}
+
+function addMapMeasurePoint(latlng) {
+  const m = mapMeasure;
+  if (!m || m.finishing) return;
+  m.points.push(L.latLng(latlng));
+  L.circleMarker(latlng, { radius: 5, color: '#F8CB2E', weight: 2, fillColor: '#fff', fillOpacity: 1 }).addTo(m.group);
+  redrawMapMeasure();
+  if (m.tool === 'distance') {
+    if (m.points.length === 2) finishMapMeasure();
+    else dom.measureOutput.textContent = 'Click the second point. Esc or right-click cancels.';
+  } else {
+    dom.measureOutput.textContent = m.points.length < 3
+      ? `${m.points.length} points placed; 3 or more are required.`
+      : `${m.points.length} points placed. Double-click, Enter, or right-click to finish.`;
+  }
+}
+
+async function finishMapMeasure() {
+  const m = mapMeasure;
+  if (m?.finishing) return;
+  if (!m || m.points.length < (m.tool === 'distance' ? 2 : 3)) { cancelMapMeasure(); setMapTool('none'); return; }
+  m.finishing = true;
+  redrawMapMeasure();
+  const value = m.tool === 'distance' ? mapDistanceMeters(m.points) : mapAreaSquareMeters(m.points);
+  let text = m.tool === 'distance' ? formatLength(value, DISPLAY_UNITS) : formatArea(value, DISPLAY_UNITS);
+  const anchor = m.tool === 'distance'
+    ? L.latLng((m.points[0].lat + m.points.at(-1).lat) / 2, (m.points[0].lng + m.points.at(-1).lng) / 2)
+    : L.polygon(m.points).getBounds().getCenter();
+  if (m.tool === 'volume') {
+    dom.measureOutput.textContent = 'Sampling elevation cells inside the polygon…';
+    try {
+      const result = await calculateMapVolume(m.points);
+      text = `Net ${formatVolume(result.netM3, DISPLAY_UNITS)}`;
+      dom.measureOutput.innerHTML = `<b>Cut:</b> ${formatVolume(result.cutM3, DISPLAY_UNITS)}<br><b>Fill:</b> ${formatVolume(result.fillM3, DISPLAY_UNITS)}<br><b>Net:</b> ${formatVolume(result.netM3, DISPLAY_UNITS)}<br><span class="sub">Reference ${formatElevation(result.referenceElevation, DISPLAY_UNITS)} · ${result.sampleCount.toLocaleString()} elevation cells</span>`;
+    } catch (err) {
+      console.error('map volume error', err);
+      dom.measureOutput.textContent = err?.message || 'Could not calculate volume.';
+      m.finishing = false;
+      return;
+    }
+  } else {
+    dom.measureOutput.innerHTML = `<b>${m.tool === 'distance' ? 'Distance' : 'Area'}:</b> ${text}`;
+  }
+  L.tooltip({ permanent: true, direction: 'top', className: 'map-measure-label' }).setLatLng(anchor).setContent(text).addTo(m.group);
+  mapMeasurements.push(m.group);
+  mapMeasure = null;
+  state.activeTool = 'none';
+  syncMeasureButtons();
+  map.doubleClickZoom.enable();
+  dom.leafletMap.classList.remove('measuring');
+}
+
+function selectedVolumeDataset() {
+  const requested = document.getElementById('map-volume-surface')?.value;
+  if (requested === 'dsm') return demLayers.dsm?.ds || null;
+  if (requested === 'dtm') return demLayers.dtm?.ds || null;
+  return state.activeMode === 'dsm' ? demLayers.dsm?.ds || null
+    : state.activeMode === 'dtm' ? demLayers.dtm?.ds || null
+    : demLayers.dsm?.ds || demLayers.dtm?.ds || null;
+}
+
+async function calculateMapVolume(latLngPoints) {
+  const ds = selectedVolumeDataset();
+  if (!ds) throw new Error('Load DSM or DTM before calculating volume.');
+  const polygon = projectedMapPoints(latLngPoints);
+  const minE = Math.max(ds.minE, Math.min(...polygon.map((p) => p[0])));
+  const maxE = Math.min(ds.maxE, Math.max(...polygon.map((p) => p[0])));
+  const minN = Math.max(ds.minN, Math.min(...polygon.map((p) => p[1])));
+  const maxN = Math.min(ds.maxN, Math.max(...polygon.map((p) => p[1])));
+  if (!(maxE > minE && maxN > minN)) throw new Error('The polygon is outside the elevation surface.');
+  const image = ds.images[0];
+  const pxWidth = (ds.maxE - ds.minE) / ds.W;
+  const pxHeight = (ds.maxN - ds.minN) / ds.H;
+  const x0 = Math.max(0, Math.floor((minE - ds.minE) / pxWidth));
+  const x1 = Math.min(ds.W, Math.ceil((maxE - ds.minE) / pxWidth));
+  const y0 = Math.max(0, Math.floor((ds.maxN - maxN) / pxHeight));
+  const y1 = Math.min(ds.H, Math.ceil((ds.maxN - minN) / pxHeight));
+  const sourceW = Math.max(1, x1 - x0), sourceH = Math.max(1, y1 - y0);
+  const scale = Math.max(1, Math.ceil(Math.sqrt((sourceW * sourceH) / 1_500_000)));
+  const width = Math.max(1, Math.ceil(sourceW / scale));
+  const height = Math.max(1, Math.ceil(sourceH / scale));
+  const rasters = await image.readRasters({ window: [x0, y0, x1, y1], width, height, resampleMethod: 'bilinear', pool: geoPool });
+  const reference = document.getElementById('map-volume-reference')?.value || 'lowest';
+  const rawCustom = document.getElementById('map-volume-custom')?.value;
+  const customReference = rawCustom === '' ? null : elevationInputMeters(Number(rawCustom));
+  return integrateElevationVolume({
+    values: rasters[0], width, height,
+    bounds: {
+      minE: ds.minE + x0 * pxWidth,
+      maxE: ds.minE + x1 * pxWidth,
+      maxN: ds.maxN - y0 * pxHeight,
+      minN: ds.maxN - y1 * pxHeight,
+    },
+    polygon, nodata: ds.nodata, reference, customReference,
+  });
+}
+
+function syncMapVolumeAvailability() {
+  const options = document.getElementById('map-volume-options');
+  if (options) options.style.display = isMapMode() ? 'block' : 'none';
+  const surface = document.getElementById('map-volume-surface');
+  if (!surface) return;
+  surface.querySelector('option[value="dsm"]').disabled = !demLayers.dsm;
+  surface.querySelector('option[value="dtm"]').disabled = !demLayers.dtm;
+  if (state.activeMode === 'dsm' && demLayers.dsm) surface.value = 'dsm';
+  else if (state.activeMode === 'dtm' && demLayers.dtm) surface.value = 'dtm';
+  else if (surface.selectedOptions[0]?.disabled) surface.value = demLayers.dsm ? 'dsm' : demLayers.dtm ? 'dtm' : 'auto';
+  const volumeButton = document.getElementById('tool-volume');
+  if (isMapMode()) {
+    volumeButton.disabled = !selectedVolumeDataset();
+    volumeButton.title = volumeButton.disabled ? 'Open DSM or DTM once to load an elevation surface.' : '';
+  }
+}
+
+function cancelMapMeasure() {
+  if (mapMeasure && map) map.removeLayer(mapMeasure.group);
+  mapMeasure = null;
+  if (map) map.doubleClickZoom.enable();
+  dom.leafletMap.classList.remove('measuring');
 }
 
 function setMeasureHint() {
@@ -1792,9 +1992,13 @@ function onKeyDown(e) {
       setTool('none');
       return;
     }
-    if (state.activeTool !== 'none') { cancelActiveMeasure(); setTool('none'); }
+    if (state.activeTool !== 'none') {
+      if (isMapMode()) cancelMapMeasure(); else cancelActiveMeasure();
+      setTool('none');
+    }
   } else if (e.key === 'Enter') {
-    if (state.measure && state.measure.points.length >= 3) finishMeasure();
+    if (mapMeasure && mapMeasure.points.length >= 3) finishMapMeasure();
+    else if (state.measure && state.measure.points.length >= 3) finishMeasure();
   }
 }
 
@@ -1804,21 +2008,32 @@ function onKeyDown(e) {
 function ensureMap() {
   if (map) return;
   dom.leafletMap.style.display = 'block';
-  map = L.map(dom.leafletMap, { zoomControl: true, attributionControl: true, maxZoom: 24 });
+  map = L.map(dom.leafletMap, { zoomControl: true, attributionControl: true, maxZoom: 28 });
   // Detail tiles must sit ABOVE the overview imageOverlay (overlayPane z=400).
   // Leaflet's default tilePane is z=200, which buried the hi-res tiles and
   // made zooming look like it never sharpened.
   map.createPane('gtiff');
   map.getPane('gtiff').style.zIndex = 450;
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    attribution: 'Tiles © Esri', maxZoom: 24, maxNativeZoom: 19
+    attribution: 'Tiles © Esri', maxZoom: 28, maxNativeZoom: 19
   }).addTo(map);
   map.setView([42.981, -88.628], 15);
 
   map.on('mousemove', (e) => {
+    if (mapMeasure?.points.length) redrawMapMeasure(e.latlng);
     const ds = state.activeMode === 'dsm' ? geoDatasets[DSM_URL]
              : state.activeMode === 'dtm' ? geoDatasets[DTM_URL] : null;
     if (ds) showDemHover(e, ds); else dom.demHover.style.display = 'none';
+  });
+  map.on('click', (e) => { if (mapMeasure) addMapMeasurePoint(e.latlng); });
+  map.on('dblclick', (e) => {
+    if (mapMeasure?.points.length >= 3) { L.DomEvent.stop(e); finishMapMeasure(); }
+  });
+  map.on('contextmenu', (e) => {
+    if (!mapMeasure) return;
+    L.DomEvent.stop(e);
+    if (mapMeasure.points.length >= 3) finishMapMeasure();
+    else { cancelMapMeasure(); setMapTool('none'); }
   });
 }
 
@@ -2144,7 +2359,7 @@ async function showOrtho() {
       const ov = await overviewCanvas(ds, renderOrthoTile, 3400);
       const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
       const grid = new GeoTiffGridLayer(ds, renderOrthoTile, {
-        tileSize: 256, minZoom: 12, maxZoom: 24, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
+        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
       });
       orthoLayers = { overlay, grid, ds };
       hideLoading();
@@ -2170,9 +2385,10 @@ async function showDEM(type) {
       const ov = await overviewCanvas(ds, renderDemTile, 2048);
       const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 0.94 });
       const grid = new GeoTiffGridLayer(ds, renderDemTile, {
-        tileSize: 256, minZoom: 12, maxZoom: 24, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
+        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
       });
       demLayers[type] = { overlay, grid, ds };
+      syncMapVolumeAvailability();
       hideLoading();
     }
     const dl = demLayers[type];
@@ -2542,6 +2758,7 @@ window.addEventListener('message', (event) => {
   if (!message || message.source !== 'ltds-pointcloud') return;
   if (message.type === 'ready' && message.code === 'points_visible') {
     dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready';
+    applyPcPanelState();
   } else if (message.type === 'error') {
     dom.cloudStatus.textContent = 'Cloud: unavailable';
   }
@@ -2692,6 +2909,10 @@ function bindUI() {
     btn.addEventListener('click', () => setTool(btn.dataset.tool));
   });
   document.getElementById('tool-clear').addEventListener('click', () => setTool('clear'));
+  document.getElementById('map-volume-reference').addEventListener('change', (e) => {
+    document.getElementById('map-volume-custom-row').style.display = e.target.value === 'custom' ? 'flex' : 'none';
+  });
+  document.getElementById('map-volume-surface').addEventListener('change', syncMapVolumeAvailability);
 
   document.getElementById('btn-reset').addEventListener('click', resetCamera);
   document.getElementById('btn-top').addEventListener('click', topDownView);
@@ -2758,6 +2979,7 @@ function switchMode(mode) {
   if (state.activeTool !== 'none') {
     if (prevMode === 'model') { cancelActiveMeasure(); }
     else if (prevMode === 'cloud') { const api = pcApi(); if (api) api.cancel(); }
+    else if (isMapMode(prevMode)) { cancelMapMeasure(); }
     state.activeTool = 'none';
     document.querySelectorAll('#panel-measure .tool-btn').forEach((b) => {
       b.classList.toggle('active', b.dataset.tool === 'none');
@@ -2770,6 +2992,9 @@ function switchMode(mode) {
   const isPC = mode === 'cloud';
   const isPotreeCloud = isPC && state.cloudMode === 'potree';
   const isDirectCloud = isPC && state.cloudMode === 'direct';
+  const volumeButton = document.getElementById('tool-volume');
+  volumeButton.disabled = false;
+  volumeButton.title = '';
   dom.threeContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.labelsContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.cloudContainer.style.display = isPotreeCloud ? 'block' : 'none';
@@ -2782,11 +3007,12 @@ function switchMode(mode) {
   const isDem = mode === 'dsm' || mode === 'dtm';
   document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
-  document.getElementById('panel-measure').style.display = (is3D || isPC) && SHARE_PERMISSIONS.measure ? 'block' : 'none';
+  document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
   document.getElementById('panel-pc').style.display = isPotreeCloud ? 'block' : 'none';
   document.getElementById('panel-ortho').style.display = mode === 'ortho' ? 'block' : 'none';
   document.getElementById('panel-dem').style.display = isDem ? 'block' : 'none';
+  syncMapVolumeAvailability();
 
   if (is3D) {
     updateStatus('Mode: 3D Model');
@@ -2813,6 +3039,17 @@ function switchMode(mode) {
     if (mode === 'ortho') showOrtho();
     else showDEM(mode);
   }
+}
+
+function applyPcPanelState() {
+  const api = pcApi();
+  if (!api) return false;
+  api.setBudget(parseFloat(document.getElementById('pc2-budget').value));
+  api.setSize(parseFloat(document.getElementById('pc2-size').value));
+  api.setSizing(document.getElementById('pc2-sizing').value);
+  api.setColor(document.getElementById('pc2-color').value);
+  api.setEDL(document.getElementById('pc2-edl').checked);
+  return true;
 }
 
 function updateStatus(t) { dom.modeStatus.textContent = t; }

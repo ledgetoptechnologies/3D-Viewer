@@ -2,6 +2,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
+const {hashFileChunks,hashTree}=require('./storageManager');
 
 function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabled=false,limit=20}={}){
   let queued=0,scanned=0,lastProcessed=null,conflict=false;
@@ -10,9 +11,9 @@ function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabl
     scanned+=1;
     try{
       const assets=processing.modelAssetsForVersion(candidate.versionId);
-      if(!assets.some((asset)=>asset.kind==='tiles')&&candidate.outputRootKey==='models'){
+      if(!assets.some((asset)=>asset.kind==='tiles')){
         const relative=path.posix.join(candidate.outputRelativePath||`${candidate.taskId}/${candidate.attemptId}`,'3d_tiles/model/tileset.json');
-        try{if(fs.statSync(storage.resolve('models',relative,{mustExist:true})).isFile())assets.push({kind:'nativeTiles',rootKey:'models',relativePath:relative});}catch{}
+        try{if(fs.statSync(storage.resolve(candidate.outputRootKey,relative,{mustExist:true})).isFile())assets.push({kind:'nativeTiles',rootKey:candidate.outputRootKey,relativePath:relative});}catch{}
       }
       const specs=lodDerivativeSpecs(assets,{meshDerivativesEnabled});
       if(specs.length){if(!processing.enqueueOptionalDerivatives(candidate.attemptId,specs))throw Object.assign(new Error('LOD backfill candidate changed'),{code:'derivative_activation_conflict'});queued+=1;}
@@ -23,4 +24,38 @@ function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabl
   else if(!conflict)processing.advanceLodBackfillCursor(null,false);
   return{scanned,queued,conflict};
 }
-module.exports={reconcileMissingLodDerivatives};
+
+async function reconcileMissingPointCloudAssets(processing,storage,{limit=5}={}){
+  let scanned=0,registered=0,lastProcessed=null;
+  const candidates=processing.listPointCloudBackfillCandidates(limit);
+  for(const candidate of candidates){
+    scanned+=1;
+    const prefix=candidate.outputRelativePath||'';
+    const eptChoices=['assets/entwine_pointcloud/ept.json','entwine_pointcloud/ept.json'];
+    const pointChoices=['assets/odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.laz'];
+    let discovered=null;
+    for(const suffix of eptChoices){
+      const relativePath=path.posix.join(prefix,suffix);
+      let absolute;try{absolute=storage.resolve(candidate.outputRootKey,relativePath,{mustExist:true});}catch(error){if(error.code==='ENOENT')continue;throw error;}
+      if(!fs.statSync(absolute).isFile())continue;
+      const tree=await hashTree(path.dirname(absolute));
+      const entry=tree.files.find((file)=>file.relativePath==='ept.json');
+      if(entry)discovered={kind:'ept',rootKey:candidate.outputRootKey,relativePath,format:'ept',contentType:'application/json',byteSize:entry.byteSize,sha256:entry.sha256,manifestSha256:tree.manifestSha256,manifestFiles:tree.files};
+      if(discovered)break;
+    }
+    if(!discovered){for(const suffix of pointChoices){
+      const relativePath=path.posix.join(prefix,suffix);
+      let absolute;try{absolute=storage.resolve(candidate.outputRootKey,relativePath,{mustExist:true});}catch(error){if(error.code==='ENOENT')continue;throw error;}
+      const stat=fs.statSync(absolute);if(!stat.isFile())continue;
+      const integrity=await hashFileChunks(absolute);
+      discovered={kind:'pointCloud',rootKey:candidate.outputRootKey,relativePath,format:'laz',contentType:'application/vnd.laszip',byteSize:stat.size,sha256:integrity.sha256,chunks:integrity.chunks};
+      if(discovered)break;
+    }}
+    if(discovered&&!processing.modelAssetsForVersion(candidate.versionId).some((asset)=>['ept','pointCloud'].includes(asset.kind))){processing.addModelAsset({versionId:candidate.versionId,attemptId:candidate.attemptId,published:candidate.published,...discovered});registered+=1;}
+    lastProcessed=candidate.attemptId;
+  }
+  if(lastProcessed)processing.advancePointCloudBackfillCursor(lastProcessed,candidates.length>=limit);
+  else processing.advancePointCloudBackfillCursor(null,false);
+  return{scanned,registered};
+}
+module.exports={reconcileMissingLodDerivatives,reconcileMissingPointCloudAssets};

@@ -108,6 +108,13 @@
     /* isolate Leaflet's internal pane z-indexes (200-700) so app UI like the
        DEM legend (z 120) isn't buried under map tiles */
     #leaflet-map { z-index: 0; }
+    #leaflet-map.measuring { cursor: crosshair; }
+    .map-measure-label {
+      background: rgba(10,10,12,0.92); color: #fff; border: 1px solid var(--brand-orange);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.5); font-weight: 700;
+    }
+    .map-measure-label::before { border-top-color: var(--brand-orange) !important; }
+    .tool-btn:disabled { cursor: not-allowed; opacity: 0.42; }
     #labels-container { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 60; }
     #three-container canvas { position: absolute; inset: 0; touch-action: none; }
     #three-container canvas.measuring {
@@ -428,6 +435,12 @@
             <button class="tool-btn full" id="tool-clear">Clear Measurements</button>
           </div>
           <div id="measure-output"></div>
+          <div id="map-volume-options" style="display:none;margin-top:10px;">
+            <label class="slider-row"><span>Surface</span><select id="map-volume-surface"><option value="auto">Load DSM/DTM first</option><option value="dsm" disabled>DSM</option><option value="dtm" disabled>DTM</option></select></label>
+            <label class="slider-row"><span>Reference</span><select id="map-volume-reference"><option value="lowest">Lowest sampled point</option><option value="average">Average surface</option><option value="custom">Custom elevation</option></select></label>
+            <label class="slider-row" id="map-volume-custom-row" style="display:none;"><span>Elevation</span><input id="map-volume-custom" type="number" step="0.1"><span class="val" id="map-volume-custom-unit">ft</span></label>
+            <div class="hint">Volume integrates DSM/DTM cells inside the polygon against the selected horizontal reference plane.</div>
+          </div>
         </div>
 
         <div class="panel" id="panel-camera">
@@ -446,7 +459,7 @@
              <input type="range" id="ortho-opacity" min="0" max="100" step="5" value="100">
              <span class="val" id="ortho-opacity-val">100%</span>
            </div>
-           <div class="hint" style="margin-top:10px;">Full-resolution tiles stream from the GeoTIFF as you zoom. Lower opacity to compare against the satellite base map.</div>
+           <div class="hint" style="margin-top:10px;">Full-resolution tiles stream from the GeoTIFF as you zoom. Use Measurements for map distance and area. Volume requires a 3D elevation surface.</div>
          </div>
 
          <div class="panel" id="panel-dem" style="display:none;">

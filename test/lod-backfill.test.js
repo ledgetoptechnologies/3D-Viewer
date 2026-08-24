@@ -8,7 +8,7 @@ const path=require('node:path');
 const test=require('node:test');
 const auth=require('../server/auth');
 const {openDatabase}=require('../server/database');
-const {reconcileMissingLodDerivatives}=require('../server/lodBackfill');
+const {reconcileMissingLodDerivatives,reconcileMissingPointCloudAssets}=require('../server/lodBackfill');
 const {createProcessingApi}=require('../server/processingApi');
 const {processOneDerivative}=require('../server/derivativeWorker');
 const {ProcessingRepository}=require('../server/processingRepository');
@@ -182,6 +182,74 @@ test('legacy backfill probes native tiles relative to the recorded output root',
   const job=c.db.prepare('SELECT derivative_type,request_json FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id);
   assert.equal(job.derivative_type,'lod_audit');
   assert.equal(JSON.parse(job.request_json).tilesRelativePath,`${outputRelativePath}/3d_tiles/model`);
+});
+
+test('legacy imported datasets probe native WebODM tiles in the dataset root',t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  const tilesDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'3d_tiles','model');
+  fs.mkdirSync(tilesDir,{recursive:true});
+  fs.writeFileSync(path.join(tilesDir,'tileset.json'),'{}');
+  assert.equal(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:false}).queued,1);
+  const job=c.db.prepare('SELECT derivative_type,request_json FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id);
+  assert.equal(job.derivative_type,'lod_audit');
+  assert.deepEqual(JSON.parse(job.request_json),{
+    tilesRootKey:'datasets',
+    tilesRelativePath:`${outputRelativePath}/3d_tiles/model`,
+    generateFromObjOnFailure:false,
+    optional:true,
+  });
+});
+
+test('legacy WebODM EPT metadata is integrity-registered without reimporting',async t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  const eptDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'assets','entwine_pointcloud');
+  fs.mkdirSync(path.join(eptDir,'ept-data'),{recursive:true});
+  fs.mkdirSync(path.join(eptDir,'ept-hierarchy'),{recursive:true});
+  fs.writeFileSync(path.join(eptDir,'ept.json'),JSON.stringify({dataType:'laszip',schema:[]}));
+  fs.writeFileSync(path.join(eptDir,'ept-data','0-0-0-0.laz'),'points');
+  fs.writeFileSync(path.join(eptDir,'ept-hierarchy','0-0-0-0.json'),'{}');
+
+  assert.deepEqual(await reconcileMissingPointCloudAssets(c.processing,c.storage,{limit:5}),{scanned:1,registered:1});
+  const asset=c.db.prepare("SELECT id,root_key,relative_path,sha256,manifest_sha256 FROM model_assets WHERE version_id=? AND kind='ept'").get(item.versionId);
+  assert.equal(asset.root_key,'datasets');
+  assert.equal(asset.relative_path,`${outputRelativePath}/assets/entwine_pointcloud/ept.json`);
+  assert.match(asset.sha256,/^[0-9a-f]{64}$/);
+  assert.match(asset.manifest_sha256,/^[0-9a-f]{64}$/);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM model_asset_files WHERE asset_id=?').get(asset.id).n,3);
+  assert.ok(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.ept);
+  assert.deepEqual(await reconcileMissingPointCloudAssets(c.processing,c.storage,{limit:5}),{scanned:0,registered:0});
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM model_assets WHERE version_id=? AND kind='ept'").get(item.versionId).n,1);
+});
+
+test('legacy direct LAZ is reconciled only when EPT is absent',async t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  const laz=path.join(c.root,'datasets',...outputRelativePath.split('/'),'assets','odm_georeferencing','odm_georeferenced_model.laz');
+  fs.mkdirSync(path.dirname(laz),{recursive:true});fs.writeFileSync(laz,'direct points');
+  assert.equal((await reconcileMissingPointCloudAssets(c.processing,c.storage)).registered,1);
+  const asset=c.db.prepare("SELECT kind,format,sha256 FROM model_assets WHERE version_id=? AND kind='pointCloud'").get(item.versionId);
+  assert.deepEqual({kind:asset.kind,format:asset.format},{kind:'pointCloud',format:'laz'});
+  assert.match(asset.sha256,/^[0-9a-f]{64}$/);
+});
+
+test('active published legacy outputs expose integrity-registered EPT without reimporting',async t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=?,status='published' WHERE id=?").run(outputRelativePath,item.versionId);
+  c.db.prepare("UPDATE processing_attempts SET status='published' WHERE id=?").run(item.attempt.id);
+  c.db.prepare("UPDATE models SET active_version_id=?,status='ready' WHERE id=?").run(item.versionId,item.model.id);
+  c.db.prepare("UPDATE model_assets SET published=1 WHERE version_id=?").run(item.versionId);
+  const eptDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'assets','entwine_pointcloud');
+  fs.mkdirSync(path.join(eptDir,'ept-data'),{recursive:true});
+  fs.writeFileSync(path.join(eptDir,'ept.json'),JSON.stringify({dataType:'laszip',schema:[]}));
+  fs.writeFileSync(path.join(eptDir,'ept-data','0-0-0-0.laz'),'points');
+
+  assert.equal((await reconcileMissingPointCloudAssets(c.processing,c.storage)).registered,1);
+  const asset=c.db.prepare("SELECT published,manifest_sha256 FROM model_assets WHERE version_id=? AND kind='ept'").get(item.versionId);
+  assert.equal(asset.published,1);
+  assert.match(asset.manifest_sha256,/^[0-9a-f]{64}$/);
+  assert.ok(toViewerConfig(c.repository.getModel(item.model.id)).assets.ept);
 });
 
 test('GLB-only legacy models stay on explicit full-mesh fallback',t=>{

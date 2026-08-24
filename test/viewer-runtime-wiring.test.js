@@ -48,6 +48,22 @@ test('orthophoto nodata uses the supported GeoTIFF image API', () => {
   assert.doesNotMatch(main, /fileDirectory\?\.GDAL_NODATA/);
 });
 
+test('map modes expose projected distance and area tools with deeper native-detail zoom', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(main, /function setMapTool\(tool\)/);
+  assert.match(main, /function mapDistanceMeters\(points\)/);
+  assert.match(main, /function mapAreaSquareMeters\(points\)/);
+  assert.match(main, /maxZoom: 28/);
+  assert.match(main, /panel-measure'\)\.style\.display = SHARE_PERMISSIONS\.measure/);
+  assert.match(main, /Orthophoto pixels alone contain no height/);
+  assert.match(main, /integrateElevationVolume/);
+  assert.match(html, /Lowest sampled point/);
+  assert.match(html, /Average surface/);
+  assert.match(html, /Custom elevation/);
+  assert.match(html, /Use Measurements for map distance and area/);
+});
+
 test('point-cloud parent accepts health messages only from its same-origin iframe', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /event\.origin !== location\.origin \|\| event\.source !== iframe\.contentWindow/);

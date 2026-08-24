@@ -31,3 +31,25 @@ test('production image copies and asserts the complete Potree release layout', (
   assert.match(pointCloudShell, /\/potree\/libs\/jquery\/jquery-3\.1\.1\.min\.js/);
   assert.match(pointCloudShell, /\/potree\/libs\/copc\/index\.js/);
 });
+
+test('Potree controls preserve panel state and match mesh navigation feedback', () => {
+  assert.match(mainSource, /message\.type === 'ready'[\s\S]*applyPcPanelState\(\)/);
+  for (const call of ['setBudget', 'setSize', 'setSizing', 'setColor', 'setEDL']) {
+    assert.match(mainSource, new RegExp(`api\\.${call}\\(`));
+  }
+  assert.match(pointCloudShell, /activeAttributeName = a/);
+  assert.match(pointCloudShell, /PointSizeType\.ADAPTIVE/);
+  assert.match(pointCloudShell, /PointSizeType\.ATTENUATED/);
+  assert.match(pointCloudShell, /PointSizeType\.FIXED/);
+  assert.match(pointCloudShell, /ctx\.strokeStyle = '#EE5007'/);
+  assert.match(pointCloudShell, /ctx\.fillStyle = '#ffffff'/);
+  assert.match(pointCloudShell, /Math\.PI \* 2 \* 0\.55 \/ h/);
+  assert.match(pointCloudShell, /viewer\.earthControls\?\.pivotIndicator/);
+});
+
+test('pre-metadata mesh view cannot strand a healthy cloud off camera', () => {
+  assert.match(pointCloudShell, /pendingSyncedTarget = new THREE\.Vector3/);
+  assert.match(pointCloudShell, /bounds\.distanceToPoint\(pendingSyncedTarget\)/);
+  assert.match(pointCloudShell, /if \(!window\.__pcViewReady \|\| !syncedTargetIsRelevant\)/);
+  assert.match(pointCloudShell, /viewer\.fitToScreen\(0\.7\)/);
+});

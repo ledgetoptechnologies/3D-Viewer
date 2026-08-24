@@ -307,9 +307,11 @@
     // View sync API for the parent app (UTM coordinates, shared frame).
     // --------------------------------------------------------------------
     window.__pcViewReady = false;
+    let pendingSyncedTarget = null;
     window.__setViewUTM = (camE, camN, camAlt, tgtE, tgtN, tgtAlt) => {
       view.position.set(camE, camN, camAlt);
       view.lookAt(tgtE, tgtN, tgtAlt);
+      pendingSyncedTarget = new THREE.Vector3(tgtE, tgtN, tgtAlt);
       if (pcControls) {
         pcControls.pivot.set(tgtE, tgtN, tgtAlt);
         pcControls._mode = 'none';
@@ -332,6 +334,10 @@
         this.dom = viewer.renderer.domElement;
         this.pivot = new THREE.Vector3();
         this.enabled = true;
+        this._inertia = { yaw: 0, pitch: 0, active: false };
+        this._lastMoveTime = 0;
+        this.pivotIndicator = this._buildIndicator();
+        viewer.scene.scene.add(this.pivotIndicator);
 
         this._mode = 'none';            // none | orbit | pan | screenpan
         this._lastPx = { x: 0, y: 0 };
@@ -360,6 +366,59 @@
         this.dom.addEventListener('wheel', this._onWheel, { passive: false });
         window.addEventListener('pointerup', this._onPointerUp);
         window.addEventListener('pointercancel', this._onPointerUp);
+        this._lastTick = performance.now();
+        this._tick = this._update.bind(this);
+        requestAnimationFrame(this._tick);
+      }
+
+      _buildIndicator() {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        ctx.strokeStyle = '#EE5007'; ctx.lineWidth = 6;
+        ctx.beginPath(); ctx.arc(32, 32, 22, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath(); ctx.arc(32, 32, 6, 0, Math.PI * 2); ctx.fill();
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: new THREE.CanvasTexture(canvas), transparent: true,
+          opacity: 0, depthTest: false
+        }));
+        sprite.renderOrder = 1000;
+        sprite.visible = false;
+        return sprite;
+      }
+
+      _showPivot() {
+        this.pivotIndicator.position.copy(this.pivot);
+        this.pivotIndicator.visible = true;
+        this.pivotIndicator.material.opacity = 1;
+        this._scaleIndicator();
+      }
+
+      _scaleIndicator() {
+        const d = this.view.position.distanceTo(this.pivotIndicator.position);
+        this.pivotIndicator.scale.setScalar(Math.max(0.3, d / 40));
+      }
+
+      _update(now) {
+        const dt = Math.min(0.1, Math.max(0, (now - this._lastTick) / 1000));
+        this._lastTick = now;
+        if (this._inertia.active && this._mode === 'none') {
+          const decay = Math.exp(-dt * 5.5);
+          this._inertia.yaw *= decay;
+          this._inertia.pitch *= decay;
+          if (Math.abs(this._inertia.yaw) + Math.abs(this._inertia.pitch) < 0.02) {
+            this._inertia.active = false;
+          } else {
+            this._applyOrbit(this.pivot, this._inertia.yaw * dt, this._inertia.pitch * dt);
+          }
+        }
+        if (this._mode !== 'orbit' && this.pivotIndicator.visible) {
+          this.pivotIndicator.material.opacity = Math.max(0, this.pivotIndicator.material.opacity - dt * 2.5);
+          this._scaleIndicator();
+          if (this.pivotIndicator.material.opacity === 0) this.pivotIndicator.visible = false;
+        }
+        requestAnimationFrame(this._tick);
       }
 
       _cam() { return this.viewer.scene.getActiveCamera(); }
@@ -418,6 +477,7 @@
 
       _pointerDown(e) {
         if (!this.enabled) return;
+        this._inertia.active = false;
         this.dom.setPointerCapture?.(e.pointerId);
         this.dom.focus && this.dom.focus();         // keep Esc key delivery
 
@@ -446,6 +506,7 @@
 
         if (e.button === 0) {
           this.pivot.copy(this._anchor(this._px(e)));
+          this._showPivot();
           this._mode = 'orbit';
         } else if (e.button === 2) {
           if (this._inserting()) return;            // right-click => finish insertion
@@ -521,18 +582,27 @@
       }
 
       _orbitDrag(e, gainScale, preDx, preDy) {
-        const now = this._px(e);
-        const dx = preDx !== undefined ? preDx : now.x - this._lastPx.x;
-        const dy = preDy !== undefined ? preDy : now.y - this._lastPx.y;
-        this._lastPx = now;
+        const point = this._px(e);
+        const dx = preDx !== undefined ? preDx : point.x - this._lastPx.x;
+        const dy = preDy !== undefined ? preDy : point.y - this._lastPx.y;
+        this._lastPx = point;
         if (dx === 0 && dy === 0) return;
-        // 0.00434 rad/px = 0.249 deg/px — identical to the main 3D mesh tab.
+        // Match the main mesh tab's viewport-relative orbit gain.
         // Deltas are NEGATED to match EarthLikeControls' sign convention
         // (earth-controls.js _applyOrbit): dragging right orbits the camera
         // left around the pivot, i.e. the scene appears to rotate WITH the
         // cursor, matching the mesh tab exactly.
-        const G = 0.00434 * gainScale;
-        this._applyOrbit(this.pivot, -dx * G, -dy * G);
+        const h = this.dom.clientHeight || 800;
+        const G = (Math.PI * 2 * 0.55 / h) * gainScale;
+        const yaw = -dx * G;
+        const pitch = -dy * G;
+        this._applyOrbit(this.pivot, yaw, pitch);
+        const timestamp = performance.now();
+        const dt = Math.max(8, timestamp - this._lastMoveTime) / 1000;
+        this._lastMoveTime = timestamp;
+        this._inertia.yaw = yaw / dt;
+        this._inertia.pitch = pitch / dt;
+        this._showPivot();
       }
 
       _applyOrbit(pivot, yawDelta, pitchDelta) {
@@ -580,6 +650,10 @@
         if (e.button === 2 && !wasDrag) {
           window.__pcApi.cancel();
         }
+        if (this._mode === 'orbit') {
+          const speed = Math.abs(this._inertia.yaw) + Math.abs(this._inertia.pitch);
+          this._inertia.active = performance.now() - this._lastMoveTime < 60 && speed > 0.15;
+        }
         this._mode = 'none';
         this._pointerId = null;
       }
@@ -619,6 +693,7 @@
         this._pointerId = null;
         this._touch.pts.clear();
         this._touch.mode = 'none';
+        this._inertia.active = false;
       }
     }
 
@@ -628,6 +703,7 @@
     // Potree's internal getControls() consumers, we just remove its input.
     viewer.setControls(viewer.earthControls);
     viewer.inputHandler.removeInputListener(viewer.earthControls);
+    if (viewer.earthControls?.pivotIndicator) viewer.earthControls.pivotIndicator.visible = false;
     const pcControls = new PCPointerControls(viewer);
 
     if (!EPT_URL) {
@@ -651,7 +727,14 @@
       mat.activeAttributeName = 'rgba';
 
       viewer.scene.addPointCloud(pc);
-      if (!window.__pcViewReady) viewer.fitToScreen(0.7);   // don't stomp a synced view
+      const bounds = pc.boundingBox.clone().applyMatrix4(pc.matrixWorld);
+      const extent = bounds.getSize(new THREE.Vector3()).length();
+      const syncedTargetIsRelevant = pendingSyncedTarget &&
+        bounds.distanceToPoint(pendingSyncedTarget) <= Math.max(1, extent);
+      if (!window.__pcViewReady || !syncedTargetIsRelevant) {
+        viewer.fitToScreen(0.7);
+        pendingSyncedTarget = view.getPivot().clone();
+      }
       pcControls.pivot.copy(view.getPivot());
 
       const cam = viewer.scene.getActiveCamera();
