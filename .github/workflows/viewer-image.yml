@@ -108,11 +108,11 @@ jobs:
             const source=fs.readFileSync(file,"utf8");
             const start=source.indexOf("class EptLoader");
             const end=source.indexOf("class CopcLoader",start+1);
-            const ept="new Potree.PointCloudEptGeometryNode(geometry)";
-            const copc="new Potree.PointCloudCopcGeometryNode(geometry)";
+            const shared="new Potree.PointCloudCopcGeometryNode(geometry)";
+            const nonexistent="new Potree.PointCloudEptGeometryNode(geometry)";
             if(start<0||end<=start)process.exit(2);
             const block=source.slice(start,end);
-            if((block.split(ept).length-1)!==1||block.includes(copc)||!source.slice(end).includes(copc))process.exit(3);
+            if((block.split(shared).length-1)!==1||source.includes(nonexistent)||!source.slice(end).includes(shared))process.exit(3);
           '
           VIEWER_SCHEMA_VERSION="$(docker run --rm --entrypoint node "$PUBLISHED_IMAGE" -e '
             const {openDatabase}=require("./server/database");

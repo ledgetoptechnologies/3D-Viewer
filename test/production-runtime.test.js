@@ -151,7 +151,8 @@ test('release-candidate image tags cannot move latest', () => {
   assert.match(workflow, /org\.opencontainers\.image\.revision/);
   assert.match(workflow, /source-commit\.txt[\s\S]*stat -c %a[\s\S]*444/);
   assert.match(workflow, /Obj2Tiles --version[\s\S]*EXPECTED_OBJ2TILES_VERSION/);
-  assert.match(workflow, /PointCloudEptGeometryNode[\s\S]*PointCloudCopcGeometryNode/);
+  assert.match(workflow, /const shared="new Potree\.PointCloudCopcGeometryNode\(geometry\)"/);
+  assert.match(workflow, /source\.includes\(nonexistent\)[\s\S]*source\.slice\(end\)\.includes\(shared\)/);
   assert.match(workflow, /SELECT MAX\(version\) AS version FROM schema_migrations/);
   assert.match(workflow, /test "\$VIEWER_SCHEMA_VERSION" = "\$EXPECTED_SCHEMA_VERSION"/);
   assert.match(workflow, /node scripts\/write-image-attestation\.mjs viewer-image-attestation\.json/);
