@@ -38,8 +38,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl unzip ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && case "$TARGETARCH" in \
-      amd64) asset=Obj2Tiles-Linux64.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0 ;; \
-      arm64) asset=Obj2Tiles-LinuxArm64.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5 ;; \
+      amd64) asset=Obj2Tiles-Linux64.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0; executable_digest=40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274 ;; \
+      arm64) asset=Obj2Tiles-LinuxArm64.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5; executable_digest=c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1 ;; \
       *) echo "unsupported Obj2Tiles architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
     && curl -fsSL -o /tmp/obj2tiles.zip "https://github.com/OpenDroneMap/Obj2Tiles/releases/download/v${OBJ2TILES_VERSION}/${asset}" \
@@ -47,6 +47,7 @@ RUN apt-get update \
     && mkdir -p /opt/obj2tiles \
     && unzip -q /tmp/obj2tiles.zip -d /opt/obj2tiles \
     && test -x /opt/obj2tiles/Obj2Tiles \
+    && echo "$executable_digest  /opt/obj2tiles/Obj2Tiles" | sha256sum -c - \
     && /opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "${OBJ2TILES_VERSION}" \
     && curl -fsSL -o /opt/obj2tiles/LICENSE.md "https://raw.githubusercontent.com/OpenDroneMap/Obj2Tiles/v${OBJ2TILES_VERSION}/LICENSE.md" \
     && echo "b46d5156399774c9ba728b3d3f93c8ebf8da20dcebd5f67b5cd813aba2ec81cc  /opt/obj2tiles/LICENSE.md" | sha256sum -c -

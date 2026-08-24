@@ -1,8 +1,4 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { load as loadersGlLoad } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
@@ -26,21 +22,10 @@ import {
 import { EarthLikeControls } from './earth-controls.js';
 import { hasMeshSource, localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
-import { fetchAssetArrayBufferByRange } from './range-fetch.mjs';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
-import {
-  fullMeshByteLimit,
-  fullMeshDecodeTimeoutMs,
-  fullMeshFailureDisposition,
-  fullMeshRuntimePolicy,
-  fullMeshUserMessage,
-  isRetryableFullMeshError,
-  meshRuntimeError,
-  withDecodeWatchdog,
-} from './full-mesh-runtime.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -54,7 +39,6 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 // ────────────────────────────────────────────────
 let PROJECT = null;
 let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
-let GLB_RUNTIME = Object.freeze({ declaredByteSize: null, byteLimit: 0, interactive: true });
 let LOD_PROVENANCE = null;
 let SHOTS_URL = null, PHOTO_BASE = null;
 let ORTHO_URL = null, DSM_URL = null, DTM_URL = null;
@@ -131,10 +115,8 @@ let SHARE_PERMISSIONS = { measure: true, cameras: true };
 
 const state = {
   activeMode: 'model',
-  meshSource: 'none',       // 'tiles' | 'glb' | 'obj' | 'none' — whichever this project has
+  meshSource: 'none',       // 'tiles' | 'lod-required' | 'none'
   cloudMode: 'none',        // 'potree' (EPT via iframe) | 'direct' (LAZ/PLY in three.js) | 'none'
-  glbLoaded: false, glbLoading: false,
-  objLoaded: false, objLoading: false,
   pointCloudLoaded: false, pointCloudLoading: false,
   camerasLoaded: false, camerasLoading: false, camerasVisible: false,
   activeTool: 'none',
@@ -148,7 +130,6 @@ let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
-let activeGlbLoad = null;
 let camGroupParent, camInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
@@ -502,11 +483,6 @@ function applyProjectConfig(p) {
   if (dom.loadingText) dom.loadingText.textContent = `Initializing ${p.title} viewer...`;
 
   GLB_URL = p.assets.glb;
-  GLB_RUNTIME = fullMeshRuntimePolicy(
-    p.assetByteSizes?.glb,
-    navigator.deviceMemory,
-    performance.memory?.jsHeapSizeLimit,
-  );
   TILES_URL = p.assets.tiles;
   LOD_PROVENANCE = p.lodProvenance || null;
   OBJ_URL = p.assets.obj;
@@ -525,8 +501,7 @@ function applyProjectConfig(p) {
   UTM_ZONE_LON0 = (((p.georef && p.georef.utmZoneLon0Deg) ?? -87) * Math.PI) / 180;
 
   // Pick the best available mesh/point-cloud source for this project.
-  state.meshSource = TILES_URL ? 'tiles'
-    : (GLB_URL ? (GLB_RUNTIME.interactive ? 'glb' : 'lod-required') : (OBJ_URL ? 'obj' : 'none'));
+  state.meshSource = TILES_URL ? 'tiles' : (GLB_URL || OBJ_URL ? 'lod-required' : 'none');
   state.cloudMode = EPT_URL ? 'potree' : (POINT_CLOUD_URL ? 'direct' : 'none');
 }
 
@@ -561,35 +536,21 @@ function applyAvailability() {
   }
 
   const tilesBtn = document.getElementById('layer-tiles');
-  const glbBtn = document.getElementById('layer-glb');
   tilesBtn.classList.remove('active');
-  glbBtn.classList.remove('active');
   if (state.meshSource === 'tiles') {
     tilesBtn.style.display = '';
     tilesBtn.textContent = 'Streamed LOD Mesh';
     tilesBtn.dataset.layer = 'tiles';
     tilesBtn.classList.add('active');
-    glbBtn.style.display = GLB_URL && GLB_RUNTIME.interactive ? '' : 'none';
-  } else if (state.meshSource === 'obj') {
-    tilesBtn.style.display = '';
-    tilesBtn.textContent = '3D Mesh';
-    tilesBtn.dataset.layer = 'obj';
-    tilesBtn.classList.add('active');
-    glbBtn.style.display = 'none';
-  } else if (state.meshSource === 'glb') {
-    tilesBtn.style.display = 'none';
-    glbBtn.style.display = '';
-    glbBtn.classList.add('active');
   } else if (state.meshSource === 'lod-required') {
     tilesBtn.style.display = '';
-    tilesBtn.textContent = 'Streaming LOD required / processing';
+    tilesBtn.textContent = 'Streaming LOD unavailable';
     tilesBtn.dataset.layer = 'lod-required';
     tilesBtn.disabled = true;
-    tilesBtn.title = 'This full-resolution mesh exceeds the safe interactive runtime limit. Streaming tiles must finish before 3D viewing is available.';
-    glbBtn.style.display = 'none';
+    tilesBtn.title = 'Streaming tiles are still processing or unavailable. Download the original mesh from Operations if needed.';
+    updateStatus('Streaming LOD unavailable or processing');
   } else {
     tilesBtn.style.display = 'none';
-    glbBtn.style.display = 'none';
   }
   if (state.meshSource !== 'lod-required') {
     tilesBtn.disabled = false;
@@ -952,27 +913,9 @@ window.addEventListener('message', async (event) => {
 function failLod(message) {
   if (lodFailureHandled) return;
   lodFailureHandled = true;
-  showError(message);
-  setTimeout(() => {
-    const canUseFullMeshFallback = GLB_URL ? GLB_RUNTIME.interactive : Boolean(OBJ_URL);
-    if (!canUseFullMeshFallback) {
-      tilesParent.visible = false;
-      disposeTiles();
-      return;
-    }
-    if (!GLB_URL && OBJ_URL) {
-      const tilesBtn = document.getElementById('layer-tiles');
-      tilesBtn.dataset.layer = 'obj';
-      tilesBtn.textContent = 'Full-Resolution Mesh';
-      tilesBtn.classList.add('active');
-      document.getElementById('layer-glb').classList.remove('active');
-      applyMeshLayer();
-      return;
-    }
-    document.getElementById('layer-glb').classList.add('active');
-    document.getElementById('layer-tiles').classList.remove('active');
-    applyMeshLayer();
-  }, 0);
+  tilesParent.visible = false;
+  disposeTiles();
+  showError(`${message} The full-resolution source remains available for authenticated download in Operations, but is never decoded interactively.`);
 }
 
 function setHomeView() {
@@ -992,171 +935,6 @@ function resetCamera() {
 
 function topDownView() {
   controls.setView(new THREE.Vector3(0, 560, 0.01), new THREE.Vector3(0, 18, 0));
-}
-
-// ───────────────────────────────────────────────────────────────
-// Full-res GLB (on demand)
-// ───────────────────────────────────────────────────────────────
-function disposeThreeObject(root) {
-  root?.traverse?.((child) => {
-    child.geometry?.dispose?.();
-    const materials = Array.isArray(child.material) ? child.material : [child.material];
-    for (const material of materials) {
-      if (!material) continue;
-      for (const value of Object.values(material)) if (value?.isTexture) value.dispose?.();
-      material.dispose?.();
-    }
-  });
-}
-
-function cancelGLBLoad() {
-  const attempt = activeGlbLoad;
-  if (!attempt) return;
-  attempt.cancelled = true;
-  attempt.controller.abort();
-  attempt.draco.dispose();
-  activeGlbLoad = null;
-  state.glbLoading = false;
-  hideLoading();
-}
-
-function selectStreamingLod() {
-  if (!TILES_URL) return;
-  cancelGLBLoad();
-  document.getElementById('layer-glb').classList.remove('active');
-  document.getElementById('layer-tiles').classList.add('active');
-  applyMeshLayer();
-}
-
-function retryFullMesh() {
-  if (!GLB_RUNTIME.interactive) return;
-  cancelGLBLoad();
-  state.glbLoaded = false;
-  document.getElementById('layer-glb').classList.add('active');
-  document.getElementById('layer-tiles').classList.remove('active');
-  applyMeshLayer();
-}
-
-async function loadGLB() {
-  if (state.glbLoaded) { glbParent.visible = true; return; }
-  if (state.glbLoading || !GLB_URL || !GLB_RUNTIME.interactive) return;
-  state.glbLoading = true;
-  // Free the tile cache before the memory-heavy fallback decode.
-  disposeTiles();
-  tilesParent.visible = false;
-  updateLoading('Downloading full-resolution mesh...', 'Preparing secure range download...', true);
-
-  const draco = new DRACOLoader();
-  draco.setDecoderPath('/draco/');
-  draco.setWorkerLimit(Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)));
-  const loader = new GLTFLoader();
-  loader.setDRACOLoader(draco);
-  const attempt = { controller: new AbortController(), draco, cancelled: false };
-  activeGlbLoad = attempt;
-  let totalBytes = 0;
-
-  try {
-    const glb = await fetchAssetArrayBufferByRange(GLB_URL, {
-      signal: attempt.controller.signal,
-      maxBytes: fullMeshByteLimit(navigator.deviceMemory, performance.memory?.jsHeapSizeLimit),
-      onMetadata: (total) => { totalBytes = total; },
-      onProgress: (loaded, total) => {
-        const pct = ((loaded / total) * 100).toFixed(0);
-        updateLoading('Downloading full-resolution mesh...', `${pct}% (${(loaded / 1048576).toFixed(0)} of ${(total / 1048576).toFixed(0)} MB)`, true);
-      },
-    });
-    if (activeGlbLoad !== attempt || attempt.cancelled) throw meshRuntimeError('full_mesh_cancelled', 'Full-resolution mesh loading was cancelled');
-    updateLoading('Decoding full-resolution mesh...', 'Download complete · preparing geometry and textures', true);
-    const decode = loader.parseAsync(glb, '');
-    decode.then((late) => {
-      if (activeGlbLoad !== attempt || attempt.cancelled) disposeThreeObject(late.scene);
-    }).catch(() => {});
-    const gltf = await withDecodeWatchdog(decode, {
-      timeoutMs: fullMeshDecodeTimeoutMs(totalBytes || glb.byteLength),
-      onTimeout: () => { attempt.controller.abort(); draco.dispose(); },
-    });
-    if (activeGlbLoad !== attempt || attempt.cancelled) {
-      disposeThreeObject(gltf.scene);
-      throw meshRuntimeError('full_mesh_cancelled', 'Full-resolution mesh loading was cancelled');
-    }
-    gltf.scene.traverse((child) => {
-      if (child.isMesh) {
-        child.material.side = THREE.FrontSide;
-        if (child.material.map) child.material.map.colorSpace = THREE.SRGBColorSpace;
-        queueBVH(child);
-      }
-    });
-    glbOffset.add(gltf.scene);
-    frameObjectHome(gltf.scene);
-    state.glbLoaded = true;
-    state.glbLoading = false;
-    activeGlbLoad = null;
-    applyMeshLayer();
-    hideLoading();
-    draco.dispose();
-  } catch (err) {
-    const wasCancelled = attempt.cancelled || err?.name === 'AbortError' || err?.code === 'full_mesh_cancelled';
-    if (!wasCancelled) console.error('Full-resolution mesh load failed', err?.code || err?.name || 'unknown_error');
-    const disposition = fullMeshFailureDisposition(activeGlbLoad, attempt, { cancelled: wasCancelled });
-    if (disposition.clearSharedState) {
-      activeGlbLoad = null;
-      state.glbLoading = false;
-      hideLoading();
-    }
-    draco.dispose();
-    if (!disposition.recover) return;
-    if (TILES_URL) selectStreamingLod();
-    showError(fullMeshUserMessage(err, { hasLod: Boolean(TILES_URL) }), {
-      persistent: true,
-      retry: isRetryableFullMeshError(err) ? retryFullMesh : null,
-      returnToLod: TILES_URL ? selectStreamingLod : null,
-    });
-  }
-}
-
-// ────────────────────────────────────────────────
-// Full-res OBJ (fallback mesh source for projects without pre-built LOD
-// tiles or a converted GLB — loads WebODM's native textured OBJ output
-// directly; see README "Known limitations")
-// ────────────────────────────────────────────────
-function loadObjDirect() {
-  if (state.objLoaded) { glbParent.visible = true; return; }
-  if (state.objLoading || !OBJ_URL) return;
-  state.objLoading = true;
-  updateLoading('Loading textured mesh (OBJ)...', '');
-
-  const mtlUrl = OBJ_URL.replace(/\.obj$/i, '.mtl');
-  const objLoader = new OBJLoader();
-
-  const finishLoad = (materials) => {
-    if (materials) objLoader.setMaterials(materials);
-    objLoader.load(OBJ_URL, (obj) => {
-      obj.traverse((child) => {
-        if (child.isMesh) {
-          child.material.side = THREE.FrontSide;
-          if (child.material.map) child.material.map.colorSpace = THREE.SRGBColorSpace;
-          queueBVH(child);
-        }
-      });
-      glbOffset.add(obj);
-      state.objLoaded = true;
-      state.objLoading = false;
-      frameObjectHome(obj);
-      hideLoading();
-    }, (xhr) => {
-      if (xhr.total) {
-        const pct = ((xhr.loaded / xhr.total) * 100).toFixed(0);
-        updateLoading('Loading textured mesh (OBJ)...', `${pct}%`);
-      }
-    }, (err) => {
-      console.error('OBJ load error', err);
-      state.objLoading = false;
-      hideLoading();
-      showError(`Failed to load mesh from ${OBJ_URL}.`);
-    });
-  };
-
-  new MTLLoader().load(mtlUrl, finishLoad, undefined, () => finishLoad(null));
 }
 
 // Auto-frame the camera on a freshly loaded object whose bounds aren't known
@@ -2872,23 +2650,12 @@ function bindUI() {
     });
   });
 
-  // mesh source: tiles/obj (layer-tiles, repurposed per state.meshSource) OR
-  // full-res GLB (radio behavior) — see applyAvailability()
+  // 3D mode is streaming-only. Original GLB/OBJ sources remain downloadable
+  // through authenticated Operations actions and are never decoded here.
   document.getElementById('layer-tiles').addEventListener('click', () => {
-    cancelGLBLoad();
+    if (state.meshSource !== 'tiles') return;
     document.getElementById('layer-tiles').classList.add('active');
-    document.getElementById('layer-glb').classList.remove('active');
     applyMeshLayer();
-  });
-  document.getElementById('layer-glb').addEventListener('click', () => {
-    document.getElementById('layer-glb').classList.add('active');
-    document.getElementById('layer-tiles').classList.remove('active');
-    applyMeshLayer();
-  });
-  dom.loadingCancel.addEventListener('click', () => {
-    if (!activeGlbLoad) return;
-    cancelGLBLoad();
-    if (TILES_URL) selectStreamingLod();
   });
 
   // cameras
@@ -2963,37 +2730,21 @@ function bindUI() {
 }
 
 function applyMeshLayer() {
-  const tilesBtn = document.getElementById('layer-tiles');
-  const tilesBtnActive = tilesBtn.classList.contains('active') && tilesBtn.style.display !== 'none';
-  const source = tilesBtnActive ? (tilesBtn.dataset.layer || 'tiles') : 'glb';
   tilesParent.visible = false;
   glbParent.visible = false;
-  if (source === 'tiles') {
+  if (state.meshSource === 'tiles') {
     tilesParent.visible = true;
-    loadTiles();                // rebuild if disposed for the GLB/OBJ (no-op otherwise)
-  } else if (source === 'obj') {
-    glbParent.visible = true;
-    disposeTiles();
-    loadObjDirect();
-  } else {
-    glbParent.visible = true;
-    disposeTiles();             // GLB decode is memory-heavy; tile cache is dead weight either way
-    loadGLB();
+    loadTiles();
   }
 }
 
-// Restore tiles/glb/obj visibility per the active layer button, without
-// re-triggering a load (used when returning to the model tab from cloud).
+// Restore the verified streaming layer when returning from point-cloud/map mode.
 function restoreMeshVisibility() {
-  const tilesBtn = document.getElementById('layer-tiles');
-  const tilesBtnActive = tilesBtn.classList.contains('active') && tilesBtn.style.display !== 'none'
-    && tilesBtn.dataset.layer !== 'obj';
-  tilesParent.visible = !!tilesBtnActive;
-  glbParent.visible = !tilesBtnActive;
+  tilesParent.visible = state.meshSource === 'tiles';
+  glbParent.visible = false;
 }
 
 function switchMode(mode) {
-  if (mode !== 'model') cancelGLBLoad();
   rememberMapView(state.activeMode);   // keep the view of the tab we're leaving
   const prevMode = state.activeMode;
   // disarm any active measure tool in the tab we're leaving (measurements persist)
@@ -3036,10 +2787,9 @@ function switchMode(mode) {
   syncMapVolumeAvailability();
 
   if (is3D) {
-    updateStatus(state.meshSource === 'lod-required' ? 'Streaming LOD required / processing' : 'Mode: 3D Model');
+    updateStatus(state.meshSource === 'lod-required' ? 'Streaming LOD unavailable or processing' : 'Mode: 3D Model');
     if (pointCloudParent) pointCloudParent.visible = false;
     restoreMeshVisibility();
-    if (GLB_RUNTIME.interactive && glbParent.visible && !state.glbLoaded && !state.glbLoading) loadGLB();
     if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for direct-cloud mode)
     onResize();
   } else if (isPotreeCloud) {

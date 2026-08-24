@@ -51,8 +51,8 @@ quarantined, audited, and registered only after the proof succeeds. Automatic
 generation and legacy generation backfill remain default-off; an explicit
 operator opt-in permits a single bounded attempt and a manual retry.
 
-GLB-only and OBJ-only inputs deliberately remain on their available full-mesh
-fallback. The runtime image does not contain a pinned mesh interchange
+GLB-only and OBJ-only inputs deliberately remain downloadable originals, but
+are not interactive Viewer layers. The runtime image does not contain a pinned mesh interchange
 converter, and format conversion alone is not proof that node transforms,
 materials, samplers, UVs, texture bytes, and coordinates survived. Do not add a
 best-effort conversion or declare generated tiles valid without an independent
@@ -79,6 +79,8 @@ with the aggregate zero-error leaf frontier does it atomically write
     "coordinateTolerance": 0.000001,
     "maxNumericDelta": 0,
     "triangleCount": 123456,
+    "leafTriangleCount": 130000,
+    "duplicateLeafTriangleCount": 6544,
     "equivalenceSha256": "<sha256 of canonical source triangles/materials>",
     "artifacts": [
       { "uri": "tileset.json", "sha256": "<sha256>", "byteLength": 1234 },
@@ -95,8 +97,10 @@ material state, sampler state, and the exact bytes of every used texture. It
 also records a SHA-256 and byte length for every tileset, leaf, and external
 texture dependency. At model discovery the Viewer independently re-hashes the
 selected source and all recorded artifacts. A missing, changed, renamed,
-legacy-v1, or hand-authored assertion causes a safe fallback to the actual GLB
-instead of a false full-quality claim.
+legacy-v1, or hand-authored assertion removes the tiles from the interactive
+Viewer instead of falling back to browser decoding or making a false
+full-quality claim. The original GLB remains available through authenticated
+Operations downloads.
 
 The default coordinate/attribute tolerance is `1e-6` model units and the audit
 records the largest observed delta. `--tolerance` may lower it or raise it only
@@ -112,28 +116,38 @@ buffers, alternate compressed texture-source extensions, binary
 `RTC_CENTER`, or remote URLs. Decode these into the supported GLB/B3DM subset
 inside the trusted conversion job before auditing.
 
-Spatial partitioning itself is supported when leaves retain the source
-triangles. If a tiler clips triangles at tile boundaries or retriangulates the
-surface, triangle topology differs and this algorithm cannot prove exact
-equivalence even when the rendered surfaces look the same. Likewise, texture
-atlas repacking or lossless re-encoding changes texture bytes and is rejected.
+Spatial partitioning itself is supported by v2 when leaves retain the source
+triangles. Exact opaque copies at adjoining partition boundaries are treated as
+bounded overlap and recorded separately; missing triangles and additional
+non-source geometry still fail closed. If an imported/native tiler clips
+triangles at tile boundaries, retriangulates the surface, or repacks texture
+atlases, v2 rejects it because exact equivalence is no longer provable.
 The production Obj2Tiles invocation deliberately uses a bounded texture-atlas
 contract instead of `--keeptextures`: on a representative 2.53 GiB textured
 WebODM model, `--keeptextures` duplicated source textures into more than 157
 GiB before completion. The bounded invocation completed in about three minutes
-and produced a 0.89 GiB hierarchy, but its full-detail frontier retriangulated
-the 1,148,233 source triangles into 1,270,357 leaf triangles, so the v2 audit
-correctly rejected it. Production Compose still queues this optional generation
+and produced a 0.89 GiB hierarchy. Its full-detail frontier contains 1,270,357
+leaf draw triangles for 1,148,233 source triangles because Obj2Tiles performs
+61,062 boundary-edge splits, adding two triangles per split, and repacks the
+texture atlases. Locally generated output therefore uses an opt-in schema-v3
+controlled-converter proof instead of weakening v2. V3 binds the approved
+architecture-specific Obj2Tiles 1.6.2 executable digest and exact command, the
+GLB and OBJ digests, every audited artifact, a valid zero-error frontier,
+full-detail bounds/area/centroid/second moments, deterministic bidirectional
+BVH samples in rebased coordinates, and all-triangle opaque textured
+base-color/TEXCOORD_0 coverage. Shifted or missing patches, unapproved
+executables, missing UVs, and untextured materials fail closed. Production Compose still queues this optional generation
 by default so missing derivatives and failures are visible in Background Work.
 The server uses the same enabled fallback when an older deployment omits the
 variable; operators can set `MESH_DERIVATIVES_ENABLED=false` to disable it.
-Verified imported tiles may stream. The original GLB remains a guarded fallback
-only when the browser's reported memory or Chromium heap ceiling leaves enough
-decode headroom; an oversized GLB with no verified tiles is explicitly
-unavailable instead of risking a tab crash.
+Verified imported tiles may stream. The original GLB is never an interactive
+layer and remains available only through authenticated Operations downloads.
+A model without verified tiles is explicitly unavailable or processing in 3D
+mode instead of risking a full-resolution browser decode.
 Automatic generation remains verification-gated: a failed audit leaves the
-original mesh published and requires an explicit manual retry. Do not loosen
-the v2 result or manually change the provenance file.
+original mesh published and requires an explicit manual retry. Imported/native
+tiles always stay on exact v2; only the trusted local generation call site may
+request controlled v3. Do not manually change either provenance record.
 
 ## Validate before deployment
 

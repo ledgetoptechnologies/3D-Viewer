@@ -33,6 +33,7 @@ test('production image copies and asserts the complete Potree release layout', (
 });
 
 test('Potree controls preserve panel state and match mesh navigation feedback', () => {
+  const viewerShell = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   assert.match(mainSource, /message\.type === 'ready'[\s\S]*applyPcPanelState\(\)/);
   for (const call of ['setBudget', 'setSize', 'setSizing', 'setColor', 'setEDL']) {
     assert.match(mainSource, new RegExp(`api\\.${call}\\(`));
@@ -45,6 +46,10 @@ test('Potree controls preserve panel state and match mesh navigation feedback', 
   assert.match(pointCloudShell, /ctx\.fillStyle = '#ffffff'/);
   assert.match(pointCloudShell, /Math\.PI \* 2 \* 0\.55 \/ h/);
   assert.match(pointCloudShell, /viewer\.earthControls\?\.pivotIndicator/);
+  assert.match(pointCloudShell, /viewer\.setPointBudget\(4_000_000\)/);
+  assert.match(pointCloudShell, /target:\s*4_000_000/);
+  assert.match(viewerShell, /id="pc2-budget"[^>]*value="4"/);
+  assert.match(viewerShell, /id="pc2-budget-val">4M</);
 });
 
 test('pre-metadata mesh view cannot strand a healthy cloud off camera', () => {

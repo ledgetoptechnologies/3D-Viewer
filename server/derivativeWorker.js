@@ -123,7 +123,15 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     const source = storage.resolve(obj.root_key, obj.relative_path, { mustExist: true });
     const auditSource = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
     await run(config.obj2TilesBin, ['--octree', '--lods', '3', '--divisions', '2', '--lod-texture-scale', '0.5', '--local', source, incomplete], { signal });
-    await run(process.execPath, [audit, incomplete, auditSource, '--external-source'], { signal });
+    await run(process.execPath, [
+      audit,
+      incomplete,
+      auditSource,
+      '--external-source',
+      '--controlled-obj2tiles',
+      source,
+      config.obj2TilesBin,
+    ], { signal });
     fs.rmSync(output, { recursive: true, force: true });
     fs.renameSync(incomplete, output);
     const verified = await verifiedLodAsset({

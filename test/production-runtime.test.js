@@ -12,7 +12,7 @@ const test = require('node:test');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 
-test('production image pins the mesh converter and patches classic Potree EPT fail closed', () => {
+test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT constructor contract', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /ARG OBJ2TILES_VERSION=1\.6\.2/);
   assert.match(dockerfile, /Obj2Tiles-Linux64\.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0/);
@@ -21,6 +21,10 @@ test('production image pins the mesh converter and patches classic Potree EPT fa
   assert.match(dockerfile, /COPY --from=obj2tiles \/opt\/obj2tiles \/opt\/obj2tiles/);
   assert.match(dockerfile, /COPY lod-policy\.mjs \.\/lod-policy\.mjs/);
   assert.match(dockerfile, /node scripts\/patch-potree-ept\.mjs public\/potree\/build\/potree\/potree\.js/);
+  const potreePatch = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'patch-potree-ept.mjs'), 'utf8');
+  assert.match(potreePatch, /sharedNode='new Potree\.PointCloudCopcGeometryNode\(geometry\)'/);
+  assert.match(potreePatch, /nonexistentNode='new Potree\.PointCloudEptGeometryNode\(geometry\)'/);
+  assert.match(potreePatch, /block\.replace\(nonexistentNode,sharedNode\)/);
   const worker = fs.readFileSync(path.join(repositoryRoot, 'server', 'derivativeWorker.js'), 'utf8');
 });
 

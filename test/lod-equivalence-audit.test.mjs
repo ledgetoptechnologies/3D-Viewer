@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { auditFailureExitCode, auditLodEquivalence } from '../scripts/lib/lod-equivalence.mjs';
+import { auditControlledObj2Tiles, auditFailureExitCode, auditLodEquivalence } from '../scripts/lib/lod-equivalence.mjs';
 import { TRIANGLE_A, TRIANGLE_B, writeAuditableFixture } from './helpers/lod-fixture.mjs';
 
 const cli = path.join(import.meta.dirname, '..', 'scripts', 'audit-lod-equivalence.mjs');
@@ -29,6 +30,8 @@ test('audits split GLB/B3DM leaves and emits deterministic, artifact-bound evide
   assert.deepEqual(second, first);
   assert.equal(first.schemaVersion, 2);
   assert.equal(first.audit.triangleCount, 2);
+  assert.equal(first.audit.leafTriangleCount, 2);
+  assert.equal(first.audit.duplicateLeafTriangleCount, 0);
   assert.equal(first.audit.maxNumericDelta, 0);
   assert.deepEqual(first.audit.artifacts.map((entry) => entry.uri), ['leaf-a.b3dm', 'leaf-b.glb', 'tileset.json']);
 
@@ -78,7 +81,7 @@ test('does not emit provenance for arbitrary or nonmatching leaf geometry', (t) 
   writeAuditableFixture(directory, { leafBTriangles: [[[1, 0, 0], [2, 1, 0], [0, 1, 0]]] });
   const mismatch = spawnSync(process.execPath, [cli, directory, source], { encoding: 'utf8' });
   assert.equal(mismatch.status, 3);
-  assert.match(mismatch.stderr, /delta .* exceeds tolerance/);
+  assert.match(mismatch.stderr, /canonical triangle coverage differs|delta .* exceeds tolerance/);
   assert.equal(fs.existsSync(output), false);
 });
 
@@ -86,7 +89,7 @@ test('rejects reduced or re-encoded textures even when triangle geometry matches
   const { directory, source } = fixture(t, { leafBTexture: Buffer.from('different-texture') });
   const result = spawnSync(process.execPath, [cli, directory, source], { encoding: 'utf8' });
   assert.equal(result.status, 3);
-  assert.match(result.stderr, /material\/texture evidence differs/);
+  assert.match(result.stderr, /canonical triangle coverage differs|material\/texture evidence differs/);
   assert.equal(fs.existsSync(path.join(directory, 'lod-provenance.json')), false);
 });
 
@@ -160,6 +163,87 @@ test('fails when spatial splitting retriangulates the full-quality frontier', as
   const { directory, source } = fixture(t, { leafBTriangles: splitHalf });
   await assert.rejects(
     auditLodEquivalence({ derivativeDir: directory, sourceGlb: source }),
-    /triangle count differs/,
+    /canonical triangle coverage differs/,
   );
+});
+
+test('accepts only exact opaque boundary duplicates without inflating source coverage', async (t) => {
+  const { directory, source } = fixture(t, { leafBTriangles: [TRIANGLE_B, TRIANGLE_B] });
+  const evidence = await auditLodEquivalence({ derivativeDir: directory, sourceGlb: source });
+  assert.equal(evidence.audit.triangleCount, 2);
+  assert.equal(evidence.audit.leafTriangleCount, 3);
+  assert.equal(evidence.audit.duplicateLeafTriangleCount, 1);
+});
+
+test('rejects extra non-source geometry even when leaf count inflation resembles boundary overlap', async (t) => {
+  const unrelated = [[10, 10, 0], [11, 10, 0], [10, 11, 0]];
+  const { directory, source } = fixture(t, { leafBTriangles: [TRIANGLE_B, unrelated] });
+  await assert.rejects(
+    auditLodEquivalence({ derivativeDir: directory, sourceGlb: source }),
+    /canonical triangle coverage differs/,
+  );
+});
+
+function controlledInputs(directory) {
+  const converterInput = path.join(directory, 'model.obj');
+  const converterBinary = path.join(directory, 'Obj2Tiles');
+  fs.writeFileSync(converterInput, 'o fixture\nv 0 0 0\n');
+  const binary = Buffer.from('pinned Obj2Tiles 1.6.2 fixture binary');
+  fs.writeFileSync(converterBinary, binary);
+  return { converterInput, converterBinary, trustedConverterBinarySha256: [crypto.createHash('sha256').update(binary).digest('hex')] };
+}
+
+test('controlled Obj2Tiles audit rejects an unapproved executable before accepting geometry evidence',async t=>{
+  const {directory,source}=fixture(t),converterInput=path.join(directory,'model.obj'),converterBinary=path.join(directory,'Obj2Tiles');
+  fs.writeFileSync(converterInput,'o fixture\n');
+  fs.writeFileSync(converterBinary,'not the pinned release executable');
+  await assert.rejects(auditControlledObj2Tiles({derivativeDir:directory,sourceGlb:source,converterInput,converterBinary}),/not an approved Obj2Tiles 1\.6\.2 executable/);
+});
+
+test('controlled Obj2Tiles audit accepts boundary retriangulation and texture atlas repacking with bidirectional surface proof', async (t) => {
+  const split = [[TRIANGLE_B[0], [1, 0.5, 0], TRIANGLE_B[2]], [[1, 0.5, 0], TRIANGLE_B[1], TRIANGLE_B[2]]];
+  const { directory, source } = fixture(t, { leafBTriangles: split, leafBTexture: Buffer.from('repacked-atlas') });
+  const provenance = await auditControlledObj2Tiles({ derivativeDir: directory, sourceGlb: source, ...controlledInputs(directory) });
+  assert.equal(provenance.schemaVersion, 3);
+  assert.equal(provenance.audit.algorithm, 'ltds-obj2tiles-surface-equivalence-v3');
+  assert.equal(provenance.audit.sourceTriangleCount, 2);
+  assert.equal(provenance.audit.leafTriangleCount, 3);
+  assert.equal(provenance.audit.sourceRender.uvTriangleCount, 2);
+  assert.equal(provenance.audit.leafRender.texturedTriangleCount, 3);
+  assert.ok(provenance.audit.sourceToLeaves.sampleCount >= 4);
+  assert.ok(provenance.audit.leavesToSource.maximumDistance <= provenance.audit.surfaceTolerance);
+});
+
+test('controlled Obj2Tiles audit rejects shifted or missing surface patches', async (t) => {
+  const shifted = [[[1.02, 0, 0], [1.02, 1, 0], [0.02, 1, 0]]];
+  let created = fixture(t, { leafBTriangles: shifted, leafBTexture: Buffer.from('repacked-atlas') });
+  await assert.rejects(
+    auditControlledObj2Tiles({ derivativeDir: created.directory, sourceGlb: created.source, ...controlledInputs(created.directory) }),
+    /surface (?:bounds|area|distance)/,
+  );
+  created = fixture(t, { leafBTriangles: [], leafBTexture: Buffer.from('repacked-atlas') });
+  await assert.rejects(
+    auditControlledObj2Tiles({ derivativeDir: created.directory, sourceGlb: created.source, ...controlledInputs(created.directory) }),
+    /surface area differs|no non-degenerate surface area/,
+  );
+});
+
+test('controlled Obj2Tiles audit rejects missing UV and textured material coverage', async (t) => {
+  for (const [needle, replacement, expected] of [
+    ['TEXCOORD_0', '_NO_UV____', /does not retain TEXCOORD_0/],
+    ['baseColorTexture', 'baseColorFactor_', /does not retain textured base-color material coverage/],
+  ]) {
+    const { directory, source } = fixture(t);
+    const leaf = path.join(directory, 'leaf-b.glb');
+    const bytes = fs.readFileSync(leaf);
+    const offset = bytes.indexOf(needle);
+    assert.ok(offset > 0);
+    assert.equal(Buffer.byteLength(needle), Buffer.byteLength(replacement));
+    bytes.write(replacement, offset, 'utf8');
+    fs.writeFileSync(leaf, bytes);
+    await assert.rejects(
+      auditControlledObj2Tiles({ derivativeDir: directory, sourceGlb: source, ...controlledInputs(directory) }),
+      expected,
+    );
+  }
 });

@@ -4,7 +4,6 @@ import {
   fullMeshByteLimit,
   fullMeshDecodeTimeoutMs,
   fullMeshFailureDisposition,
-  fullMeshRuntimePolicy,
   fullMeshUserMessage,
   isRetryableFullMeshError,
   withDecodeWatchdog,
@@ -18,21 +17,6 @@ test('full mesh guardrail reserves decode headroom on low and high memory device
   assert.equal(fullMeshByteLimit(8, 4 * 1024 * 1024 * 1024), Math.floor(4 * 1024 * 1024 * 1024 * 0.15));
   assert.equal(fullMeshDecodeTimeoutMs(64 * 1024 * 1024), 90_000);
   assert.equal(fullMeshDecodeTimeoutMs(512 * 1024 * 1024), 240_000);
-});
-
-test('declared mesh size uses the shared runtime budget to decide interactive eligibility', () => {
-  const limit = fullMeshByteLimit(4);
-  assert.deepEqual(fullMeshRuntimePolicy(limit, 4), {
-    declaredByteSize: limit,
-    byteLimit: limit,
-    interactive: true,
-  });
-  assert.deepEqual(fullMeshRuntimePolicy(limit + 1, 4), {
-    declaredByteSize: limit + 1,
-    byteLimit: limit,
-    interactive: false,
-  });
-  assert.equal(fullMeshRuntimePolicy(null, 4).interactive, true, 'legacy records without a declared size retain the guarded range-loader path');
 });
 
 test('a stale cancelled attempt cannot clear or recover over a newer retry', () => {

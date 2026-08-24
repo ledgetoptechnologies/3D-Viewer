@@ -1,5 +1,6 @@
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
+const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 
 export function detailToErrorTarget(value) {
   const parsed = Number.parseInt(value, 10);
@@ -134,33 +135,31 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
     return { verified: false, errors: ['lod-provenance.json is required'] };
   }
 
-  if (provenance.schemaVersion !== 2) errors.push('schemaVersion must be 2 (audited leaf equivalence)');
+  const exactV2 = provenance.schemaVersion === 2 && provenance.audit?.algorithm === 'ltds-glb-leaf-equivalence-v2';
+  const controlledV3 = provenance.schemaVersion === 3 && provenance.audit?.algorithm === 'ltds-obj2tiles-surface-equivalence-v3';
+  if (!exactV2 && !controlledV3) errors.push('recognized exact v2 or controlled Obj2Tiles v3 audit evidence is required');
   if (!/^[a-f0-9]{64}$/i.test(String(provenance.sourceSha256 || ''))) {
     errors.push('sourceSha256 must be a SHA-256 digest');
   }
-  if (provenance.geometry !== 'bounded-triangle-equivalence') {
-    errors.push('geometry must be bounded-triangle-equivalence');
-  }
-  if (provenance.textures !== 'byte-identical-material-equivalence') {
-    errors.push('textures must be byte-identical-material-equivalence');
-  }
+  const expectedGeometry = controlledV3 ? 'controlled-bidirectional-surface-equivalence' : 'bounded-triangle-equivalence';
+  const expectedTextures = controlledV3 ? 'controlled-atlas-material-equivalence' : 'byte-identical-material-equivalence';
+  if (provenance.geometry !== expectedGeometry) errors.push(`geometry must be ${expectedGeometry}`);
+  if (provenance.textures !== expectedTextures) errors.push(`textures must be ${expectedTextures}`);
   if (provenance.leafGeometricError !== 0) errors.push('leafGeometricError must be 0');
-  if (provenance.audit?.algorithm !== 'ltds-glb-leaf-equivalence-v2') {
-    errors.push('recognized LOD equivalence audit evidence is required');
-  }
-  if (!Number.isInteger(provenance.audit?.triangleCount) || provenance.audit.triangleCount < 1) {
-    errors.push('audit triangleCount must be a positive integer');
-  }
+  if (exactV2 && (!Number.isInteger(provenance.audit?.triangleCount) || provenance.audit.triangleCount < 1)) errors.push('audit triangleCount must be a positive integer');
+  if (controlledV3 && (!Number.isInteger(provenance.audit?.sourceTriangleCount) || provenance.audit.sourceTriangleCount < 1 || !Number.isInteger(provenance.audit?.leafTriangleCount) || provenance.audit.leafTriangleCount < 1)) errors.push('controlled audit triangle counts must be positive integers');
   if (!/^[a-f0-9]{64}$/i.test(String(provenance.audit?.equivalenceSha256 || ''))) {
     errors.push('audit equivalenceSha256 must be a SHA-256 digest');
   }
-  const tolerance = provenance.audit?.coordinateTolerance;
-  const maxDelta = provenance.audit?.maxNumericDelta;
-  if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 1e-3) {
-    errors.push('audit coordinateTolerance must be between 0 and 0.001');
+  if (exactV2) {
+    const tolerance = provenance.audit?.coordinateTolerance;
+    const maxDelta = provenance.audit?.maxNumericDelta;
+    if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 1e-3) errors.push('audit coordinateTolerance must be between 0 and 0.001');
+    if (!Number.isFinite(maxDelta) || maxDelta < 0 || maxDelta > tolerance) errors.push('audit maxNumericDelta must not exceed coordinateTolerance');
   }
-  if (!Number.isFinite(maxDelta) || maxDelta < 0 || maxDelta > tolerance) {
-    errors.push('audit maxNumericDelta must not exceed coordinateTolerance');
+  if (controlledV3) {
+    if (provenance.converter?.name !== 'OpenDroneMap/Obj2Tiles' || provenance.converter?.version !== '1.6.2' || provenance.converter?.commandSha256 !== '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681' || !CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256||'').toLowerCase())) errors.push('controlled audit converter contract is invalid');
+    if (!Number.isFinite(provenance.audit?.surfaceTolerance) || provenance.audit.surfaceTolerance <= 0 || !Number.isFinite(provenance.audit?.maximumSurfaceDistance) || provenance.audit.maximumSurfaceDistance < 0 || provenance.audit.maximumSurfaceDistance > provenance.audit.surfaceTolerance || !Number.isFinite(provenance.audit?.minimumNormalDot) || !Number.isFinite(provenance.audit?.maximumReversedNormalFraction) || provenance.audit.maximumReversedNormalFraction < 0 || provenance.audit.maximumReversedNormalFraction > 0.01) errors.push('controlled audit surface evidence is invalid');
   }
   if (!Number.isInteger(provenance.audit?.artifactCount) || provenance.audit.artifactCount < 2) {
     errors.push('audit artifactCount must bind the tileset and leaf artifacts');

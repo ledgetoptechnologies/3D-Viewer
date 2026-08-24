@@ -2,11 +2,26 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import draco3d from 'draco3d';
-import { Matrix3, Matrix4, Quaternion, Vector3 } from 'three';
+import { BufferGeometry, Float32BufferAttribute, Matrix3, Matrix4, Quaternion, Vector3 } from 'three';
+import { MeshBVH } from 'three-mesh-bvh';
 import { inspectLodTileset } from '../../lod-policy.mjs';
 
 export const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
+export const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
+export const CONTROLLED_CONVERTER = Object.freeze({
+  name: 'OpenDroneMap/Obj2Tiles',
+  version: '1.6.2',
+  arguments: ['--octree', '--lods', '3', '--divisions', '2', '--lod-texture-scale', '0.5', '--local', '<source.obj>', '<output>'],
+});
+export const CONTROLLED_CONVERTER_BINARY_SHA256 = Object.freeze([
+  // v1.6.2 Obj2Tiles-Linux64.zip (archive SHA-256 34a576e0...baa0).
+  '40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274',
+  // v1.6.2 Obj2Tiles-LinuxArm64.zip (archive SHA-256 b5252158...ed5).
+  'c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1',
+]);
 export const DEFAULT_TOLERANCE = 1e-6;
+const CONTROLLED_SAMPLE_COUNT = 16_384;
+const CONTROLLED_RELATIVE_SURFACE_TOLERANCE = 2e-5;
 
 const dracoDecoderModule = draco3d.createDecoderModule({});
 
@@ -24,6 +39,12 @@ const TILE_TO_GLTF = GLTF_TO_TILE.clone().invert();
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+  return hash.digest('hex');
 }
 
 function stable(value) {
@@ -451,8 +472,13 @@ async function extractTriangles(asset, rootTransform, label) {
           for (const index of indices.slice(offset, offset + 3)) {
             if (!Number.isInteger(index) || index < 0 || index >= vertexCount) throw new Error(`${label}: primitive index is out of bounds`);
             const values = [];
-            for (const name of attributeNames) values.push(...transformAttribute(name, attributes[name][index], world, normalMatrix));
-            vertices.push({ keys: attributeNames.join('|'), values });
+            let position = null;
+            for (const name of attributeNames) {
+              const transformed = transformAttribute(name, attributes[name][index], world, normalMatrix);
+              values.push(...transformed);
+              if (name === 'POSITION') position = transformed.slice(0, 3);
+            }
+            vertices.push({ keys: attributeNames.join('|'), values, position });
           }
           if (determinant < 0) [vertices[1], vertices[2]] = [vertices[2], vertices[1]];
           triangles.push({ material, vertices: rotateCanonical(vertices) });
@@ -464,7 +490,7 @@ async function extractTriangles(asset, rootTransform, label) {
   }
 
   let assetTransform = rootTransform;
-  const cesiumRtc = asset.json.extensions?.CESIUM_RTC?.center;
+  const cesiumRtc = asset.applyCesiumRtc === false ? undefined : asset.json.extensions?.CESIUM_RTC?.center;
   if (cesiumRtc !== undefined) {
     if (!Array.isArray(cesiumRtc) || cesiumRtc.length !== 3 || cesiumRtc.some((value) => !Number.isFinite(value))) {
       throw new Error(`${label}: malformed CESIUM_RTC center`);
@@ -475,7 +501,7 @@ async function extractTriangles(asset, rootTransform, label) {
   return triangles;
 }
 
-function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null) {
+function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null, applyCesiumRtc = true) {
   const label = path.relative(root, filePath) || path.basename(filePath);
   const parsed = parseGlb(embeddedBuffer || fs.readFileSync(filePath), label);
   if ((parsed.json.buffers || []).length > 1 || (parsed.json.buffers?.[0]?.uri)) {
@@ -486,7 +512,7 @@ function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null
     || name === 'KHR_texture_transform' || (/^KHR_materials_/.test(name) && name !== 'KHR_materials_variants');
   const unsupportedRequired = (parsed.json.extensionsRequired || []).find((name) => !supportedExtension(name));
   if (unsupportedRequired) throw new Error(`${label}: required extension ${unsupportedRequired} is not supported by v2`);
-  return { ...parsed, root, baseDir: path.dirname(filePath), bindExternal };
+  return { ...parsed, root, baseDir: path.dirname(filePath), bindExternal, applyCesiumRtc };
 }
 
 async function collectLeafTriangles(derivativeDir, artifacts) {
@@ -570,11 +596,8 @@ function compareAudits(source, leaves, tolerance) {
   for (const triangle of leaves) triangle.vertices = rotateCanonical(triangle.vertices, tolerance);
   source.sort((a, b) => triangleCompare(a, b, tolerance));
   leaves.sort((a, b) => triangleCompare(a, b, tolerance));
-  if (source.length !== leaves.length) throw new Error(`triangle count differs: source=${source.length}, leaves=${leaves.length}`);
   let maxNumericDelta = 0;
-  for (let triangleIndex = 0; triangleIndex < source.length; triangleIndex += 1) {
-    const a = source[triangleIndex];
-    const b = leaves[triangleIndex];
+  const compareTriangleValues = (a, b, triangleIndex) => {
     if (a.material !== b.material) throw new Error(`material/texture evidence differs at canonical triangle ${triangleIndex}`);
     for (let vertexIndex = 0; vertexIndex < 3; vertexIndex += 1) {
       if (a.vertices[vertexIndex].keys !== b.vertices[vertexIndex].keys) {
@@ -591,9 +614,278 @@ function compareAudits(source, leaves, tolerance) {
         maxNumericDelta = Math.max(maxNumericDelta, delta);
       }
     }
+  };
+
+  // Obj2Tiles assigns a triangle that straddles a spatial partition to each
+  // adjoining leaf. Those are byte/material-equivalent duplicate draw calls,
+  // not new surface geometry. Compare canonical triangle multisets and permit
+  // only additional exact opaque copies. This deliberately does not accept
+  // clipping, retriangulation, missing triangles, or area/bounds-only matches.
+  // Area and bounds alone are not an integrity proof: unrelated geometry can
+  // preserve both. Transparent duplicates are rejected because overdraw can
+  // change their rendered appearance.
+  let sourceIndex = 0;
+  let leafIndex = 0;
+  let duplicateLeafTriangleCount = 0;
+  while (sourceIndex < source.length || leafIndex < leaves.length) {
+    if (sourceIndex >= source.length || leafIndex >= leaves.length
+      || triangleCompare(source[sourceIndex], leaves[leafIndex], tolerance) !== 0) {
+      throw new Error(`canonical triangle coverage differs: source=${source.length}, leaves=${leaves.length}`);
+    }
+    const representative = source[sourceIndex];
+    let sourceEnd = sourceIndex + 1;
+    while (sourceEnd < source.length && triangleCompare(representative, source[sourceEnd], tolerance) === 0) sourceEnd += 1;
+    let leafEnd = leafIndex + 1;
+    while (leafEnd < leaves.length && triangleCompare(representative, leaves[leafEnd], tolerance) === 0) leafEnd += 1;
+    const sourceCopies = sourceEnd - sourceIndex;
+    const leafCopies = leafEnd - leafIndex;
+    if (leafCopies < sourceCopies) {
+      throw new Error(`canonical triangle multiplicity is reduced: source=${sourceCopies}, leaves=${leafCopies}`);
+    }
+    if (leafCopies > sourceCopies && representative.material.includes('"alphaMode":"BLEND"')) {
+      throw new Error('transparent canonical triangle is duplicated across leaves');
+    }
+    for (let index = sourceIndex; index < sourceEnd; index += 1) compareTriangleValues(representative, source[index], index);
+    for (let index = leafIndex; index < leafEnd; index += 1) compareTriangleValues(representative, leaves[index], sourceIndex);
+    duplicateLeafTriangleCount += leafCopies - sourceCopies;
+    sourceIndex = sourceEnd;
+    leafIndex = leafEnd;
   }
   const canonical = source.map((triangle) => ({ material: triangle.material, vertices: triangle.vertices }));
-  return { maxNumericDelta, equivalenceSha256: sha256(stable(canonical)) };
+  return {
+    maxNumericDelta,
+    equivalenceSha256: sha256(stable(canonical)),
+    leafTriangleCount: leaves.length,
+    duplicateLeafTriangleCount,
+  };
+}
+
+function trianglePositions(triangle) {
+  const positions = triangle.vertices.map((vertex) => vertex.position);
+  if (positions.some((position) => !Array.isArray(position) || position.length !== 3
+    || position.some((value) => !Number.isFinite(value)))) {
+    throw new Error('controlled surface audit encountered a non-finite position');
+  }
+  return positions;
+}
+
+function materialTraits(material) {
+  let parsed;
+  try {
+    parsed = JSON.parse(material);
+  } catch {
+    throw new Error('controlled surface audit encountered malformed material evidence');
+  }
+  return {
+    alphaMode: parsed.alphaMode,
+    textured: Boolean(parsed.pbrMetallicRoughness?.baseColorTexture?.texture?.image),
+  };
+}
+
+function assertControlledRenderCoverage(triangles, label) {
+  let textured = 0;
+  let opaque = 0;
+  let uv = 0;
+  let normals = 0;
+  for (const triangle of triangles) {
+    const keys = triangle.vertices[0]?.keys?.split('|') || [];
+    if (keys.includes('TEXCOORD_0')) uv += 1;
+    if (keys.includes('NORMAL')) normals += 1;
+    const traits = materialTraits(triangle.material);
+    if (traits.textured) textured += 1;
+    if (traits.alphaMode === 'OPAQUE') opaque += 1;
+  }
+  if (uv !== triangles.length) throw new Error(`${label} does not retain TEXCOORD_0 on every full-detail triangle`);
+  if (textured !== triangles.length) throw new Error(`${label} does not retain textured base-color material coverage`);
+  if (opaque !== triangles.length) throw new Error(`${label} introduces non-opaque full-detail material coverage`);
+  return { triangleCount: triangles.length, texturedTriangleCount: textured, uvTriangleCount: uv, normalTriangleCount: normals };
+}
+
+function surfaceStatistics(triangles, origin) {
+  const minimum = [Infinity, Infinity, Infinity];
+  const maximum = [-Infinity, -Infinity, -Infinity];
+  const firstMoment = [0, 0, 0];
+  const secondMoment = [0, 0, 0, 0, 0, 0];
+  let area = 0;
+  let degenerateTriangleCount = 0;
+  for (const triangle of triangles) {
+    const points = trianglePositions(triangle).map((point) => point.map((value, axis) => value - origin[axis]));
+    for (const point of points) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        minimum[axis] = Math.min(minimum[axis], point[axis]);
+        maximum[axis] = Math.max(maximum[axis], point[axis]);
+      }
+    }
+    const ab = new Vector3(...points[1]).sub(new Vector3(...points[0]));
+    const ac = new Vector3(...points[2]).sub(new Vector3(...points[0]));
+    const triangleArea = ab.cross(ac).length() / 2;
+    if (!Number.isFinite(triangleArea)) throw new Error('controlled surface audit encountered a non-finite triangle area');
+    if (triangleArea <= 1e-18) {
+      degenerateTriangleCount += 1;
+      continue;
+    }
+    area += triangleArea;
+    const sum = [0, 1, 2].map((axis) => points[0][axis] + points[1][axis] + points[2][axis]);
+    for (let axis = 0; axis < 3; axis += 1) firstMoment[axis] += triangleArea * sum[axis] / 3;
+    const pairs = [[0, 0], [1, 1], [2, 2], [0, 1], [0, 2], [1, 2]];
+    for (let index = 0; index < pairs.length; index += 1) {
+      const [left, right] = pairs[index];
+      const diagonal = points.reduce((total, point) => total + point[left] * point[right], 0);
+      secondMoment[index] += triangleArea * (sum[left] * sum[right] + diagonal) / 12;
+    }
+  }
+  if (!(area > 0)) throw new Error('controlled surface audit found no non-degenerate surface area');
+  const centroid = firstMoment.map((value) => value / area);
+  const normalizedSecondMoment = secondMoment.map((value) => value / area);
+  return { minimum, maximum, area, centroid, normalizedSecondMoment, degenerateTriangleCount };
+}
+
+function maximumDelta(left, right) {
+  return Math.max(...left.map((value, index) => Math.abs(value - right[index])));
+}
+
+function relativeDelta(left, right, scale = 1) {
+  return Math.abs(left - right) / Math.max(Math.abs(left), Math.abs(right), scale);
+}
+
+function deterministicTriangleIndices(count, requested, seed) {
+  const take = Math.min(count, requested);
+  if (take === count) return Array.from({ length: count }, (_, index) => index);
+  let state = Number.parseInt(seed.slice(0, 8), 16) >>> 0;
+  const selected = new Set();
+  while (selected.size < take) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    selected.add(state % count);
+  }
+  return [...selected].sort((a, b) => a - b);
+}
+
+function makeSurfaceBvh(triangles, origin) {
+  const positions = new Float32Array(triangles.length * 9);
+  let offset = 0;
+  for (const triangle of triangles) {
+    for (const point of trianglePositions(triangle)) {
+      positions[offset++] = point[0] - origin[0];
+      positions[offset++] = point[1] - origin[1];
+      positions[offset++] = point[2] - origin[2];
+    }
+  }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
+  const bvh = new MeshBVH(geometry, { targetLeafSize: 20 });
+  return { bvh, geometry };
+}
+
+function faceNormal(triangle) {
+  const [a, b, c] = trianglePositions(triangle).map((point) => new Vector3(...point));
+  return b.sub(a).cross(c.sub(a)).normalize();
+}
+
+function geometryFaceNormal(geometry, faceIndex) {
+  const position = geometry.getAttribute('position');
+  const index = geometry.getIndex();
+  const indices = index
+    ? [index.getX(faceIndex * 3), index.getX(faceIndex * 3 + 1), index.getX(faceIndex * 3 + 2)]
+    : [faceIndex * 3, faceIndex * 3 + 1, faceIndex * 3 + 2];
+  const [a, b, c] = indices.map((vertex) => new Vector3(position.getX(vertex), position.getY(vertex), position.getZ(vertex)));
+  return b.sub(a).cross(c.sub(a)).normalize();
+}
+
+function samplePoint(points, sample) {
+  const weights = sample === 0 ? [1 / 3, 1 / 3, 1 / 3]
+    : sample === 1 ? [0.6, 0.2, 0.2]
+      : sample === 2 ? [0.2, 0.6, 0.2] : [0.2, 0.2, 0.6];
+  return new Vector3(
+    points.reduce((sum, point, index) => sum + point[0] * weights[index], 0),
+    points.reduce((sum, point, index) => sum + point[1] * weights[index], 0),
+    points.reduce((sum, point, index) => sum + point[2] * weights[index], 0),
+  );
+}
+
+function auditSurfaceDirection(source, targetSurface, origin, seed, tolerance) {
+  const requestedTriangles = Math.max(1, Math.floor(CONTROLLED_SAMPLE_COUNT / 4));
+  const indices = deterministicTriangleIndices(source.length, requestedTriangles, seed);
+  let maximumDistance = 0;
+  let minimumNormalDot = 1;
+  let reversedNormalSampleCount = 0;
+  let sampleCount = 0;
+  for (const index of indices) {
+    const sourceTriangle = source[index];
+    const points = trianglePositions(sourceTriangle).map((point) => point.map((value, axis) => value - origin[axis]));
+    const sourceNormal = faceNormal(sourceTriangle);
+    for (let sample = 0; sample < 4; sample += 1) {
+      const closest = targetSurface.bvh.closestPointToPoint(samplePoint(points, sample), {});
+      if (!closest || !Number.isFinite(closest.distance) || !Number.isInteger(closest.faceIndex)) {
+        throw new Error('controlled surface BVH query did not return a finite nearest point');
+      }
+      maximumDistance = Math.max(maximumDistance, closest.distance);
+      if (closest.distance > tolerance) {
+        throw new Error(`controlled surface distance ${closest.distance} exceeds tolerance ${tolerance}`);
+      }
+      const dot = sourceNormal.dot(geometryFaceNormal(targetSurface.geometry, closest.faceIndex));
+      minimumNormalDot = Math.min(minimumNormalDot, dot);
+      if (!Number.isFinite(dot)) throw new Error('controlled surface orientation sample is non-finite');
+      if (dot < 0) reversedNormalSampleCount += 1;
+      sampleCount += 1;
+    }
+  }
+  const reversedNormalFraction = reversedNormalSampleCount / sampleCount;
+  if (reversedNormalFraction > 0.01) throw new Error(`controlled surface orientation reverses ${reversedNormalFraction} of samples`);
+  return { sampleCount, maximumDistance, minimumNormalDot, reversedNormalSampleCount, reversedNormalFraction };
+}
+
+function controlledSurfaceComparison(source, leaves, sourceSha256) {
+  const sourceRender = assertControlledRenderCoverage(source, 'source GLB');
+  const leafRender = assertControlledRenderCoverage(leaves, 'controlled Obj2Tiles frontier');
+  const absoluteMinimum = [Infinity, Infinity, Infinity];
+  const absoluteMaximum = [-Infinity, -Infinity, -Infinity];
+  for (const triangle of source) {
+    for (const point of trianglePositions(triangle)) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        absoluteMinimum[axis] = Math.min(absoluteMinimum[axis], point[axis]);
+        absoluteMaximum[axis] = Math.max(absoluteMaximum[axis], point[axis]);
+      }
+    }
+  }
+  const origin = absoluteMinimum.map((value, axis) => (value + absoluteMaximum[axis]) / 2);
+  const sourceStats = surfaceStatistics(source, origin);
+  const leafStats = surfaceStatistics(leaves, origin);
+  const diagonal = Math.hypot(...sourceStats.maximum.map((value, axis) => value - sourceStats.minimum[axis]));
+  const surfaceTolerance = Math.max(DEFAULT_TOLERANCE, diagonal * CONTROLLED_RELATIVE_SURFACE_TOLERANCE);
+  const boundsDelta = Math.max(maximumDelta(sourceStats.minimum, leafStats.minimum), maximumDelta(sourceStats.maximum, leafStats.maximum));
+  if (boundsDelta > surfaceTolerance) throw new Error(`controlled surface bounds differ by ${boundsDelta} (tolerance ${surfaceTolerance})`);
+  const areaRelativeDelta = relativeDelta(sourceStats.area, leafStats.area, diagonal * diagonal);
+  if (areaRelativeDelta > 1e-5) throw new Error(`controlled surface area differs by ${areaRelativeDelta}`);
+  const centroidDelta = maximumDelta(sourceStats.centroid, leafStats.centroid);
+  if (centroidDelta > surfaceTolerance) throw new Error(`controlled surface centroid differs by ${centroidDelta}`);
+  const momentScale = Math.max(diagonal * diagonal, 1);
+  const momentDelta = maximumDelta(sourceStats.normalizedSecondMoment, leafStats.normalizedSecondMoment) / momentScale;
+  if (momentDelta > 2e-5) throw new Error(`controlled surface second moments differ by ${momentDelta}`);
+
+  const sourceSurface = makeSurfaceBvh(source, origin);
+  const leafSurface = makeSurfaceBvh(leaves, origin);
+  try {
+    const sourceToLeaves = auditSurfaceDirection(source, leafSurface, origin, `${sourceSha256}01`, surfaceTolerance);
+    const leavesToSource = auditSurfaceDirection(leaves, sourceSurface, origin, `${sourceSha256}10`, surfaceTolerance);
+    return {
+      sourceRender,
+      leafRender,
+      sourceStats,
+      leafStats,
+      origin,
+      diagonal,
+      surfaceTolerance,
+      boundsDelta,
+      areaRelativeDelta,
+      centroidDelta,
+      momentDelta,
+      sourceToLeaves,
+      leavesToSource,
+    };
+  } finally {
+    sourceSurface.geometry.dispose();
+    leafSurface.geometry.dispose();
+  }
 }
 
 export async function auditLodEquivalence({ derivativeDir, sourceGlb, tolerance = DEFAULT_TOLERANCE, allowExternalSource = false }) {
@@ -632,14 +924,110 @@ export async function auditLodEquivalence({ derivativeDir, sourceGlb, tolerance 
       coordinateTolerance: tolerance,
       maxNumericDelta: comparison.maxNumericDelta,
       triangleCount: source.length,
+      leafTriangleCount: comparison.leafTriangleCount,
+      duplicateLeafTriangleCount: comparison.duplicateLeafTriangleCount,
       equivalenceSha256: comparison.equivalenceSha256,
       artifacts,
     },
   };
 }
 
-export async function writeLodProvenance({ derivativeDir, sourceGlb, tolerance = DEFAULT_TOLERANCE, output, allowExternalSource = false }) {
-  const provenance = await auditLodEquivalence({ derivativeDir, sourceGlb, tolerance, allowExternalSource });
+export async function auditControlledObj2Tiles({
+  derivativeDir,
+  sourceGlb,
+  converterInput,
+  converterBinary,
+  allowExternalSource = false,
+  trustedConverterBinarySha256 = CONTROLLED_CONVERTER_BINARY_SHA256,
+}) {
+  derivativeDir = path.resolve(derivativeDir);
+  sourceGlb = path.resolve(sourceGlb);
+  converterInput = path.resolve(converterInput || '');
+  converterBinary = path.resolve(converterBinary || '');
+  if (!allowExternalSource && (![sourceGlb, converterInput, converterBinary].every((candidate) => inside(derivativeDir, candidate)))) {
+    throw new Error('controlled converter inputs must be inside the derivative directory unless external inputs are explicitly enabled');
+  }
+  if (!/\.glb$/i.test(sourceGlb)) throw new Error('controlled Obj2Tiles auditing requires a GLB reference source');
+  if (!/\.obj$/i.test(converterInput)) throw new Error('controlled Obj2Tiles auditing requires the exact OBJ converter input');
+  const [sourceBytes, converterInputSha256, converterBinarySha256] = await Promise.all([
+    fs.promises.readFile(sourceGlb),
+    sha256File(converterInput),
+    sha256File(converterBinary),
+  ]);
+  const sourceDigest = sha256(sourceBytes);
+  if (!Array.isArray(trustedConverterBinarySha256) || !trustedConverterBinarySha256.includes(converterBinarySha256)) {
+    throw new Error(`converter binary SHA-256 is not an approved Obj2Tiles ${CONTROLLED_CONVERTER.version} executable`);
+  }
+  const artifactMap = new Map();
+  const bindExternal = (filePath, knownBytes = null) => {
+    const relative = path.relative(derivativeDir, filePath).split(path.sep).join('/');
+    const bytes = knownBytes || fs.readFileSync(filePath);
+    artifactMap.set(relative, { uri: relative, sha256: sha256(bytes), byteLength: bytes.length });
+    return bytes;
+  };
+  const source = await extractTriangles(
+    loadGlbAsset(sourceGlb, derivativeDir, sourceBytes, bindExternal, false),
+    IDENTITY,
+    path.basename(sourceGlb),
+  );
+  const { triangles: leaves } = await collectLeafTriangles(derivativeDir, artifactMap);
+  const artifacts = [...artifactMap.values()].sort((a, b) => a.uri.localeCompare(b.uri));
+  const comparison = controlledSurfaceComparison(source, leaves, sourceDigest);
+  const commandSha256 = sha256(stable(CONTROLLED_CONVERTER));
+  const surfaceEvidence = {
+    sourceTriangleCount: source.length,
+    leafTriangleCount: leaves.length,
+    sourceArea: comparison.sourceStats.area,
+    leafArea: comparison.leafStats.area,
+    boundsDelta: comparison.boundsDelta,
+    areaRelativeDelta: comparison.areaRelativeDelta,
+    centroidDelta: comparison.centroidDelta,
+    normalizedSecondMomentDelta: comparison.momentDelta,
+    coordinateOrigin: comparison.origin,
+    diagonal: comparison.diagonal,
+    surfaceTolerance: comparison.surfaceTolerance,
+    sourceToLeaves: comparison.sourceToLeaves,
+    leavesToSource: comparison.leavesToSource,
+    sourceRender: comparison.sourceRender,
+    leafRender: comparison.leafRender,
+  };
+  return {
+    schemaVersion: 3,
+    sourceAsset: path.basename(sourceGlb),
+    sourceSha256: sourceDigest,
+    geometry: 'controlled-bidirectional-surface-equivalence',
+    textures: 'controlled-atlas-material-equivalence',
+    leafGeometricError: 0,
+    converter: {
+      ...CONTROLLED_CONVERTER,
+      commandSha256,
+      inputAsset: path.basename(converterInput),
+      inputSha256: converterInputSha256,
+      binarySha256: converterBinarySha256,
+    },
+    audit: {
+      algorithm: CONTROLLED_AUDIT_ALGORITHM,
+      equivalenceSha256: sha256(stable({ sourceSha256: sourceDigest, converter: CONTROLLED_CONVERTER, surfaceEvidence })),
+      ...surfaceEvidence,
+      artifacts,
+    },
+  };
+}
+
+export async function writeLodProvenance({
+  derivativeDir,
+  sourceGlb,
+  tolerance = DEFAULT_TOLERANCE,
+  output,
+  allowExternalSource = false,
+  controlledObj2Tiles = false,
+  converterInput,
+  converterBinary,
+  trustedConverterBinarySha256,
+}) {
+  const provenance = controlledObj2Tiles
+    ? await auditControlledObj2Tiles({ derivativeDir, sourceGlb, converterInput, converterBinary, allowExternalSource, trustedConverterBinarySha256 })
+    : await auditLodEquivalence({ derivativeDir, sourceGlb, tolerance, allowExternalSource });
   const outputPath = path.resolve(output || path.join(derivativeDir, 'lod-provenance.json'));
   if (!inside(path.resolve(derivativeDir), outputPath)) throw new Error('provenance output must stay inside the derivative directory');
   const temporary = `${outputPath}.${process.pid}.tmp`;

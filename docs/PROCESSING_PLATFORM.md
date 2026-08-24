@@ -102,20 +102,26 @@ the production image pins Obj2Tiles 1.6.2, and production Compose enables
 `MESH_DERIVATIVES_ENABLED` by default so missing derivatives and failures are
 visible in Background Work. The server fallback is also true when an older
 deployment omits the variable; operators can explicitly set it false to
-disable generation. The production path prefers verified native 3D Tiles and retains
-the original GLB as the full-resolution fallback. Missing or invalid tiles
+disable generation. The production path uses verified native 3D Tiles for
+interactive 3D viewing and retains the original GLB for authenticated download
+only. Missing or invalid tiles
 receive one optional background generation attempt only when both a textured
 OBJ and independent companion GLB are present; existing active published and
 review-ready imports use the same bounded backfill cursor without reimporting
 or taking the original model offline.
-Failure retains the full GLB and requires an authorized manual retry; failed
+Failure retains the downloadable GLB and requires an authorized manual retry; failed
 work is never automatically requeued. GLB-only and OBJ-only sources remain
 fail-closed because the image has no pinned interchange converter capable of
-supplying independently auditable preservation evidence. Native or generated
-3D Tiles are exposed only after the LOD-v2 audit proves the full-detail
-frontier. Current Obj2Tiles output retriangulates partition boundaries, so its
-generated result does not pass that proof and cannot silently replace the GLB;
-it remains visible as failed background work until an authorized manual retry.
+supplying independently auditable preservation evidence. Native/imported 3D
+Tiles are exposed only after exact LOD-v2 evidence proves their full-detail
+geometry, attributes, materials, and texture bytes. The trusted local Obj2Tiles
+1.6.2 generation call uses a distinct schema-v3 proof because the pinned tool
+retriangulates partition edges and repacks texture atlases. V3 is bound to the
+approved architecture-specific executable and command plus source and artifact
+digests, and verifies aggregate surface invariants and deterministic
+bidirectional BVH samples with mandatory opaque textured UV coverage. Imported
+tiles cannot select v3; missing, shifted, untextured, or unrelated geometry
+remains quarantined.
 
 ## Dataset lifecycle
 

@@ -45,6 +45,7 @@ test('admin output URLs expose only exact derived files and issue a published vi
   const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {}, createdBy: 'ops:reader' });
   const relativeRoot = `${task.id}/${attempt.id}`;
   const files = {
+    dsm: { relativePath: `${relativeRoot}/dsm.tif`, body: Buffer.from('derived-dsm') },
     glb: { relativePath: `${relativeRoot}/model.glb`, body: Buffer.from('derived-mesh') },
     ortho: { relativePath: `${relativeRoot}/orthophoto.tif`, body: Buffer.from('AAAABBBBCCCC') },
     report: { relativePath: `${relativeRoot}/odm_report/report.pdf`, body: Buffer.from('%PDF-safe-report') },
@@ -60,6 +61,7 @@ test('admin output URLs expose only exact derived files and issue a published vi
     provider: 'ltds-processing', providerModelId: task.id, providerVersionId: attempt.id,
     displayName: task.displayName, status: 'ready', sourceLocator: { taskId: task.id, attemptId: attempt.id },
     assets: [
+      { kind: 'dsm', rootKey: 'models', relativePath: files.dsm.relativePath, format: 'tif', contentType: 'image/tiff', byteSize: files.dsm.body.length, sha256: sha256(files.dsm.body), published: false },
       { kind: 'glb', rootKey: 'models', relativePath: files.glb.relativePath, format: 'glb', byteSize: files.glb.body.length, sha256: sha256(files.glb.body), published: true },
       { kind: 'ortho', rootKey: 'models', relativePath: files.ortho.relativePath, format: 'tif', contentType: 'image/tiff', byteSize: files.ortho.body.length, sha256: sha256(files.ortho.body), chunks: [0, 4, 8].map((byteOffset, chunkIndex) => { const body = files.ortho.body.subarray(byteOffset, byteOffset + 4); return { chunkIndex, byteOffset, byteSize: body.length, sha256: sha256(body) }; }), published: false },
       { kind: 'report', rootKey: 'models', relativePath: files.report.relativePath, format: 'pdf', contentType: 'application/pdf', byteSize: files.report.body.length, sha256: sha256(files.report.body), published: false },
@@ -91,10 +93,10 @@ test('admin output URLs expose only exact derived files and issue a published vi
   const listedResponse = await fetch(`${base}/api/v1/processing/outputs`, { headers });
   assert.equal(listedResponse.status, 200);
   const output = (await listedResponse.json()).outputs[0];
-  assert.deepEqual(output.assetKinds, ['glb', 'ortho', 'report']);
-  assert.deepEqual(output.assets.map((asset) => asset.kind), ['glb', 'ortho', 'report']);
+  assert.deepEqual(output.assetKinds, ['dsm', 'glb', 'ortho', 'report']);
+  assert.deepEqual(output.assets.map((asset) => asset.kind), ['dsm', 'glb', 'ortho', 'report']);
   assert.equal(output.assets.some((asset) => 'relativePath' in asset || 'rootKey' in asset), false);
-  assert.equal(output.downloadUrl, `/api/v1/processing/outputs/${versionId}/assets/glb`);
+  assert.equal(output.downloadUrl, `/api/v1/processing/outputs/${versionId}/assets/glb`, 'the authenticated original mesh remains the primary Operations download even when alphabetically earlier map assets exist');
   assert.equal(output.reportUrl, `/api/v1/processing/outputs/${versionId}/assets/report`);
   assert.equal(output.viewSessionUrl, `/api/v1/processing/outputs/${versionId}/view-sessions`);
 

@@ -41,9 +41,6 @@ function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
     georef: model.activeVersion.georef || {},
     pointCount: model.activeVersion.pointCount ?? null,
     lodProvenance,
-    assetByteSizes: {
-      glb: Number.isSafeInteger(byKind.glb?.byteSize) && byKind.glb.byteSize >= 0 ? byKind.glb.byteSize : null,
-    },
     assets: {
       glb: encodedAssetUrl(model.id, byKind.glb, assetToken),
       tiles: encodedAssetUrl(model.id, byKind.tiles, assetToken),

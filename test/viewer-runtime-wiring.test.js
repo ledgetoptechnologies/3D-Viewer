@@ -5,26 +5,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-test('viewer wires cancel/retry/LOD recovery without exposing capability asset URLs', () => {
+test('viewer 3D mode is streaming-only and keeps original mesh access outside layer UI', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(main, /signal: attempt\.controller\.signal/);
-  assert.match(main, /maxBytes: fullMeshByteLimit\(navigator\.deviceMemory, performance\.memory\?\.jsHeapSizeLimit\)/);
-  assert.match(main, /fullMeshRuntimePolicy\(\s*p\.assetByteSizes\?\.glb,/);
-  assert.match(main, /GLB_URL \? \(GLB_RUNTIME\.interactive \? 'glb' : 'lod-required'\)/);
-  assert.match(main, /Streaming LOD required \/ processing/);
-  assert.match(main, /glbBtn\.style\.display = GLB_URL && GLB_RUNTIME\.interactive \? '' : 'none'/);
-  assert.match(main, /if \(state\.glbLoading \|\| !GLB_URL \|\| !GLB_RUNTIME\.interactive\) return/);
-  assert.match(main, /withDecodeWatchdog\(decode/);
-  assert.match(main, /fullMeshFailureDisposition\(activeGlbLoad, attempt/);
-  assert.match(main, /if \(!disposition\.recover\) return/);
-  assert.match(main, /frameObjectHome\(gltf\.scene\)/);
-  assert.match(main, /dom\.loadingCancel\.addEventListener\('click'/);
-  assert.match(main, /returnToLod: TILES_URL \? selectStreamingLod : null/);
-  assert.doesNotMatch(main, /showError\(`[^`]*\$\{GLB_URL\}/);
-  assert.match(html, /id="loading-cancel"/);
-  assert.match(html, /id="error-retry"/);
-  assert.match(html, /id="error-lod"/);
+  assert.match(main, /state\.meshSource = TILES_URL \? 'tiles' : \(GLB_URL \|\| OBJ_URL \? 'lod-required' : 'none'\)/);
+  assert.match(main, /Streaming LOD unavailable/);
+  assert.match(main, /full-resolution source remains available for authenticated download in Operations/);
+  assert.doesNotMatch(main, /function loadGLB|loadGLB\(|function loadObjDirect|loadObjDirect\(/);
+  assert.doesNotMatch(main, /GLTFLoader|DRACOLoader|OBJLoader|MTLLoader|fetchAssetArrayBufferByRange/);
+  assert.doesNotMatch(main, /data-layer=['"]glb|layer-glb/);
+  assert.doesNotMatch(html, /data-layer="glb"|id="layer-glb"|Full-Res Mesh/);
+  assert.match(main, /if \(state\.meshSource !== 'tiles'\) return/);
+  assert.match(main, /if \(state\.meshSource === 'tiles'\) \{\s*tilesParent\.visible = true;\s*loadTiles\(\)/);
 });
 
 test('viewer streams root backdrop without preloading stale branches', () => {

@@ -426,20 +426,26 @@ empty.
 - **Production derivatives prefer ODM's native stages.** Provider
   capabilities request `pc-ept`, `3d-tiles`, and `gltf`, and the Viewer audits
   existing tile manifests before reuse. The production image pins and verifies
-  Obj2Tiles 1.6.2 for controlled experiments while Entwine and automatic mesh
-  generation both default off. Imported native tiles are quarantined until an
-  audit binds them to the companion GLB. The original GLB remains available
+  Obj2Tiles 1.6.2 for controlled mesh generation while local Entwine remains
+  disabled by default. Imported native tiles are quarantined until an
+  audit binds them to the companion GLB. The original GLB remains available as
+  an authenticated Operations download, never an interactive Viewer layer,
   when that proof is missing or fails. Explicitly enabling mesh generation
-  permits one bounded background attempt and one authorized manual retry, but
-  current Obj2Tiles output retriangulates partition boundaries and therefore
-  cannot activate under the exact v2 proof. OBJ-only or GLB-only models remain
-  explicit full-mesh fallbacks; the Viewer never claims streaming LOD that it
-  cannot validate.
-- **Native 3D Tiles do not automatically prove lossless full detail.** The
-  schema-v2 LOD audit must bind the exact full GLB, leaf geometry, material
+  permits one bounded background attempt and one authorized manual retry.
+  Generated Obj2Tiles output retriangulates partition boundaries and repacks
+  texture atlases, so it uses a separate schema-v3 proof bound to the exact
+  pinned executable and command, GLB and OBJ digests, artifact digests,
+  aggregate surface invariants, and deterministic bidirectional BVH samples.
+  OBJ-only or GLB-only models remain
+  downloadable but unavailable in 3D mode; the Viewer never claims streaming
+  LOD that it cannot validate or decodes the complete source mesh.
+- **Native and generated 3D Tiles have separate proof lanes.** The native-tile
+  schema-v2 LOD audit binds the exact full GLB, leaf geometry, material
   state, and texture bytes. If upstream tiling decimates, retriangulates, or
-  repacks textures, the LOD claim fails closed and the full GLB remains the
-  published close-range fallback.
+  repacks textures, the LOD claim fails closed and the full GLB remains an
+  authenticated download rather than a published close-range layer. Only the
+  locally generated, executable-allowlisted Obj2Tiles lane may use schema v3;
+  imported tiles cannot opt into that controlled-converter proof.
 - **WebODM migration is file-based.** Direct WebODM media import reads the
   mounted tree without credentials and never moves or deletes it. Exported
   task ZIPs and task folders can be adopted into Viewer-managed storage.

@@ -51,14 +51,6 @@ function publishModel(c,item){
   return item;
 }
 
-test('viewer config exposes the immutable declared GLB byte size for runtime policy',t=>{
-  const c=fixture(t),item=readyModel(c),declared=898*1024*1024;
-  c.db.prepare("UPDATE model_assets SET byte_size=? WHERE version_id=? AND kind='glb'").run(declared,item.versionId);
-  const viewer=toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId));
-  assert.equal(viewer.assetByteSizes.glb,declared);
-  assert.ok(viewer.assets.glb,'the capability URL remains available for authenticated download even when the browser declines interactive decoding');
-});
-
 test('legacy OBJ backfill queues once without taking the ready model offline',t=>{
   const c=fixture(t),item=readyModel(c);
   assert.deepEqual(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true,limit:20}),{scanned:1,queued:1,conflict:false});
@@ -450,6 +442,26 @@ test('transient backfill conflict is retried instead of skipped',t=>{
   c.processing.enqueueOptionalDerivatives=original;
   assert.equal(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true}).queued,1);
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).n,1);
+});
+
+test('controlled Obj2Tiles v3 provenance is publishable only with its pinned converter, exact OBJ input, and bounded surface evidence',t=>{
+  const c=fixture(t),item=readyModel(c);
+  c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
+  const provenance={schemaVersion:3,sourceAsset:'model.glb',sourceSha256:'b'.repeat(64),tilesManifestSha256:'d'.repeat(64),geometry:'controlled-bidirectional-surface-equivalence',textures:'controlled-atlas-material-equivalence',leafGeometricError:0,converter:{name:'OpenDroneMap/Obj2Tiles',version:'1.6.2',commandSha256:'7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',inputAsset:'model.obj',inputSha256:'b'.repeat(64),binarySha256:'40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274'},audit:{algorithm:'ltds-obj2tiles-surface-equivalence-v3',sourceTriangleCount:100,leafTriangleCount:110,surfaceTolerance:0.001,maximumSurfaceDistance:0.0005,minimumNormalDot:-0.9,maximumReversedNormalFraction:0.001,equivalenceSha256:'a'.repeat(64),artifactCount:2}};
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:provenance}),item.versionId);
+  assert.ok(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.tiles);
+  assert.ok(c.processing.publishAttemptAtomic(item.attempt.id,['glb','tiles'],{actorId:'ops:test'}));
+
+  const next=readyModel(c);
+  c.processing.addModelAsset({versionId:next.versionId,kind:'tiles',rootKey:'models',relativePath:'forged/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:next.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{...provenance,converter:{...provenance.converter,version:'latest'}}}),next.versionId);
+  assert.equal(toViewerConfig(c.repository.getModelVersion(next.model.id,next.versionId)).assets.tiles,null);
+  assert.equal(c.processing.publishAttemptAtomic(next.attempt.id,['glb','tiles'],{actorId:'ops:test'}),null);
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{...provenance,converter:{...provenance.converter,binarySha256:'b46d5156399774c9ba728b3d3f93c8ebf8da20dcebd5f67b5cd813aba2ec81cc'}}}),next.versionId);
+  assert.equal(toViewerConfig(c.repository.getModelVersion(next.model.id,next.versionId)).assets.tiles,null);
+  c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{...provenance,converter:{...provenance.converter,inputSha256:'e'.repeat(64)}}}),next.versionId);
+  assert.equal(toViewerConfig(c.repository.getModelVersion(next.model.id,next.versionId)).assets.tiles,null);
+  assert.equal(c.processing.publishAttemptAtomic(next.attempt.id,['glb','tiles'],{actorId:'ops:test'}),null);
 });
 
 test('a stale cursor wraps and queues a lone newly eligible legacy model in the same maintenance pass',t=>{

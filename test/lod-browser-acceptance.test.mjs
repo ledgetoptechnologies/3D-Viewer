@@ -18,6 +18,9 @@ function browserPath() {
   return [
     process.env.CHROME_PATH,
     process.env.EDGE_PATH,
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
   ].filter(Boolean).find(existsSync) || null;
@@ -105,6 +108,38 @@ async function startFixture(tileRoot) {
     server.listen(0, '127.0.0.1', resolve);
   });
   return { server, vite, origin: `http://127.0.0.1:${server.address().port}` };
+}
+
+async function startStreamingOnlyFixture() {
+  const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
+  const requests = [];
+  const config = fixtureConfig();
+  config.assets.tiles = null;
+  const server = createServer((request, reply) => {
+    const url = new URL(request.url || '/', 'http://127.0.0.1');
+    requests.push(url.pathname);
+    if (url.pathname === '/api/models') {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      reply.end(JSON.stringify([config]));
+      return;
+    }
+    if (url.pathname === `/api/models/${fixtureId}`) {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      reply.end(JSON.stringify(config));
+      return;
+    }
+    if (url.pathname === config.assets.glb) {
+      reply.writeHead(200, { 'Content-Type': 'model/gltf-binary', 'Content-Length': 4 });
+      reply.end('GLB!');
+      return;
+    }
+    vite.middlewares(request, reply);
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return { server, vite, requests, glbPath: config.assets.glb, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
 class CdpClient {
@@ -322,6 +357,64 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     ) && !isViteHmrEvent(event));
     assert.deepEqual(failures, []);
     assert.deepEqual(errors, []);
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    releaseLock();
+  }
+});
+
+test('browser never requests the original GLB when verified streaming tiles are absent', { timeout: 60_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for streaming-only browser acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const fixture = await startStreamingOnlyFixture();
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-streaming-only-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Network.enable');
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, `document.querySelector('#layer-tiles')?.textContent === 'Streaming LOD unavailable'`, 'streaming-only state did not render');
+    const state = await client.evaluate(`({
+      layerDisabled: document.querySelector('#layer-tiles')?.disabled,
+      fullMeshLayerPresent: Boolean(document.querySelector('#layer-glb')),
+      status: document.querySelector('#mode-status')?.textContent,
+      tilesRuntimePresent: Boolean(window.__ltds?.tiles?.()),
+    })`);
+    assert.deepEqual(state, {
+      layerDisabled: true,
+      fullMeshLayerPresent: false,
+      status: 'Streaming LOD unavailable or processing',
+      tilesRuntimePresent: false,
+    });
+    await client.evaluate(`document.querySelector('#layer-tiles').click()`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'initialization or layer UI fetched the original GLB');
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});

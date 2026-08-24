@@ -6,8 +6,28 @@ const path = require('node:path');
 
 const digestCache = new Map();
 const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
+const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
+const CONTROLLED_CONVERTER = Object.freeze({
+  name: 'OpenDroneMap/Obj2Tiles',
+  version: '1.6.2',
+  arguments: ['--octree', '--lods', '3', '--divisions', '2', '--lod-texture-scale', '0.5', '--local', '<source.obj>', '<output>'],
+});
+const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set([
+  '40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274',
+  'c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1',
+]);
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIT_ARTIFACTS = 100_000;
+
+function stable(value) {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
 
 async function sha256File(filePath) {
   const stat = await fs.promises.stat(filePath);
@@ -39,7 +59,9 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
   if (!provenance || typeof provenance !== 'object' || Array.isArray(provenance)) {
     return { verified: false, errors: ['provenance must be an object'], provenance: null };
   }
-  if (provenance.schemaVersion !== 2) errors.push('schemaVersion must be 2 (audited leaf equivalence)');
+  const exactV2 = provenance.schemaVersion === 2 && provenance.audit?.algorithm === AUDIT_ALGORITHM;
+  const controlledV3 = provenance.schemaVersion === 3 && provenance.audit?.algorithm === CONTROLLED_AUDIT_ALGORITHM;
+  if (!exactV2 && !controlledV3) errors.push('provenance must use exact v2 or controlled Obj2Tiles v3 audit evidence');
   if (!/^[a-f0-9]{64}$/i.test(String(provenance.sourceSha256 || ''))) {
     errors.push('sourceSha256 must be a SHA-256 digest');
   }
@@ -49,28 +71,46 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
   if (!/\.glb$/i.test(String(provenance.sourceAsset || ''))) {
     errors.push('audited sourceAsset must be a GLB');
   }
-  if (provenance.geometry !== 'bounded-triangle-equivalence') {
-    errors.push('geometry must be bounded-triangle-equivalence');
-  }
-  if (provenance.textures !== 'byte-identical-material-equivalence') {
-    errors.push('textures must be byte-identical-material-equivalence');
-  }
+  const expectedGeometry = controlledV3 ? 'controlled-bidirectional-surface-equivalence' : 'bounded-triangle-equivalence';
+  const expectedTextures = controlledV3 ? 'controlled-atlas-material-equivalence' : 'byte-identical-material-equivalence';
+  if (provenance.geometry !== expectedGeometry) errors.push(`geometry must be ${expectedGeometry}`);
+  if (provenance.textures !== expectedTextures) errors.push(`textures must be ${expectedTextures}`);
   if (provenance.leafGeometricError !== 0) errors.push('leafGeometricError must be 0');
 
   const audit = provenance.audit;
   if (!audit || typeof audit !== 'object' || Array.isArray(audit)) {
     errors.push('audit evidence is required');
   } else {
-    if (audit.algorithm !== AUDIT_ALGORITHM) errors.push(`audit.algorithm must be ${AUDIT_ALGORITHM}`);
-    if (!Number.isFinite(audit.coordinateTolerance) || audit.coordinateTolerance < 0 || audit.coordinateTolerance > 1e-3) {
-      errors.push('audit.coordinateTolerance must be between 0 and 0.001');
-    }
-    if (!Number.isFinite(audit.maxNumericDelta) || audit.maxNumericDelta < 0
-      || audit.maxNumericDelta > audit.coordinateTolerance) {
-      errors.push('audit.maxNumericDelta must not exceed coordinateTolerance');
-    }
-    if (!Number.isInteger(audit.triangleCount) || audit.triangleCount < 1) {
-      errors.push('audit.triangleCount must be a positive integer');
+    if (exactV2) {
+      if (!Number.isFinite(audit.coordinateTolerance) || audit.coordinateTolerance < 0 || audit.coordinateTolerance > 1e-3) errors.push('audit.coordinateTolerance must be between 0 and 0.001');
+      if (!Number.isFinite(audit.maxNumericDelta) || audit.maxNumericDelta < 0 || audit.maxNumericDelta > audit.coordinateTolerance) errors.push('audit.maxNumericDelta must not exceed coordinateTolerance');
+      if (!Number.isInteger(audit.triangleCount) || audit.triangleCount < 1) errors.push('audit.triangleCount must be a positive integer');
+      const hasLeafCounts = audit.leafTriangleCount !== undefined || audit.duplicateLeafTriangleCount !== undefined;
+      if (hasLeafCounts && (!Number.isInteger(audit.leafTriangleCount) || audit.leafTriangleCount < audit.triangleCount)) errors.push('audit.leafTriangleCount must be an integer no smaller than triangleCount');
+      if (hasLeafCounts && (!Number.isInteger(audit.duplicateLeafTriangleCount) || audit.duplicateLeafTriangleCount < 0 || audit.duplicateLeafTriangleCount !== audit.leafTriangleCount - audit.triangleCount)) errors.push('audit.duplicateLeafTriangleCount must match the bounded leaf overlap');
+    } else if (controlledV3) {
+      const converter = provenance.converter;
+      const expectedCommandSha256 = sha256(stable(CONTROLLED_CONVERTER));
+      if (!converter || converter.name !== CONTROLLED_CONVERTER.name || converter.version !== CONTROLLED_CONVERTER.version
+        || stable(converter.arguments) !== stable(CONTROLLED_CONVERTER.arguments)
+        || converter.commandSha256 !== expectedCommandSha256) errors.push('converter must match the pinned Obj2Tiles command contract');
+      for (const [key, value] of [['converter.inputSha256', converter?.inputSha256], ['converter.binarySha256', converter?.binarySha256]]) {
+        if (!/^[a-f0-9]{64}$/i.test(String(value || ''))) errors.push(`${key} must be a SHA-256 digest`);
+      }
+      if (!CONTROLLED_CONVERTER_BINARY_SHA256.has(String(converter?.binarySha256 || '').toLowerCase())) errors.push('converter.binarySha256 must match an approved Obj2Tiles 1.6.2 executable');
+      if (!/\.obj$/i.test(String(converter?.inputAsset || '')) || path.basename(converter?.inputAsset || '') !== converter?.inputAsset) errors.push('converter.inputAsset must name the exact OBJ input');
+      if (!Number.isInteger(audit.sourceTriangleCount) || audit.sourceTriangleCount < 1 || !Number.isInteger(audit.leafTriangleCount) || audit.leafTriangleCount < 1) errors.push('controlled audit triangle counts must be positive integers');
+      if (!Number.isFinite(audit.surfaceTolerance) || audit.surfaceTolerance <= 0 || !Number.isFinite(audit.diagonal) || audit.diagonal <= 0 || audit.surfaceTolerance > audit.diagonal * 1e-3) errors.push('controlled audit surface tolerance is invalid');
+      for (const key of ['boundsDelta', 'areaRelativeDelta', 'centroidDelta', 'normalizedSecondMomentDelta']) if (!Number.isFinite(audit[key]) || audit[key] < 0) errors.push(`controlled audit ${key} is invalid`);
+      if (audit.boundsDelta > audit.surfaceTolerance || audit.centroidDelta > audit.surfaceTolerance || audit.areaRelativeDelta > 1e-5 || audit.normalizedSecondMomentDelta > 2e-5) errors.push('controlled audit aggregate surface evidence exceeds policy');
+      for (const key of ['sourceToLeaves', 'leavesToSource']) {
+        const direction = audit[key];
+        if (!Number.isInteger(direction?.sampleCount) || direction.sampleCount < 4 || !Number.isFinite(direction.maximumDistance) || direction.maximumDistance < 0 || direction.maximumDistance > audit.surfaceTolerance || !Number.isFinite(direction.minimumNormalDot) || !Number.isInteger(direction.reversedNormalSampleCount) || direction.reversedNormalSampleCount < 0 || direction.reversedNormalSampleCount > direction.sampleCount || !Number.isFinite(direction.reversedNormalFraction) || direction.reversedNormalFraction < 0 || direction.reversedNormalFraction > 0.01 || Math.abs(direction.reversedNormalFraction - direction.reversedNormalSampleCount / direction.sampleCount) > 1e-12) errors.push(`controlled audit ${key} evidence is invalid`);
+      }
+      for (const key of ['sourceRender', 'leafRender']) {
+        const render = audit[key];
+        if (!Number.isInteger(render?.triangleCount) || render.triangleCount < 1 || render.texturedTriangleCount !== render.triangleCount || render.uvTriangleCount !== render.triangleCount || !Number.isInteger(render.normalTriangleCount) || render.normalTriangleCount < 0 || render.normalTriangleCount > render.triangleCount) errors.push(`controlled audit ${key} coverage is invalid`);
+      }
     }
     if (!/^[a-f0-9]{64}$/i.test(String(audit.equivalenceSha256 || ''))) {
       errors.push('audit.equivalenceSha256 must be a SHA-256 digest');
@@ -134,20 +174,39 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
   }
 
   const sanitized = errors.length === 0 ? {
-    schemaVersion: 2,
+    schemaVersion: provenance.schemaVersion,
     sourceAsset: provenance.sourceAsset,
     sourceSha256: provenance.sourceSha256.toLowerCase(),
-    geometry: 'bounded-triangle-equivalence',
-    textures: 'byte-identical-material-equivalence',
+    geometry: expectedGeometry,
+    textures: expectedTextures,
     leafGeometricError: 0,
     audit: {
-      algorithm: AUDIT_ALGORITHM,
-      coordinateTolerance: audit.coordinateTolerance,
-      maxNumericDelta: audit.maxNumericDelta,
-      triangleCount: audit.triangleCount,
+      algorithm: audit.algorithm,
+      ...(exactV2 ? {
+        coordinateTolerance: audit.coordinateTolerance,
+        maxNumericDelta: audit.maxNumericDelta,
+        triangleCount: audit.triangleCount,
+        leafTriangleCount: audit.leafTriangleCount ?? audit.triangleCount,
+        duplicateLeafTriangleCount: audit.duplicateLeafTriangleCount ?? 0,
+      } : {
+        sourceTriangleCount: audit.sourceTriangleCount,
+        leafTriangleCount: audit.leafTriangleCount,
+        surfaceTolerance: audit.surfaceTolerance,
+        maximumSurfaceDistance: Math.max(audit.sourceToLeaves.maximumDistance, audit.leavesToSource.maximumDistance),
+        minimumNormalDot: Math.min(audit.sourceToLeaves.minimumNormalDot, audit.leavesToSource.minimumNormalDot),
+        maximumReversedNormalFraction: Math.max(audit.sourceToLeaves.reversedNormalFraction, audit.leavesToSource.reversedNormalFraction),
+      }),
       equivalenceSha256: audit.equivalenceSha256.toLowerCase(),
       artifactCount: audit.artifacts.length,
     },
+    ...(controlledV3 ? { converter: {
+      name: provenance.converter.name,
+      version: provenance.converter.version,
+      commandSha256: provenance.converter.commandSha256,
+      inputAsset: provenance.converter.inputAsset,
+      inputSha256: provenance.converter.inputSha256.toLowerCase(),
+      binarySha256: provenance.converter.binarySha256.toLowerCase(),
+    } } : {}),
   } : null;
   const artifacts = errors.length === 0 ? audit.artifacts.map((artifact) => ({
     uri: artifact.uri,

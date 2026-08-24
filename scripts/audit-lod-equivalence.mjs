@@ -4,7 +4,7 @@ import path from 'node:path';
 import { auditFailureExitCode, writeLodProvenance } from './lib/lod-equivalence.mjs';
 
 function usage() {
-  console.error('Usage: npm run audit:lod -- <derivative-directory> <source.glb> [--tolerance <model-units>] [--external-source]');
+  console.error('Usage: npm run audit:lod -- <derivative-directory> <source.glb> [--tolerance <model-units>] [--external-source] [--controlled-obj2tiles <source.obj> <Obj2Tiles-binary>]');
 }
 
 async function main() {
@@ -13,10 +13,18 @@ async function main() {
   const sourceGlb = args.shift();
   let tolerance;
   let allowExternalSource = false;
+  let controlledObj2Tiles = false;
+  let converterInput;
+  let converterBinary;
   while (args.length) {
     const flag = args.shift();
     if (flag === '--tolerance' && args.length) tolerance = Number(args.shift());
     else if (flag === '--external-source') allowExternalSource = true;
+    else if (flag === '--controlled-obj2tiles' && args.length >= 2) {
+      controlledObj2Tiles = true;
+      converterInput = args.shift();
+      converterBinary = args.shift();
+    }
     else throw new Error(`unknown or incomplete argument: ${flag}`);
   }
   if (!derivativeDir || !sourceGlb) {
@@ -28,6 +36,9 @@ async function main() {
     derivativeDir: path.resolve(derivativeDir),
     sourceGlb: path.resolve(sourceGlb),
     allowExternalSource,
+    controlledObj2Tiles,
+    ...(converterInput ? { converterInput: path.resolve(converterInput) } : {}),
+    ...(converterBinary ? { converterBinary: path.resolve(converterBinary) } : {}),
     ...(tolerance === undefined ? {} : { tolerance }),
   });
   console.log(JSON.stringify({ valid: true, output: result.outputPath, audit: result.provenance.audit }, null, 2));

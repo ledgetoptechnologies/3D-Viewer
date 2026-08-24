@@ -134,7 +134,10 @@
     window.viewer = viewer;
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
-    viewer.setPointBudget(10_000_000);
+    // Start at the proven WebODM-friendly baseline. Stronger devices can raise
+    // this from the parent controls; auto-LOD still lowers it if frame time
+    // degrades while streaming a large legacy EPT tree.
+    viewer.setPointBudget(4_000_000);
     viewer.setLengthUnit(DISPLAY_UNITS);
     viewer.setBackground('black');
     viewer.setDescription('');
@@ -150,8 +153,8 @@
     // --------------------------------------------------------------------
     let cloudMeta = { total: 0, name: 'EPT' };
     const budgetState = {
-      target: 10_000_000,     // user-set target (via __pcApi.setBudget only)
-      live: 10_000_000,       // what the viewer actually gets; dropped by auto-LOD
+      target: 4_000_000,      // user-set target (via __pcApi.setBudget only)
+      live: 4_000_000,        // what the viewer actually gets; dropped by auto-LOD
       auto: false
     };
     let fpsEMA = 60, lastFrameT = 0;
