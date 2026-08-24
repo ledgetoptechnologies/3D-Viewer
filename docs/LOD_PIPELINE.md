@@ -123,14 +123,16 @@ WebODM model, `--keeptextures` duplicated source textures into more than 157
 GiB before completion. The bounded invocation completed in about three minutes
 and produced a 0.89 GiB hierarchy, but its full-detail frontier retriangulated
 the 1,148,233 source triangles into 1,270,357 leaf triangles, so the v2 audit
-correctly rejected it. `MESH_DERIVATIVES_ENABLED` therefore defaults to false.
+correctly rejected it. Production Compose still queues this optional generation
+by default so missing derivatives and failures are visible in Background Work;
+operators can set `MESH_DERIVATIVES_ENABLED=false` to disable it.
 Verified imported tiles may stream. The original GLB remains a guarded fallback
 only when the browser's reported memory or Chromium heap ceiling leaves enough
 decode headroom; an oversized GLB with no verified tiles is explicitly
 unavailable instead of risking a tab crash.
-Automatic generation must stay opt-in/experimental until a separately
-versioned surface-and-appearance proof is implemented; do not loosen the v2
-result or manually change the provenance file.
+Automatic generation remains verification-gated: a failed audit leaves the
+original mesh published and requires an explicit manual retry. Do not loosen
+the v2 result or manually change the provenance file.
 
 ## Validate before deployment
 

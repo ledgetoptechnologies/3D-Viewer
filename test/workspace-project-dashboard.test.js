@@ -111,6 +111,11 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/\/api\/v1\/operations\/\$\{encodeURIComponent\(id\)\}\/retry/);
   assert.match(source,/\/api\/v1\/processing\/derivatives\?limit=100/);
   assert.match(source,/\/api\/v1\/processing\/derivatives\/\$\{encodeURIComponent\(id\)\}\/retry/);
+  assert.match(source,/\/api\/v1\/processing\/outputs\/\$\{encodeURIComponent\(outputId\)\}\/derivatives\/tiles/);
+  assert.match(source,/Generate 3D tiles/);
+  assert.match(source,/data-derivative-id/);
+  assert.match(source,/Waiting for derivative worker/);
+  assert.match(processingApi,/requestOptionalLodDerivative/);
   assert.match(source,/The original model remains available/);
   assert.match(source,/rememberOperation\(result\.operation\);modal\.close\(\)/);
   assert.match(source,/scheduleOperationRefresh\(500\)/);

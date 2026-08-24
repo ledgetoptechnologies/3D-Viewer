@@ -41,6 +41,16 @@ function readyModel(c,{assets=['glb','obj']}={}){
   return{project,task,attempt:c.processing.getAttempt(attempt.id),model,versionId};
 }
 
+function publishModel(c,item){
+  c.db.prepare("UPDATE model_outputs SET status='published' WHERE id=?").run(item.versionId);
+  c.db.prepare("UPDATE processing_attempts SET status='published' WHERE id=?").run(item.attempt.id);
+  c.db.prepare("UPDATE processing_tasks SET status='published',published_model_id=? WHERE id=?").run(item.model.id,item.task.id);
+  c.db.prepare("UPDATE models SET active_version_id=?,status='ready' WHERE id=?").run(item.versionId,item.model.id);
+  c.db.prepare("UPDATE model_assets SET published=1 WHERE version_id=?").run(item.versionId);
+  item.attempt=c.processing.getAttempt(item.attempt.id);
+  return item;
+}
+
 test('legacy OBJ backfill queues once without taking the ready model offline',t=>{
   const c=fixture(t),item=readyModel(c);
   assert.deepEqual(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true,limit:20}),{scanned:1,queued:1,conflict:false});
@@ -69,6 +79,18 @@ test('legacy WebODM backups with the georeferenced OBJ and companion GLB enter b
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
 });
 
+test('active published legacy models enter the optional LOD queue without reimporting or losing publication',t=>{
+  const c=fixture(t),item=publishModel(c,readyModel(c));
+  assert.deepEqual(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true,limit:20}),{scanned:1,queued:1,conflict:false});
+  const job=c.db.prepare('SELECT derivative_type,status,request_json FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id);
+  assert.equal(job.derivative_type,'mesh_tiles');
+  assert.equal(job.status,'pending');
+  assert.equal(JSON.parse(job.request_json).optional,true);
+  assert.equal(c.processing.getAttempt(item.attempt.id).status,'published');
+  assert.equal(c.processing.getModelOutput(item.versionId).status,'published');
+  assert.equal(c.db.prepare('SELECT active_version_id FROM models WHERE id=?').get(item.model.id).active_version_id,item.versionId);
+});
+
 test('optional LOD failure is terminal until audited manual retry and preserves readiness',t=>{
   const c=fixture(t),item=readyModel(c);
   c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'mesh_tiles',request:{optional:true}}]);
@@ -89,8 +111,9 @@ test('failed imported tile audit quarantines tiles while preserving the GLB fall
   const c=fixture(t),item=readyModel(c,{assets:['glb']});
   c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64)});
   c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'lod_audit',request:{optional:true,tilesRootKey:'models',tilesRelativePath:'legacy/tiles'}}]);
-  assert.deepEqual(c.processing.modelAssetsForVersion(item.versionId).map(asset=>asset.kind),['glb'],'enqueue atomically quarantines the tile row');
+  assert.deepEqual(c.processing.modelAssetsForVersion(item.versionId).map(asset=>asset.kind),['glb','tiles'],'enqueue preserves the existing asset until the audit is leased');
   const claimed=c.processing.claimDerivative('lod-worker');
+  assert.deepEqual(c.processing.modelAssetsForVersion(item.versionId).map(asset=>asset.kind),['glb'],'claim atomically quarantines the tile row before verification');
   assert.equal(c.processing.completeOptionalDerivative(claimed.id,'lod-worker',{verified:false,fallback:'glb'}),true);
   assert.deepEqual(c.processing.modelAssetsForVersion(item.versionId).map(asset=>asset.kind),['glb']);
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
@@ -129,6 +152,36 @@ test('the derivative worker executes a real external-GLB tile audit and register
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
   assert.equal(c.processing.getModelOutput(item.versionId).status,'ready');
   assert.equal(c.db.prepare('SELECT status FROM model_versions WHERE id=?').get(item.versionId).status,'ready');
+});
+
+test('verified LOD backfill is atomically added to an already published model',async t=>{
+  const c=fixture(t),item=publishModel(c,readyModel(c,{assets:['glb']}));
+  const {writeAuditableFixture}=await import('./helpers/lod-fixture.mjs');
+  const tilesRelativePath=`${item.task.id}/${item.attempt.id}/native-tiles`,tilesDir=path.join(c.root,'models',...tilesRelativePath.split('/'));
+  const fixtureSource=writeAuditableFixture(tilesDir),glbPath=path.join(c.root,'datasets','legacy','model.glb');
+  fs.mkdirSync(path.dirname(glbPath),{recursive:true});fs.copyFileSync(fixtureSource,glbPath);fs.rmSync(fixtureSource);
+  c.db.prepare("UPDATE model_assets SET sha256=? WHERE version_id=? AND kind='glb'").run(crypto.createHash('sha256').update(fs.readFileSync(glbPath)).digest('hex'),item.versionId);
+  c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'lod_audit',request:{optional:true,tilesRootKey:'models',tilesRelativePath}}]);
+
+  assert.equal(await processOneDerivative({processing:c.processing,storage:c.storage,config:{opsBaseUrl:'https://ops.example',meshDerivativesEnabled:true}},'lod-worker'),true);
+  assert.equal(c.db.prepare('SELECT status FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).status,'complete');
+  const tiles=c.db.prepare("SELECT published,manifest_sha256 FROM model_assets WHERE version_id=? AND kind='tiles'").get(item.versionId);
+  assert.equal(tiles.published,1);
+  assert.match(tiles.manifest_sha256,/^[0-9a-f]{64}$/);
+  assert.equal(c.processing.getAttempt(item.attempt.id).status,'published');
+  assert.equal(c.processing.getModelOutput(item.versionId).status,'published');
+  assert.ok(toViewerConfig(c.repository.getModel(item.model.id)).assets.tiles);
+});
+
+test('published optional LOD failures are terminal and manually retryable without unpublishing the model',t=>{
+  const c=fixture(t),item=publishModel(c,readyModel(c));
+  c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'mesh_tiles',request:{optional:true}}]);
+  const claimed=c.processing.claimDerivative('lod-worker');
+  assert.equal(c.processing.failOptionalDerivative(claimed.id,'lod-worker','converter failed','derivative_failed'),true);
+  assert.equal(c.processing.claimDerivative('automatic-retry'),null);
+  assert.equal(c.processing.getAttempt(item.attempt.id).status,'published');
+  assert.equal(c.processing.getModelOutput(item.versionId).status,'published');
+  assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test').status,'pending');
 });
 
 test('failed regeneration cannot leave proven-invalid imported tiles registered',async t=>{
@@ -312,4 +365,25 @@ test('derivative list and retry API enforce read/write permissions',async t=>{
   const response=await fetch(`${base}/api/v1/processing/derivatives/${claimed.id}/retry`,{method:'POST',headers:headers(writeToken),body:'{}'});
   assert.equal(response.status,202);
   assert.equal((await response.json()).derivative.status,'pending');
+});
+
+test('eligible output exposes and queues manual tile generation through the existing derivative lane',async t=>{
+  const c=fixture(t),item=readyModel(c,{assets:['glb']}),token='lod-generate-token-000000000000000000';
+  c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/native/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64)});
+  c.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:generate',permissions:['viewer.processing.read','viewer.processing.write'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+  const app=express();app.use(express.json());app.use(createProcessingApi({repository:c.repository,processing:c.processing,storage:c.storage}));
+  const server=await new Promise(resolve=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()};
+  const listed=await fetch(`${base}/api/v1/processing/outputs`,{headers});
+  assert.equal(listed.status,200);
+  assert.deepEqual((await listed.json()).outputs[0].lod,{status:'eligible',canGenerate:true});
+  const queued=await fetch(`${base}/api/v1/processing/outputs/${item.versionId}/derivatives/tiles`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:'{}'});
+  assert.equal(queued.status,202);
+  const derivative=(await queued.json()).derivative;
+  assert.equal(derivative.type,'lod_audit');
+  assert.equal(derivative.status,'pending');
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative.requested' AND entity_id=?").get(derivative.id).n,1);
+  const duplicate=await fetch(`${base}/api/v1/processing/outputs/${item.versionId}/derivatives/tiles`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:'{}'});
+  assert.equal(duplicate.status,409);
 });

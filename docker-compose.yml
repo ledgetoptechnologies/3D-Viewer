@@ -23,9 +23,9 @@ x-runtime: &runtime
     EMERGENCY_ADMIN_ENABLED: "false"
     PROCESSING_PLATFORM_ENABLED: ${PROCESSING_PLATFORM_ENABLED:-true}
     LOCAL_DERIVATIVES_ENABLED: "false"
-    # Experimental until generated tiles pass the versioned surface/appearance
-    # audit. Verified native tiles and the original GLB remain available.
-    MESH_DERIVATIVES_ENABLED: ${MESH_DERIVATIVES_ENABLED:-false}
+    # Generation is optional and never replaces the original mesh. A generated
+    # tileset activates only after the versioned surface/appearance audit passes.
+    MESH_DERIVATIVES_ENABLED: ${MESH_DERIVATIVES_ENABLED:-true}
     OBJ2TILES_BIN: /opt/obj2tiles/Obj2Tiles
     DATA_DIR: /app/storage/data
     DATABASE_PATH: /app/storage/data/viewer.sqlite

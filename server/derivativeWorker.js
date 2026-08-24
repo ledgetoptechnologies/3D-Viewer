@@ -237,14 +237,14 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     } else throw new Error('unsupported derivative type');
 
     if (lost) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
-    if (request.optional && attempt.status === 'ready_for_review') {
+    if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) {
       if (!processing.completeOptionalDerivative(job.id, owner, derivativeResult)) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
     } else emitReady(processing, config, attempt, job, owner, derivativeResult);
     return true;
   } catch (error) {
     const safe = sanitizeLogMessage(error.message).slice(0, 1000);
     if (error.code !== 'lease_lost') {
-      if (request.optional && attempt.status === 'ready_for_review') processing.failOptionalDerivative(job.id, owner, safe, error.code || 'derivative_failed');
+      if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) processing.failOptionalDerivative(job.id, owner, safe, error.code || 'derivative_failed');
       else processing.failDerivative(job.id, owner, safe, error.code || 'derivative_failed');
     }
     return true;

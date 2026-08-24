@@ -64,7 +64,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /TRASH_MOUNT:\s*\/app\/storage\/trash/);
   assert.match(compose, /EMERGENCY_ADMIN_ENABLED:\s+"false"/);
   assert.match(compose, /LOCAL_DERIVATIVES_ENABLED:\s+"false"/);
-  assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+\$\{MESH_DERIVATIVES_ENABLED:-false\}/);
+  assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+\$\{MESH_DERIVATIVES_ENABLED:-true\}/);
   assert.match(compose, /OBJ2TILES_BIN:\s+\/opt\/obj2tiles\/Obj2Tiles/);
   assert.match(compose, /viewer-worker:[\s\S]*processing_worker_heartbeat/);
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);

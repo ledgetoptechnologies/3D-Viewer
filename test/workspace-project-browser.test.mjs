@@ -64,6 +64,7 @@ const fixtures = {
   }, {
     id: 'output-quarry-ready', taskId: 'task-quarry', modelId: 'model-quarry', attemptId: 'attempt-quarry', displayName: 'Quarry ready output',
     status: 'ready', activePublished: false, byteSize: 3072, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
+    lod: { status: 'eligible', canGenerate: true },
     downloadUrl: '/api/v1/processing/outputs/output-quarry-ready/assets/glb',
     reportUrl: '/api/v1/processing/outputs/output-quarry-ready/assets/report',
   }],
@@ -76,7 +77,11 @@ const fixtures = {
     status: 'failed', phase: 'failed', progress: .25, source: { kind: 'server_folder', browserTransferRequired: false, transferComplete: true },
     attemptCount: 1, errorCode: 'invalid_archive', errorMessage: 'The archive could not be imported.', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z',
   }],
-  derivatives: [{ id: 'derivative-failed', attemptId: 'attempt-johnson', type: 'mesh_tiles', status: 'failed', optional: true, result: { error: 'Tile conversion failed; the original model remains available.' }, taskId: 'task-johnson', taskDisplayName: 'Johnson task', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z' }],
+  derivatives: [
+    { id: 'derivative-running', attemptId: 'attempt-running', type: 'lod_audit', status: 'leased', optional: true, result: {}, taskId: 'task-running', taskDisplayName: 'Existing tile audit', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', heartbeatAt: '2026-08-19T13:04:00.000Z', createdAt: '2026-08-19T13:00:00.000Z', updatedAt: '2026-08-19T13:04:00.000Z' },
+    { id: 'derivative-queued', attemptId: 'attempt-queued', type: 'mesh_tiles', status: 'pending', optional: true, result: {}, taskId: 'task-queued', taskDisplayName: 'Queued tile model', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', createdAt: '2026-08-19T12:00:00.000Z', updatedAt: '2026-08-19T12:00:00.000Z' },
+    { id: 'derivative-failed', attemptId: 'attempt-johnson', type: 'mesh_tiles', status: 'failed', optional: true, result: { error: 'Tile conversion failed; the original model remains available.' }, taskId: 'task-johnson', taskDisplayName: 'Johnson task', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z' },
+  ],
 };
 
 function browserPath() {
@@ -169,6 +174,11 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/derivatives/derivative-failed/retry' && method === 'POST') {
     runtime.derivatives = runtime.derivatives.map(job => job.id === 'derivative-failed' ? { ...job, status: 'pending', result: {} } : job);
     return json({ derivative: runtime.derivatives.find(job => job.id === 'derivative-failed') }, 202);
+  }
+  if (pathname === '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles' && method === 'POST') {
+    const derivative = { id: 'derivative-quarry', attemptId: 'attempt-quarry', type: 'mesh_tiles', status: 'pending', optional: true, result: {}, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    runtime.derivatives = [derivative, ...runtime.derivatives];
+    return json({ derivative }, 202);
   }
   if (pathname === '/api/v1/operations/operation-failed/retry' && method === 'POST') {
     runtime.operations = runtime.operations.map(operation => operation.id === 'operation-failed' ? { ...operation, status: 'queued', phase: 'queued', progress: 0, heartbeatAt: null, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() } : operation);
@@ -395,11 +405,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
 
-    await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '1'", `${viewport.name}: background work count did not load`);
+    await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '3'", `${viewport.name}: background work count did not include active derivatives`);
     await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
     await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 2", `${viewport.name}: dedicated import activity did not load`);
     const activityText = await client.evaluate(`document.querySelector('#import-activity').textContent`);
     for (const expected of ['Import activity', '35%', 'Server ZIP', 'Phase: adopting', 'Worker heartbeat', 'The archive could not be imported.']) assert.ok(activityText.includes(expected), `${viewport.name}: missing operation detail ${expected}`);
+    const derivativeText = await client.evaluate(`document.querySelector('#workspace-content').textContent`);
+    for (const expected of ['Model derivatives', 'Validate imported 3D tiles', 'Generate streaming 3D tiles', 'Running', 'Queued', 'Tile conversion failed']) assert.ok(derivativeText.includes(expected), `${viewport.name}: missing derivative detail ${expected}`);
+    assert.equal(await client.evaluate(`document.querySelector('[data-derivative-id="derivative-running"] progress')?.hasAttribute('value')`), false, `${viewport.name}: running derivative progress was not indeterminate`);
     assert.equal(activityText.includes('server import'), false, `${viewport.name}: internal operation subject leaked into the activity title`);
     await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-failed/retry');
@@ -499,7 +512,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry project'", `${viewport.name}: terminal project selection failed`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Download', 'Report'], `${viewport.name}: ready output did not expose review/download/report shortcuts or exposed Share before publish`);
+      ['View', 'Generate 3D tiles', 'Download', 'Report'], `${viewport.name}: ready output did not expose review/tile/download/report shortcuts or exposed Share before publish`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="generate-tiles"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles');
+    await waitFor(client, "document.querySelector('.task-quick-actions')?.textContent.includes('3D tiles queued')", `${viewport.name}: queued tile derivative did not replace the generate action`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="open-review"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-review-grant')", `${viewport.name}: ready output View did not open its isolated review session`);
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
@@ -556,6 +572,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['DELETE', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['POST', '/api/v1/processing/outputs/output-johnson/view-sessions'],
       ['POST', '/api/v1/processing/outputs/output-johnson/archive'],
+      ['POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles'],
       ['DELETE', '/api/v1/processing/outputs/output-johnson-archived'],
       ['POST', '/api/v1/datasets/dataset-johnson/archive'],
       ['DELETE', '/api/v1/datasets/dataset-johnson'],
