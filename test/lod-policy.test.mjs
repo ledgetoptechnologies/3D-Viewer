@@ -4,10 +4,12 @@ import {
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
+  enableRootLodBackdrop,
   inspectLodProvenance,
   inspectLodTileset,
   lodCacheBudget,
   refreshLodResolution,
+  releaseStaleLodDetails,
   visibleLodFrontier,
 } from '../lod-policy.mjs';
 
@@ -19,7 +21,7 @@ test('detail slider maps monotonically to a bounded SSE target', () => {
   assert.equal(detailToErrorTarget(100), 2);
 });
 
-test('renderer configuration pins full-depth REPLACE fallback behavior', () => {
+test('renderer configuration keeps only the current view local and bounded', () => {
   const calls = [];
   const tiles = {
     lruCache: {},
@@ -31,12 +33,125 @@ test('renderer configuration pins full-depth REPLACE fallback behavior', () => {
   const budget = configureLodRenderer(tiles, { camera, renderer, detail: 24, deviceMemoryGiB: 4 });
   assert.deepEqual(calls, [['camera', camera], ['resolution', camera, renderer]]);
   assert.equal(tiles.errorTarget, 2);
-  assert.equal(tiles.loadAncestors, true);
-  assert.equal(tiles.loadSiblings, true);
+  assert.equal(tiles.loadAncestors, false);
+  assert.equal(tiles.loadSiblings, false);
   assert.equal(tiles.maxDepth, Infinity);
   assert.deepEqual(tiles.lruCache, budget);
-  assert.deepEqual(budget, lodCacheBudget(4));
-  assert.ok(budget.maxBytesSize < lodCacheBudget(8).maxBytesSize);
+  assert.deepEqual(budget, {
+    minBytesSize: 384 * 1024 * 1024,
+    maxBytesSize: 768 * 1024 * 1024,
+    minSize: 8,
+    maxSize: 24,
+    unloadPercent: 0.20,
+  });
+  assert.deepEqual(lodCacheBudget(8), {
+    minBytesSize: 0.4 * 1024 * 1024 * 1024,
+    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    minSize: 8,
+    maxSize: 48,
+    unloadPercent: 0.20,
+  });
+});
+
+test('a renderable root can become a runtime-only coarse backdrop', () => {
+  const root = { refine: 'REPLACE', content: { uri: 'root.b3dm' } };
+  assert.equal(enableRootLodBackdrop({ root }), true);
+  assert.equal(root.refine, 'ADD');
+
+  const externalRoot = { refine: 'REPLACE', content: { uri: 'nested/tileset.json' } };
+  assert.equal(enableRootLodBackdrop({ root: externalRoot }), false);
+  assert.equal(externalRoot.refine, 'REPLACE');
+
+  const emptyRoot = { refine: 'REPLACE' };
+  assert.equal(enableRootLodBackdrop({ root: emptyRoot }), false);
+  assert.equal(emptyRoot.refine, 'REPLACE');
+});
+
+test('stale full-detail leaves are released only after their parent is out of view or coarse enough', () => {
+  const oldLeaf = {
+    geometricError: 0,
+    traversal: { active: true, visible: true },
+    engineData: { scene: { visible: true } },
+    children: [],
+  };
+  const settledLeaf = {
+    geometricError: 0,
+    traversal: { active: true, visible: true },
+    engineData: { scene: { visible: true } },
+    children: [],
+  };
+  const activeLeaf = {
+    geometricError: 0,
+    traversal: { active: true, visible: true },
+    engineData: { scene: { visible: true } },
+    children: [],
+  };
+  const intermediate = {
+    geometricError: 3,
+    traversal: { active: true, visible: true },
+    engineData: { scene: { visible: true } },
+    children: [],
+  };
+  const root = {
+    refine: 'ADD',
+    geometricError: 100,
+    traversal: { active: true, visible: true },
+    engineData: { scene: { visible: true } },
+    children: [
+      { geometricError: 3, traversal: { inFrustum: false }, children: [oldLeaf] },
+      { geometricError: 3, traversal: { inFrustum: true, error: 6 }, children: [settledLeaf] },
+      { geometricError: 3, traversal: { inFrustum: true, error: 7 }, children: [activeLeaf] },
+      intermediate,
+    ],
+  };
+  const unused = [];
+  const visibilityChanges = [];
+  const activeChanges = [];
+  let unloads = 0;
+  const tiles = {
+    root,
+    errorTarget: 6,
+    setTileVisible: (tile, visible) => visibilityChanges.push([tile, visible]),
+    setTileActive: (tile, active) => activeChanges.push([tile, active]),
+    lruCache: {
+      markUnused: (tile) => unused.push(tile),
+      scheduleUnload: () => { unloads += 1; },
+    },
+  };
+
+  assert.equal(releaseStaleLodDetails(tiles), 2);
+  assert.equal(oldLeaf.engineData.scene.visible, true);
+  assert.equal(oldLeaf.traversal.active, false);
+  assert.equal(oldLeaf.traversal.visible, false);
+  assert.equal(settledLeaf.engineData.scene.visible, true);
+  assert.equal(activeLeaf.engineData.scene.visible, true);
+  assert.equal(intermediate.engineData.scene.visible, true);
+  assert.deepEqual(visibilityChanges, [[oldLeaf, false], [settledLeaf, false]]);
+  assert.deepEqual(activeChanges, [[oldLeaf, false], [settledLeaf, false]]);
+  assert.deepEqual(unused, [oldLeaf, settledLeaf]);
+  assert.equal(unloads, 1);
+});
+
+test('stale full-detail leaves stay intact without a coarse backdrop', () => {
+  const leaf = {
+    geometricError: 0,
+    traversal: { active: true, visible: true },
+    engineData: { scene: { visible: true } },
+    children: [],
+  };
+  const root = {
+    refine: 'REPLACE',
+    geometricError: 100,
+    children: [{ geometricError: 3, traversal: { inFrustum: false }, children: [leaf] }],
+  };
+  const unused = [];
+  assert.equal(releaseStaleLodDetails({
+    root,
+    errorTarget: 6,
+    lruCache: { markUnused: (tile) => unused.push(tile), scheduleUnload: () => { throw new Error('must not unload'); } },
+  }), 0);
+  assert.equal(leaf.engineData.scene.visible, true);
+  assert.deepEqual(unused, []);
 });
 
 test('resize refreshes the renderer resolution used by SSE calculations', () => {
@@ -148,6 +263,29 @@ test('a zero-error internal tile is rejected because its full-detail children ar
   assert.equal(report.valid, false);
   assert.equal(report.canConvergeToZeroError, false);
   assert.match(report.errors.join('\n'), /greater than zero while the tile has children/);
+});
+
+test('runtime frontier ignores a coarse ADD backdrop only while detail is visible above it', () => {
+  const root = {
+    refine: 'ADD',
+    geometricError: 100,
+    traversal: { visible: true },
+    children: [
+      { geometricError: 0, traversal: { visible: true }, children: [] },
+    ],
+  };
+  assert.deepEqual(visibleLodFrontier(root), {
+    visibleCount: 1,
+    fullDetail: true,
+    maximumGeometricError: 0,
+  });
+
+  root.children[0].traversal.visible = false;
+  assert.deepEqual(visibleLodFrontier(root), {
+    visibleCount: 1,
+    fullDetail: false,
+    maximumGeometricError: 100,
+  });
 });
 
 test('runtime frontier reports full detail only when every visible tile is zero-error', () => {

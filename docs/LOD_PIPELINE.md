@@ -23,9 +23,15 @@ Viewer instead streams 3D Tiles to the browser and renders them locally.
 
 The renderer calculates screen-space error every frame. Its configured error
 target decides when a tile refines; there is no fixed camera-distance switch.
-Ancestors remain available while children load, and the cache is reduced on
-mobile/low-memory devices. Moving away naturally makes the coarse parent meet
-the error target again, after which inactive detailed children can be evicted.
+The persisted hierarchy remains `REPLACE`. Only after a renderable root passes
+validation may the runtime set that root to `ADD` as a whole-model coarse
+backdrop; it never changes the source manifest. Ancestor/sibling preload stays
+disabled so only the active view branch remains pinned. When the backdrop is
+active, a post-update pass releases a stale zero-error leaf only after its
+parent is out of the frustum or already meets the error target. The cache is
+reduced on mobile/low-memory devices. Moving away naturally makes the coarse
+parent meet the error target again, after which inactive detailed children can
+be evicted.
 
 ## Full-quality attestation
 

@@ -16,9 +16,11 @@ import {
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
+  enableRootLodBackdrop,
   inspectLodProvenance,
   inspectLodTileset,
   refreshLodResolution,
+  releaseStaleLodDetails,
   visibleLodFrontier,
 } from './lod-policy.mjs';
 import { EarthLikeControls } from './earth-controls.js';
@@ -736,6 +738,10 @@ function loadTiles() {
       failLod(decision.reason);
       return;
     }
+    // Keep the persisted manifest REPLACE through validation. Only after the
+    // valid startup decision do we make a capable runtime root into the coarse
+    // backdrop.
+    enableRootLodBackdrop(tilesRenderer);
     if (!report.canConvergeToZeroError) {
       console.warn('LOD root delegates to external tilesets; validate each child manifest.', report);
     }
@@ -752,6 +758,7 @@ function loadTiles() {
     }
   });
   tilesRenderer.addEventListener('load-model', (ev) => {
+    const isCoarseBackdrop = ev.tile === tilesRenderer.root;
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -761,8 +768,18 @@ function loadTiles() {
         const old = c.material;
         const map = old.map || null;
         if (map) map.colorSpace = THREE.SRGBColorSpace;
-        c.material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide });
-        c.material.toneMapped = false;
+        const material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide });
+        material.toneMapped = false;
+        if (isCoarseBackdrop) {
+          // Render the permanent coarse base before streamed children. It does
+          // not write depth, so nearby detail cleanly overlays it without flicker.
+          material.depthWrite = false;
+          material.polygonOffset = true;
+          material.polygonOffsetFactor = 1;
+          material.polygonOffsetUnits = 1;
+          c.renderOrder = -100;
+        }
+        c.material = material;
         if (old.dispose) old.dispose();
         queueBVH(c);
       }
@@ -2842,7 +2859,10 @@ function startLoop() {
     if (renderThree) {
       controls.update(dt);
       camera.updateMatrixWorld();
-      if (tilesRenderer && tilesParent.visible) tilesRenderer.update();
+      if (tilesRenderer && tilesParent.visible) {
+        tilesRenderer.update();
+        releaseStaleLodDetails(tilesRenderer);
+      }
       drainBVH();
 
       // scale measurement markers with camera distance

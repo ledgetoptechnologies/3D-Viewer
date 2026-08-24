@@ -22,6 +22,26 @@ test('viewer wires cancel/retry/LOD recovery without exposing capability asset U
   assert.match(html, /id="error-lod"/);
 });
 
+test('viewer streams root backdrop without preloading stale branches', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /enableRootLodBackdrop,/);
+  assert.match(main, /releaseStaleLodDetails,/);
+  const rootStart = main.indexOf("tilesRenderer.addEventListener('load-root-tileset'");
+  const tilesetStart = main.indexOf("tilesRenderer.addEventListener('load-tileset'");
+  const modelStart = main.indexOf("tilesRenderer.addEventListener('load-model'");
+  assert.ok(rootStart >= 0 && tilesetStart > rootStart && modelStart > tilesetStart, 'LOD event handlers are present in order');
+  const rootHandler = main.slice(rootStart, tilesetStart);
+  const tilesetHandler = main.slice(tilesetStart, modelStart);
+  assert.match(rootHandler, /const decision = decideLodStartup\(/);
+  assert.match(rootHandler, /if \(decision\.action !== 'stream-lod'\)\s*\{[\s\S]*?return;\s*\}[\s\S]*?enableRootLodBackdrop\(tilesRenderer\);/);
+  assert.doesNotMatch(tilesetHandler, /enableRootLodBackdrop\(tilesRenderer\)/);
+  assert.match(main, /const isCoarseBackdrop = ev\.tile === tilesRenderer\.root;/);
+  assert.match(main, /material\.depthWrite = false;/);
+  assert.match(main, /material\.polygonOffset = true;/);
+  assert.match(main, /c\.renderOrder = -100;/);
+  assert.match(main, /tilesRenderer\.update\(\);\s*releaseStaleLodDetails\(tilesRenderer\);/);
+});
+
 test('orthophoto nodata uses the supported GeoTIFF image API', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /parseFiniteGdalNoData\(image\.getGDALNoData\(\)\)/);
