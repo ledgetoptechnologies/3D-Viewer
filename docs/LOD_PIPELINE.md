@@ -124,8 +124,9 @@ GiB before completion. The bounded invocation completed in about three minutes
 and produced a 0.89 GiB hierarchy, but its full-detail frontier retriangulated
 the 1,148,233 source triangles into 1,270,357 leaf triangles, so the v2 audit
 correctly rejected it. Production Compose still queues this optional generation
-by default so missing derivatives and failures are visible in Background Work;
-operators can set `MESH_DERIVATIVES_ENABLED=false` to disable it.
+by default so missing derivatives and failures are visible in Background Work.
+The server uses the same enabled fallback when an older deployment omits the
+variable; operators can set `MESH_DERIVATIVES_ENABLED=false` to disable it.
 Verified imported tiles may stream. The original GLB remains a guarded fallback
 only when the browser's reported memory or Chromium heap ceiling leaves enough
 decode headroom; an oversized GLB with no verified tiles is explicitly

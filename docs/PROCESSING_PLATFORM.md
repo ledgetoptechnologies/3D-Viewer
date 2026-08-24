@@ -100,8 +100,9 @@ do not force-kill a worker merely because a large operation has not exited yet.
 point-cloud conversion stays disabled. Mesh generation is separately gated:
 the production image pins Obj2Tiles 1.6.2, and production Compose enables
 `MESH_DERIVATIVES_ENABLED` by default so missing derivatives and failures are
-visible in Background Work. Operators can explicitly set it false to disable
-generation. The production path prefers verified native 3D Tiles and retains
+visible in Background Work. The server fallback is also true when an older
+deployment omits the variable; operators can explicitly set it false to
+disable generation. The production path prefers verified native 3D Tiles and retains
 the original GLB as the full-resolution fallback. Missing or invalid tiles
 receive one optional background generation attempt only when both a textured
 OBJ and independent companion GLB are present; existing active published and

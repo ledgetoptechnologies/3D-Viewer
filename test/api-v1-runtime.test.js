@@ -199,6 +199,7 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.ok(!JSON.stringify(browserSession).includes(SERVICE_SECRET));
   assert.match(browserSession.accessToken, /^[A-Za-z0-9_-]{43}$/);
   assert.ok(browserSession.model.assets.glb.includes(`/session-assets/${browserSession.accessToken}/`));
+  assert.equal(browserSession.model.assetByteSizes.glb, null, 'legacy registrations without declared size remain range-loader compatible');
   assert.ok(browserSession.model.assets.ept.includes(`/session-assets/${browserSession.accessToken}/`));
   assert.equal(browserSession.model.assets.pointCloudFormat, 'laz');
 

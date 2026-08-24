@@ -35,6 +35,7 @@ import {
   fullMeshByteLimit,
   fullMeshDecodeTimeoutMs,
   fullMeshFailureDisposition,
+  fullMeshRuntimePolicy,
   fullMeshUserMessage,
   isRetryableFullMeshError,
   meshRuntimeError,
@@ -53,6 +54,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 // ────────────────────────────────────────────────
 let PROJECT = null;
 let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
+let GLB_RUNTIME = Object.freeze({ declaredByteSize: null, byteLimit: 0, interactive: true });
 let LOD_PROVENANCE = null;
 let SHOTS_URL = null, PHOTO_BASE = null;
 let ORTHO_URL = null, DSM_URL = null, DTM_URL = null;
@@ -500,6 +502,11 @@ function applyProjectConfig(p) {
   if (dom.loadingText) dom.loadingText.textContent = `Initializing ${p.title} viewer...`;
 
   GLB_URL = p.assets.glb;
+  GLB_RUNTIME = fullMeshRuntimePolicy(
+    p.assetByteSizes?.glb,
+    navigator.deviceMemory,
+    performance.memory?.jsHeapSizeLimit,
+  );
   TILES_URL = p.assets.tiles;
   LOD_PROVENANCE = p.lodProvenance || null;
   OBJ_URL = p.assets.obj;
@@ -518,7 +525,8 @@ function applyProjectConfig(p) {
   UTM_ZONE_LON0 = (((p.georef && p.georef.utmZoneLon0Deg) ?? -87) * Math.PI) / 180;
 
   // Pick the best available mesh/point-cloud source for this project.
-  state.meshSource = TILES_URL ? 'tiles' : (GLB_URL ? 'glb' : (OBJ_URL ? 'obj' : 'none'));
+  state.meshSource = TILES_URL ? 'tiles'
+    : (GLB_URL ? (GLB_RUNTIME.interactive ? 'glb' : 'lod-required') : (OBJ_URL ? 'obj' : 'none'));
   state.cloudMode = EPT_URL ? 'potree' : (POINT_CLOUD_URL ? 'direct' : 'none');
 }
 
@@ -549,7 +557,7 @@ function applyAvailability() {
   setVisible('panel-pc', state.cloudMode === 'potree');   // budget/size/EDL sliders only apply to Potree
   // A share link can disable measuring entirely (permissions.measure=false).
   if (dom.btnMeasureFloat) {
-    dom.btnMeasureFloat.style.display = (VIEW_MODE === 'embed' && SHARE_PERMISSIONS.measure && state.meshSource !== 'none') ? 'flex' : 'none';
+    dom.btnMeasureFloat.style.display = (VIEW_MODE === 'embed' && SHARE_PERMISSIONS.measure && hasMeshSource(state.meshSource)) ? 'flex' : 'none';
   }
 
   const tilesBtn = document.getElementById('layer-tiles');
@@ -561,7 +569,7 @@ function applyAvailability() {
     tilesBtn.textContent = 'Streamed LOD Mesh';
     tilesBtn.dataset.layer = 'tiles';
     tilesBtn.classList.add('active');
-    glbBtn.style.display = GLB_URL ? '' : 'none';
+    glbBtn.style.display = GLB_URL && GLB_RUNTIME.interactive ? '' : 'none';
   } else if (state.meshSource === 'obj') {
     tilesBtn.style.display = '';
     tilesBtn.textContent = '3D Mesh';
@@ -572,9 +580,20 @@ function applyAvailability() {
     tilesBtn.style.display = 'none';
     glbBtn.style.display = '';
     glbBtn.classList.add('active');
+  } else if (state.meshSource === 'lod-required') {
+    tilesBtn.style.display = '';
+    tilesBtn.textContent = 'Streaming LOD required / processing';
+    tilesBtn.dataset.layer = 'lod-required';
+    tilesBtn.disabled = true;
+    tilesBtn.title = 'This full-resolution mesh exceeds the safe interactive runtime limit. Streaming tiles must finish before 3D viewing is available.';
+    glbBtn.style.display = 'none';
   } else {
     tilesBtn.style.display = 'none';
     glbBtn.style.display = 'none';
+  }
+  if (state.meshSource !== 'lod-required') {
+    tilesBtn.disabled = false;
+    tilesBtn.title = '';
   }
 
   // land on the first available tab if "3D Model" isn't offered
@@ -935,7 +954,8 @@ function failLod(message) {
   lodFailureHandled = true;
   showError(message);
   setTimeout(() => {
-    if (!GLB_URL && !OBJ_URL) {
+    const canUseFullMeshFallback = GLB_URL ? GLB_RUNTIME.interactive : Boolean(OBJ_URL);
+    if (!canUseFullMeshFallback) {
       tilesParent.visible = false;
       disposeTiles();
       return;
@@ -1009,6 +1029,7 @@ function selectStreamingLod() {
 }
 
 function retryFullMesh() {
+  if (!GLB_RUNTIME.interactive) return;
   cancelGLBLoad();
   state.glbLoaded = false;
   document.getElementById('layer-glb').classList.add('active');
@@ -1018,7 +1039,7 @@ function retryFullMesh() {
 
 async function loadGLB() {
   if (state.glbLoaded) { glbParent.visible = true; return; }
-  if (state.glbLoading || !GLB_URL) return;
+  if (state.glbLoading || !GLB_URL || !GLB_RUNTIME.interactive) return;
   state.glbLoading = true;
   // Free the tile cache before the memory-heavy fallback decode.
   disposeTiles();
@@ -3015,10 +3036,10 @@ function switchMode(mode) {
   syncMapVolumeAvailability();
 
   if (is3D) {
-    updateStatus('Mode: 3D Model');
+    updateStatus(state.meshSource === 'lod-required' ? 'Streaming LOD required / processing' : 'Mode: 3D Model');
     if (pointCloudParent) pointCloudParent.visible = false;
     restoreMeshVisibility();
-    if (glbParent.visible && !state.glbLoaded && !state.glbLoading) loadGLB();
+    if (GLB_RUNTIME.interactive && glbParent.visible && !state.glbLoaded && !state.glbLoading) loadGLB();
     if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for direct-cloud mode)
     onResize();
   } else if (isPotreeCloud) {

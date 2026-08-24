@@ -6,7 +6,14 @@ const {hashFileChunks,hashTree}=require('./storageManager');
 
 function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabled=false,limit=20}={}){
   let queued=0,scanned=0,lastProcessed=null,conflict=false;
-  const candidates=processing.listLodBackfillCandidates(limit);
+  let candidates=processing.listLodBackfillCandidates(limit);
+  // A persisted cursor can point beyond every remaining candidate after an
+  // upgrade changes eligibility. Wrap once in the same maintenance pass so a
+  // single legacy model is not deferred until the next hourly run.
+  if(!candidates.length&&processing.lodBackfillCursor?.()){
+    processing.advanceLodBackfillCursor(null,false);
+    candidates=processing.listLodBackfillCandidates(limit);
+  }
   for(const candidate of candidates){
     scanned+=1;
     try{
@@ -27,7 +34,11 @@ function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabl
 
 async function reconcileMissingPointCloudAssets(processing,storage,{limit=5}={}){
   let scanned=0,registered=0,lastProcessed=null;
-  const candidates=processing.listPointCloudBackfillCandidates(limit);
+  let candidates=processing.listPointCloudBackfillCandidates(limit);
+  if(!candidates.length&&processing.pointCloudBackfillCursor?.()){
+    processing.advancePointCloudBackfillCursor(null,false);
+    candidates=processing.listPointCloudBackfillCandidates(limit);
+  }
   for(const candidate of candidates){
     scanned+=1;
     const prefix=candidate.outputRelativePath||'';
@@ -43,7 +54,7 @@ async function reconcileMissingPointCloudAssets(processing,storage,{limit=5}={})
       if(entry)discovered={kind:'ept',rootKey:candidate.outputRootKey,relativePath,format:'ept',contentType:'application/json',byteSize:entry.byteSize,sha256:entry.sha256,manifestSha256:tree.manifestSha256,manifestFiles:tree.files};
       if(discovered)break;
     }
-    if(!discovered){for(const suffix of pointChoices){
+    if(!discovered&&!candidate.hasPointCloud){for(const suffix of pointChoices){
       const relativePath=path.posix.join(prefix,suffix);
       let absolute;try{absolute=storage.resolve(candidate.outputRootKey,relativePath,{mustExist:true});}catch(error){if(error.code==='ENOENT')continue;throw error;}
       const stat=fs.statSync(absolute);if(!stat.isFile())continue;
@@ -51,7 +62,10 @@ async function reconcileMissingPointCloudAssets(processing,storage,{limit=5}={})
       discovered={kind:'pointCloud',rootKey:candidate.outputRootKey,relativePath,format:'laz',contentType:'application/vnd.laszip',byteSize:stat.size,sha256:integrity.sha256,chunks:integrity.chunks};
       if(discovered)break;
     }}
-    if(discovered&&!processing.modelAssetsForVersion(candidate.versionId).some((asset)=>['ept','pointCloud'].includes(asset.kind))){processing.addModelAsset({versionId:candidate.versionId,attemptId:candidate.attemptId,published:candidate.published,...discovered});registered+=1;}
+    // EPT is the scalable viewer source and is reconciled independently of a
+    // direct LAZ/PLY fallback. Upsert repairs incomplete, stale, or unpublished
+    // legacy EPT metadata while retaining the original pointCloud asset.
+    if(discovered){processing.addModelAsset({versionId:candidate.versionId,attemptId:candidate.attemptId,published:candidate.published,...discovered});registered+=1;}
     lastProcessed=candidate.attemptId;
   }
   if(lastProcessed)processing.advancePointCloudBackfillCursor(lastProcessed,candidates.length>=limit);

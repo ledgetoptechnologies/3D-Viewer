@@ -12,6 +12,18 @@ export function fullMeshByteLimit(deviceMemoryGiB, jsHeapSizeLimitBytes) {
   return Math.min(768 * MIB, Math.max(128 * MIB, deviceBudget, heapBudget));
 }
 
+export function fullMeshRuntimePolicy(byteLength, deviceMemoryGiB, jsHeapSizeLimitBytes) {
+  const declaredByteSize = Number(byteLength);
+  const byteLimit = fullMeshByteLimit(deviceMemoryGiB, jsHeapSizeLimitBytes);
+  const hasDeclaredByteSize = byteLength !== null && byteLength !== undefined && byteLength !== ''
+    && Number.isSafeInteger(declaredByteSize) && declaredByteSize >= 0;
+  return Object.freeze({
+    declaredByteSize: hasDeclaredByteSize ? declaredByteSize : null,
+    byteLimit,
+    interactive: !hasDeclaredByteSize || declaredByteSize <= byteLimit,
+  });
+}
+
 export function fullMeshDecodeTimeoutMs(byteLength) {
   const bytes = Number(byteLength);
   if (!Number.isFinite(bytes) || bytes <= 0) return 90_000;

@@ -113,6 +113,12 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/\/api\/v1\/processing\/derivatives\/\$\{encodeURIComponent\(id\)\}\/retry/);
   assert.match(source,/\/api\/v1\/processing\/outputs\/\$\{encodeURIComponent\(outputId\)\}\/derivatives\/tiles/);
   assert.match(source,/Generate 3D tiles/);
+  assert.match(source,/lod\.jobId/);
+  assert.match(source,/lod\.canRetry/);
+  assert.match(source,/3D tiles disabled by server/);
+  assert.match(source,/Using full mesh fallback/);
+  assert.match(source,/Full mesh fallback/);
+  assert.match(source,/manualRetryCount/);
   assert.match(source,/data-derivative-id/);
   assert.match(source,/Waiting for derivative worker/);
   assert.match(processingApi,/requestOptionalLodDerivative/);

@@ -174,7 +174,9 @@ const config = {
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
-  meshDerivativesEnabled: bool(process.env.MESH_DERIVATIVES_ENABLED, false),
+  // The production image contains the pinned converter and every generated
+  // tileset remains verification-gated. Explicit false is still authoritative.
+  meshDerivativesEnabled: bool(process.env.MESH_DERIVATIVES_ENABLED, true),
 };
 
 function validate() {

@@ -51,6 +51,14 @@ function publishModel(c,item){
   return item;
 }
 
+test('viewer config exposes the immutable declared GLB byte size for runtime policy',t=>{
+  const c=fixture(t),item=readyModel(c),declared=898*1024*1024;
+  c.db.prepare("UPDATE model_assets SET byte_size=? WHERE version_id=? AND kind='glb'").run(declared,item.versionId);
+  const viewer=toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId));
+  assert.equal(viewer.assetByteSizes.glb,declared);
+  assert.ok(viewer.assets.glb,'the capability URL remains available for authenticated download even when the browser declines interactive decoding');
+});
+
 test('legacy OBJ backfill queues once without taking the ready model offline',t=>{
   const c=fixture(t),item=readyModel(c);
   assert.deepEqual(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true,limit:20}),{scanned:1,queued:1,conflict:false});
@@ -100,11 +108,16 @@ test('optional LOD failure is terminal until audited manual retry and preserves 
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
   assert.equal(c.processing.getModelOutput(item.versionId).status,'ready');
   assert.equal(c.db.prepare('SELECT status FROM model_versions WHERE id=?').get(item.versionId).status,'ready');
-  const retried=c.processing.retryOptionalDerivative(claimed.id,'ops:test');
+  const retried=c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true});
   assert.equal(retried.status,'pending');
+  assert.equal(retried.manualRetryCount,1);
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'ready_for_review');
   assert.equal(c.processing.getModelOutput(item.versionId).status,'ready');
   assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative.retry' AND entity_id=?").get(claimed.id).n,1);
+  const retriedClaim=c.processing.claimDerivative('lod-worker');
+  assert.equal(retriedClaim.id,claimed.id);
+  assert.equal(c.processing.failOptionalDerivative(retriedClaim.id,'lod-worker','converter failed again','derivative_failed'),true);
+  assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true}),null,'the single manual retry is bounded');
 });
 
 test('failed imported tile audit quarantines tiles while preserving the GLB fallback',t=>{
@@ -122,6 +135,36 @@ test('failed imported tile audit quarantines tiles while preserving the GLB fall
   const audit=c.db.prepare("SELECT details_json FROM audit_events WHERE action='derivative.optional_complete' AND entity_id=?").get(claimed.id);
   assert.deepEqual(JSON.parse(audit.details_json).invalidatedAssetKinds,[]);
   assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative.tiles_quarantined'").get().n>0,true);
+});
+
+test('unverified imported tiles expose one bounded recovery from the textured source and explain disabled generation',t=>{
+  const c=fixture(t),item=readyModel(c);
+  c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64)});
+  c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'lod_audit',request:{optional:true,tilesRootKey:'models',tilesRelativePath:'legacy/tiles'}}]);
+  const claimed=c.processing.claimDerivative('lod-worker');
+  assert.equal(c.processing.completeOptionalDerivative(claimed.id,'lod-worker',{verified:false,fallback:'glb'}),true);
+
+  const disabled=c.processing.lodDerivativeState(item.versionId,{meshDerivativesEnabled:false});
+  assert.equal(disabled.status,'fallback');
+  assert.equal(disabled.canRetry,false);
+  assert.equal(disabled.disabledByPolicy,true);
+  assert.match(disabled.reason,/disabled on this Viewer deployment/);
+
+  const enabled=c.processing.lodDerivativeState(item.versionId,{meshDerivativesEnabled:true});
+  assert.equal(enabled.status,'fallback');
+  assert.equal(enabled.canRetry,true);
+  assert.equal(enabled.jobId,claimed.id);
+  const retried=c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true});
+  assert.equal(retried.status,'pending');
+  assert.equal(retried.manualRetryCount,1);
+  const request=JSON.parse(c.db.prepare('SELECT request_json FROM derivative_jobs WHERE id=?').get(claimed.id).request_json);
+  assert.equal(request.generateFromObjOnFailure,true);
+  assert.equal(request.manualRetryCount,1);
+
+  const secondClaim=c.processing.claimDerivative('lod-worker');
+  assert.equal(c.processing.completeOptionalDerivative(secondClaim.id,'lod-worker',{verified:false,fallback:'glb'}),true);
+  assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true}),null);
+  assert.equal(c.processing.lodDerivativeState(item.versionId,{meshDerivativesEnabled:true}).canRetry,false);
 });
 
 test('the derivative worker executes a real external-GLB tile audit and registers verified tiles',async t=>{
@@ -181,7 +224,7 @@ test('published optional LOD failures are terminal and manually retryable withou
   assert.equal(c.processing.claimDerivative('automatic-retry'),null);
   assert.equal(c.processing.getAttempt(item.attempt.id).status,'published');
   assert.equal(c.processing.getModelOutput(item.versionId).status,'published');
-  assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test').status,'pending');
+  assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true}).status,'pending');
 });
 
 test('failed regeneration cannot leave proven-invalid imported tiles registered',async t=>{
@@ -285,6 +328,66 @@ test('legacy direct LAZ is reconciled only when EPT is absent',async t=>{
   const asset=c.db.prepare("SELECT kind,format,sha256 FROM model_assets WHERE version_id=? AND kind='pointCloud'").get(item.versionId);
   assert.deepEqual({kind:asset.kind,format:asset.format},{kind:'pointCloud',format:'laz'});
   assert.match(asset.sha256,/^[0-9a-f]{64}$/);
+  assert.deepEqual(await reconcileMissingPointCloudAssets(c.processing,c.storage),{scanned:1,registered:0},'a valid LAZ fallback is not rehashed while EPT remains absent');
+});
+
+test('legacy LAZ registration does not block discovery of the scalable WebODM EPT tree',async t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  c.processing.addModelAsset({versionId:item.versionId,kind:'pointCloud',rootKey:'datasets',relativePath:`${outputRelativePath}/assets/odm_georeferencing/odm_georeferenced_model.laz`,format:'laz',contentType:'application/vnd.laszip',byteSize:6,attemptId:item.attempt.id,sha256:'a'.repeat(64)});
+  const eptDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'assets','entwine_pointcloud');
+  fs.mkdirSync(path.join(eptDir,'ept-data'),{recursive:true});
+  fs.writeFileSync(path.join(eptDir,'ept.json'),JSON.stringify({dataType:'laszip',schema:[]}));
+  fs.writeFileSync(path.join(eptDir,'ept-data','0-0-0-0.laz'),'points');
+
+  assert.deepEqual(await reconcileMissingPointCloudAssets(c.processing,c.storage),{scanned:1,registered:1});
+  assert.deepEqual(c.db.prepare("SELECT kind FROM model_assets WHERE version_id=? AND kind IN ('ept','pointCloud') ORDER BY kind").all(item.versionId).map(row=>row.kind),['ept','pointCloud']);
+  assert.ok(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.ept);
+});
+
+test('active published output repairs and publishes incomplete legacy EPT metadata',async t=>{
+  const c=fixture(t),item=publishModel(c,readyModel(c)),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  c.processing.addModelAsset({versionId:item.versionId,kind:'ept',rootKey:'datasets',relativePath:`${outputRelativePath}/assets/entwine_pointcloud/ept.json`,format:'ept',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:null,published:false});
+  const eptDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'assets','entwine_pointcloud');
+  fs.mkdirSync(path.join(eptDir,'ept-data'),{recursive:true});
+  fs.writeFileSync(path.join(eptDir,'ept.json'),JSON.stringify({dataType:'laszip',schema:[]}));
+  fs.writeFileSync(path.join(eptDir,'ept-data','0-0-0-0.laz'),'points');
+
+  assert.equal((await reconcileMissingPointCloudAssets(c.processing,c.storage)).registered,1);
+  const asset=c.db.prepare("SELECT id,published,sha256,manifest_sha256 FROM model_assets WHERE version_id=? AND kind='ept'").get(item.versionId);
+  assert.equal(asset.published,1);
+  assert.match(asset.sha256,/^[0-9a-f]{64}$/);
+  assert.match(asset.manifest_sha256,/^[0-9a-f]{64}$/);
+  assert.ok(c.db.prepare("SELECT 1 FROM model_asset_files WHERE asset_id=? AND relative_path='ept.json'").get(asset.id));
+  assert.ok(toViewerConfig(c.repository.getModel(item.model.id)).assets.ept);
+});
+
+test('stale legacy EPT registration is replaced by the valid standard tree',async t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  c.processing.addModelAsset({versionId:item.versionId,kind:'ept',rootKey:'datasets',relativePath:`${outputRelativePath}/old/ept.json`,format:'ept',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),manifestFiles:[{relativePath:'ept.json',byteSize:2,sha256:'a'.repeat(64)}]});
+  const eptDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'entwine_pointcloud');
+  fs.mkdirSync(path.join(eptDir,'ept-hierarchy'),{recursive:true});
+  fs.writeFileSync(path.join(eptDir,'ept.json'),JSON.stringify({dataType:'laszip',schema:[]}));
+  fs.writeFileSync(path.join(eptDir,'ept-hierarchy','0-0-0-0.json'),'{}');
+
+  assert.equal((await reconcileMissingPointCloudAssets(c.processing,c.storage)).registered,1);
+  const asset=c.db.prepare("SELECT relative_path,manifest_sha256 FROM model_assets WHERE version_id=? AND kind='ept'").get(item.versionId);
+  assert.equal(asset.relative_path,`${outputRelativePath}/entwine_pointcloud/ept.json`);
+  assert.notEqual(asset.manifest_sha256,'b'.repeat(64));
+});
+
+test('stale point-cloud cursor wraps and repairs a newly eligible legacy EPT in the same pass',async t=>{
+  const c=fixture(t),item=readyModel(c),outputRelativePath=`legacy/${crypto.randomUUID()}`;
+  c.db.prepare("UPDATE model_outputs SET root_key='datasets',relative_path=? WHERE id=?").run(outputRelativePath,item.versionId);
+  c.processing.advancePointCloudBackfillCursor('ffffffff-ffff-ffff-ffff-ffffffffffff',true);
+  const eptDir=path.join(c.root,'datasets',...outputRelativePath.split('/'),'assets','entwine_pointcloud');
+  fs.mkdirSync(eptDir,{recursive:true});
+  fs.writeFileSync(path.join(eptDir,'ept.json'),JSON.stringify({dataType:'laszip',schema:[]}));
+
+  assert.deepEqual(await reconcileMissingPointCloudAssets(c.processing,c.storage),{scanned:1,registered:1});
+  assert.ok(c.db.prepare("SELECT 1 FROM model_assets WHERE version_id=? AND kind='ept'").get(item.versionId));
 });
 
 test('active published legacy outputs expose integrity-registered EPT without reimporting',async t=>{
@@ -347,6 +450,14 @@ test('transient backfill conflict is retried instead of skipped',t=>{
   c.processing.enqueueOptionalDerivatives=original;
   assert.equal(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true}).queued,1);
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).n,1);
+});
+
+test('a stale cursor wraps and queues a lone newly eligible legacy model in the same maintenance pass',t=>{
+  const c=fixture(t),item=publishModel(c,readyModel(c));
+  c.processing.advanceLodBackfillCursor('zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz',true);
+  assert.deepEqual(reconcileMissingLodDerivatives(c.processing,c.storage,{meshDerivativesEnabled:true}),{scanned:1,queued:1,conflict:false});
+  assert.equal(c.db.prepare('SELECT derivative_type FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).derivative_type,'mesh_tiles');
+  assert.equal(c.processing.lodBackfillCursor(),null);
 });
 
 test('derivative list and retry API enforce read/write permissions',async t=>{

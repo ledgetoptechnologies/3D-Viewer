@@ -55,6 +55,7 @@ const fixtures = {
   outputs: [{
     id: 'output-johnson', taskId: 'task-johnson', modelId: 'model-johnson', displayName: 'Johnson output',
     status: 'published', activePublished: true, byteSize: 4096, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
+    lod: { status: 'fallback', canGenerate: false, canRetry: true, jobId: 'derivative-stale-fallback', reason: 'Imported tiles did not verify.' },
     downloadUrl: '/api/v1/processing/outputs/output-johnson/assets/glb',
     reportUrl: '/api/v1/processing/outputs/output-johnson/assets/report',
     viewSessionUrl: '/api/v1/processing/outputs/output-johnson/view-sessions',
@@ -174,6 +175,9 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/derivatives/derivative-failed/retry' && method === 'POST') {
     runtime.derivatives = runtime.derivatives.map(job => job.id === 'derivative-failed' ? { ...job, status: 'pending', result: {} } : job);
     return json({ derivative: runtime.derivatives.find(job => job.id === 'derivative-failed') }, 202);
+  }
+  if (pathname === '/api/v1/processing/derivatives/derivative-stale-fallback/retry' && method === 'POST') {
+    return json({ derivative: { id: 'derivative-stale-fallback', status: 'pending', manualRetryCount: 1 } }, 202);
   }
   if (pathname === '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles' && method === 'POST') {
     const derivative = { id: 'derivative-quarry', attemptId: 'attempt-quarry', type: 'mesh_tiles', status: 'pending', optional: true, result: {}, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
@@ -451,7 +455,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts`);
+      ['View', 'Retry 3D tiles', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts and DTO-backed stale derivative retry`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="retry-derivative"][data-id="derivative-stale-fallback"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-stale-fallback/retry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: stale derivative retry did not settle`);
     assert.equal(await client.evaluate(`document.querySelectorAll('button button').length`), 0, `${viewport.name}: task shortcuts were nested inside a button`);
     assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].every(button=>button.getBoundingClientRect().height>=44)`), true, `${viewport.name}: task shortcuts have sub-44px targets`);
     await client.evaluate(`history.back()`);

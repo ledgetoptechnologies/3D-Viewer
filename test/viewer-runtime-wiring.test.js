@@ -10,6 +10,11 @@ test('viewer wires cancel/retry/LOD recovery without exposing capability asset U
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   assert.match(main, /signal: attempt\.controller\.signal/);
   assert.match(main, /maxBytes: fullMeshByteLimit\(navigator\.deviceMemory, performance\.memory\?\.jsHeapSizeLimit\)/);
+  assert.match(main, /fullMeshRuntimePolicy\(\s*p\.assetByteSizes\?\.glb,/);
+  assert.match(main, /GLB_URL \? \(GLB_RUNTIME\.interactive \? 'glb' : 'lod-required'\)/);
+  assert.match(main, /Streaming LOD required \/ processing/);
+  assert.match(main, /glbBtn\.style\.display = GLB_URL && GLB_RUNTIME\.interactive \? '' : 'none'/);
+  assert.match(main, /if \(state\.glbLoading \|\| !GLB_URL \|\| !GLB_RUNTIME\.interactive\) return/);
   assert.match(main, /withDecodeWatchdog\(decode/);
   assert.match(main, /fullMeshFailureDisposition\(activeGlbLoad, attempt/);
   assert.match(main, /if \(!disposition\.recover\) return/);
