@@ -151,28 +151,55 @@ let lastFps = performance.now(), frames = 0;
 let bvhQueue = [];
 let homeView = null;
 let modeEpoch = 0;
+let modeAbortController = null;
+let mapToolEpoch = 0;
 let directPointCloudLoad = null;
+
+const DIAGNOSTIC_CORRELATION_ID = (() => {
+  const value = globalThis.crypto?.randomUUID?.();
+  return typeof value === 'string' && /^[0-9a-f-]{36}$/i.test(value)
+    ? value
+    : `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 14)}`;
+})();
+let VIEWER_BUILD_REVISION = 'unavailable';
 
 const DIAGNOSTIC_EVENTS = new Set([
   'mode_start', 'mode_cancel', 'pointcloud_start', 'pointcloud_stop',
   'pointcloud_ready', 'pointcloud_failure',
 ]);
 const DIAGNOSTIC_REASONS = new Set(['navigation', 'history', 'startup', 'superseded', 'unavailable']);
+const DIAGNOSTIC_STAGES = new Set(['startup', 'metadata', 'nodes', 'fetch', 'decode', 'runtime']);
 const POINT_CLOUD_FAILURE_CODES = new Set([
   'startup_timeout', 'load_timeout', 'node_timeout', 'resource_failed',
   'runtime_unavailable', 'metadata_failed', 'runtime_error', 'not_configured',
 ]);
 
-// Diagnostics are deliberately finite and identifier-free. Never include
-// asset URLs, project titles, session identifiers, or exception objects here.
-function viewerDiagnostic(event, { mode = null, reason = null, code = null } = {}) {
+// Diagnostics are deliberately finite. The random correlation id is not an
+// authorization/session identifier. Never include asset URLs, project titles,
+// bearer/session credentials, or exception objects here.
+function viewerDiagnostic(event, { mode = null, reason = null, code = null, stage = null } = {}) {
   if (!DIAGNOSTIC_EVENTS.has(event)) return;
-  const details = {};
+  const details = { correlationId: DIAGNOSTIC_CORRELATION_ID, revision: VIEWER_BUILD_REVISION };
   if (['model', 'cloud', 'ortho', 'dsm', 'dtm'].includes(mode)) details.mode = mode;
   if (DIAGNOSTIC_REASONS.has(reason)) details.reason = reason;
   if (POINT_CLOUD_FAILURE_CODES.has(code)) details.code = code;
+  if (DIAGNOSTIC_STAGES.has(stage)) details.stage = stage;
   const method = event.endsWith('failure') ? 'warn' : 'info';
   console[method](`[viewer-runtime] ${event}`, details);
+}
+
+async function captureViewerBuildRevision() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    const response = await fetch('/api/v1/health', { cache: 'no-store', signal: controller.signal });
+    const revision = response.headers.get('x-ltds-viewer-revision')?.trim().toLowerCase();
+    VIEWER_BUILD_REVISION = /^[0-9a-f]{40}$/.test(revision || '') ? revision : 'unavailable';
+  } catch {
+    VIEWER_BUILD_REVISION = 'unavailable';
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 bootstrap();
@@ -189,6 +216,7 @@ async function bootstrap() {
   document.body.classList.add(`${VIEW_MODE === 'session' ? 'view' : VIEW_MODE}-mode`);
   bindSharePasswordForm();
   bindAdminControls();
+  await captureViewerBuildRevision();
 
   if (VIEW_MODE === 'session') return bootstrapSession();
   if (VIEW_MODE === 'project') return bootstrapProjectShare();
@@ -1383,8 +1411,9 @@ function isMapMode(mode = state.activeMode) {
   return mode === 'ortho' || mode === 'dsm' || mode === 'dtm';
 }
 
-function setMapTool(tool) {
+async function setMapTool(tool) {
   if (!map) return;
+  const requestEpoch = ++mapToolEpoch;
   if (tool === 'clear') {
     cancelMapMeasure();
     mapMeasurements.forEach((layer) => map.removeLayer(layer));
@@ -1392,11 +1421,24 @@ function setMapTool(tool) {
     tool = 'none';
   }
   if (mapMeasure) cancelMapMeasure();
-  if (tool === 'volume' && !selectedVolumeDataset()) {
+  if (tool === 'volume') {
     state.activeTool = 'none';
-    dom.measureOutput.innerHTML = '<b>Load an elevation surface first.</b><br><span class="sub">Open DSM or DTM once, then select that surface here. Orthophoto pixels alone contain no height.</span>';
     syncMeasureButtons();
-    return;
+    if (!DSM_URL && !DTM_URL) {
+      dom.measureOutput.innerHTML = '<b>Volume requires an elevation raster.</b><br><span class="sub">This task has no published DSM or DTM. Orthophoto pixels alone contain no height.</span>';
+      return;
+    }
+    if (!selectedVolumeDataset()) {
+      dom.measureOutput.textContent = 'Loading the elevation surface for volume measurement…';
+      try {
+        await ensureVolumeDataset(modeAbortController?.signal);
+      } catch (error) {
+        if (error?.name === 'AbortError' || requestEpoch !== mapToolEpoch) return;
+        dom.measureOutput.innerHTML = '<b>Could not load the elevation raster.</b><br><span class="sub">Retry Volume or choose another published DSM/DTM surface.</span>';
+        return;
+      }
+      if (requestEpoch !== mapToolEpoch || modeAbortController?.signal.aborted || !isMapMode()) return;
+    }
   }
   state.activeTool = tool;
   syncMeasureButtons();
@@ -1487,6 +1529,7 @@ async function finishMapMeasure() {
       text = `Net ${formatVolume(result.netM3, DISPLAY_UNITS)}`;
       dom.measureOutput.innerHTML = `<b>Cut:</b> ${formatVolume(result.cutM3, DISPLAY_UNITS)}<br><b>Fill:</b> ${formatVolume(result.fillM3, DISPLAY_UNITS)}<br><b>Net:</b> ${formatVolume(result.netM3, DISPLAY_UNITS)}<br><span class="sub">Reference ${formatElevation(result.referenceElevation, DISPLAY_UNITS)} · ${result.sampleCount.toLocaleString()} elevation cells</span>`;
     } catch (err) {
+      if (err?.name === 'AbortError' || mapMeasure !== m) return;
       console.error('map volume error', err);
       dom.measureOutput.textContent = err?.message || 'Could not calculate volume.';
       m.finishing = false;
@@ -1506,16 +1549,42 @@ async function finishMapMeasure() {
 
 function selectedVolumeDataset() {
   const requested = document.getElementById('map-volume-surface')?.value;
-  if (requested === 'dsm') return demLayers.dsm?.ds || null;
-  if (requested === 'dtm') return demLayers.dtm?.ds || null;
-  return state.activeMode === 'dsm' ? demLayers.dsm?.ds || null
-    : state.activeMode === 'dtm' ? demLayers.dtm?.ds || null
-    : demLayers.dsm?.ds || demLayers.dtm?.ds || null;
+  const dsm = demLayers.dsm?.ds || geoDatasets[DSM_URL] || null;
+  const dtm = demLayers.dtm?.ds || geoDatasets[DTM_URL] || null;
+  if (requested === 'dsm') return dsm;
+  if (requested === 'dtm') return dtm;
+  return state.activeMode === 'dsm' ? dsm
+    : state.activeMode === 'dtm' ? dtm
+    : dsm || dtm;
+}
+
+function requestedVolumeSurface() {
+  const requested = document.getElementById('map-volume-surface')?.value;
+  if (requested === 'dsm' && DSM_URL) return { type: 'dsm', url: DSM_URL };
+  if (requested === 'dtm' && DTM_URL) return { type: 'dtm', url: DTM_URL };
+  if (state.activeMode === 'dsm' && DSM_URL) return { type: 'dsm', url: DSM_URL };
+  if (state.activeMode === 'dtm' && DTM_URL) return { type: 'dtm', url: DTM_URL };
+  if (DSM_URL) return { type: 'dsm', url: DSM_URL };
+  if (DTM_URL) return { type: 'dtm', url: DTM_URL };
+  return null;
+}
+
+async function ensureVolumeDataset(signal = modeAbortController?.signal) {
+  const loaded = selectedVolumeDataset();
+  if (loaded) return loaded;
+  const surface = requestedVolumeSurface();
+  if (!surface) throw Object.assign(new Error('No elevation raster is published.'), { code: 'elevation_unavailable' });
+  const ds = await getDataset(surface.url, true, { signal });
+  if (signal?.aborted) throw new DOMException('The elevation load was cancelled.', 'AbortError');
+  const select = document.getElementById('map-volume-surface');
+  if (select?.value === 'auto') select.value = surface.type;
+  syncMapVolumeAvailability();
+  return ds;
 }
 
 async function calculateMapVolume(latLngPoints) {
-  const ds = selectedVolumeDataset();
-  if (!ds) throw new Error('Load DSM or DTM before calculating volume.');
+  const signal = modeAbortController?.signal;
+  const ds = selectedVolumeDataset() || await ensureVolumeDataset(signal);
   const polygon = projectedMapPoints(latLngPoints);
   const minE = Math.max(ds.minE, Math.min(...polygon.map((p) => p[0])));
   const maxE = Math.min(ds.maxE, Math.max(...polygon.map((p) => p[0])));
@@ -1533,7 +1602,7 @@ async function calculateMapVolume(latLngPoints) {
   const scale = Math.max(1, Math.ceil(Math.sqrt((sourceW * sourceH) / 1_500_000)));
   const width = Math.max(1, Math.ceil(sourceW / scale));
   const height = Math.max(1, Math.ceil(sourceH / scale));
-  const rasters = await image.readRasters({ window: [x0, y0, x1, y1], width, height, resampleMethod: 'bilinear', pool: geoPool });
+  const rasters = await image.readRasters({ window: [x0, y0, x1, y1], width, height, resampleMethod: 'bilinear', pool: geoPool, signal });
   const reference = document.getElementById('map-volume-reference')?.value || 'lowest';
   const rawCustom = document.getElementById('map-volume-custom')?.value;
   const customReference = rawCustom === '' ? null : elevationInputMeters(Number(rawCustom));
@@ -1554,15 +1623,17 @@ function syncMapVolumeAvailability() {
   if (options) options.style.display = isMapMode() ? 'block' : 'none';
   const surface = document.getElementById('map-volume-surface');
   if (!surface) return;
-  surface.querySelector('option[value="dsm"]').disabled = !demLayers.dsm;
-  surface.querySelector('option[value="dtm"]').disabled = !demLayers.dtm;
+  surface.querySelector('option[value="dsm"]').disabled = !DSM_URL;
+  surface.querySelector('option[value="dtm"]').disabled = !DTM_URL;
   if (state.activeMode === 'dsm' && demLayers.dsm) surface.value = 'dsm';
   else if (state.activeMode === 'dtm' && demLayers.dtm) surface.value = 'dtm';
   else if (surface.selectedOptions[0]?.disabled) surface.value = demLayers.dsm ? 'dsm' : demLayers.dtm ? 'dtm' : 'auto';
   const volumeButton = document.getElementById('tool-volume');
   if (isMapMode()) {
-    volumeButton.disabled = !selectedVolumeDataset();
-    volumeButton.title = volumeButton.disabled ? 'Open DSM or DTM once to load an elevation surface.' : '';
+    volumeButton.disabled = false;
+    volumeButton.title = DSM_URL || DTM_URL
+      ? 'The selected DSM/DTM loads automatically when Volume is chosen.'
+      : 'Volume is unavailable because this task has no DSM or DTM elevation raster.';
   }
 }
 
@@ -1923,13 +1994,23 @@ function ensureMap() {
   });
 }
 
-async function getDataset(url, isDem) {
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw new DOMException('The viewer load was cancelled.', 'AbortError');
+}
+
+async function getDataset(url, isDem, { signal = null } = {}) {
+  throwIfAborted(signal);
   if (geoDatasets[url]) return geoDatasets[url];
   if (!geoPool) geoPool = new GeoTiffPool(Math.min(4, navigator.hardwareConcurrency || 2));
-  const tiff = await openGeoTiff(url, { allowFullFile: false, blockSize: 262144, cacheSize: 128 });
+  const tiff = await openGeoTiff(url, { allowFullFile: false, blockSize: 262144, cacheSize: 128 }, signal);
+  throwIfAborted(signal);
   const count = await tiff.getImageCount();
   const images = [];
-  for (let i = 0; i < count; i++) images.push(await tiff.getImage(i));
+  for (let i = 0; i < count; i++) {
+    throwIfAborted(signal);
+    images.push(await tiff.getImage(i));
+  }
   const image = images[0];
   const bbox = image.getBoundingBox();
   const [minE, minN, maxE, maxN] = bbox;
@@ -1954,7 +2035,7 @@ async function getDataset(url, isDem) {
   if (isDem) {
     // stats from the smallest overview
     const smallest = images[images.length - 1];
-    const raster = await smallest.readRasters({ pool: geoPool });
+    const raster = await smallest.readRasters({ pool: geoPool, signal });
     let min = Infinity, max = -Infinity;
     const band = raster[0];
     for (let i = 0; i < band.length; i++) {
@@ -1976,12 +2057,19 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     L.GridLayer.prototype.initialize.call(this, options);
     this.ds = ds;
     this.renderFn = renderFn;
+    this.abortSignal = options?.signal || null;
+  },
+  setAbortSignal: function (signal) {
+    this.abortSignal = signal || null;
+    return this;
   },
   createTile: function (coords, done) {
     const tile = document.createElement('canvas');
     const size = this.getTileSize();
     tile.width = size.x; tile.height = size.y;
     const ds = this.ds;
+    const signal = this.abortSignal;
+    if (signal?.aborted) { setTimeout(() => done(null, tile), 0); return tile; }
 
     // Warp fix: unproject ALL FOUR tile corners (UTM rows are not Mercator rows -
     // grid convergence rotates the raster ~1.11 deg, so NW/SE alone misses the shear)
@@ -2030,8 +2118,10 @@ const GeoTiffGridLayer = L.GridLayer.extend({
       pool: geoPool,
       resampleMethod: ds.isDem ? 'nearest' : 'bilinear',
       interleave: false,
-      fillValue: ds.isDem ? (isNaN(ds.nodata) ? -9999 : ds.nodata) : 0
+      fillValue: ds.isDem ? (isNaN(ds.nodata) ? -9999 : ds.nodata) : 0,
+      signal,
     }).then((raster) => {
+      if (signal?.aborted) { done(null, tile); return; }
       const rw = raster.width, rh = raster.height;
       // exact UTM span of the read window (pixel corners in level-m space)
       const mpx = mPerPxX / s, mpy = mPerPxY / s;
@@ -2053,7 +2143,7 @@ const GeoTiffGridLayer = L.GridLayer.extend({
       ctx.imageSmoothingEnabled = !ds.isDem;
       ctx.drawImage(cvs, 0, 0);
       done(null, tile);
-    }).catch((err) => { done(err, tile); });
+    }).catch((err) => { done(err?.name === 'AbortError' ? null : err, tile); });
 
     return tile;
   }
@@ -2199,7 +2289,8 @@ function renderDemTile(raster, w, h, ds, warp) {
 // can only be pixel-accurate if we pre-warp every pixel into Web-Mercator space here.
 // Rows are linear in MERCATOR y (merc(lat) = ln(tan(pi/4 + lat*pi/360))), which is exactly
 // how imageOverlay stretches the image; cols are linear in lon.
-async function overviewCanvas(ds, renderFn, maxDim = 1400) {
+async function overviewCanvas(ds, renderFn, maxDim = 1400, signal = null) {
+  throwIfAborted(signal);
   // source overview selection (+ recolor cache in ds._ovCache so applyDemSettings skips the fetch)
   let idx = ds.images.length - 1;
   for (let i = 0; i < ds.images.length; i++) {
@@ -2211,7 +2302,8 @@ async function overviewCanvas(ds, renderFn, maxDim = 1400) {
     ({ raster, w: rw, h: rh } = ds._ovCache);
   } else {
     const im = ds.images[idx];
-    raster = await im.readRasters({ pool: geoPool, interleave: false });
+    raster = await im.readRasters({ pool: geoPool, interleave: false, signal });
+    throwIfAborted(signal);
     rw = im.getWidth(); rh = im.getHeight();
     ds._ovCache = { raster, w: rw, h: rh };
   }
@@ -2236,48 +2328,49 @@ async function overviewCanvas(ds, renderFn, maxDim = 1400) {
   return { canvas, bounds: [[minLat, minLon], [maxLat, maxLon]] };
 }
 
-async function showOrtho(epoch = modeEpoch) {
+async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal) {
   updateStatus('Mode: Orthophoto');
   try {
     if (!orthoLayers) {
       updateLoading('Opening orthophoto (streaming)...', '');
-      const ds = await getDataset(ORTHO_URL, false);
+      const ds = await getDataset(ORTHO_URL, false, { signal });
       if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
-      const ov = await overviewCanvas(ds, renderOrthoTile, 3400);
+      const ov = await overviewCanvas(ds, renderOrthoTile, 3400, signal);
       if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
       const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
       const grid = new GeoTiffGridLayer(ds, renderOrthoTile, {
-        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
+        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
       });
       orthoLayers = { overlay, grid, ds };
       if (epoch === modeEpoch) hideLoading();
     }
     if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
+    orthoLayers.grid.setAbortSignal(signal);
     orthoLayers.overlay.addTo(map);
     orthoLayers.grid.addTo(map);
     restoreOrFit('ortho', orthoLayers.ds.llBounds);
     applyOrthoOpacity();
   } catch (err) {
-    if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
+    if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== 'ortho') return;
     console.error('[viewer-runtime] orthophoto initialization failed');
     hideLoading();
     showError('Could not stream the orthophoto GeoTIFF.');
   }
 }
 
-async function showDEM(type, epoch = modeEpoch) {
+async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.signal) {
   updateStatus(`Mode: ${type.toUpperCase()}`);
   const url = type === 'dsm' ? DSM_URL : DTM_URL;
   try {
     if (!demLayers[type]) {
       updateLoading(`Opening ${type.toUpperCase()} (streaming)...`, '');
-      const ds = await getDataset(url, true);
+      const ds = await getDataset(url, true, { signal });
       if (epoch !== modeEpoch || state.activeMode !== type) return;
-      const ov = await overviewCanvas(ds, renderDemTile, 2048);
+      const ov = await overviewCanvas(ds, renderDemTile, 2048, signal);
       if (epoch !== modeEpoch || state.activeMode !== type) return;
       const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 0.94 });
       const grid = new GeoTiffGridLayer(ds, renderDemTile, {
-        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
+        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
       });
       demLayers[type] = { overlay, grid, ds };
       syncMapVolumeAvailability();
@@ -2285,6 +2378,7 @@ async function showDEM(type, epoch = modeEpoch) {
     }
     if (epoch !== modeEpoch || state.activeMode !== type) return;
     const dl = demLayers[type];
+    dl.grid.setAbortSignal(signal);
     dl.overlay.addTo(map);
     dl.grid.addTo(map);
     restoreOrFit(type, dl.ds.llBounds);
@@ -2292,7 +2386,7 @@ async function showDEM(type, epoch = modeEpoch) {
     applyDemOpacity();
     refreshLegendFor(dl.ds);
   } catch (err) {
-    if (epoch !== modeEpoch || state.activeMode !== type) return;
+    if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== type) return;
     console.error(`[viewer-runtime] ${type.toUpperCase()} initialization failed`);
     hideLoading();
     showError(`Could not stream the ${type.toUpperCase()} GeoTIFF.`);
@@ -2334,6 +2428,7 @@ function applyDemOpacity() {
 }
 
 async function applyDemSettings() {
+  const signal = modeAbortController?.signal;
   demSettings.cmap = dom.demColormap.value;
   demSettings.shade = parseFloat(dom.demShading.value);
   const mn = dom.demMin.value.trim(), mx = dom.demMax.value.trim();
@@ -2344,7 +2439,7 @@ async function applyDemSettings() {
   for (const t of ['dsm', 'dtm']) {
     const dl = demLayers[t];
     if (!dl) continue;
-    const ov = await overviewCanvas(dl.ds, renderDemTile, 2048);   // warped; raster from ds._ovCache
+    const ov = await overviewCanvas(dl.ds, renderDemTile, 2048, signal);   // warped; raster from ds._ovCache
     dl.overlay.setUrl(ov.canvas.toDataURL('image/png'));
     dl.grid.redraw();
   }
@@ -2383,7 +2478,8 @@ function showDemHover(e, layer) {
   const s = img.getWidth() / ds.W;
   const px = Math.floor((E - ds.minE) / (ds.maxE - ds.minE) * ds.W * s);
   const py = Math.floor((ds.maxN - N) / (ds.maxN - ds.minN) * ds.H * s);
-  img.readRasters({ window: [px, py, px + 1, py + 1], pool: geoPool }).then((r) => {
+  const signal = modeAbortController?.signal;
+  img.readRasters({ window: [px, py, px + 1, py + 1], pool: geoPool, signal }).then((r) => {
     const v = r[0][0];
     if (isFinite(v) && v > -1000 && v !== ds.nodata) {
       dom.demHover.textContent = `Elevation: ${formatElevation(v, DISPLAY_UNITS)}`;
@@ -2540,15 +2636,16 @@ function loadPointCloudDirect() {
   const isLaz = POINT_CLOUD_FORMAT === 'laz' || /\.la[sz]$/i.test(POINT_CLOUD_URL);
   const label = isLaz ? 'LAZ' : 'PLY';
   updateLoading(`Loading point cloud (${label})...`, '');
+  viewerDiagnostic('pointcloud_start', { mode: 'cloud', stage: 'fetch' });
 
   const onFail = (err) => {
     if (attempt.cancelled || directPointCloudLoad !== attempt || err?.name === 'AbortError') return;
     console.error('[viewer-runtime] direct point-cloud load failed');
-    viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code: 'runtime_error' });
+    viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code: 'runtime_error', stage: 'decode' });
     state.pointCloudLoading = false;
     directPointCloudLoad = null;
     hideLoading();
-    showError('Failed to load the point cloud. Retry the Point Cloud view or check Background Work.');
+    showError(`Failed to load the point cloud. Retry the Point Cloud view or check browser diagnostics with reference ${DIAGNOSTIC_CORRELATION_ID.slice(0, 8)}.`);
   };
   const onGeometryReady = (geometry) => {
     if (attempt.cancelled || directPointCloudLoad !== attempt || state.activeMode !== 'cloud') {
@@ -2593,7 +2690,7 @@ function loadPointCloudDirect() {
       state.pointCloudLoaded = true;
       state.pointCloudLoading = false;
       directPointCloudLoad = null;
-      viewerDiagnostic('pointcloud_ready', { mode: 'cloud' });
+      viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
       hideLoading();
     } catch (err) {
       onFail(err);
@@ -2673,12 +2770,15 @@ function showPointCloud() {
     iframe.id = 'pc-iframe';
     const params = new URLSearchParams({ ept: EPT_URL || '', title: (PROJECT && PROJECT.title) || '' });
     params.set('units', DISPLAY_UNITS);
+    params.set('correlation', DIAGNOSTIC_CORRELATION_ID);
+    params.set('revision', VIEWER_BUILD_REVISION);
     if (POINT_COUNT) params.set('points', String(POINT_COUNT));
     iframe.src = `/pointcloud.html?${params.toString()}`;
     iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:#050505;';
     dom.cloudContainer.appendChild(iframe);
     state.pcIframeLoaded = true;
-    viewerDiagnostic('pointcloud_start', { mode: 'cloud' });
+    iframe.dataset.correlationId = DIAGNOSTIC_CORRELATION_ID;
+    viewerDiagnostic('pointcloud_start', { mode: 'cloud', stage: 'startup' });
   }
   dom.cloudStatus.textContent = 'Cloud: connecting…';
 }
@@ -2699,14 +2799,16 @@ window.addEventListener('message', (event) => {
   if (!iframe || event.origin !== location.origin || event.source !== iframe.contentWindow) return;
   const message = event.data;
   if (!message || message.source !== 'ltds-pointcloud') return;
+  if (message.correlationId !== iframe.dataset.correlationId) return;
   if (message.type === 'ready' && message.code === 'points_visible') {
     dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready';
-    viewerDiagnostic('pointcloud_ready', { mode: 'cloud' });
+    viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
     applyPcPanelState();
   } else if (message.type === 'error') {
     const code = POINT_CLOUD_FAILURE_CODES.has(message.code) ? message.code : 'runtime_error';
-    dom.cloudStatus.textContent = `Cloud: unavailable (${code})`;
-    viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code });
+    const stage = DIAGNOSTIC_STAGES.has(message.stage) ? message.stage : 'runtime';
+    dom.cloudStatus.textContent = `Cloud: unavailable (${code}; ref ${DIAGNOSTIC_CORRELATION_ID.slice(0, 8)})`;
+    viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code, stage });
   }
 });
 
@@ -2924,8 +3026,13 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   }
 
   // Invalidate every asynchronous initializer before the next mode starts.
-  // This prevents a late GeoTIFF/LAZ completion from taking over the canvas.
+  // The epoch protects state, while the controller actively cancels GeoTIFF
+  // network reads and decoder work rather than merely ignoring late results.
+  modeAbortController?.abort();
+  modeAbortController = new AbortController();
+  mapToolEpoch += 1;
   modeEpoch += 1;
+  const modeSignal = modeAbortController.signal;
   hideLoading();
   if (prevMode && prevMode !== mode) {
     viewerDiagnostic('mode_cancel', { mode: prevMode, reason: 'superseded' });
@@ -2996,8 +3103,8 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
     ensureMap();
     removeMapOverlays();
     map.invalidateSize();
-    if (mode === 'ortho') showOrtho(modeEpoch);
-    else showDEM(mode, modeEpoch);
+    if (mode === 'ortho') showOrtho(modeEpoch, modeSignal);
+    else showDEM(mode, modeEpoch, modeSignal);
   }
   return true;
 }

@@ -57,8 +57,12 @@ test('map modes expose projected distance and area tools with deeper native-deta
   assert.match(main, /function mapAreaSquareMeters\(points\)/);
   assert.match(main, /maxZoom: 28/);
   assert.match(main, /panel-measure'\)\.style\.display = SHARE_PERMISSIONS\.measure/);
-  assert.match(main, /Orthophoto pixels alone contain no height/);
+  assert.match(main, /async function ensureVolumeDataset/);
+  assert.match(main, /await ensureVolumeDataset\(modeAbortController\?\.signal\)/);
+  assert.match(main, /This task has no published DSM or DTM/);
+  assert.match(main, /The selected DSM\/DTM loads automatically when Volume is chosen/);
   assert.match(main, /integrateElevationVolume/);
+  assert.match(html, /Auto \(prefer DSM\)/);
   assert.match(html, /Lowest sampled point/);
   assert.match(html, /Average surface/);
   assert.match(html, /Custom elevation/);
@@ -71,7 +75,7 @@ test('point-cloud parent accepts health messages only from its same-origin ifram
   assert.match(main, /message\.source !== 'ltds-pointcloud'/);
   assert.match(main, /message\.type === 'ready' && message\.code === 'points_visible'/);
   assert.match(main, /POINT_CLOUD_FAILURE_CODES\.has\(message\.code\)/);
-  assert.match(main, /Cloud: unavailable \(\$\{code\}\)/);
+  assert.match(main, /Cloud: unavailable \(\$\{code\}; ref \$\{DIAGNOSTIC_CORRELATION_ID\.slice\(0, 8\)\}\)/);
   assert.doesNotMatch(main, /cloudStatus\.textContent\s*=\s*message\.(?:code|error|detail)/);
 });
 
@@ -81,6 +85,8 @@ test('viewer mode lifecycle cancels stale initializers and persists history', ()
   assert.match(main, /history\[historyMode === 'replace' \? 'replaceState' : 'pushState'\]/);
   assert.match(main, /window\.addEventListener\('popstate'/);
   assert.match(main, /modeEpoch \+= 1/);
+  assert.match(main, /modeAbortController\?\.abort\(\)/);
+  assert.match(main, /modeAbortController = new AbortController\(\)/);
   assert.match(main, /stopPointCloudIframe\('superseded'\)/);
   assert.match(main, /stopDirectPointCloud\('superseded'\)/);
   assert.match(main, /directPointCloudLoad\.controller\.abort\(\)/);
@@ -88,12 +94,24 @@ test('viewer mode lifecycle cancels stale initializers and persists history', ()
   assert.match(main, /disposeTiles\(\)/);
   assert.match(main, /epoch !== modeEpoch \|\| state\.activeMode !== 'ortho'/);
   assert.match(main, /epoch !== modeEpoch \|\| state\.activeMode !== type/);
+  assert.match(main, /openGeoTiff\(url, \{ allowFullFile: false, blockSize: 262144, cacheSize: 128 \}, signal\)/);
+  assert.match(main, /smallest\.readRasters\(\{ pool: geoPool, signal \}\)/);
+  assert.match(main, /im\.readRasters\(\{ pool: geoPool, interleave: false, signal \}\)/);
+  assert.match(main, /image\.readRasters\(\{ window: \[x0, y0, x1, y1\], width, height, resampleMethod: 'bilinear', pool: geoPool, signal \}\)/);
+  assert.match(main, /setAbortSignal: function \(signal\)/);
+  assert.match(main, /err\?\.name === 'AbortError'/);
 });
 
 test('viewer diagnostics are bounded and never include asset URLs or exception details', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /const DIAGNOSTIC_EVENTS = new Set/);
   assert.match(main, /const POINT_CLOUD_FAILURE_CODES = new Set/);
-  assert.match(main, /Never include\s*\/\/ asset URLs, project titles, session identifiers, or exception objects/);
+  assert.match(main, /Never include asset URLs, project titles,[\s\S]*bearer\/session credentials, or exception objects/);
+  assert.match(main, /correlationId: DIAGNOSTIC_CORRELATION_ID, revision: VIEWER_BUILD_REVISION/);
+  assert.match(main, /const DIAGNOSTIC_STAGES = new Set/);
+  assert.match(main, /x-ltds-viewer-revision/);
+  assert.match(main, /params\.set\('correlation', DIAGNOSTIC_CORRELATION_ID\)/);
+  assert.match(main, /params\.set\('revision', VIEWER_BUILD_REVISION\)/);
+  assert.match(main, /message\.correlationId !== iframe\.dataset\.correlationId/);
   assert.doesNotMatch(main, /showError\(`Failed to load point cloud from \$\{POINT_CLOUD_URL\}/);
 });

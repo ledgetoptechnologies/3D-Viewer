@@ -12,7 +12,7 @@
     resource_failed: 'A point-cloud viewer component failed to load. Retry, then check the Viewer image if this continues.',
     runtime_unavailable: 'The point-cloud viewer components did not initialize. Retry, then update or restart the Viewer if this continues.',
     metadata_failed: 'Point-cloud metadata could not be loaded. Check access to the published EPT data, then retry.',
-    runtime_error: 'The point-cloud viewer stopped unexpectedly. Retry, then check the Viewer logs if this continues.',
+    runtime_error: 'The point-cloud viewer stopped unexpectedly. Retry, then open browser diagnostics and use the displayed reference if this continues.',
     not_configured: 'No point cloud is configured for this project.',
   });
 
@@ -26,6 +26,8 @@
     const setTimer = options.setTimeout || win.setTimeout.bind(win);
     const clearTimer = options.clearTimeout || win.clearTimeout.bind(win);
     const reload = options.reload || (() => win.location.reload());
+    const correlationId = /^[0-9a-f-]{8,64}$/i.test(options.correlationId || '') ? options.correlationId : 'unavailable';
+    const revision = /^[0-9a-f]{40}$/i.test(options.buildRevision || '') ? options.buildRevision.toLowerCase() : 'unavailable';
     const timeouts = {
       startup: options.startupTimeoutMs || 30_000,
       load: options.loadTimeoutMs || 60_000,
@@ -35,16 +37,24 @@
     let phase = 'starting';
     let failureCode = null;
 
-    function diagnostic(event, code) {
-      const safeCode = Object.hasOwn(FAILURES, code) ? code : null;
-      if (event === 'failure' && safeCode) console.warn('[point-cloud-runtime] failure', { code: safeCode });
-      else if (event === 'metadata_ready') console.info('[point-cloud-runtime] metadata_ready');
-      else if (event === 'points_visible') console.info('[point-cloud-runtime] points_visible');
+    function stableStage() {
+      if (phase === 'starting') return 'startup';
+      if (phase === 'loading-metadata') return 'metadata';
+      if (phase === 'loading-nodes' || phase === 'ready') return 'nodes';
+      return 'runtime';
     }
 
-    function notify(type, code) {
+    function diagnostic(event, code, stage = stableStage()) {
+      const safeCode = Object.hasOwn(FAILURES, code) ? code : null;
+      const details = { correlationId, revision, stage };
+      if (event === 'failure' && safeCode) console.warn('[point-cloud-runtime] failure', { ...details, code: safeCode });
+      else if (event === 'metadata_ready') console.info('[point-cloud-runtime] metadata_ready', details);
+      else if (event === 'points_visible') console.info('[point-cloud-runtime] points_visible', details);
+    }
+
+    function notify(type, code, stage = stableStage()) {
       if (!win.parent || win.parent === win || typeof win.parent.postMessage !== 'function') return;
-      win.parent.postMessage({ source: 'ltds-pointcloud', type, code }, win.location.origin);
+      win.parent.postMessage({ source: 'ltds-pointcloud', type, code, correlationId, stage, revision }, win.location.origin);
     }
 
     function clearWatchdog() {
@@ -68,9 +78,10 @@
 
     function fail(code, { retryable = true } = {}) {
       if (phase === 'ready' || phase === 'failed') return;
+      const failedStage = stableStage();
       phase = 'failed';
       failureCode = Object.hasOwn(FAILURES, code) ? code : 'runtime_error';
-      diagnostic('failure', failureCode);
+      diagnostic('failure', failureCode, failedStage);
       clearWatchdog();
       const message = FAILURES[code] || FAILURES.runtime_error;
       if (loadingText) loadingText.textContent = message;
@@ -81,7 +92,7 @@
         retry.hidden = !retryable;
         retry.disabled = false;
       }
-      notify('error', failureCode);
+      notify('error', failureCode, failedStage);
     }
 
     function beginStartup() {
@@ -106,12 +117,12 @@
       if (phase === 'ready' || (phase === 'failed' && failureCode !== 'node_timeout')) return;
       phase = 'ready';
       failureCode = null;
-      diagnostic('points_visible');
+      diagnostic('points_visible', null, 'nodes');
       clearWatchdog();
       loading?.classList.add('hidden');
       loading?.classList.remove('failed');
       if (retry) retry.hidden = true;
-      notify('ready', 'points_visible');
+      notify('ready', 'points_visible', 'nodes');
     }
 
     retry?.addEventListener('click', () => {

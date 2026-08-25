@@ -432,6 +432,10 @@ empty.
   an authenticated Operations download, never an interactive Viewer layer,
   when that proof is missing or fails. Explicitly enabling mesh generation
   permits one bounded background attempt and one authorized manual retry.
+  Migration 23 also gives pre-fix terminal LOD jobs one durable, audited
+  compare-and-swap recovery per explicitly shipped recovery revision. Current
+  jobs are stamped before execution, so this upgrade recovery cannot become an
+  infinite retry loop or reset the manual retry allowance.
   Generated Obj2Tiles output retriangulates partition boundaries and repacks
   texture atlases, so it uses a separate schema-v3 proof bound to the exact
   pinned executable and command, GLB and OBJ digests, artifact digests,
@@ -685,7 +689,7 @@ Output DTOs expose bounded staff URLs rather than storage paths. `GET /api/v1/pr
 
 Provider endpoints, hidden credential state, concurrency, probes, enable/disable controls, and capability-bound processing presets live in the **Providers & nodes** master-detail dialog. Adding a node asks only for a label, endpoint, and an API token when the endpoint requires one. Viewer probes `/info` and `/options` before storing the provider, classifies direct NodeODM 2.x versus the ClusterODM 1.x proxy signature, and rejects unsupported or ambiguous responses. A successful no-token probe is persisted as an explicit no-auth mode, distinct from a missing or cleared credential. Staff can later edit the label, endpoint, and Viewer admission limit; rotate or clear the write-only token; re-probe capabilities; and create or edit JSON option presets that are validated against the exact current capability fingerprint. The detail pane shows the detected provider type, API and processing-engine versions, queue/slot values, and the bounded provider-options catalog.
 
-Projects and tasks become read-only after archive. Dataset and output controls follow the journaled archive-to-trash lifecycle, and the workspace suppresses actions that the current staff grant or object state cannot perform. **Diagnostics** paginates the complete recoverable-trash inventory, provides restore and typed-confirmation purge, and lists failed storage mutations with their bounded error details and a guarded Retry action. Worker readiness, queue lifecycle, storage accounting, and provider health live there as well.
+The normal project/task workflow provides Rename and a recoverable Delete instead of asking staff to archive first. Delete moves a project or task and its exclusively owned datasets/outputs into one 30-day trash container; shared datasets remain active. Restore returns every member to its exact usable pre-delete state. Typed permanent deletion removes owned bytes, scrubs user metadata from the retained referential-integrity tombstones, and makes the project/task unavailable through direct and list APIs. Dataset and output controls retain their journaled 14-day lifecycle. **Background Work** searches and cursor-paginates the complete import and derivative history rather than only a recent window. **Diagnostics** paginates the complete recoverable-trash inventory, provides restore and typed-confirmation purge, and lists failed storage mutations with their bounded error details and a guarded Retry action. Worker readiness, queue lifecycle, storage accounting, and provider health live there as well.
 
 ## Verification
 

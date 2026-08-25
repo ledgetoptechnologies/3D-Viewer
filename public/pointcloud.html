@@ -58,6 +58,23 @@
   <script>
     // Surface bootstrap/resource failures instead of leaving the viewer on an
     // endless loading spinner. This runs before Potree and its dependencies.
+    window.__pointCloudDiagnosticContext = (() => {
+      const params = new URLSearchParams(location.search);
+      const correlationId = params.get('correlation');
+      const revision = params.get('revision');
+      return {
+        correlationId: /^[0-9a-f-]{8,64}$/i.test(correlationId || '') ? correlationId : 'unavailable',
+        revision: /^[0-9a-f]{40}$/i.test(revision || '') ? revision.toLowerCase() : 'unavailable',
+      };
+    })();
+    function postPointCloudBootstrapFailure() {
+      if (!window.parent || window.parent === window) return;
+      window.parent.postMessage({
+        source: 'ltds-pointcloud', type: 'error', code: 'resource_failed', stage: 'startup',
+        correlationId: window.__pointCloudDiagnosticContext.correlationId,
+        revision: window.__pointCloudDiagnosticContext.revision,
+      }, location.origin);
+    }
     function showPointCloudBootstrapError() {
       if (window.__pointCloudHealth) {
         window.__pointCloudHealth.fail('resource_failed');
@@ -74,9 +91,7 @@
         retry.hidden = false;
         retry.onclick = () => location.reload();
       }
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage({ source: 'ltds-pointcloud', type: 'error', code: 'resource_failed' }, location.origin);
-      }
+      postPointCloudBootstrapFailure();
     }
     window.addEventListener('error', (event) => {
       const isResourceError = event.target && event.target !== window;
@@ -95,7 +110,12 @@
       showPointCloudBootstrapError();
       throw new Error('point-cloud health runtime unavailable');
     }
-    const pointCloudHealth = window.LtdsPointCloudHealth.createPointCloudHealth({ window, document });
+    const pointCloudHealth = window.LtdsPointCloudHealth.createPointCloudHealth({
+      window,
+      document,
+      correlationId: window.__pointCloudDiagnosticContext.correlationId,
+      buildRevision: window.__pointCloudDiagnosticContext.revision,
+    });
     window.__pointCloudHealth = pointCloudHealth;
     pointCloudHealth.beginStartup();
   </script>

@@ -1339,6 +1339,41 @@ const MIGRATIONS = [
       CREATE INDEX container_trash_members_member_idx ON container_trash_members(member_trash_id);
     `,
   },
+  {
+    version: 23,
+    name: 'lod_derivative_recovery_revision',
+    sql: `
+      ALTER TABLE derivative_jobs ADD COLUMN recovery_revision INTEGER NOT NULL DEFAULT 0
+        CHECK(recovery_revision >= 0);
+      ALTER TABLE derivative_jobs ADD COLUMN recovery_requeued_at TEXT;
+      CREATE INDEX derivative_jobs_lod_recovery_idx
+        ON derivative_jobs(recovery_revision,updated_at,id)
+        WHERE derivative_type IN ('mesh_tiles','lod_audit')
+          AND status IN ('failed','complete');
+    `,
+  },
+  {
+    version: 24,
+    name: 'recoverable_container_delete_state',
+    sql: `
+      ALTER TABLE storage_trash ADD COLUMN original_status TEXT;
+      ALTER TABLE storage_mutations ADD COLUMN original_status TEXT;
+      ALTER TABLE projects ADD COLUMN purged_at TEXT;
+      ALTER TABLE processing_tasks ADD COLUMN purged_at TEXT;
+      UPDATE storage_trash
+        SET original_status=CASE
+          WHEN entity_type='project' THEN 'active'
+          WHEN entity_type='task' THEN NULLIF(relative_path,'')
+          WHEN entity_type IN ('dataset','output') THEN 'archived'
+          ELSE NULL
+        END
+        WHERE original_status IS NULL;
+      CREATE INDEX projects_active_page_idx
+        ON projects(purged_at,status,created_at DESC,id DESC);
+      CREATE INDEX processing_tasks_active_page_idx
+        ON processing_tasks(purged_at,status,created_at DESC,id DESC);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

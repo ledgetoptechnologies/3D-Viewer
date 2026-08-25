@@ -86,7 +86,7 @@ test('trash restore and purge recover when a process dies before recording the f
   assert.equal(fs.existsSync(directory),true);
   assert.equal(storage.pathExists('trash',trashMutation.destinationRelativePath),false);
   reconcileStorageMutations(processing,storage);
-  assert.equal(processing.getDataset(dataset.id).status,'archived');
+  assert.equal(processing.getDataset(dataset.id).status,'finalized');
 
   const retrash=processing.beginTrashMutation(dataset.id,'ops:1');applyStorageMutation(processing,storage,retrash);
   const purge=processing.beginPurgeMutation(retrash.trashId,'ops:1');
@@ -117,7 +117,7 @@ test('restore and manual purge use the same recoverable lifecycle journal',(t)=>
   assert.equal(fs.existsSync(directory),true);
   reconcileStorageMutations(processing,storage);
   assert.equal(processing.getStorageMutation(restore.id).status,'complete');
-  assert.equal(processing.getDataset(dataset.id).status,'archived');
+  assert.equal(processing.getDataset(dataset.id).status,'finalized');
 
   const retrash=processing.beginTrashMutation(dataset.id,'ops:1');applyStorageMutation(processing,storage,retrash);
   const secondTrash=processing.getTrash(retrash.trashId),purge=processing.beginPurgeMutation(secondTrash.id,'ops:1');
@@ -142,7 +142,7 @@ test('empty draft trash is metadata-recoverable and retention purges use the jou
   applyStorageMutation(processing,storage,trashMutation);
   const trash=processing.getTrash(trashMutation.trashId);assert.equal(trash.relativePath,'');
   const restore=processing.beginRestoreMutation(trash.id,'ops:1');assert.equal(restore.allowAbsentSource,true);applyStorageMutation(processing,storage,restore);
-  assert.equal(processing.getDataset(draft.id).status,'archived');
+  assert.equal(processing.getDataset(draft.id).status,'draft');
 
   const managed=storedDataset(context,'Retention'),managedTrashMutation=processing.beginTrashMutation(managed.dataset.id,'system');applyStorageMutation(processing,storage,managedTrashMutation);
   db.prepare("UPDATE storage_trash SET purge_after='2000-01-01T00:00:00.000Z' WHERE id=?").run(managedTrashMutation.trashId);
@@ -160,7 +160,7 @@ test('external-reference lifecycle never moves or deletes referenced bytes',(t)=
   const firstTrash=processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'});
   assert.ok(firstTrash);assert.equal(fs.existsSync(directory),true);assert.equal(processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'}),null);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM storage_trash WHERE entity_id=? AND permanently_deleted_at IS NULL').get(dataset.id).count,1);
-  assert.equal(processing.restoreTrash(firstTrash.id).status,'archived');assert.equal(fs.existsSync(directory),true);
+  assert.equal(processing.restoreTrash(firstTrash.id).status,'finalized');assert.equal(fs.existsSync(directory),true);
   const secondTrash=processing.trashDataset(dataset.id,{trashRelative:'',actor:'ops:1'});
   db.prepare("UPDATE storage_trash SET purge_after='2000-01-01T00:00:00.000Z' WHERE id=?").run(secondTrash.id);
   const result=purgeExpiredTrash(processing,storage,{actor:'maintenance'}).find((row)=>row.trashId===secondTrash.id);

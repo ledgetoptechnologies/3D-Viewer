@@ -219,6 +219,18 @@ Deleting a dataset moves Viewer-owned bytes to recoverable trash for 14 days. Tr
 
 External-reference deletion changes Viewer metadata only and never creates a byte-mutation journal, moves, or deletes external bytes. Archive/delete refuse datasets with tasks or active finalize/import/lifecycle operations. Permanent purge requires the dedicated `viewer.storage.purge` permission and typed confirmation. Empty draft datasets use a metadata-only journal entry and remain restorable during the retention window.
 
+Projects and tasks use a 30-day container lifecycle. The normal staff surface
+offers Rename and Delete; archive remains an internal compatibility state, not
+the required workflow. Deleting a project or task groups its exclusively owned
+datasets and outputs beneath one trash record while preserving datasets shared
+by another live task. Each member records its original status. Restore moves
+managed bytes back and atomically restores the project, tasks, datasets, and
+outputs to those exact usable states. Permanent or retention purge processes
+members before the container root, removes owned bytes and asset rows, scrubs
+user-facing project/task metadata, and leaves only the minimum internal
+tombstone needed by foreign keys and audit history. Purged projects and tasks
+are excluded from both direct lookups and catalogs.
+
 Managed model outputs have the same 14-day recoverable lifecycle. The bounded
 output catalog and project/task storage routes report actual ingested output
 bytes separately from immutable dataset bytes. Archiving first unpublishes the
@@ -252,9 +264,11 @@ admin bearer permission plus `Idempotency-Key`.
 
 The staff workspace applies those same permission and state checks before it
 renders project, task, dataset, output, trash, or mutation-retry controls.
-Archived projects and tasks remain inspectable but are read-only. Diagnostics
-paginates all recoverable trash and all failed storage mutations rather than
-showing only the first page.
+Background Work cursor-paginates and searches the complete import and
+derivative history. Diagnostics paginates all recoverable trash and all failed
+storage mutations rather than showing only the first page. Maintenance emits a
+bounded step name and stable error code for failures; retention audit actions
+use the actual project, task, dataset, or output entity type.
 
 Whole-project public links use a separate `public_project_shares` record and
 `/project/:token` flow; they do not reuse the single-model `public_shares`,

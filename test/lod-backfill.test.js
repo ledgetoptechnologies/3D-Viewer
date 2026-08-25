@@ -8,7 +8,8 @@ const path=require('node:path');
 const test=require('node:test');
 const auth=require('../server/auth');
 const {openDatabase}=require('../server/database');
-const {reconcileMissingLodDerivatives,reconcileMissingPointCloudAssets}=require('../server/lodBackfill');
+const {lodReconciliationFailure,lodReconciliationSummary,reconcileLodMaintenance,reconcileMissingLodDerivatives,reconcileMissingPointCloudAssets}=require('../server/lodBackfill');
+const {LOD_DERIVATIVE_RECOVERY_REVISION}=require('../server/lodRecoveryPolicy');
 const {createProcessingApi}=require('../server/processingApi');
 const {processOneDerivative}=require('../server/derivativeWorker');
 const {ProcessingRepository}=require('../server/processingRepository');
@@ -110,6 +111,62 @@ test('optional LOD failure is terminal until audited manual retry and preserves 
   assert.equal(retriedClaim.id,claimed.id);
   assert.equal(c.processing.failOptionalDerivative(retriedClaim.id,'lod-worker','converter failed again','derivative_failed'),true);
   assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true}),null,'the single manual retry is bounded');
+});
+
+test('pre-fix exhausted mesh work is recovered exactly once per validator revision without resetting manual retry limits',t=>{
+  const c=fixture(t),item=readyModel(c);
+  c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'mesh_tiles',request:{optional:true,manualRetryCount:1}}]);
+  const claimed=c.processing.claimDerivative('old-worker');
+  assert.equal(c.processing.failOptionalDerivative(claimed.id,'old-worker','legacy validator rejected output','derivative_failed'),true);
+  c.db.prepare('UPDATE derivative_jobs SET recovery_revision=0 WHERE id=?').run(claimed.id);
+
+  const first=c.processing.recoverStaleLodDerivatives({meshDerivativesEnabled:true});
+  assert.deepEqual(first,{revision:LOD_DERIVATIVE_RECOVERY_REVISION,scanned:1,requeued:1,conflicts:0});
+  let row=c.db.prepare('SELECT status,recovery_revision,recovery_requeued_at,request_json FROM derivative_jobs WHERE id=?').get(claimed.id);
+  assert.equal(row.status,'pending');
+  assert.equal(row.recovery_revision,LOD_DERIVATIVE_RECOVERY_REVISION);
+  assert.match(row.recovery_requeued_at,/^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(JSON.parse(row.request_json).manualRetryCount,1,'system recovery does not erase the consumed manual retry');
+  assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true}),null);
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative.recovery_requeued' AND entity_id=?").get(claimed.id).n,1);
+
+  const retriedClaim=c.processing.claimDerivative('current-worker');
+  assert.equal(retriedClaim.id,claimed.id);
+  assert.equal(c.processing.failOptionalDerivative(claimed.id,'current-worker','still invalid','derivative_failed'),true);
+  assert.deepEqual(c.processing.recoverStaleLodDerivatives({meshDerivativesEnabled:true}),{revision:LOD_DERIVATIVE_RECOVERY_REVISION,scanned:0,requeued:0,conflicts:0});
+  assert.equal(c.processing.claimDerivative('infinite-retry-check'),null,'the current revision is never retried in a loop');
+
+  const nextRevision=LOD_DERIVATIVE_RECOVERY_REVISION+1;
+  assert.deepEqual(c.processing.recoverStaleLodDerivatives({revision:nextRevision,meshDerivativesEnabled:true}),{revision:nextRevision,scanned:1,requeued:1,conflicts:0});
+  row=c.db.prepare('SELECT status,recovery_revision FROM derivative_jobs WHERE id=?').get(claimed.id);
+  assert.equal(row.status,'pending');
+  assert.equal(row.recovery_revision,nextRevision);
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative.recovery_requeued' AND entity_id=?").get(claimed.id).n,2);
+});
+
+test('pre-fix rejected native tile audits recover through the current audit and generation policy',t=>{
+  const c=fixture(t),item=readyModel(c),tilesRelativePath='legacy/native-tiles';
+  c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'lod_audit',request:{optional:true,tilesRootKey:'models',tilesRelativePath,generateFromObjOnFailure:false}}]);
+  const job=c.processing.claimDerivative('old-auditor');
+  assert.equal(c.processing.completeOptionalDerivative(job.id,'old-auditor',{verified:false,fallback:'glb'}),true);
+  c.db.prepare('UPDATE derivative_jobs SET recovery_revision=0 WHERE id=?').run(job.id);
+
+  const result=reconcileLodMaintenance(c.processing,c.storage,{meshDerivativesEnabled:true,limit:20});
+  assert.equal(result.recovery.requeued,1);
+  assert.equal(result.discovery.queued,0);
+  const recovered=c.db.prepare('SELECT status,recovery_revision,request_json FROM derivative_jobs WHERE id=?').get(job.id);
+  assert.equal(recovered.status,'pending');
+  assert.equal(recovered.recovery_revision,LOD_DERIVATIVE_RECOVERY_REVISION);
+  assert.equal(JSON.parse(recovered.request_json).generateFromObjOnFailure,true);
+  assert.match(lodReconciliationSummary(result),/^LOD reconciliation: revision=1 recoveryScanned=1 requeued=1 conflicts=0 discoveryScanned=0 queued=0 discoveryConflict=no$/);
+});
+
+test('LOD maintenance diagnostics are bounded and never echo filesystem errors',()=>{
+  const message=lodReconciliationFailure(Object.assign(new Error('C:\\customers\\secret\\model.obj'),{code:'ENOENT:C:\\customers\\secret'}));
+  assert.equal(message,'LOD reconciliation failed: revision=1 code=maintenance_error retry=next-maintenance');
+  assert.equal(lodReconciliationFailure({code:'SQLITE_BUSY'}),'LOD reconciliation failed: revision=1 code=SQLITE_BUSY retry=next-maintenance');
+  assert.equal(message.includes('model.obj'),false);
+  assert.ok(message.length<180);
 });
 
 test('derivative progress exposes only bounded lifecycle summaries while the lease is live',t=>{
@@ -505,6 +562,22 @@ test('derivative list and retry API enforce read/write permissions',async t=>{
   const response=await fetch(`${base}/api/v1/processing/derivatives/${claimed.id}/retry`,{method:'POST',headers:headers(writeToken),body:'{}'});
   assert.equal(response.status,202);
   assert.equal((await response.json()).derivative.status,'pending');
+});
+
+test('derivative activity paginates every historical job without duplicate cursors',async t=>{
+  const c=fixture(t),first=readyModel(c),second=readyModel(c),token='lod-page-token-000000000000000000000';
+  c.processing.enqueueOptionalDerivatives(first.attempt.id,[{type:'mesh_tiles',request:{optional:true}}]);
+  c.processing.enqueueOptionalDerivatives(second.attempt.id,[{type:'mesh_tiles',request:{optional:true}}]);
+  c.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:page',permissions:['viewer.processing.read'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
+  const app=express();app.use(express.json());app.use(createProcessingApi({repository:c.repository,processing:c.processing,storage:c.storage}));
+  const server=await new Promise(resolve=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:`Bearer ${token}`};
+  const firstResponse=await fetch(`${base}/api/v1/processing/derivatives?limit=1`,{headers}),firstPage=await firstResponse.json();
+  assert.equal(firstResponse.status,200);assert.equal(firstPage.derivatives.length,1);assert.ok(firstPage.nextCursor);
+  const secondResponse=await fetch(`${base}/api/v1/processing/derivatives?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`,{headers}),secondPage=await secondResponse.json();
+  assert.equal(secondResponse.status,200);assert.equal(secondPage.derivatives.length,1);assert.notEqual(secondPage.derivatives[0].id,firstPage.derivatives[0].id);
+  assert.equal(secondPage.nextCursor,null);
 });
 
 test('eligible output exposes and queues manual tile generation through the existing derivative lane',async t=>{

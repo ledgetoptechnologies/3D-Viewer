@@ -149,10 +149,12 @@ test('project Delete cascades owned storage into 30-day trash and restore/purge 
   assert.equal(fs.existsSync(datasetDirectory), false); assert.equal(fs.existsSync(output.directory), false);
   response = await context.request('GET', '/api/v1/storage?limit=100'); const visibleTrash = (await response.json()).trash.items; assert.deepEqual(visibleTrash.map(item => item.id), [trash.id], 'owned member trash is grouped beneath the project');
   response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {}); assert.equal(response.status, 200); assert.equal((await response.json()).project.status, 'active');
-  assert.equal(fs.existsSync(datasetDirectory), true); assert.equal(fs.existsSync(output.directory), true); assert.equal(context.processing.getDataset(dataset.id).status, 'archived'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'archived');
+  assert.equal(fs.existsSync(datasetDirectory), true); assert.equal(fs.existsSync(output.directory), true); assert.equal(context.processing.getDataset(dataset.id).status, 'finalized'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'ready'); assert.equal(context.processing.getTask(task.id).status, 'ready_for_review');
   response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); trash = (await response.json()).trash;
   assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: 'wrong' })).status, 400);
   assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: project.id })).status, 204); assert.equal(fs.existsSync(datasetDirectory), false); assert.equal(fs.existsSync(output.directory), false);
+  assert.equal(context.processing.getProject(project.id), null, 'purged projects are no longer retrievable'); assert.equal(context.processing.getTask(task.id), null, 'purged tasks are no longer retrievable');
+  assert.match(context.database.prepare('SELECT display_name FROM projects WHERE id=?').get(project.id).display_name, /^deleted-project-/); assert.match(context.database.prepare('SELECT display_name FROM processing_tasks WHERE id=?').get(task.id).display_name, /^deleted-task-/);
   const { purgeContainerTrash } = require('../server/containerLifecycle'); assert.equal(purgeContainerTrash(context.processing, context.storage, trash.id, 'ops:lifecycle').permanentlyDeletedAt !== null, true, 'repeat purge is idempotent');
 });
 

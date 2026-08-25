@@ -99,6 +99,35 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 22);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 24);
   upgraded.close();
+});
+
+test('v23 persists revision-zero recovery state for terminal pre-upgrade LOD jobs', (t) => {
+  const databasePath = temporaryDatabase(t, 'migration-v23-lod-recovery');
+  const database = new DatabaseSync(databasePath);
+  database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+  for (const migration of MIGRATIONS.filter((item) => item.version < 23)) {
+    database.exec(migration.sql);
+    database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+      .run(migration.version, migration.name, new Date().toISOString());
+  }
+  const created = new Date().toISOString();
+  database.exec('PRAGMA foreign_keys=OFF');
+  database.prepare("INSERT INTO derivative_jobs(id,attempt_id,derivative_type,status,request_json,result_json,created_at,updated_at,completed_at) VALUES (?,?,?,'failed',?,?,?, ?,?)")
+    .run('legacy-lod-job', 'legacy-attempt', 'mesh_tiles', JSON.stringify({ optional: true, manualRetryCount: 1 }), JSON.stringify({ error: 'old validator rejected output' }), created, created, created);
+
+  const migration=MIGRATIONS.find((item)=>item.version===23);
+  database.exec('BEGIN IMMEDIATE');
+  database.exec(migration.sql);
+  database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+    .run(migration.version,migration.name,new Date().toISOString());
+  database.exec('COMMIT');
+
+  const row = database.prepare('SELECT recovery_revision,recovery_requeued_at FROM derivative_jobs WHERE id=?').get('legacy-lod-job');
+  assert.equal(row.recovery_revision, 0);
+  assert.equal(row.recovery_requeued_at, null);
+  assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='derivative_jobs_lod_recovery_idx'").get());
+  assert.equal(database.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 23);
+  database.close();
 });

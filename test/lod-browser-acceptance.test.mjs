@@ -14,6 +14,18 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
 const GiB = 1024 * 1024 * 1024;
 
+function removeBrowserProfile(profile) {
+  if (!profile) return;
+  try {
+    rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
+  } catch (error) {
+    // Edge can retain a Windows file handle briefly after its process exits.
+    // The isolated OS temp profile is non-authoritative test scratch; cleanup
+    // must never strand the cross-process browser lock or mask UI assertions.
+    if (process.platform !== 'win32' || !['EPERM', 'EBUSY'].includes(error.code)) throw error;
+  }
+}
+
 function browserPath() {
   return [
     process.env.CHROME_PATH,
@@ -424,8 +436,8 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     }
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
-    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     releaseLock();
+    removeBrowserProfile(profile);
   }
 });
 
@@ -482,8 +494,8 @@ test('browser never requests the original GLB when verified streaming tiles are 
     }
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
-    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     releaseLock();
+    removeBrowserProfile(profile);
   }
 });
 
@@ -549,9 +561,9 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     }
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
-    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     rmSync(tileRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     releaseLock();
+    removeBrowserProfile(profile);
   }
 });
 
@@ -607,7 +619,7 @@ test('browser defaults to orthophoto and tears down point-cloud runtime across h
     }
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
-    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     releaseLock();
+    removeBrowserProfile(profile);
   }
 });

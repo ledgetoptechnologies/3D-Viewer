@@ -112,7 +112,7 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/background-work-count/);
   assert.match(source,/function background\(\)/);
   assert.match(source,/\/api\/v1\/operations\/\$\{encodeURIComponent\(id\)\}\/retry/);
-  assert.match(source,/\/api\/v1\/processing\/derivatives\?limit=100/);
+  assert.match(source,/pagedApi\('\/api\/v1\/processing\/derivatives','derivatives'\)/);
   assert.match(source,/\/api\/v1\/processing\/derivatives\/\$\{encodeURIComponent\(id\)\}\/retry/);
   assert.match(source,/\/api\/v1\/processing\/outputs\/\$\{encodeURIComponent\(outputId\)\}\/derivatives\/tiles/);
   assert.match(source,/Generate 3D tiles/);

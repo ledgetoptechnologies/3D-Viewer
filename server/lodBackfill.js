@@ -2,6 +2,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
+const {LOD_DERIVATIVE_RECOVERY_REVISION}=require('./lodRecoveryPolicy');
 const {hashFileChunks,hashTree}=require('./storageManager');
 
 function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabled=false,limit=20}={}){
@@ -30,6 +31,22 @@ function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabl
   if(lastProcessed)processing.advanceLodBackfillCursor(lastProcessed,conflict||candidates.length>=limit);
   else if(!conflict)processing.advanceLodBackfillCursor(null,false);
   return{scanned,queued,conflict};
+}
+
+function reconcileLodMaintenance(processing,storage,{meshDerivativesEnabled=false,limit=20,recoveryRevision=LOD_DERIVATIVE_RECOVERY_REVISION}={}){
+  const recovery=processing.recoverStaleLodDerivatives({revision:recoveryRevision,meshDerivativesEnabled,limit});
+  const discovery=reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabled,limit});
+  return{revision:recovery.revision,recovery,discovery};
+}
+
+function lodReconciliationSummary(result){
+  const recovery=result?.recovery||{},discovery=result?.discovery||{};
+  return`LOD reconciliation: revision=${Math.max(0,Number(result?.revision)||0)} recoveryScanned=${Math.max(0,Number(recovery.scanned)||0)} requeued=${Math.max(0,Number(recovery.requeued)||0)} conflicts=${Math.max(0,Number(recovery.conflicts)||0)} discoveryScanned=${Math.max(0,Number(discovery.scanned)||0)} queued=${Math.max(0,Number(discovery.queued)||0)} discoveryConflict=${discovery.conflict?'yes':'no'}`;
+}
+
+function lodReconciliationFailure(error){
+  const raw=String(error?.code||error?.name||''),code=/^[a-z0-9_-]{1,80}$/i.test(raw)?raw:'maintenance_error';
+  return`LOD reconciliation failed: revision=${LOD_DERIVATIVE_RECOVERY_REVISION} code=${code} retry=next-maintenance`;
 }
 
 async function reconcileMissingPointCloudAssets(processing,storage,{limit=5}={}){
@@ -72,4 +89,4 @@ async function reconcileMissingPointCloudAssets(processing,storage,{limit=5}={})
   else processing.advancePointCloudBackfillCursor(null,false);
   return{scanned,registered};
 }
-module.exports={reconcileMissingLodDerivatives,reconcileMissingPointCloudAssets};
+module.exports={lodReconciliationFailure,lodReconciliationSummary,reconcileLodMaintenance,reconcileMissingLodDerivatives,reconcileMissingPointCloudAssets};

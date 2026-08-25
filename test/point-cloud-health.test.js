@@ -5,8 +5,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { createPointCloudHealth, FAILURES } = require('../public/pointcloud-health.js');
+const CORRELATION_ID = '12345678-abcd-4abc-9abc-1234567890ab';
+const BUILD_REVISION = 'a'.repeat(40);
 
-function fixture() {
+const diagnosticMessage = (type, code, stage, overrides = {}) => ({
+  source: 'ltds-pointcloud', type, code, correlationId: CORRELATION_ID, stage, revision: BUILD_REVISION, ...overrides,
+});
+
+function fixture(diagnostics = {}) {
   const classes = () => {
     const values = new Set();
     return {
@@ -40,6 +46,8 @@ function fixture() {
     startupTimeoutMs: 1,
     loadTimeoutMs: 2,
     nodeTimeoutMs: 3,
+    correlationId: diagnostics.correlationId || CORRELATION_ID,
+    buildRevision: diagnostics.buildRevision || BUILD_REVISION,
   });
   const fireOnlyTimer = () => {
     assert.equal(timers.size, 1);
@@ -58,7 +66,7 @@ test('startup and node watchdogs terminate with fixed actionable messages', () =
   assert.equal(startup.elements['pc-loading-text'].textContent, FAILURES.startup_timeout);
   assert.equal(startup.elements['pc-retry'].hidden, false);
   assert.deepEqual(startup.messages, [{
-    message: { source: 'ltds-pointcloud', type: 'error', code: 'startup_timeout' },
+    message: diagnosticMessage('error', 'startup_timeout', 'startup'),
     origin: 'https://viewer.example',
   }]);
 
@@ -81,7 +89,7 @@ test('visible points clear the watchdog and notify only the same-origin parent',
   assert.equal(value.timers.size, 0);
   assert.equal(value.elements['pc-loading'].classList.contains('hidden'), true);
   assert.deepEqual(value.messages, [{
-    message: { source: 'ltds-pointcloud', type: 'ready', code: 'points_visible' },
+    message: diagnosticMessage('ready', 'points_visible', 'nodes'),
     origin: 'https://viewer.example',
   }]);
 });
@@ -97,8 +105,8 @@ test('late visible points recover from the observational node timeout only', () 
   assert.equal(late.health.phase(), 'ready');
   assert.equal(late.elements['pc-loading'].classList.contains('hidden'), true);
   assert.deepEqual(late.messages.map(({ message }) => message), [
-    { source: 'ltds-pointcloud', type: 'error', code: 'node_timeout' },
-    { source: 'ltds-pointcloud', type: 'ready', code: 'points_visible' },
+    diagnosticMessage('error', 'node_timeout', 'nodes'),
+    diagnosticMessage('ready', 'points_visible', 'nodes'),
   ]);
 
   const structural = fixture();
@@ -124,6 +132,18 @@ test('retry is explicit and missing configuration does not offer a reload loop',
   assert.equal(missing.elements['pc-loading-text'].textContent, FAILURES.not_configured);
 });
 
+test('diagnostics expose only sanitized correlation, stage, code and build revision', () => {
+  const value = fixture({ correlationId: 'https://private.example/ept.json', buildRevision: 'not-a-revision/path' });
+  value.health.beginStartup();
+  value.health.fail('metadata_failed');
+  assert.deepEqual(value.messages[0].message, diagnosticMessage('error', 'metadata_failed', 'startup', {
+    correlationId: 'unavailable',
+    revision: 'unavailable',
+  }));
+  assert.equal(FAILURES.runtime_error.includes('Viewer logs'), false);
+  assert.match(FAILURES.runtime_error, /browser diagnostics/);
+});
+
 test('point-cloud shell starts watchdogs before Potree and requires visible nodes before readiness', () => {
   const shell = fs.readFileSync(path.join(__dirname, '..', 'public', 'pointcloud.html'), 'utf8');
   assert.ok(shell.indexOf('/pointcloud-health.js') < shell.indexOf('/potree/libs/jquery/jquery-3.1.1.min.js'));
@@ -131,4 +151,6 @@ test('point-cloud shell starts watchdogs before Potree and requires visible node
   assert.match(shell, /pointCloudHealth\.beginLoad\(\)[\s\S]*Potree\.loadPointCloud/);
   assert.match(shell, /pc\.numVisiblePoints > 0[\s\S]*pc\.visibleNodes[\s\S]*pointCloudHealth\.pointsVisible\(\)/);
   assert.doesNotMatch(shell, /showPointCloudBootstrapError\([^)]*(?:event\.message|event\.reason|target\.src|target\.href)/);
+  assert.match(shell, /correlationId: window\.__pointCloudDiagnosticContext\.correlationId/);
+  assert.match(shell, /buildRevision: window\.__pointCloudDiagnosticContext\.revision/);
 });

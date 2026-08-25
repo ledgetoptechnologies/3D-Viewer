@@ -144,10 +144,19 @@ Verified imported tiles may stream. The original GLB is never an interactive
 layer and remains available only through authenticated Operations downloads.
 A model without verified tiles is explicitly unavailable or processing in 3D
 mode instead of risking a full-resolution browser decode.
-Automatic generation remains verification-gated: a failed audit leaves the
-original mesh published and requires an explicit manual retry. Imported/native
+Automatic generation remains verification-gated: a current-revision failure
+leaves the original mesh published and requires an explicit manual retry.
+Migration 23 records the LOD recovery revision on every derivative job. When a
+shipped validator or converter fix increments that revision, startup
+maintenance may reopen each older terminal `mesh_tiles` or rejected
+`lod_audit` job exactly once with a compare-and-swap. New or first-leased jobs
+are stamped at the current revision, so ordinary failures cannot enter an
+automatic retry loop; the single authorized manual retry remains a separate,
+unchanged budget. The worker emits bounded reconciliation counts and a safe
+error code, and records every system recovery in the audit log. Imported/native
 tiles always stay on exact v2; only the trusted local generation call site may
-request controlled v3. Do not manually change either provenance record.
+request controlled v3. Do not manually change either provenance or recovery
+record.
 
 ## Validate before deployment
 
