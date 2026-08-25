@@ -88,7 +88,9 @@ app.use((_req, res, next) => {
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
     "img-src 'self' data: blob: https://server.arcgisonline.com https://ledgetopdroneservices.com",
-    "connect-src 'self' https://server.arcgisonline.com",
+    // GLTFLoader decodes embedded B3DM textures through temporary blob URLs.
+    // Keep network access same-origin while permitting those in-memory reads.
+    "connect-src 'self' blob: https://server.arcgisonline.com",
     "worker-src 'self' blob:",
     "frame-src 'self'",
     "object-src 'none'",

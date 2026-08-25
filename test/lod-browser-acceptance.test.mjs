@@ -48,7 +48,7 @@ function fixtureConfig() {
       glb: `${base}/odm_textured_model_geo.glb`,
       obj: null,
       tiles: `${base}/tileset.json`,
-      shots: null,
+      shots: `${base}/shots.geojson`,
       ortho: null,
       dsm: null,
       dtm: null,
@@ -106,6 +106,21 @@ async function startFixture(tileRoot) {
     if (url.pathname === `/api/models/${fixtureId}`) {
       reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       reply.end(JSON.stringify(config));
+      return;
+    }
+    if (url.pathname === `${assetPrefix}shots.geojson`) {
+      const center = config.georef.bboxCenter;
+      const features = [0, 1, 2].map((index) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [center.x + index * 4, center.y + index * 3, center.z + 20 + index] },
+        properties: {
+          translation: [center.x + index * 4, center.y + index * 3, center.z + 20 + index],
+          rotation: [0, 0, 0],
+          photoKey: `photo-${index}.jpg`,
+        },
+      }));
+      reply.writeHead(200, { 'Content-Type': 'application/geo+json; charset=utf-8' });
+      reply.end(JSON.stringify({ type: 'FeatureCollection', features }));
       return;
     }
     if (url.pathname.startsWith(assetPrefix)) {
@@ -326,7 +341,16 @@ function snapshotExpression() {
     visit(root);
     const materials = [];
     root?.engineData?.scene?.traverse((object) => {
-      if (object.isMesh && object.material) materials.push({ depthWrite: object.material.depthWrite, polygonOffset: object.material.polygonOffset, renderOrder: object.renderOrder });
+      if (!object.isMesh || !object.material) return;
+      for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
+        materials.push({
+          depthWrite: material.depthWrite,
+          polygonOffset: material.polygonOffset,
+          renderOrder: object.renderOrder,
+          hasMap: Boolean(material.map),
+          imageReady: Boolean(material.map && (material.map.image?.width || material.map.source?.data?.width)),
+        });
+      }
     });
     return {
       errorPanel: getComputedStyle(document.querySelector('#error-panel')).display,
@@ -377,13 +401,106 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'root B3DM did not load');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
 
+    const home = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const volume = tiles.root.engineData.boundingVolume;
+      const obb = volume.obb || volume.regionObb;
+      const V = window.__ltds.camera().position.constructor;
+      const min = new V(Infinity, Infinity, Infinity);
+      const max = new V(-Infinity, -Infinity, -Infinity);
+      tiles.group.updateWorldMatrix(true, false);
+      const include = (x, y, z, matrix = null) => {
+        const point = new V(x, y, z);
+        if (matrix) point.applyMatrix4(matrix);
+        point.applyMatrix4(tiles.group.matrixWorld);
+        min.min(point); max.max(point);
+      };
+      if (obb?.box && obb?.transform) {
+        for (const x of [obb.box.min.x, obb.box.max.x])
+          for (const y of [obb.box.min.y, obb.box.max.y])
+            for (const z of [obb.box.min.z, obb.box.max.z]) include(x, y, z, obb.transform);
+      } else if (volume.sphere) {
+        const c = volume.sphere.center, r = volume.sphere.radius;
+        for (const x of [c.x-r, c.x+r])
+          for (const y of [c.y-r, c.y+r])
+            for (const z of [c.z-r, c.z+r]) include(x, y, z);
+      } else return null;
+      const center = min.clone().add(max).multiplyScalar(0.5);
+      const diameter = max.clone().sub(min).length();
+      const distance = Math.max(20, diameter * 0.9);
+      const expected = new V(center.x, center.y + distance * 0.55, center.z + distance * 0.75);
+      const actual = window.__ltds.camera().position;
+      return { expected: expected.toArray(), actual: actual.toArray(), error: expected.distanceTo(actual), center: center.toArray() };
+    })()`);
+    assert.ok(home && home.error < 1e-5, `initial LOD framing ignored rendered world bounds: ${JSON.stringify(home)}`);
+
+    await setView(client, [500, 600, 700], [50, 60, 70]);
+    await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
+    const reset = await client.evaluate(`(() => {
+      const expected = ${JSON.stringify(home.expected)};
+      const p = window.__ltds.camera().position;
+      return Math.hypot(p.x-expected[0], p.y-expected[1], p.z-expected[2]);
+    })()`);
+    assert.ok(reset < 1e-5, `Reset View did not restore world-bounds home: ${reset}`);
+
     const initial = await client.evaluate(snapshotExpression());
     assert.equal(initial.errorPanel, 'none');
     assert.equal(initial.root.refine, 'ADD');
     assert.equal(initial.root.visible, true);
     assert.ok(initial.root.materials.length > 0);
     assert.ok(initial.root.materials.every((item) => item.depthWrite === false && item.polygonOffset === true && item.renderOrder === -100));
+    assert.ok(initial.root.materials.every((item) => item.hasMap && item.imageReady), 'root B3DM textures were not decoded and bound');
     assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 1.75 * GiB, minSize: 8, maxSize: 48, unloadPercent: 0.20 });
+
+    await client.evaluate(`document.querySelector('#layer-cameras').click()`);
+    await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
+    const visibleCameras = await client.evaluate(`(() => {
+      let count = 0;
+      window.__ltds.scene().traverse((object) => {
+        if (object.isInstancedMesh && object.visible && object.parent?.parent?.visible) count += object.count;
+      });
+      return count;
+    })()`);
+    assert.equal(visibleCameras, 3);
+    await client.evaluate(`document.querySelector('#layer-cameras').click()`);
+
+    const transferred = await client.evaluate(`(() => {
+      const state = window.__ltds.state;
+      const V = window.__ltds.camera().position.constructor;
+      const expectedPosition = new V(35, 75, 95);
+      const expectedTarget = new V(5, 15, 25);
+      const positionUtm = window.__ltds.worldToUtm(expectedPosition);
+      const targetUtm = window.__ltds.worldToUtm(expectedTarget);
+      const iframe = document.createElement('iframe');
+      iframe.id = 'pc-iframe';
+      iframe.src = 'about:blank';
+      document.querySelector('#cloud-container').appendChild(iframe);
+      state.cloudMode = 'potree';
+      state.pcIframeLoaded = true;
+      document.querySelector('#tab-cloud').click();
+      iframe.contentWindow.viewer = { scene: { view: {
+        position: { x: positionUtm.e, y: positionUtm.n, z: positionUtm.alt },
+        getPivot: () => ({ x: targetUtm.e, y: targetUtm.n, z: targetUtm.alt }),
+      } } };
+      iframe.contentWindow.__pcViewReady = true;
+      iframe.contentWindow.__getViewUTM = () => ({
+        position: [positionUtm.e, positionUtm.n, positionUtm.alt],
+        target: [targetUtm.e, targetUtm.n, targetUtm.alt],
+      });
+      document.querySelector('#tab-model').click();
+      return {
+        expected: expectedPosition.toArray(),
+        beforeRootError: window.__ltds.camera().position.distanceTo(expectedPosition),
+      };
+    })()`);
+    assert.ok(transferred.beforeRootError < 1e-5, `point-cloud view was not transferred before LOD startup: ${JSON.stringify(transferred)}`);
+    await waitFor(client, 'Boolean(window.__ltds.tiles()?.root?.engineData?.scene)', 'reloaded root B3DM did not load after point-cloud transfer');
+    const transferAfterRoot = await client.evaluate(`(() => {
+      const expected = ${JSON.stringify([35, 75, 95])};
+      const p = window.__ltds.camera().position;
+      return Math.hypot(p.x-expected[0], p.y-expected[1], p.z-expected[2]);
+    })()`);
+    assert.ok(transferAfterRoot < 1e-5, `LOD startup overwrote the transferred point-cloud view: ${transferAfterRoot}`);
 
     await setView(client, [0, 44, 52], [0, 18, 0]);
     await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return n>0; })()`, 'close view did not refine');

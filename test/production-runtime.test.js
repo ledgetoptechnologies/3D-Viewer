@@ -312,6 +312,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
     /frame-ancestors 'self' https:\/\/ops\.example\.test https:\/\/client\.example\.test/,
   );
   assert.match(contentSecurityPolicy, /script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'/);
+  assert.match(contentSecurityPolicy, /connect-src 'self' blob: https:\/\/server\.arcgisonline\.com/);
   assert.doesNotMatch(contentSecurityPolicy, /(?:^|[ ;])'unsafe-eval'(?:[ ;]|$)/);
   assert.equal(health.headers.get('referrer-policy'), 'no-referrer');
 

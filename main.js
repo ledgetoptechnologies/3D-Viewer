@@ -29,6 +29,7 @@ import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
 import { preserveLodMaterials } from './lod-materials.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
+import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -157,6 +158,7 @@ let modeAbortController = null;
 let mapToolEpoch = 0;
 let directPointCloudLoad = null;
 let pendingPointCloudView = null;
+let preserveIncomingModelView = false;
 
 const DIAGNOSTIC_CORRELATION_ID = (() => {
   const value = globalThis.crypto?.randomUUID?.();
@@ -773,9 +775,10 @@ function drainBVH() {
 function loadTiles() {
   if (tilesRenderer) return;
   updateLoading('Streaming LOD tiles...', '');
-  tilesRenderer = new TilesRenderer(TILES_URL);
+  const rendererInstance = new TilesRenderer(TILES_URL);
+  tilesRenderer = rendererInstance;
   const detailSlider = document.getElementById('lod-detail');
-  configureLodRenderer(tilesRenderer, {
+  configureLodRenderer(rendererInstance, {
     camera,
     renderer,
     detail: detailSlider?.value,
@@ -784,7 +787,8 @@ function loadTiles() {
   });
   lodFailureHandled = false;
 
-  tilesRenderer.addEventListener('load-root-tileset', (ev) => {
+  rendererInstance.addEventListener('load-root-tileset', (ev) => {
+    if (tilesRenderer !== rendererInstance) return;
     const report = inspectLodTileset(ev.tileset);
     const provenance = inspectLodProvenance(LOD_PROVENANCE, GLB_URL || OBJ_URL);
     state.lodManifestReport = { ...report, provenance };
@@ -796,24 +800,26 @@ function loadTiles() {
     // Keep the persisted manifest REPLACE through validation. Only after the
     // valid startup decision do we make a capable runtime root into the coarse
     // backdrop.
-    enableRootLodBackdrop(tilesRenderer);
+    enableRootLodBackdrop(rendererInstance);
     if (!report.canConvergeToZeroError) {
       console.warn('LOD root delegates to external tilesets; validate each child manifest.', report);
     }
     hideLoading();
-    if (!homeView) {
-      setHomeView();
-      controls.setView(homeView.position, homeView.lookAt);
+    const bounds = tilesetWorldBounds(rendererInstance);
+    if (bounds && frameBoundsHome(bounds, { apply: !preserveIncomingModelView })) {
+      preserveIncomingModelView = false;
     }
   });
-  tilesRenderer.addEventListener('load-tileset', (ev) => {
+  rendererInstance.addEventListener('load-tileset', (ev) => {
+    if (tilesRenderer !== rendererInstance) return;
     const report = inspectLodTileset(ev.tileset);
     if (!report.valid) {
       failLod(`LOD child manifest cannot reach a valid full-detail frontier: ${report.errors[0]}`);
     }
   });
-  tilesRenderer.addEventListener('load-model', (ev) => {
-    const isCoarseBackdrop = ev.tile === tilesRenderer.root;
+  rendererInstance.addEventListener('load-model', (ev) => {
+    if (tilesRenderer !== rendererInstance) return;
+    const isCoarseBackdrop = ev.tile === rendererInstance.root;
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -829,11 +835,12 @@ function loadTiles() {
       }
     });
   });
-  tilesRenderer.addEventListener('load-error', (ev) => {
+  rendererInstance.addEventListener('load-error', (ev) => {
+    if (tilesRenderer !== rendererInstance) return;
     console.error('Tiles load error', ev);
     failLod('A required LOD tile failed to load.');
   });
-  tilesParent.add(tilesRenderer.group);
+  tilesParent.add(rendererInstance.group);
 }
 
 // Free ~2.5GB of decoded tile textures/geometry. Needed before the 898MB GLB
@@ -1050,18 +1057,18 @@ function topDownView() {
 // Auto-frame the camera on a freshly loaded object whose bounds aren't known
 // ahead of time (the server may not have a pre-computed bbox center for
 // OBJ-only imported projects).
-function frameObjectHome(object3D) {
-  const box = new THREE.Box3().setFromObject(object3D);
-  if (box.isEmpty()) return;
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3()).length();
-  controls.minDistance = closeZoomDistanceForDiameter(size, { cameraNear: camera.near });
-  const dist = Math.max(20, size * 0.9);
-  homeView = {
-    position: new THREE.Vector3(center.x, center.y + dist * 0.55, center.z + dist * 0.75),
-    lookAt: center
-  };
-  controls.setView(homeView.position, homeView.lookAt);
+function frameBoundsHome(bounds, { apply = true } = {}) {
+  const view = homeViewForBounds(bounds);
+  if (!view) return false;
+  controls.minDistance = closeZoomDistanceForDiameter(view.diameter, { cameraNear: camera.near });
+  homeView = { position: view.position, lookAt: view.lookAt };
+  if (apply) controls.setView(homeView.position, homeView.lookAt);
+  return true;
+}
+
+function frameObjectHome(object3D, options) {
+  object3D.updateWorldMatrix(true, true);
+  return frameBoundsHome(new THREE.Box3().setFromObject(object3D), options);
 }
 
 // ────────────────────────────────────────────────
@@ -2867,6 +2874,7 @@ function pullViewFromPointCloud() {
     const camW = utmToWorld(p[0], p[1], p[2]);
     const tgtW = utmToWorld(pv[0], pv[1], pv[2]);
     if (camW.distanceTo(tgtW) < 0.01) return;
+    preserveIncomingModelView = !tilesRenderer?.root;
     controls.setView(camW, tgtW);
   } catch (err) { /* keep current view */ }
 }
