@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
-const { createPointCloudHealth, FAILURES } = require('../public/pointcloud-health.js');
+const { createPointCloudHealth, FAILURES, hasVisiblePointCloudNodes } = require('../public/pointcloud-health.js');
 const CORRELATION_ID = '12345678-abcd-4abc-9abc-1234567890ab';
 const BUILD_REVISION = 'a'.repeat(40);
 
@@ -94,6 +94,18 @@ test('visible points clear the watchdog and notify only the same-origin parent',
   }]);
 });
 
+test('stale point totals cannot mark an empty black canvas ready', () => {
+  assert.equal(hasVisiblePointCloudNodes({ numVisiblePoints: 1_192_224, visibleNodes: [] }), false);
+  assert.equal(hasVisiblePointCloudNodes({
+    numVisiblePoints: 1_192_224,
+    visibleNodes: [{ sceneNode: { visible: false, geometry: {} } }],
+  }), false);
+  assert.equal(hasVisiblePointCloudNodes({
+    numVisiblePoints: 12_646,
+    visibleNodes: [{ sceneNode: { visible: true, geometry: {} } }],
+  }), true);
+});
+
 test('late visible points recover from the observational node timeout only', () => {
   const late = fixture();
   late.health.beginStartup();
@@ -149,7 +161,8 @@ test('point-cloud shell starts watchdogs before Potree and requires visible node
   assert.ok(shell.indexOf('/pointcloud-health.js') < shell.indexOf('/potree/libs/jquery/jquery-3.1.1.min.js'));
   assert.match(shell, /pointCloudHealth\.beginStartup\(\)/);
   assert.match(shell, /pointCloudHealth\.beginLoad\(\)[\s\S]*Potree\.loadPointCloud/);
-  assert.match(shell, /pc\.numVisiblePoints > 0[\s\S]*pc\.visibleNodes[\s\S]*pointCloudHealth\.pointsVisible\(\)/);
+  assert.match(shell, /hasVisiblePointCloudNodes\(pc\)[\s\S]*pointCloudHealth\.pointsVisible\(\)/);
+  assert.doesNotMatch(shell, /pc\.numVisiblePoints > 0\s*\|\|/);
   assert.doesNotMatch(shell, /showPointCloudBootstrapError\([^)]*(?:event\.message|event\.reason|target\.src|target\.href)/);
   assert.match(shell, /correlationId: window\.__pointCloudDiagnosticContext\.correlationId/);
   assert.match(shell, /buildRevision: window\.__pointCloudDiagnosticContext\.revision/);

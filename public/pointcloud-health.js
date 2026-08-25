@@ -16,6 +16,13 @@
     not_configured: 'No point cloud is configured for this project.',
   });
 
+  function hasVisiblePointCloudNodes(pointCloud) {
+    if (!Array.isArray(pointCloud?.visibleNodes)) return false;
+    return pointCloud.visibleNodes.some((node) => Boolean(
+      node?.sceneNode?.geometry && node.sceneNode.visible !== false,
+    ));
+  }
+
   function createPointCloudHealth(options) {
     const win = options.window;
     const doc = options.document;
@@ -135,5 +142,5 @@
     return { beginStartup, beginLoad, metadataReady, pointsVisible, fail, phase: () => phase };
   }
 
-  return { FAILURES, createPointCloudHealth };
+  return { FAILURES, createPointCloudHealth, hasVisiblePointCloudNodes };
 }));

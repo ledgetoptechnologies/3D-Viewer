@@ -15,6 +15,7 @@ const { SHARE_COOKIE } = require('./shareApi');
 const { VIEWER_COOKIE } = require('./apiV1');
 const { config } = require('./config');
 const { publicDerivativeKind } = require('./processingSecurity');
+const { scopedStorageRootKey } = require('./storageManager');
 const { validCameraFilename } = require('./cameraPhotos');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
@@ -97,10 +98,22 @@ function canonicalAssetRoot(model, rootKey) {
   const source = model && model.activeVersion && model.activeVersion.sourceLocator || {};
   const legacyRoot = source.legacyAssetRoots && source.legacyAssetRoots[rootKey];
   if (legacyRoot) return legacyRoot;
+
+  // External-reference outputs use a UUID-qualified logical root so lifecycle
+  // accounting stays version-scoped. The suffix is metadata only; the bytes
+  // remain under the provider's configured read-only mount.
+  const scoped = scopedStorageRootKey(rootKey);
+  if (scoped === 'webodm') return config.webodmMediaMount;
+  if (scoped === 'terra_import') return config.terraImportMount;
+
+  // Managed derivatives can belong to a WebODM/Terra import while being stored
+  // in Viewer-owned roots. Authorization remains asset- and version-scoped in
+  // publishedAssetMatch, so provider identity must not hide these roots.
+  if (rootKey === 'models') return config.modelsMount;
+  if (rootKey === 'datasets') return config.datasetsMount;
+
   if (source.catalogImport && rootKey === 'webodm') return config.webodmMediaMount;
   if (source.catalogImport && rootKey === 'terra') return config.terraImportMount;
-  if (source.catalogImport && rootKey === 'datasets') return config.datasetsMount;
-  if (source.webodmTaskImport && rootKey === 'datasets') return config.datasetsMount;
   if (model.provider === 'webodm' && source.projectId !== null && source.taskId !== null) {
     if (rootKey === 'webodm') {
       return path.join(config.webodmMediaMount, 'project', String(source.projectId), 'task', String(source.taskId), 'assets');
@@ -109,7 +122,6 @@ function canonicalAssetRoot(model, rootKey) {
       return path.join(config.derivativesMount, `${source.projectId}-${source.taskId}`);
     }
   }
-  if (model.provider === 'ltds-processing' && rootKey === 'models') return config.modelsMount;
   return null;
 }
 

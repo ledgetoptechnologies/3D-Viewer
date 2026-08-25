@@ -6,6 +6,20 @@ const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { safeRelativePath } = require('./processingSecurity');
 
+const SCOPED_STORAGE_ROOT = /^(webodm|terra|terra_import)@([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+
+function scopedStorageRootKey(value) {
+  const match = String(value || '').match(SCOPED_STORAGE_ROOT);
+  if (!match) return null;
+  return match[1].toLowerCase() === 'webodm' ? 'webodm' : 'terra_import';
+}
+
+function physicalStorageRootKey(value) {
+  const key = String(value || '');
+  if (key === 'terra') return 'terra_import';
+  return scopedStorageRootKey(key) || key;
+}
+
 function hashFile(filePath,{signal=null}={}) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -64,7 +78,7 @@ class StorageManager {
   }
   initialize() { for(const key of ['datasets','models','cache','trash','dataset_import','terra_import']) if(this.roots[key])fs.mkdirSync(this.roots[key],{recursive:true}); }
   resolve(rootKey,relativePath,{mustExist=false}={}) {
-    const aliased=String(rootKey||'').match(/^(webodm|terra_import)@[0-9a-f-]{36}$/i),root=this.roots[rootKey]||(aliased&&this.roots[aliased[1]]), rel=safeRelativePath(relativePath); if(!root||!rel)throw Object.assign(new Error('invalid storage location'),{code:'invalid_storage_location'});
+    const root=this.roots[physicalStorageRootKey(rootKey)], rel=safeRelativePath(relativePath); if(!root||!rel)throw Object.assign(new Error('invalid storage location'),{code:'invalid_storage_location'});
     const resolvedRoot=fs.realpathSync.native(root), candidate=path.resolve(resolvedRoot,...rel.split('/'));
     if(candidate!==resolvedRoot&&!candidate.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('path escapes configured root'),{code:'invalid_storage_location'});
     if(mustExist){const real=fs.realpathSync.native(candidate);if(real!==resolvedRoot&&!real.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('symlink escapes configured root'),{code:'invalid_storage_location'});return real;}
@@ -119,4 +133,4 @@ class StorageManager {
   removeExact(rootKey,relativePath){if(rootKey!=='trash')throw Object.assign(new Error('lifecycle deletion is restricted to Viewer trash'),{code:'external_reference'});const target=this.resolve(rootKey,relativePath);if(!this.pathExistsStrict(rootKey,relativePath))return false;fs.rmSync(target,{recursive:true,force:false});return true;}
 }
 
-module.exports={StorageManager,hashFile,hashFileChunks,hashTree,jpegMetadata,parseExif,readHead};
+module.exports={StorageManager,hashFile,hashFileChunks,hashTree,jpegMetadata,parseExif,physicalStorageRootKey,readHead,scopedStorageRootKey};

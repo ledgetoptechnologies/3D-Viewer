@@ -6,7 +6,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer as createViteServer } from 'vite';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -144,7 +143,7 @@ function fixtureApi(url, request, body, runtime) {
 
 async function startFixtureServer() {
   const runtime = { requests: [], projectShares: [], origin: '' };
-  const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
+  const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     if (url.pathname.startsWith('/api/')) {
@@ -159,16 +158,32 @@ async function startFixtureServer() {
       reply.end(result.body);
       return;
     }
-    if (url.pathname === '/workspace') request.url = `/workspace.html${url.search}`;
-    else if (url.pathname.startsWith('/project/')) request.url = `/index.html${url.search}`;
-    vite.middlewares(request, reply);
+    const relative = url.pathname === '/workspace'
+      ? 'workspace.html'
+      : url.pathname.startsWith('/project/') || url.pathname === '/'
+        ? 'index.html'
+        : decodeURIComponent(url.pathname.slice(1));
+    const absolute = path.resolve(builtRoot, relative);
+    if (!absolute.startsWith(`${builtRoot}${path.sep}`) || !existsSync(absolute)) {
+      reply.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      reply.end(JSON.stringify({ error: 'not_found' }));
+      return;
+    }
+    const extension = path.extname(absolute);
+    const contentType = extension === '.html' ? 'text/html; charset=utf-8'
+      : extension === '.css' ? 'text/css; charset=utf-8'
+        : ['.js', '.mjs'].includes(extension) ? 'text/javascript; charset=utf-8'
+          : extension === '.wasm' ? 'application/wasm'
+            : 'application/octet-stream';
+    reply.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-store' });
+    reply.end(readFileSync(absolute));
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
   runtime.origin = `http://127.0.0.1:${server.address().port}`;
-  return { server, vite, runtime };
+  return { server, runtime };
 }
 
 class CdpClient {
@@ -355,9 +370,9 @@ test('whole-project public sharing works in real desktop and mobile browsers', {
     return;
   }
   const releaseBrowserLock = await acquireBrowserHarnessLock({ root });
-  let server, vite, runtime, profile, browser;
+  let server, runtime, profile, browser;
   try {
-    ({ server, vite, runtime } = await startFixtureServer());
+    ({ server, runtime } = await startFixtureServer());
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-project-share-browser-'));
     browser = spawn(executable, [
       '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
@@ -384,7 +399,6 @@ test('whole-project public sharing works in real desktop and mobile browsers', {
       releaseBrowserLock();
     }
     if (server) await new Promise((resolve) => server.close(resolve));
-    if (vite) await vite.close();
     await removeBrowserProfile(profile, t);
   }
 });

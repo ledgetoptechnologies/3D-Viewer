@@ -106,10 +106,12 @@
 
   <script src="/pointcloud-health.js"></script>
   <script>
-    if (!window.LtdsPointCloudHealth?.createPointCloudHealth) {
+    if (!window.LtdsPointCloudHealth?.createPointCloudHealth
+      || !window.LtdsPointCloudHealth?.hasVisiblePointCloudNodes) {
       showPointCloudBootstrapError();
       throw new Error('point-cloud health runtime unavailable');
     }
+    const hasVisiblePointCloudNodes = window.LtdsPointCloudHealth.hasVisiblePointCloudNodes;
     const pointCloudHealth = window.LtdsPointCloudHealth.createPointCloudHealth({
       window,
       document,
@@ -236,8 +238,8 @@
     budgetState.points = 0;
     setInterval(() => {
       const pc = viewer.scene.pointclouds[0];
-      if (pc && pc.numVisiblePoints) budgetState.points = pc.numVisiblePoints;
-      if (pc && (pc.numVisiblePoints > 0 || (Array.isArray(pc.visibleNodes) && pc.visibleNodes.length > 0))) {
+      if (hasVisiblePointCloudNodes(pc)) {
+        if (pc.numVisiblePoints) budgetState.points = pc.numVisiblePoints;
         pointCloudHealth.pointsVisible();
       }
     }, 500);

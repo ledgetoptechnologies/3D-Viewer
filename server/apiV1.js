@@ -23,11 +23,15 @@ function encodedAssetUrl(modelId, asset, assetToken = null) {
 function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
   if (!model || !model.activeVersion) return null;
   const eligibleAssets = viewerEligibleAssets(model.activeVersion.metadata, model.activeVersion.assets);
+  // Validate the complete private asset set before review-session filtering.
+  // Schema-v3 provenance binds the private OBJ proof asset, which must never
+  // be exposed in the browser configuration but is still required to prove the
+  // already-eligible tiles are authentic.
+  const lodProvenance = verifiedLodProvenance(model.activeVersion.metadata, eligibleAssets);
   const visibleAssets = typeof assetFilter === 'function'
     ? eligibleAssets.filter(assetFilter)
     : eligibleAssets;
   const byKind = Object.fromEntries(visibleAssets.map((asset) => [asset.kind, asset]));
-  const lodProvenance = verifiedLodProvenance(model.activeVersion.metadata, visibleAssets);
   const pointCloud = byKind.pointCloud;
   return {
     id: model.id,
@@ -148,13 +152,7 @@ function createApiV1(repository) {
     if (session.sessionMode === 'review') {
       const candidate = repository.getModelVersion(session.modelId, session.modelVersionId);
       if (!candidate?.activeVersion || candidate.activeVersion.id !== session.modelVersionId) return null;
-      return {
-        ...candidate,
-        activeVersion: {
-          ...candidate.activeVersion,
-          assets: candidate.activeVersion.assets.filter((asset) => publicDerivativeKind(asset.kind)),
-        },
-      };
+      return candidate;
     }
     const model = repository.getModel(session.modelId);
     return model?.status === 'ready' && model.activeVersionId === session.modelVersionId ? model : null;
@@ -166,7 +164,10 @@ function createApiV1(repository) {
       return res.status(404).json({ error: 'model version is no longer available' });
     res.setHeader('Cache-Control', 'no-store');
     return res.json({
-      model: toViewerConfig(model, { assetToken: accessToken }),
+      model: toViewerConfig(model, {
+        assetToken: accessToken,
+        assetFilter: session.sessionMode === 'review' ? (asset) => publicDerivativeKind(asset.kind) : null,
+      }),
       permissions: session.permissions,
       sessionId: session.id,
       subject: session.subject,

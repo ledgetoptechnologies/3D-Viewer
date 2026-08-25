@@ -39,16 +39,50 @@ test('admin review sessions expose only an exact review-ready derived version an
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
   const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {}, createdBy: subject });
   const directory = path.join(models, task.id, attempt.id);
-  fs.mkdirSync(directory, { recursive: true });
+  const tilesDirectory = path.join(directory, 'tiles');
+  fs.mkdirSync(tilesDirectory, { recursive: true });
   fs.writeFileSync(path.join(directory, 'model.glb'), 'derived-mesh');
+  fs.writeFileSync(path.join(directory, 'model.obj'), 'derived-obj');
   fs.writeFileSync(path.join(directory, 'raw.laz'), 'administrative-source');
+  fs.writeFileSync(path.join(tilesDirectory, 'tileset.json'), '{"root":{"content":{"uri":"root.b3dm"}}}');
+  fs.writeFileSync(path.join(tilesDirectory, 'root.b3dm'), 'verified-root-tile');
   const sha256 = crypto.createHash('sha256').update('derived-mesh').digest('hex');
+  const objSha256 = crypto.createHash('sha256').update('derived-obj').digest('hex');
   const rawSha256 = crypto.createHash('sha256').update('administrative-source').digest('hex');
+  const tilesetSha256 = crypto.createHash('sha256').update('{"root":{"content":{"uri":"root.b3dm"}}}').digest('hex');
+  const rootTileSha256 = crypto.createHash('sha256').update('verified-root-tile').digest('hex');
+  const tileFiles = [
+    { relativePath: 'root.b3dm', byteSize: 18, sha256: rootTileSha256 },
+    { relativePath: 'tileset.json', byteSize: 40, sha256: tilesetSha256 },
+  ];
+  const tilesManifestSha256 = crypto.createHash('sha256').update(JSON.stringify(tileFiles)).digest('hex');
   const model = repository.upsertModelVersion({
     provider: 'ltds-processing', providerModelId: task.id, providerVersionId: attempt.id,
     displayName: task.displayName, status: 'ready', sourceLocator: { taskId: task.id, attemptId: attempt.id },
+    versionMetadata: {
+      lodProvenance: {
+        schemaVersion: 3,
+        sourceAsset: 'model.glb',
+        sourceSha256: sha256,
+        tilesManifestSha256,
+        geometry: 'controlled-bidirectional-surface-equivalence',
+        textures: 'controlled-atlas-material-equivalence',
+        leafGeometricError: 0,
+        converter: {
+          name: 'OpenDroneMap/Obj2Tiles',
+          version: '1.6.2',
+          commandSha256: '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',
+          inputAsset: 'model.obj',
+          inputSha256: objSha256,
+          binarySha256: '40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274',
+        },
+        audit: { algorithm: 'ltds-obj2tiles-surface-equivalence-v3', artifactCount: 2 },
+      },
+    },
     assets: [
       { kind: 'glb', rootKey: 'models', relativePath: `${task.id}/${attempt.id}/model.glb`, byteSize: 12, sha256, published: false },
+      { kind: 'obj', rootKey: 'models', relativePath: `${task.id}/${attempt.id}/model.obj`, byteSize: 11, sha256: objSha256, published: false },
+      { kind: 'tiles', rootKey: 'models', relativePath: `${task.id}/${attempt.id}/tiles/tileset.json`, byteSize: 40, sha256: tilesetSha256, manifestSha256: tilesManifestSha256, manifestFiles: tileFiles, published: false },
       { kind: 'pointCloud', rootKey: 'models', relativePath: `${task.id}/${attempt.id}/raw.laz`, byteSize: 21, sha256: rawSha256, published: false },
     ],
     makeActive: false,
@@ -82,7 +116,7 @@ test('admin review sessions expose only an exact review-ready derived version an
   assert.equal(issuedResponse.status, 201);
   assert.equal(issuedResponse.headers.get('cache-control'), 'no-store');
   const issued = await issuedResponse.json();
-  assert.deepEqual(issued.assetKinds, ['glb']);
+  assert.deepEqual(issued.assetKinds, ['glb', 'tiles']);
   assert.equal(issued.sessionMode, 'review');
   assert.equal(issued.attemptId, attempt.id);
   assert.equal(issued.modelVersionId, versionId);
@@ -96,10 +130,14 @@ test('admin review sessions expose only an exact review-ready derived version an
   assert.equal(session.reviewAttemptId, attempt.id);
   assert.equal(session.model.activeVersion.id, versionId);
   assert.ok(session.model.assets.glb);
+  assert.ok(session.model.assets.tiles, 'verified tiles survive the private OBJ review filter');
+  assert.equal(session.model.assets.obj, null, 'the private OBJ proof input is not exposed to review sessions');
+  assert.equal(session.model.lodProvenance?.schemaVersion, 3, 'review configuration retains verified LOD provenance after hiding its private OBJ proof asset');
   assert.equal(session.model.assets.pointCloud, null, 'raw point-cloud processing input is not review-shareable');
   const assetResponse = await fetch(`${base}${session.model.assets.glb}`, { headers: { range: 'bytes=0-6' } });
   assert.equal(assetResponse.status, 206);
   assert.equal(await assetResponse.text(), 'derived');
+  assert.equal((await fetch(`${base}${session.model.assets.tiles}`)).status, 200);
   const rawAssetUrl = `${base}/session-assets/${encodeURIComponent(session.accessToken)}/${encodeURIComponent(model.id)}/models/${task.id}/${attempt.id}/raw.laz`;
   assert.equal((await fetch(rawAssetUrl)).status, 404, 'a valid review capability cannot request administrative source assets directly');
 

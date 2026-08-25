@@ -84,7 +84,7 @@ app.use((_req, res, next) => {
     "default-src 'self'",
     // Legacy Potree/admin shells still contain fixed inline bootstrap scripts.
     // Third-party script origins remain forbidden.
-    "script-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
     "img-src 'self' data: blob: https://server.arcgisonline.com https://ledgetopdroneservices.com",

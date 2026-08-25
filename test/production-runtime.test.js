@@ -28,6 +28,17 @@ test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT
   const worker = fs.readFileSync(path.join(repositoryRoot, 'server', 'derivativeWorker.js'), 'utf8');
 });
 
+test('published image executes a real Obj2Tiles conversion and provenance audit', () => {
+  const smokePath = path.join(repositoryRoot, 'scripts', 'verify-obj2tiles-runtime.mjs');
+  assert.equal(fs.existsSync(smokePath), true, 'the immutable image includes a real converter smoke test');
+  const smoke = fs.readFileSync(smokePath, 'utf8');
+  const workflow = fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'viewer-image.yml'), 'utf8');
+  assert.match(smoke, /spawnSync\(obj2Tiles/);
+  assert.match(smoke, /auditControlledObj2Tiles/);
+  assert.match(smoke, /lod-provenance\.json/);
+  assert.match(workflow, /docker run --rm "\$PUBLISHED_IMAGE" node scripts\/verify-obj2tiles-runtime\.mjs/);
+});
+
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
   const compose = fs.readFileSync(path.join(repositoryRoot, 'docker-compose.yml'), 'utf8');
   const environmentTemplate = fs.readFileSync(path.join(repositoryRoot, '.env.example'), 'utf8');
@@ -153,6 +164,13 @@ test('release-candidate image tags cannot move latest', () => {
   assert.match(workflow, /Obj2Tiles --version[\s\S]*EXPECTED_OBJ2TILES_VERSION/);
   assert.match(workflow, /const shared="new Potree\.PointCloudCopcGeometryNode\(geometry\)"/);
   assert.match(workflow, /source\.includes\(nonexistent\)[\s\S]*source\.slice\(end\)\.includes\(shared\)/);
+  assert.match(workflow, /EptLazRsDecoderWorker\.js[\s\S]*EPT LAZ-RS decode failed/);
+  assert.match(workflow, /laz_rs_wasm_bg-.*\\\.wasm/);
+  assert.match(workflow, /wasm\.length!==1[\s\S]*size<1000/);
+  assert.match(workflow, /const relativeWasmReference=/);
+  assert.match(workflow, /const route=source\.indexOf\("isFullFile \?"\)[\s\S]*const lazRs=source\.indexOf\("EptLazRsDecoderWorker\.js",route\)[\s\S]*const legacy=source\.indexOf\("EptLaszipDecoderWorker\.js",route\)/);
+  assert.match(workflow, /const moduleFactory="url\.endsWith\(\\"\/EptLazRsDecoderWorker\.js\\"\) \? \{type: \\"module\\"\} : undefined"/);
+  assert.match(workflow, /e\.data\.pointCount/);
   assert.match(workflow, /SELECT MAX\(version\) AS version FROM schema_migrations/);
   assert.match(workflow, /test "\$VIEWER_SCHEMA_VERSION" = "\$EXPECTED_SCHEMA_VERSION"/);
   assert.match(workflow, /node scripts\/write-image-attestation\.mjs viewer-image-attestation\.json/);
@@ -288,10 +306,13 @@ test('production gates health/readiness and all routes behind exact proxy host a
   assert.equal(health.headers.get('x-ltds-viewer-revision'), 'unavailable');
   assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '24');
   assert.equal(health.headers.get('cache-control'), 'no-store');
+  const contentSecurityPolicy = health.headers.get('content-security-policy') || '';
   assert.match(
-    health.headers.get('content-security-policy') || '',
+    contentSecurityPolicy,
     /frame-ancestors 'self' https:\/\/ops\.example\.test https:\/\/client\.example\.test/,
   );
+  assert.match(contentSecurityPolicy, /script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'/);
+  assert.doesNotMatch(contentSecurityPolicy, /(?:^|[ ;])'unsafe-eval'(?:[ ;]|$)/);
   assert.equal(health.headers.get('referrer-policy'), 'no-referrer');
 
   assert.equal((await requestWithHost(port, 'attacker.example.test', '/', proxySecret)).status, 421);

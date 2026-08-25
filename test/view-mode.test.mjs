@@ -7,12 +7,12 @@ import {
   viewerModeUrl,
 } from '../view-mode.mjs';
 
-test('orthophoto is the default while a valid requested view is preserved', () => {
+test('verified LOD is the default while a valid requested view is preserved', () => {
   const available = availableViewerModes({
     meshSource: 'tiles', cloudMode: 'potree', ortho: true, dsm: true, dtm: true,
   });
   assert.deepEqual(available, ['model', 'cloud', 'ortho', 'dsm', 'dtm']);
-  assert.equal(chooseViewerMode(null, available), 'ortho');
+  assert.equal(chooseViewerMode(null, available), 'model');
   assert.equal(chooseViewerMode('cloud', available), 'cloud');
 });
 

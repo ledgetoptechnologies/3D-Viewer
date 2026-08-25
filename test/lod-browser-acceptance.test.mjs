@@ -89,16 +89,23 @@ function contentType(file) {
 async function startFixture(tileRoot) {
   const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
   const assetPrefix = `/assets/${fixtureId}/derivatives/`;
+  const config = fixtureConfig();
+  config.assets.ortho = '/fixtures/orthophoto.tif';
   const server = createServer((request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
+    if (url.pathname === '/api/v1/health') {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'X-LTDS-Viewer-Revision': 'a'.repeat(40) });
+      reply.end('{"ok":true}');
+      return;
+    }
     if (url.pathname === '/api/models') {
       reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      reply.end(JSON.stringify([fixtureConfig()]));
+      reply.end(JSON.stringify([config]));
       return;
     }
     if (url.pathname === `/api/models/${fixtureId}`) {
       reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      reply.end(JSON.stringify(fixtureConfig()));
+      reply.end(JSON.stringify(config));
       return;
     }
     if (url.pathname.startsWith(assetPrefix)) {
@@ -131,6 +138,11 @@ async function startStreamingOnlyFixture(assetOverrides = {}) {
   const server = createServer((request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     requests.push(url.pathname);
+    if (url.pathname === '/api/v1/health') {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'X-LTDS-Viewer-Revision': 'a'.repeat(40) });
+      reply.end('{"ok":true}');
+      return;
+    }
     if (url.pathname === '/api/models') {
       reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       reply.end(JSON.stringify([config]));
@@ -166,6 +178,11 @@ async function startSessionRefreshFixture(tileRoot) {
   const server = createServer((request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     requests.push(url.pathname);
+    if (url.pathname === '/api/v1/health') {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'X-LTDS-Viewer-Revision': 'a'.repeat(40) });
+      reply.end('{"ok":true}');
+      return;
+    }
     if (url.pathname === '/api/v1/sessions/current') {
       currentRequests += 1;
       const model = structuredClone(config);
@@ -356,6 +373,7 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     await client.command('Log.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, screenWidth: 1440, screenHeight: 900 });
     await client.command('Page.navigate', { url: `${origin}/?project=${fixtureId}` });
+    await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'verified LOD was not selected over the available orthophoto');
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'root B3DM did not load');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
 
@@ -379,23 +397,42 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     assert.equal(far.root.visible, true);
 
     const closeSet = new Set(close.visibleLeaves);
-    const candidates = [
-      { position: [-112, 44, -180], lookAt: [-104, 18, -190] },
-      { position: [-112, 44, 180], lookAt: [-104, 18, 190] },
-      { position: [112, 44, -180], lookAt: [104, 18, -190] },
-      { position: [112, 44, 180], lookAt: [104, 18, 190] },
-    ];
+    const candidates = await client.evaluate(`(() => {
+      const tiles=window.__ltds.tiles();
+      const Vector3=window.__ltds.camera().position.constructor;
+      tiles.group.updateMatrixWorld(true);
+      const close=new Set(${JSON.stringify([...closeSet])});
+      const rows=[];
+      const visit=(tile)=>{
+        (tile?.children||[]).forEach(visit);
+        const uri=tile.content?.uri||tile.content?.url||null;
+        if ((tile?.children||[]).length || Number(tile?.geometricError)!==0 || close.has(uri)) return;
+        const volume=tile.engineData?.boundingVolume;
+        const obb=volume?.obb||volume?.regionObb;
+        let center=null;
+        if (obb?.box&&obb?.transform) center=obb.box.getCenter(new Vector3()).applyMatrix4(obb.transform);
+        else if (volume?.sphere?.center) center=volume.sphere.center.clone();
+        if (!center) return;
+        center.applyMatrix4(tiles.group.matrixWorld);
+        rows.push({uri,lookAt:[center.x,center.y,center.z],position:[center.x,center.y+30,center.z+55]});
+      };
+      visit(tiles.root);
+      return rows;
+    })()`);
+    assert.ok(candidates.length > 0, 'tile hierarchy exposed no alternate full-detail view');
     let panned = null;
+    const panSamples = [];
     for (const candidate of candidates) {
       await setView(client, candidate.position, candidate.lookAt);
       await new Promise((resolve) => setTimeout(resolve, 2_500));
       const sample = await client.evaluate(snapshotExpression());
+      panSamples.push({ candidate, visibleLeaves: sample.visibleLeaves, camera: sample.camera });
       if (sample.visibleLeaves.some((uri) => !closeSet.has(uri))) {
         panned = sample;
         break;
       }
     }
-    assert.ok(panned, 'panning did not replace the detailed frontier');
+    assert.ok(panned, `panning did not replace the detailed frontier: ${JSON.stringify({ close: [...closeSet], panSamples })}`);
     assert.equal(panned.root.visible, true);
 
     // The original close-up leaves normally stay cached. Returning to that view
@@ -567,7 +604,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
   }
 });
 
-test('browser defaults to orthophoto and tears down point-cloud runtime across history navigation', { timeout: 60_000 }, async (t) => {
+test('browser defaults to orthophoto when LOD is unavailable and tears down point-cloud runtime across history navigation', { timeout: 60_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) {
     t.skip('Chrome or Edge is required for view lifecycle browser acceptance.');
@@ -594,7 +631,7 @@ test('browser defaults to orthophoto and tears down point-cloud runtime across h
     await client.command('Page.enable');
     await client.command('Runtime.enable');
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
-    await waitFor(client, `location.search.includes('view=ortho') && document.querySelector('#tab-ortho')?.classList.contains('active')`, 'orthophoto was not selected by default');
+    await waitFor(client, `location.search.includes('view=ortho') && document.querySelector('#tab-ortho')?.classList.contains('active')`, 'orthophoto fallback was not selected');
 
     await client.evaluate(`document.querySelector('#tab-cloud').click()`);
     await waitFor(client, `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`, 'point-cloud mode did not start');

@@ -102,6 +102,7 @@ jobs:
             'test "$(cat /app/source-commit.txt)" = "$EXPECTED_REVISION" && test "$(stat -c %a /app/source-commit.txt)" = 444'
           docker run --rm --entrypoint sh -e EXPECTED_OBJ2TILES_VERSION="$EXPECTED_OBJ2TILES_VERSION" "$PUBLISHED_IMAGE" -c \
             '/opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "$EXPECTED_OBJ2TILES_VERSION" >/dev/null'
+          docker run --rm "$PUBLISHED_IMAGE" node scripts/verify-obj2tiles-runtime.mjs
           docker run --rm --entrypoint node "$PUBLISHED_IMAGE" -e '
             const fs=require("node:fs");
             const file="/app/dist/potree/build/potree/potree.js";
@@ -113,6 +114,19 @@ jobs:
             if(start<0||end<=start)process.exit(2);
             const block=source.slice(start,end);
             if((block.split(shared).length-1)!==1||source.includes(nonexistent)||!source.slice(end).includes(shared))process.exit(3);
+            const route=source.indexOf("isFullFile ?");
+            const lazRs=source.indexOf("EptLazRsDecoderWorker.js",route);
+            const legacy=source.indexOf("EptLaszipDecoderWorker.js",route);
+            const moduleFactory="url.endsWith(\"/EptLazRsDecoderWorker.js\") ? {type: \"module\"} : undefined";
+            const decodedPointCount="Number.isSafeInteger(e.data.pointCount) && e.data.pointCount > 0 ? e.data.pointCount : pointCount";
+            if(route<0||lazRs<route||legacy<lazRs||!source.includes(moduleFactory)||!source.includes(decodedPointCount))process.exit(4);
+            const workerDirectory="/app/dist/potree/build/potree/workers";
+            const workerFile=`${workerDirectory}/EptLazRsDecoderWorker.js`;
+            const workerSource=fs.readFileSync(workerFile,"utf8");
+            const relativeWasmReference=/new URL\(`laz_rs_wasm_bg-[^`]+\.wasm`,import\.meta\.url\)/.test(workerSource);
+            if(!workerSource.includes("EPT LAZ-RS decode failed")||workerSource.includes("data:application/wasm;base64,")||workerSource.length<10000||!relativeWasmReference)process.exit(5);
+            const wasm=fs.readdirSync(workerDirectory).filter((name)=>/^laz_rs_wasm_bg-.*\.wasm$/.test(name));
+            if(wasm.length!==1||fs.statSync(`${workerDirectory}/${wasm[0]}`).size<1000)process.exit(6);
           '
           VIEWER_SCHEMA_VERSION="$(docker run --rm --entrypoint node "$PUBLISHED_IMAGE" -e '
             const {openDatabase}=require("./server/database");
