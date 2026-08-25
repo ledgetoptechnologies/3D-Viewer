@@ -47,9 +47,14 @@ generation requires both the OBJ (including its MTL/textures) and an independent
 companion GLB. Standard WebODM task backups commonly satisfy this source
 contract with `assets/odm_texturing/odm_textured_model_geo.obj` and
 `assets/odm_texturing/odm_textured_model_geo.glb`. Native imported tiles are
-quarantined, audited, and registered only after the proof succeeds. Automatic
-generation and legacy generation backfill remain default-off; an explicit
-operator opt-in permits a single bounded attempt and a manual retry.
+quarantined, audited, and registered only after the proof succeeds. Production
+enables automatic generation and bounded legacy-model reconciliation by
+default. Verified imported tiles are reused; an eligible textured OBJ plus
+companion GLB with no valid tiles receives one durable generation attempt, and
+a terminal current-revision failure permits only the existing explicit manual
+retry. Operators may deliberately disable generation with
+`MESH_DERIVATIVES_ENABLED=false`; disabling it does not make an unverified or
+missing tileset interactive.
 
 GLB-only and OBJ-only inputs deliberately remain downloadable originals, but
 are not interactive Viewer layers. The runtime image does not contain a pinned mesh interchange
