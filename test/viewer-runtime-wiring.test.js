@@ -25,6 +25,7 @@ test('viewer 3D mode is streaming-only and keeps original mesh access outside la
 
 test('viewer streams root backdrop without preloading stale branches', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const materials = fs.readFileSync(path.join(__dirname, '..', 'lod-materials.mjs'), 'utf8');
   assert.match(main, /enableRootLodBackdrop,/);
   assert.match(main, /releaseStaleLodDetails,/);
   const rootStart = main.indexOf("tilesRenderer.addEventListener('load-root-tileset'");
@@ -37,8 +38,15 @@ test('viewer streams root backdrop without preloading stale branches', () => {
   assert.match(rootHandler, /if \(decision\.action !== 'stream-lod'\)\s*\{[\s\S]*?return;\s*\}[\s\S]*?enableRootLodBackdrop\(tilesRenderer\);/);
   assert.doesNotMatch(tilesetHandler, /enableRootLodBackdrop\(tilesRenderer\)/);
   assert.match(main, /const isCoarseBackdrop = ev\.tile === tilesRenderer\.root;/);
-  assert.match(main, /material\.depthWrite = false;/);
-  assert.match(main, /material\.polygonOffset = true;/);
+  assert.match(main, /import \{ preserveLodMaterials \} from '\.\/lod-materials\.mjs'/);
+  assert.match(materials, /function preserveLodMaterials\(source, options\)/);
+  assert.match(materials, /const originals = Array\.isArray\(source\) \? source : \[source\]/);
+  assert.match(materials, /const replacements = originals\.map\(\(material\) => unlitLodMaterial\(material, options\)\)/);
+  assert.match(materials, /map,\s*lightMap: source\?\.lightMap/);
+  assert.match(materials, /vertexColors: Boolean\(source\?\.vertexColors\)/);
+  assert.match(main, /c\.material = preserveLodMaterials\(c\.material, \{ coarseBackdrop: isCoarseBackdrop \}\)/);
+  assert.match(materials, /material\.depthWrite = false;/);
+  assert.match(materials, /material\.polygonOffset = true;/);
   assert.match(main, /c\.renderOrder = -100;/);
   assert.match(main, /tilesRenderer\.update\(\);\s*releaseStaleLodDetails\(tilesRenderer\);/);
 });
@@ -100,6 +108,18 @@ test('viewer mode lifecycle cancels stale initializers and persists history', ()
   assert.match(main, /image\.readRasters\(\{ window: \[x0, y0, x1, y1\], width, height, resampleMethod: 'bilinear', pool: geoPool, signal \}\)/);
   assert.match(main, /setAbortSignal: function \(signal\)/);
   assert.match(main, /err\?\.name === 'AbortError'/);
+});
+
+test('mesh and Potree modes exchange one immutable camera snapshot before teardown', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /function captureMeshView\(\) \{[\s\S]*position: camera\.position\.clone\(\),[\s\S]*quaternion: camera\.quaternion\.clone\(\),[\s\S]*target: getViewTargetWorld\(\)/);
+  const capture = main.indexOf('pendingPointCloudView = captureMeshView()');
+  const dispose = main.indexOf('disposeTiles()', capture);
+  assert.ok(capture >= 0 && dispose > capture, 'mesh view is captured before streamed tiles are disposed');
+  assert.match(main, /setTimeout\(\(\) => pushViewToPointCloud\(snapshot, retries - 1\), 250\)/);
+  assert.match(main, /w\.__setViewUTM\(camU\.e, camU\.n, camU\.alt, tgtU\.e, tgtU\.n, tgtU\.alt\)/);
+  assert.match(main, /typeof w\.__getViewUTM === 'function' \? w\.__getViewUTM\(\) : null/);
+  assert.match(main, /controls\.setView\(camW, tgtW\)/);
 });
 
 test('viewer diagnostics are bounded and never include asset URLs or exception details', () => {

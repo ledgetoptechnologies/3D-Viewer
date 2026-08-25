@@ -13,6 +13,11 @@ function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+function finiteVector(value, keys) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && keys.every((key) => typeof value[key] === 'number' && Number.isFinite(value[key]));
+}
+
 function sourceAuthorization(row) {
   if (!row || row.source_authorization_type !== 'model_association'
     || typeof row.source_authorization_id !== 'string' || !row.source_authorization_id
@@ -145,6 +150,90 @@ class ViewerRepository {
     if (!model || !version) return null;
     const assets = this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(versionId);
     return asModel(model, version, assets);
+  }
+
+  listMissingOdmGeorefCandidates(limit = 5, reconciliationRevision = 1) {
+    const n = Math.max(1, Math.min(Number(limit) || 5, 20));
+    const revision = Math.max(1, Math.min(Number(reconciliationRevision) || 1, 1_000_000));
+    const cursor = parseJson(this.getState('odm_georef_backfill_cursor'), null);
+    const rows = this.database.prepare(`SELECT
+      v.id AS version_id,v.model_id,o.root_key AS output_root_key,o.relative_path AS output_relative_path
+      FROM model_versions v
+      JOIN models m ON m.id=v.model_id
+      JOIN model_outputs o ON o.id=v.id AND o.model_id=v.model_id
+      WHERE m.provider='webodm' AND m.status<>'unregistered'
+        AND v.status='ready' AND o.status IN ('ready','published') AND v.id>?
+        AND COALESCE(json_extract(v.metadata_json,'$.odmGeorefReconciliation.revision'),0)<?
+        AND (
+          COALESCE(json_type(v.georef_json,'$.rtc.e'),'') NOT IN ('integer','real') OR
+          COALESCE(json_type(v.georef_json,'$.rtc.n'),'') NOT IN ('integer','real') OR
+          COALESCE(json_type(v.georef_json,'$.rtc.z'),'') NOT IN ('integer','real') OR
+          COALESCE(json_type(v.georef_json,'$.bboxCenter.x'),'') NOT IN ('integer','real') OR
+          COALESCE(json_type(v.georef_json,'$.bboxCenter.y'),'') NOT IN ('integer','real') OR
+          COALESCE(json_type(v.georef_json,'$.bboxCenter.z'),'') NOT IN ('integer','real')
+        )
+      ORDER BY v.id LIMIT ?`).all(typeof cursor === 'string' ? cursor : '', revision, n);
+    return rows.map((row) => ({
+      versionId: row.version_id, modelId: row.model_id,
+      outputRootKey: row.output_root_key, outputRelativePath: row.output_relative_path,
+    }));
+  }
+
+  odmGeorefBackfillCursor() {
+    const value = parseJson(this.getState('odm_georef_backfill_cursor'), null);
+    return typeof value === 'string' && value ? value : null;
+  }
+
+  advanceOdmGeorefBackfillCursor(versionId, more) {
+    this.setState('odm_georef_backfill_cursor', more && versionId ? JSON.stringify(versionId) : 'null');
+  }
+
+  mergeModelVersionGeoref(modelId, versionId, discovered) {
+    return this.transaction(() => {
+      const row = this.database.prepare('SELECT georef_json FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
+      if (!row) return false;
+      const current = parseJson(row.georef_json, {}), next = { ...current };
+      let changed = false;
+      const hadRtc = finiteVector(current.rtc, ['e', 'n', 'z']);
+      const discoveredRtc = finiteVector(discovered?.rtc, ['e', 'n', 'z']);
+      if (!hadRtc && discoveredRtc) {
+        next.rtc = { e: Number(discovered.rtc.e), n: Number(discovered.rtc.n), z: Number(discovered.rtc.z) };
+        changed = true;
+      }
+      const matchingRtc = !hadRtc || (discoveredRtc && ['e', 'n', 'z'].every((key) => Number(current.rtc[key]) === Number(discovered.rtc[key])));
+      if (matchingRtc && !finiteVector(current.bboxCenter, ['x', 'y', 'z']) && finiteVector(discovered?.bboxCenter, ['x', 'y', 'z'])) {
+        next.bboxCenter = { x: Number(discovered.bboxCenter.x), y: Number(discovered.bboxCenter.y), z: Number(discovered.bboxCenter.z) };
+        changed = true;
+      }
+      for (const key of ['crs', 'proj', 'epsg', 'utmZone', 'hemisphere', 'utmZoneLon0Deg']) {
+        if ((current[key] === undefined || current[key] === null || current[key] === '')
+          && discovered?.[key] !== undefined && discovered[key] !== null && discovered[key] !== '') {
+          next[key] = discovered[key]; changed = true;
+        }
+      }
+      if (!changed) return false;
+      return this.database.prepare('UPDATE model_versions SET georef_json=?,updated_at=? WHERE id=? AND model_id=?')
+        .run(JSON.stringify(next), now(), versionId, modelId).changes === 1;
+    });
+  }
+
+  modelVersionHasCompleteGeoref(modelId, versionId) {
+    const row = this.database.prepare('SELECT georef_json FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
+    const value = parseJson(row?.georef_json, {});
+    return finiteVector(value.rtc, ['e', 'n', 'z']) && finiteVector(value.bboxCenter, ['x', 'y', 'z']);
+  }
+
+  markModelVersionGeorefReconciliation(modelId, versionId, revision, outcome = 'terminal_no_metadata') {
+    const targetRevision = Math.max(1, Math.min(Number(revision) || 1, 1_000_000));
+    return this.transaction(() => {
+      const row = this.database.prepare('SELECT metadata_json FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
+      if (!row) return false;
+      const metadata = parseJson(row.metadata_json, {}), current = metadata.odmGeorefReconciliation;
+      if (Number(current?.revision) >= targetRevision) return false;
+      const next = { ...metadata, odmGeorefReconciliation: { revision: targetRevision, outcome } };
+      return this.database.prepare('UPDATE model_versions SET metadata_json=?,updated_at=? WHERE id=? AND model_id=?')
+        .run(JSON.stringify(next), now(), versionId, modelId).changes === 1;
+    });
   }
 
   getModelAssetFile(assetId, relativePath) {

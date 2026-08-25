@@ -589,12 +589,15 @@ WGS84 UTM 16N
 ```
 
 - GLB/OBJ: parent rotated `-π/2` X (Z-up→Y-up), child offset `-C` (model bbox
-  center; `{0,0,0}` unless a `viewer.json` override is present — see "Known
-  limitations")
+  center). WebODM imports read their bounded model origin from
+  `odm_georeferencing_model_geo.txt` (with `coords.txt` as a fallback) and
+  derive `C` from authoritative summary, info, or EPT bounds.
 - 3D Tiles: `3d-tiles-renderer` already applies its own up-axis fix; parent is
   rotated `π` X with offset `(-C.x, -C.z, C.y)` so tiles land exactly on the GLB
 - Cameras (`shots.geojson` translations are absolute UTM): position − RTC, then
-  the same GLB frame; rotation = axis-angle negated (WebODM convention)
+  the same GLB frame; rotation = axis-angle negated (WebODM convention).
+  Worker maintenance repairs missing RTC/bounds metadata on existing adopted
+  WebODM versions in bounded, idempotent batches, so reimport is unnecessary.
 - Statusbar `worldToUtm()` converts back for live E/N/elevation readout
 
 ## Feature notes
@@ -603,9 +606,10 @@ WGS84 UTM 16N
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom). Detail
   slider maps to `tilesRenderer.errorTarget` (26 − slider). The status bar says
   `LOD: full-detail` only when every visible tile is on the declared zero-error
-  frontier. Invalid hierarchy or tile-load failures fail over to the independent
-  GLB when it is available. Resize/orientation changes also refresh the render
-  resolution used by the screen-space-error calculation.
+  frontier. Invalid hierarchy or tile-load failures remain unavailable until a
+  verified streaming derivative exists; original GLB/OBJ files are download-only
+  and are never decoded automatically in the browser. Resize/orientation changes
+  also refresh the render resolution used by the screen-space-error calculation.
 
   Zero geometric error verifies renderer convergence, not conversion provenance:
   the tiles match the full mesh only if the derivative pipeline generated every
@@ -681,7 +685,7 @@ The staff workspace is project-first. **Dashboard** loads the complete permissio
 
 Open a project to manage its datasets and tasks, start or restart processing, import data, work with GCPs, review/publish outputs, and create authenticated client access, task-specific public links, or one whole-project public link. A whole-project link dynamically lists only each task's current active published output, automatically includes tasks published later, and stops serving a task when its publication is replaced, archived, or removed. Project links have their own password, expiry, revocation, audit, and rate-limit boundary; they do not create client grants or child model shares. Public project sessions and asset capabilities expose only published GLB, tiles, EPT, ortho, DSM, and DTM derivatives. Processing reports, raw inputs, logs, datasets, provider paths, OBJ sources, and unpublished assets remain staff-only. Disabling download controls is a UI choice rather than DRM because a browser must receive renderable model bytes.
 
-The import dialog separates bounded browser uploads (**This device**) from the managed server import folder; there is no live WebODM scan control. The server option provides a root-confined browser over `/app/storage/imports/datasets`, so staff open folders and explicitly select a folder or ZIP without typing or seeing a host path. ZIP and ZIP64 WebODM backups are read from their bounded central directory, which supports large task backups without weakening traversal, symlink, duplicate-path, entry-count, or expanded-size checks. The API and worker revalidate the selected source, then copy and validate it before creating the task. The original source remains untouched until a separate recoverable cleanup action is requested. Emlid all-columns GCP files use a separate preview-first flow, with the exact `CS name`, vertical provenance, units, coordinate mapping, and warnings returned by the server; GCP import requires explicit confirmation and never substitutes a guessed coordinate system.
+The import dialog separates bounded browser uploads (**This device**) from the managed server import folder; there is no live WebODM scan control. The server option provides a root-confined browser over `/app/storage/imports/datasets`, so staff open folders and explicitly select a folder or ZIP without typing or seeing a host path. ZIP and ZIP64 WebODM backups are read from their bounded central directory, which supports large task backups without weakening traversal, symlink, duplicate-path, entry-count, or expanded-size checks. The API and worker revalidate the selected source, then copy and validate it before creating the task. An operator may intentionally import identical WebODM content more than once; each operation receives independent task, dataset, model, and version identities, while retrying one operation remains idempotent. The original source remains untouched until a separate recoverable cleanup action is requested. Emlid all-columns GCP files use a separate preview-first flow, with the exact `CS name`, vertical provenance, units, coordinate mapping, and warnings returned by the server; GCP import requires explicit confirmation and never substitutes a guessed coordinate system.
 
 Expanded tasks show only authoritative API metrics: processing status/duration, source-image count, reconstructed points, georeferencing CRS, output availability, and task disk usage. Average GSD or surveyed area display **Unavailable** unless the imported or completed ODM task supplies the authoritative statistics. The task also exposes the latest 100 immutable processing attempts, with retry available only for failed or cancelled attempts. Output actions appear only for reported derivative kinds and usable URLs; reviewable map/3D derivatives open through an isolated review session. While an attempt is active, the workspace refreshes its sanitized API log tail every five seconds; the UI keeps the latest 100 entries and offers bounded log-tail download and fullscreen views.
 

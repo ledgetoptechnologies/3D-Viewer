@@ -46,15 +46,26 @@ test('Potree controls preserve panel state and match mesh navigation feedback', 
   assert.match(pointCloudShell, /ctx\.fillStyle = '#ffffff'/);
   assert.match(pointCloudShell, /Math\.PI \* 2 \* 0\.55 \/ h/);
   assert.match(pointCloudShell, /viewer\.earthControls\?\.pivotIndicator/);
-  assert.match(pointCloudShell, /viewer\.setPointBudget\(4_000_000\)/);
-  assert.match(pointCloudShell, /target:\s*4_000_000/);
-  assert.match(viewerShell, /id="pc2-budget"[^>]*value="4"/);
-  assert.match(viewerShell, /id="pc2-budget-val">4M</);
+  assert.match(pointCloudShell, /viewer\.setPointBudget\(10_000_000\)/);
+  assert.match(pointCloudShell, /target:\s*10_000_000/);
+  assert.match(viewerShell, /id="pc2-budget"[^>]*value="10"/);
+  assert.match(viewerShell, /id="pc2-budget-val">10M</);
+  assert.match(pointCloudShell, /const forward = new THREE\.Vector3\(\)\s*\.subVectors\(view\.getPivot\(\), view\.position\)\s*\.normalize\(\)\s*\.applyQuaternion\(q\)/);
+  assert.match(pointCloudShell, /view\.lookAt\(view\.position\.clone\(\)\.addScaledVector\(forward, lookDistance\)\)/);
+  assert.doesNotMatch(pointCloudShell, /view\.lookAt\(pivot\)/);
+  assert.match(pointCloudShell, /this\.view\.position\.add\(delta\);\s*this\.pivot\.add\(delta\);/);
+  assert.match(pointCloudShell, /this\._touch\.pinchStart\.copy\(cur\)\.add\(delta\)/);
+  assert.doesNotMatch(pointCloudShell, /this\.view\.position\.copy\(this\._panStartPos\)/);
+  assert.match(pointCloudShell, /this\.pivot\.copy\(this\.view\.getPivot\(\)\)/);
+  assert.match(pointCloudShell, /this\._inertia\.yaw = 0;\s*this\._inertia\.pitch = 0;\s*this\._lastMoveTime = 0;/);
 });
 
-test('pre-metadata mesh view cannot strand a healthy cloud off camera', () => {
-  assert.match(pointCloudShell, /pendingSyncedTarget = new THREE\.Vector3/);
-  assert.match(pointCloudShell, /bounds\.distanceToPoint\(pendingSyncedTarget\)/);
-  assert.match(pointCloudShell, /if \(!window\.__pcViewReady \|\| !syncedTargetIsRelevant\)/);
+test('pre-metadata mesh view remains exact when the cloud finishes loading', () => {
+  assert.match(pointCloudShell, /window\.__setViewUTM = \(camE, camN, camAlt, tgtE, tgtN, tgtAlt\)/);
+  assert.match(pointCloudShell, /window\.__getViewUTM = \(\) =>/);
+  assert.match(pointCloudShell, /position: \[view\.position\.x, view\.position\.y, view\.position\.z\]/);
+  assert.match(pointCloudShell, /target: \[target\.x, target\.y, target\.z\]/);
+  assert.match(pointCloudShell, /if \(!window\.__pcViewReady\) \{\s*viewer\.fitToScreen\(0\.7\)/);
+  assert.doesNotMatch(pointCloudShell, /syncedTargetIsRelevant|pendingSyncedTarget/);
   assert.match(pointCloudShell, /viewer\.fitToScreen\(0\.7\)/);
 });

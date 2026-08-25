@@ -27,6 +27,8 @@ import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthoph
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
+import { preserveLodMaterials } from './lod-materials.mjs';
+import { createUtmProjection } from './utm-conversion.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -51,7 +53,7 @@ let POINT_CLOUD_URL = null, POINT_CLOUD_FORMAT = null;
 // coords.txt / an optional imported-derivatives sidecar).
 let RTC = { e: 0, n: 0, z: 0 };
 let C = { x: 0, y: 0, z: 0 };
-let UTM_ZONE_LON0 = 0;
+let UTM_PROJECTION = createUtmProjection();
 
 const METERS_TO_FT = 3.28084;
 let DISPLAY_UNITS = 'imperial';
@@ -154,6 +156,7 @@ let modeEpoch = 0;
 let modeAbortController = null;
 let mapToolEpoch = 0;
 let directPointCloudLoad = null;
+let pendingPointCloudView = null;
 
 const DIAGNOSTIC_CORRELATION_ID = (() => {
   const value = globalThis.crypto?.randomUUID?.();
@@ -551,7 +554,10 @@ function applyProjectConfig(p) {
 
   RTC = (p.georef && p.georef.rtc) || { e: 0, n: 0, z: 0 };
   C = (p.georef && p.georef.bboxCenter) || { x: 0, y: 0, z: 0 };
-  UTM_ZONE_LON0 = (((p.georef && p.georef.utmZoneLon0Deg) ?? -87) * Math.PI) / 180;
+  UTM_PROJECTION = createUtmProjection({
+    zoneLon0Deg: p.georef?.utmZoneLon0Deg ?? -87,
+    hemisphere: p.georef?.hemisphere ?? 'N',
+  });
 
   // Pick the best available mesh/point-cloud source for this project.
   state.meshSource = TILES_URL ? 'tiles' : (GLB_URL || OBJ_URL ? 'lod-required' : 'none');
@@ -814,22 +820,11 @@ function loadTiles() {
         // environment map. Convert to unlit like the GLB (KHR_materials_unlit).
         // FrontSide (backface culling) matches WebODM: from below, the ground
         // is see-through so you can inspect undersides of structures.
-        const old = c.material;
-        const map = old.map || null;
-        if (map) map.colorSpace = THREE.SRGBColorSpace;
-        const material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide });
-        material.toneMapped = false;
-        if (isCoarseBackdrop) {
-          // Render the permanent coarse base before streamed children. It does
-          // not write depth, so nearby detail cleanly overlays it without flicker.
-          material.depthWrite = false;
-          material.polygonOffset = true;
-          material.polygonOffsetFactor = 1;
-          material.polygonOffsetUnits = 1;
-          c.renderOrder = -100;
-        }
-        c.material = material;
-        if (old.dispose) old.dispose();
+        // Preserve every primitive's texture assignment. WebODM/Obj2Tiles can
+        // emit a material array; treating it as one material drops every map
+        // and renders the streamed mesh white.
+        c.material = preserveLodMaterials(c.material, { coarseBackdrop: isCoarseBackdrop });
+        if (isCoarseBackdrop) c.renderOrder = -100;
         queueBVH(c);
       }
     });
@@ -2525,41 +2520,14 @@ function updateLegend(minM, maxM, steps) {
   }
 }
 
-// UTM <-> WGS84 (zone 16N)
+// UTM <-> WGS84. The active projection carries the imported zone central
+// meridian and hemisphere, including southern UTM false northing.
 function utmToLatLon(e, n) {
-  const a = 6378137, f = 1 / 298.257223563, k0 = 0.9996, e0 = 500000;
-  const eSq = 2 * f - f * f;
-  const e1 = (1 - Math.sqrt(1 - eSq)) / (1 + Math.sqrt(1 - eSq));
-  const x = e - e0, M = n / k0;
-  const mu = M / (a * (1 - eSq / 4 - 3 * eSq * eSq / 64 - 5 * eSq ** 3 / 256));
-  const j1 = 3 * e1 / 2 - 27 * e1 ** 3 / 32, j2 = 21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32;
-  const j3 = 151 * e1 ** 3 / 96, j4 = 1097 * e1 ** 4 / 512;
-  const fp = mu + j1 * Math.sin(2 * mu) + j2 * Math.sin(4 * mu) + j3 * Math.sin(6 * mu) + j4 * Math.sin(8 * mu);
-  const ep2 = eSq / (1 - eSq);
-  const c1 = ep2 * Math.cos(fp) ** 2, t1 = Math.tan(fp) ** 2;
-  const r1 = a * (1 - eSq) / Math.pow(1 - eSq * Math.sin(fp) ** 2, 1.5);
-  const n1 = a / Math.sqrt(1 - eSq * Math.sin(fp) ** 2);
-  const d = x / (n1 * k0);
-  const lat = fp - (n1 * Math.tan(fp) / r1) * (d * d / 2 - (5 + 3 * t1 + 10 * c1 - 4 * c1 * c1 - 9 * ep2) * d ** 4 / 24 + (61 + 90 * t1 + 298 * c1 + 45 * t1 * t1 - 252 * ep2 - 3 * c1 * c1) * d ** 6 / 720);
-  const lon = UTM_ZONE_LON0 + (d - (1 + 2 * t1 + c1) * d ** 3 / 6 + (5 - 2 * c1 + 28 * t1 - 3 * c1 * c1 + 8 * ep2 + 24 * t1 * t1) * d ** 5 / 120) / Math.cos(fp);
-  return [lat * 180 / Math.PI, lon * 180 / Math.PI];
+  return UTM_PROJECTION.utmToLatLon(e, n);
 }
 
 function latLonToUtm(latDeg, lonDeg) {
-  const a = 6378137, f = 1 / 298.257223563, k0 = 0.9996;
-  const eSq = 2 * f - f * f, ep2 = eSq / (1 - eSq);
-  const lat = latDeg * Math.PI / 180, lon = lonDeg * Math.PI / 180;
-  const N = a / Math.sqrt(1 - eSq * Math.sin(lat) ** 2);
-  const T = Math.tan(lat) ** 2;
-  const Cc = ep2 * Math.cos(lat) ** 2;
-  const A = Math.cos(lat) * (lon - UTM_ZONE_LON0);
-  const M = a * ((1 - eSq / 4 - 3 * eSq ** 2 / 64 - 5 * eSq ** 3 / 256) * lat
-    - (3 * eSq / 8 + 3 * eSq ** 2 / 32 + 45 * eSq ** 3 / 1024) * Math.sin(2 * lat)
-    + (15 * eSq ** 2 / 256 + 45 * eSq ** 3 / 1024) * Math.sin(4 * lat)
-    - (35 * eSq ** 3 / 3072) * Math.sin(6 * lat));
-  const E = k0 * N * (A + (1 - T + Cc) * A ** 3 / 6 + (5 - 18 * T + T * T + 72 * Cc - 58 * ep2) * A ** 5 / 120) + 500000;
-  const Nn = k0 * (M + N * Math.tan(lat) * (A * A / 2 + (5 - T + 9 * Cc + 4 * Cc * Cc) * A ** 4 / 24 + (61 - 58 * T + T * T + 600 * Cc - 330 * ep2) * A ** 6 / 720));
-  return [E, Nn];
+  return UTM_PROJECTION.latLonToUtm(latDeg, lonDeg);
 }
 
 // WebODM-style colormaps (matplotlib equivalents WebODM offers for DEM layers)
@@ -2859,17 +2827,30 @@ function getViewTargetWorld() {
   return camera.position.clone().addScaledVector(dir, 150);
 }
 
-function pushViewToPointCloud(retries = 40) {
+function captureMeshView() {
+  camera.updateMatrixWorld(true);
+  return {
+    position: camera.position.clone(),
+    quaternion: camera.quaternion.clone(),
+    target: getViewTargetWorld(),
+  };
+}
+
+function pushViewToPointCloud(snapshot = pendingPointCloudView, retries = 40) {
   if (state.activeMode !== 'cloud' || state.cloudMode !== 'potree') return;
   const f = document.getElementById('pc-iframe');
   const w = f && f.contentWindow;
   if (!w || typeof w.__setViewUTM !== 'function') {
-    if (retries > 0) setTimeout(() => pushViewToPointCloud(retries - 1), 250);
+    if (retries > 0) setTimeout(() => pushViewToPointCloud(snapshot, retries - 1), 250);
     return;
   }
-  const camU = worldToUtm(camera.position);
-  const tgtU = worldToUtm(getViewTargetWorld());
-  try { w.__setViewUTM(camU.e, camU.n, camU.alt, tgtU.e, tgtU.n, tgtU.alt); } catch (err) { /* iframe busy */ }
+  const exact = snapshot || captureMeshView();
+  const camU = worldToUtm(exact.position);
+  const tgtU = worldToUtm(exact.target);
+  try {
+    w.__setViewUTM(camU.e, camU.n, camU.alt, tgtU.e, tgtU.n, tgtU.alt);
+    pendingPointCloudView = null;
+  } catch (err) { /* iframe busy */ }
 }
 
 function pullViewFromPointCloud() {
@@ -2877,11 +2858,14 @@ function pullViewFromPointCloud() {
   const w = f && f.contentWindow;
   if (!w || !w.viewer || !w.__pcViewReady) return;
   try {
+    const exact = typeof w.__getViewUTM === 'function' ? w.__getViewUTM() : null;
     const view = w.viewer.scene.view;
-    const p = view.position;
-    const pv = view.getPivot();
-    const camW = utmToWorld(p.x, p.y, p.z);
-    const tgtW = utmToWorld(pv.x, pv.y, pv.z);
+    const p = exact?.position || [view.position.x, view.position.y, view.position.z];
+    const pivot = view.getPivot();
+    const pv = exact?.target || [pivot.x, pivot.y, pivot.z];
+    if (![...p, ...pv].every(Number.isFinite)) return;
+    const camW = utmToWorld(p[0], p[1], p[2]);
+    const tgtW = utmToWorld(pv[0], pv[1], pv[2]);
     if (camW.distanceTo(tgtW) < 0.01) return;
     controls.setView(camW, tgtW);
   } catch (err) { /* keep current view */ }
@@ -3037,6 +3021,11 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   if (prevMode && prevMode !== mode) {
     viewerDiagnostic('mode_cancel', { mode: prevMode, reason: 'superseded' });
   }
+  if (prevMode === 'model' && mode === 'cloud' && state.cloudMode === 'potree') {
+    // Capture while the textured mesh is still present so the center-ray
+    // target is exact; tile disposal immediately below must not change it.
+    pendingPointCloudView = captureMeshView();
+  }
   if (prevMode === 'model' && prevMode !== mode) {
     tilesParent.visible = false;
     disposeTiles();
@@ -3091,7 +3080,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   } else if (isPotreeCloud) {
     updateStatus('Mode: Point Cloud');
     showPointCloud();
-    if (prevMode === 'model') pushViewToPointCloud();
+    if (prevMode === 'model') pushViewToPointCloud(pendingPointCloudView);
   } else if (isDirectCloud) {
     updateStatus('Mode: Point Cloud');
     tilesParent.visible = false;

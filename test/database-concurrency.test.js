@@ -2,12 +2,15 @@
 
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
 const { MIGRATIONS, openDatabase } = require('../server/database');
+const { ProcessingRepository } = require('../server/processingRepository');
+const { ViewerRepository } = require('../server/repository');
 
 const databaseModule = path.resolve(__dirname, '..', 'server', 'database.js');
 const childSource = "const {openDatabase}=require(process.argv[1]);const db=openDatabase(process.argv[2]);db.close();";
@@ -99,7 +102,7 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 24);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 25);
   upgraded.close();
 });
 
@@ -129,5 +132,42 @@ test('v23 persists revision-zero recovery state for terminal pre-upgrade LOD job
   assert.equal(row.recovery_requeued_at, null);
   assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='derivative_jobs_lod_recovery_idx'").get());
   assert.equal(database.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 23);
+  database.close();
+});
+
+test('v25 preserves import history while replacing fingerprint uniqueness with a lookup index', (t) => {
+  const databasePath=temporaryDatabase(t,'migration-v25-duplicate-imports'),database=new DatabaseSync(databasePath);
+  database.exec('PRAGMA foreign_keys=ON');
+  database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+  for(const migration of MIGRATIONS.filter((item)=>item.version<25)){
+    database.exec(migration.sql);
+    database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)').run(migration.version,migration.name,new Date().toISOString());
+  }
+  const processing=new ProcessingRepository(database),repository=new ViewerRepository(database),fingerprint='f'.repeat(64);
+  const project=processing.createProject({id:'project-one',displayName:'Migration project'});
+  const dataset=processing.createDataset({id:'dataset-one',projectId:project.id,displayName:'Migration dataset',sourceType:'webodm',storageMode:'adopted',rootKey:'datasets',relativePath:'dataset-one'});
+  processing.finalizeDataset(dataset.id,[],crypto.createHash('sha256').digest('hex'));
+  const task=processing.createTask({id:'task-one',projectId:project.id,datasetId:dataset.id,displayName:'Migration task'});
+  const attempt=processing.createImportedAttempt({id:'attempt-one',taskId:task.id,datasetId:dataset.id,providerTaskId:'webodm:migration',createdBy:'ops:test'});
+  const model=repository.upsertModelVersion({modelId:'model-one',versionId:'version-one',provider:'webodm',providerModelId:'task-import:import-one',providerVersionId:fingerprint,displayName:'Migration task',status:'ready',assets:[],makeActive:false});
+  processing.setAttemptResult(attempt.id,model.id,'version-one');
+  processing.recordWebodmTaskImport({id:'import-one',sourceFingerprint:fingerprint,sourceRelativePath:'backup.zip',projectId:project.id,taskId:task.id,datasetId:dataset.id,attemptId:attempt.id,modelId:model.id,modelVersionId:'version-one',assetKinds:[],createdBy:'ops:test'});
+  const migration=MIGRATIONS.find((item)=>item.version===25);
+  database.exec('BEGIN IMMEDIATE');database.exec(migration.sql);database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)').run(migration.version,migration.name,new Date().toISOString());database.exec('COMMIT');
+  const preserved=database.prepare('SELECT * FROM webodm_task_imports WHERE id=?').get('import-one');
+  assert.equal(preserved.source_fingerprint,fingerprint);
+  assert.equal(preserved.project_id,project.id);
+  assert.equal(preserved.task_id,task.id);
+  assert.equal(preserved.dataset_id,dataset.id);
+  assert.equal(preserved.attempt_id,attempt.id);
+  assert.equal(preserved.model_id,model.id);
+  assert.equal(preserved.model_version_id,'version-one');
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(),[]);
+  const indexes=database.prepare("PRAGMA index_list('webodm_task_imports')").all(),lookup=indexes.find((item)=>item.name==='webodm_task_imports_fingerprint_idx');
+  assert.ok(lookup);
+  assert.equal(lookup.unique,0);
+  assert.deepEqual(database.prepare("PRAGMA index_info('webodm_task_imports_fingerprint_idx')").all().map((item)=>item.name),['source_fingerprint','created_at','id']);
+  assert.doesNotMatch(database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='webodm_task_imports'").get().sql,/source_fingerprint\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i);
+  assert.equal(database.prepare('SELECT MAX(version) version FROM schema_migrations').get().version,25);
   database.close();
 });

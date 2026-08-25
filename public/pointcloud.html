@@ -156,10 +156,9 @@
     window.viewer = viewer;
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
-    // Start at the proven WebODM-friendly baseline. Stronger devices can raise
-    // this from the parent controls; auto-LOD still lowers it if frame time
-    // degrades while streaming a large legacy EPT tree.
-    viewer.setPointBudget(4_000_000);
+    // Start at a useful high-detail desktop baseline. Auto-LOD can still lower
+    // the live budget when frame time degrades on a large legacy EPT tree.
+    viewer.setPointBudget(10_000_000);
     viewer.setLengthUnit(DISPLAY_UNITS);
     viewer.setBackground('black');
     viewer.setDescription('');
@@ -175,8 +174,8 @@
     // --------------------------------------------------------------------
     let cloudMeta = { total: 0, name: 'EPT' };
     const budgetState = {
-      target: 4_000_000,      // user-set target (via __pcApi.setBudget only)
-      live: 4_000_000,        // what the viewer actually gets; dropped by auto-LOD
+      target: 10_000_000,      // user-set target (via __pcApi.setBudget only)
+      live: 10_000_000,        // what the viewer actually gets; dropped by auto-LOD
       auto: false
     };
     let fpsEMA = 60, lastFrameT = 0;
@@ -332,16 +331,28 @@
     // View sync API for the parent app (UTM coordinates, shared frame).
     // --------------------------------------------------------------------
     window.__pcViewReady = false;
-    let pendingSyncedTarget = null;
     window.__setViewUTM = (camE, camN, camAlt, tgtE, tgtN, tgtAlt) => {
       view.position.set(camE, camN, camAlt);
       view.lookAt(tgtE, tgtN, tgtAlt);
-      pendingSyncedTarget = new THREE.Vector3(tgtE, tgtN, tgtAlt);
       if (pcControls) {
         pcControls.pivot.set(tgtE, tgtN, tgtAlt);
         pcControls._mode = 'none';
+        pcControls._inertia.active = false;
+        pcControls._inertia.yaw = 0;
+        pcControls._inertia.pitch = 0;
+        pcControls._lastMoveTime = 0;
       }
       window.__pcViewReady = true;
+    };
+    window.__getViewUTM = () => {
+      const target = view.getPivot();
+      return {
+        position: [view.position.x, view.position.y, view.position.z],
+        target: [target.x, target.y, target.z],
+        yaw: view.yaw,
+        pitch: view.pitch,
+        radius: view.radius
+      };
     };
 
     // --------------------------------------------------------------------
@@ -368,7 +379,6 @@
         this._lastPx = { x: 0, y: 0 };
         this._downPx = { x: 0, y: 0, t: 0 };
         this._panStart = new THREE.Vector3();
-        this._panStartPos = new THREE.Vector3();
         this._panPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
         this._screenRef = 100;
         this._grabDepth = 100;
@@ -503,6 +513,9 @@
       _pointerDown(e) {
         if (!this.enabled) return;
         this._inertia.active = false;
+        this._inertia.yaw = 0;
+        this._inertia.pitch = 0;
+        this._lastMoveTime = 0;
         this.dom.setPointerCapture?.(e.pointerId);
         this.dom.focus && this.dom.focus();         // keep Esc key delivery
 
@@ -520,7 +533,8 @@
             this._touch.mode = 'pinch';
           } else {
             this._touch.mode = 'orbit';
-            this.pivot.copy(this._anchor(this._px(e)));
+            this._lastPx = this._px(e);
+            this.pivot.copy(this._anchor(this._lastPx));
           }
           return;
         }
@@ -540,7 +554,6 @@
           const s = this._planeHit(this._px(e), this._panPlane, 0.1);
           if (!s) { this._mode = 'none'; return; }
           this._panStart.copy(s);
-          this._panStartPos.copy(this.view.position);
           this._mode = 'pan';
           e.preventDefault();
         } else if (e.button === 1) {
@@ -569,9 +582,16 @@
             const cur = this._planeHit(mid, this._touch.pinchPlane, 0.1);
             if (cur) {
               const delta = this._touch.pinchStart.clone().sub(cur);
-              if (delta.length() < 1000) this.view.position.add(delta);
+              if (delta.length() < 1000) {
+                this.view.position.add(delta);
+                this.pivot.add(delta);
+                // Store the post-translation hit. Keeping the pre-move hit
+                // makes the next touch event undo the last one and oscillate.
+                this._touch.pinchStart.copy(cur).add(delta);
+              } else {
+                this._touch.pinchStart.copy(cur);
+              }
             }
-            this._touch.pinchStart.copy(cur || this._touch.pinchStart);
             this._touch.pinchDist = dist;
             this._touch.pinchMidPx = mid;
           } else if (this._touch.mode === 'orbit' && this._touch.pts.size === 1) {
@@ -594,15 +614,20 @@
           const delta = this._panStart.clone().sub(cur);
           const maxStep = Math.max(50, this.view.position.distanceTo(cur) * 2);
           if (delta.length() > maxStep) delta.setLength(maxStep);
-          this.view.position.copy(this._panStartPos).add(delta);
+          // Apply only the latest ray-plane correction. Resetting to the
+          // pointer-down camera while intersections came from the already
+          // moved camera introduced a feedback loop and visible pan jitter.
+          this.view.position.add(delta);
+          this.pivot.add(delta);
         } else if (this._mode === 'screenpan') {
           const h = this.dom.clientHeight || 800;
           const fov = this._cam().fov || 60;
           const wpp = 2 * this._screenRef * Math.tan(THREE.MathUtils.degToRad(fov / 2)) / h;
           const right = new THREE.Vector3().setFromMatrixColumn(this._cam().matrixWorld, 0);
           const up = new THREE.Vector3().setFromMatrixColumn(this._cam().matrixWorld, 1);
-          this.view.position.addScaledVector(right, -dx * wpp);
-          this.view.position.addScaledVector(up, dy * wpp);
+          const delta = right.multiplyScalar(-dx * wpp).add(up.multiplyScalar(dy * wpp));
+          this.view.position.add(delta);
+          this.pivot.add(delta);
         }
       }
 
@@ -636,23 +661,49 @@
         const r = offset.length();
         if (r < 1e-6) return;
 
-        // camera-right projected onto the XY plane (Potree world up = +Z)
-        const RIGHT = new THREE.Vector3(
-          Math.cos(view.yaw), Math.sin(view.yaw), 0);
-        const curPitch = view.pitch;
-        let pd = THREE.MathUtils.clamp(
-          pitchDelta,
-          (Math.max(curPitch, -Math.PI / 2) - Math.PI / 2 + 0.03) - curPitch,
-          (Math.min(curPitch, Math.PI / 2) + Math.PI / 2 - 0.03) - curPitch
-        );
+        // Faithful Z-up port of the mesh viewer's EarthLikeControls orbit.
+        // Deriving the side axis from the rendered camera (rather than the
+        // yaw scalar) keeps sensitivity and direction identical after a view
+        // is transferred between the two renderers.
+        const UP = new THREE.Vector3(0, 0, 1);
+        const cam = this._cam();
+        cam.updateMatrixWorld(true);
+        let side = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+        side.z = 0;
+        if (side.lengthSq() < 1e-8) {
+          side = new THREE.Vector3().crossVectors(offset, UP);
+          if (side.lengthSq() < 1e-8) side.set(1, 0, 0);
+        }
+        side.normalize();
 
-        const q = new THREE.Quaternion()
-          .setFromAxisAngle(new THREE.Vector3(0, 0, 1), yawDelta)
-          .multiply(new THREE.Quaternion().setFromAxisAngle(RIGHT, pd));
+        const minPolar = 0.03;
+        const maxPolar = Math.PI - 0.03;
+        let pd = pitchDelta;
+        if (pd !== 0) {
+          const polar = Math.acos(THREE.MathUtils.clamp(offset.clone().normalize().dot(UP), -1, 1));
+          const test = offset.clone().applyQuaternion(new THREE.Quaternion().setFromAxisAngle(side, pd));
+          const polarNew = Math.acos(THREE.MathUtils.clamp(test.normalize().dot(UP), -1, 1));
+          if (polarNew < minPolar || polarNew > maxPolar) {
+            const target = THREE.MathUtils.clamp(polarNew, minPolar, maxPolar);
+            const denominator = polarNew - polar;
+            pd = Math.abs(denominator) > 1e-9 ? pd * (target - polar) / denominator : 0;
+          }
+        }
+
+        const qPitch = new THREE.Quaternion().setFromAxisAngle(side, pd);
+        const qYaw = new THREE.Quaternion().setFromAxisAngle(UP, yawDelta);
+        const q = new THREE.Quaternion().multiplyQuaternions(qYaw, qPitch);
+        const forward = new THREE.Vector3()
+          .subVectors(view.getPivot(), view.position)
+          .normalize()
+          .applyQuaternion(q);
+        const lookDistance = Number.isFinite(view.radius) && view.radius > 1e-6 ? view.radius : r;
         offset.applyQuaternion(q);
-        // lookAt keeps the zero-roll yaw/pitch composition; radius untouched
         view.position.copy(pivot).add(offset);
-        view.lookAt(pivot);
+        // Rotate the existing center ray exactly as EarthLikeControls rotates
+        // the mesh camera quaternion. Looking at the clicked pivot here would
+        // incorrectly center an off-axis click before the user even dragged.
+        view.lookAt(view.position.clone().addScaledVector(forward, lookDistance));
       }
 
       _pointerUp(e) {
@@ -662,7 +713,8 @@
             this._touch.mode = 'none';
           } else if (this._touch.pts.size === 1 && this._touch.mode === 'pinch') {
             this._touch.mode = 'orbit';
-            this.pivot.copy(this._anchor([...this._touch.pts.values()][0]));
+            this._lastPx = [...this._touch.pts.values()][0];
+            this.pivot.copy(this._anchor(this._lastPx));
           }
           return;
         }
@@ -697,6 +749,7 @@
         // the camera to snap-reaim at whatever point was under the cursor on
         // every scroll tick, causing a visible "swim" instead of a smooth zoom.
         view.position.copy(target).add(offset);
+        this.pivot.copy(view.getPivot());
       }
 
       _wheel(e) {
@@ -706,7 +759,9 @@
         const hit = this._anchor(px);
         const s = Math.pow(0.9, -e.deltaY / 100);   // 3 x 100 notches => ~0.73x
         this._zoomTowards(hit, s);
-        this.pivot.copy(hit);                        // follow-up wheel keeps depth
+        // Keep the canonical view target. Using the cursor hit itself as the
+        // next orbit pivot made a wheel action behave like click-to-center.
+        this.pivot.copy(this.view.getPivot());
       }
 
       _inserting() {
@@ -752,13 +807,8 @@
       mat.activeAttributeName = 'rgba';
 
       viewer.scene.addPointCloud(pc);
-      const bounds = pc.boundingBox.clone().applyMatrix4(pc.matrixWorld);
-      const extent = bounds.getSize(new THREE.Vector3()).length();
-      const syncedTargetIsRelevant = pendingSyncedTarget &&
-        bounds.distanceToPoint(pendingSyncedTarget) <= Math.max(1, extent);
-      if (!window.__pcViewReady || !syncedTargetIsRelevant) {
+      if (!window.__pcViewReady) {
         viewer.fitToScreen(0.7);
-        pendingSyncedTarget = view.getPivot().clone();
       }
       pcControls.pivot.copy(view.getPivot());
 

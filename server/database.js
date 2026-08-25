@@ -1374,6 +1374,40 @@ const MIGRATIONS = [
         ON processing_tasks(purged_at,status,created_at DESC,id DESC);
     `,
   },
+  {
+    version: 25,
+    name: 'allow_duplicate_webodm_import_fingerprints',
+    sql: `
+      DROP INDEX webodm_task_imports_project_idx;
+      ALTER TABLE webodm_task_imports RENAME TO webodm_task_imports_v18;
+      CREATE TABLE webodm_task_imports (
+        id TEXT PRIMARY KEY,
+        source_fingerprint TEXT NOT NULL CHECK(length(source_fingerprint)=64),
+        source_relative_path TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+        dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+        attempt_id TEXT NOT NULL REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+        model_id TEXT NOT NULL REFERENCES models(id) ON DELETE RESTRICT,
+        model_version_id TEXT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
+        asset_kinds_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO webodm_task_imports(
+        id,source_fingerprint,source_relative_path,project_id,task_id,dataset_id,
+        attempt_id,model_id,model_version_id,asset_kinds_json,created_by,created_at
+      ) SELECT
+        id,source_fingerprint,source_relative_path,project_id,task_id,dataset_id,
+        attempt_id,model_id,model_version_id,asset_kinds_json,created_by,created_at
+      FROM webodm_task_imports_v18;
+      DROP TABLE webodm_task_imports_v18;
+      CREATE INDEX webodm_task_imports_project_idx
+        ON webodm_task_imports(project_id,created_at DESC);
+      CREATE INDEX webodm_task_imports_fingerprint_idx
+        ON webodm_task_imports(source_fingerprint,created_at DESC,id DESC);
+    `,
+  },
 ];
 
 function applyMigrations(database) {
