@@ -19,6 +19,9 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(source,/function pagedApi/);
   assert.match(css,/\.project-row/);
   assert.match(css,/@media\(max-width:720px\)/);
+  assert.ok(source.indexOf("['dashboard','⌂','Dashboard']")<source.indexOf("['providers','⌁','Providers & nodes']"));
+  assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
+  assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
 });
 
 test('workspace route preserves the section project and expanded task across history and reauthorization',()=>{
@@ -117,17 +120,24 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/lod\.canRetry/);
   assert.match(source,/3D tiles disabled by server/);
   assert.match(source,/Using full mesh fallback/);
-  assert.match(source,/Full mesh fallback/);
+  assert.match(source,/authenticated download/);
   assert.match(source,/manualRetryCount/);
   assert.match(source,/data-derivative-id/);
   assert.match(source,/Waiting for derivative worker/);
+  assert.match(source,/job\.result\?\.summary/);
   assert.match(processingApi,/requestOptionalLodDerivative/);
-  assert.match(source,/The original model remains available/);
+  assert.match(source,/The original (?:model|input) remains available/);
   assert.match(source,/rememberOperation\(result\.operation\);modal\.close\(\)/);
   assert.match(source,/scheduleOperationRefresh\(500\)/);
   assert.doesNotMatch(source,/while\(modal\.open\)/);
   assert.match(css,/\.import-activity/);
   assert.match(css,/\.operation-progress/);
+  assert.match(source,/backgroundImportLimit:3/);
+  assert.match(source,/backgroundDerivativeLimit:3/);
+  assert.match(source,/id="background-search-form"/);
+  assert.match(source,/load-more-background/);
+  assert.match(source,/view-all-background/);
+  assert.match(source,/knownPhases=new Set/);
 });
 
 test('providers are master-detail and diagnostics owns storage health and trash',()=>{

@@ -45,10 +45,16 @@ test('trash lifecycle keeps permanent deletion behind exact typed confirmation',
   assert.match(source,/Permanent deletion cannot be undone/);
 });
 
-test('project-first lifecycle exposes only guarded archive, trash, restore and retry actions',()=>{
-  for(const action of ['archive-project','archive-task','archive-dataset','trash-dataset','archive-output','trash-output','restore-trash','purge-trash','retry-storage-mutation'])assert.ok(source.includes(action),action);
-  for(const permission of ['viewer.projects.write','viewer.datasets.write','viewer.storage.purge','viewer.processing.write','viewer.processing.publish'])assert.ok(source.includes(`can('${permission}')`),permission);
+test('project-first lifecycle exposes rename and recoverable delete without archive-first UI',()=>{
+  for(const action of ['edit-project','edit-task','trash-project','trash-task','trash-dataset','trash-output','restore-trash','purge-trash','retry-storage-mutation'])assert.ok(source.includes(action),action);
+  for(const removed of ['archive-project','archive-task','archive-dataset','archive-output'])assert.equal(source.includes(removed),false,removed);
+  for(const permission of ['viewer.projects.write','viewer.storage.purge','viewer.processing.write','viewer.processing.publish'])assert.ok(source.includes(`can('${permission}')`),permission);
   assert.match(source,/function confirmedMutation/);
+  assert.match(source,/function editProject/);
+  assert.match(source,/function editTask/);
+  assert.match(source,/remain recoverable in trash for 14 days/);
+  assert.match(source,/restored until \$\{purgeDate\(30\)\}/);
+  assert.match(source,/after that date it will be permanently purged/);
   assert.match(source,/project is archived and read-only/);
   assert.match(source,/task\.status==='archived'\?'task':'project'\} is archived and read-only/);
   assert.match(source,/pagedStorage/);

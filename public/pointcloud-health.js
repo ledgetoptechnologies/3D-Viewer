@@ -35,6 +35,13 @@
     let phase = 'starting';
     let failureCode = null;
 
+    function diagnostic(event, code) {
+      const safeCode = Object.hasOwn(FAILURES, code) ? code : null;
+      if (event === 'failure' && safeCode) console.warn('[point-cloud-runtime] failure', { code: safeCode });
+      else if (event === 'metadata_ready') console.info('[point-cloud-runtime] metadata_ready');
+      else if (event === 'points_visible') console.info('[point-cloud-runtime] points_visible');
+    }
+
     function notify(type, code) {
       if (!win.parent || win.parent === win || typeof win.parent.postMessage !== 'function') return;
       win.parent.postMessage({ source: 'ltds-pointcloud', type, code }, win.location.origin);
@@ -63,6 +70,7 @@
       if (phase === 'ready' || phase === 'failed') return;
       phase = 'failed';
       failureCode = Object.hasOwn(FAILURES, code) ? code : 'runtime_error';
+      diagnostic('failure', failureCode);
       clearWatchdog();
       const message = FAILURES[code] || FAILURES.runtime_error;
       if (loadingText) loadingText.textContent = message;
@@ -85,6 +93,7 @@
     }
 
     function metadataReady() {
+      diagnostic('metadata_ready');
       arm('loading-nodes', timeouts.nodes, 'node_timeout', 'Streaming point-cloud detail…');
       if (status) status.textContent = 'Point-cloud metadata ready; waiting for points…';
     }
@@ -97,6 +106,7 @@
       if (phase === 'ready' || (phase === 'failed' && failureCode !== 'node_timeout')) return;
       phase = 'ready';
       failureCode = null;
+      diagnostic('points_visible');
       clearWatchdog();
       loading?.classList.add('hidden');
       loading?.classList.remove('failed');

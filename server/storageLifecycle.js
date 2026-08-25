@@ -59,6 +59,14 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
   const results=[];
   for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
     try{
+      if(item.entityType==='project'||item.entityType==='task'){
+        const {purgeContainerTrash}=require('./containerLifecycle');
+        const purged=purgeContainerTrash(processing,storage,item.id,actor);
+        if(!purged){results.push({trashId:item.id,status:'failed',errorCode:'lifecycle_conflict'});continue;}
+        results.push({trashId:item.id,status:'complete',container:true});
+        if(processing.getTrash(item.id)?.permanentlyDeletedAt)onPurged?.(item);
+        continue;
+      }
       const dataset=item.entityType==='dataset'?processing.getDataset(item.entityId):null;
       const output=item.entityType==='output'?processing.getModelOutput(item.entityId):null;
       if(!dataset&&!output){results.push({trashId:item.id,status:'failed',errorCode:'entity_not_found'});continue;}

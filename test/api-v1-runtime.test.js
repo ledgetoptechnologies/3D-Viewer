@@ -212,6 +212,57 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
     headers: { Authorization: `Bearer ${browserSession.accessToken}` },
   });
   assert.equal(current.status, 200);
+  assert.equal((await current.json()).model.assets.tiles, null);
+
+  // An optional LOD backfill may complete after the browser capability was
+  // redeemed. The same live, version-scoped session must immediately expose
+  // and authorize that registered derivative; no reimport or new grant is
+  // required.
+  const tilesDir = path.join(assetRoot, 'tiles');
+  fs.mkdirSync(tilesDir, { recursive: true });
+  const tilesetBytes = Buffer.from(JSON.stringify({
+    asset: { version: '1.1' },
+    root: { geometricError: 0, boundingVolume: { sphere: [0, 0, 0, 1] }, content: { uri: 'leaf.b3dm' } },
+  }));
+  const leafBytes = Buffer.from('verified-leaf');
+  fs.writeFileSync(path.join(tilesDir, 'tileset.json'), tilesetBytes);
+  fs.writeFileSync(path.join(tilesDir, 'leaf.b3dm'), leafBytes);
+  const digest = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+  const liveDatabase = openDatabase(path.join(dataDir, 'viewer.sqlite'));
+  const glbAsset = liveDatabase.prepare("SELECT sha256,relative_path FROM model_assets WHERE version_id=? AND kind='glb'").get(model.activeVersion.id);
+  const versionRow = liveDatabase.prepare('SELECT metadata_json FROM model_versions WHERE id=?').get(model.activeVersion.id);
+  const manifestSha256 = digest(Buffer.from('session-visible-lod-manifest'));
+  const tileAssetId = crypto.randomUUID();
+  liveDatabase.prepare(`INSERT INTO model_assets(
+    id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at
+  ) VALUES (?,?, 'tiles','derivatives','tiles/tileset.json','3dtiles','application/json',?,'managed',1,NULL,?,?,?)`).run(
+    tileAssetId, model.activeVersion.id, tilesetBytes.length, digest(tilesetBytes), manifestSha256, new Date().toISOString(),
+  );
+  const insertTileFile = liveDatabase.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)');
+  insertTileFile.run(tileAssetId, 'tileset.json', tilesetBytes.length, digest(tilesetBytes));
+  insertTileFile.run(tileAssetId, 'leaf.b3dm', leafBytes.length, digest(leafBytes));
+  const metadata = JSON.parse(versionRow.metadata_json || '{}');
+  metadata.lodProvenance = {
+    schemaVersion: 2,
+    sourceAsset: path.posix.basename(glbAsset.relative_path),
+    sourceSha256: glbAsset.sha256,
+    tilesManifestSha256: manifestSha256,
+    geometry: 'bounded-triangle-equivalence',
+    textures: 'byte-identical-material-equivalence',
+    leafGeometricError: 0,
+    audit: { algorithm: 'ltds-glb-leaf-equivalence-v2', artifactCount: 2 },
+  };
+  liveDatabase.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify(metadata), model.activeVersion.id);
+  liveDatabase.close();
+
+  const refreshedCurrent = await fetch(`${baseUrl}/api/v1/sessions/current`, {
+    headers: { Authorization: `Bearer ${browserSession.accessToken}` },
+  });
+  assert.equal(refreshedCurrent.status, 200);
+  const refreshedSession = await refreshedCurrent.json();
+  assert.match(refreshedSession.model.assets.tiles, new RegExp(`/session-assets/${browserSession.accessToken}/`));
+  assert.equal((await fetch(`${baseUrl}${refreshedSession.model.assets.tiles}`)).status, 200);
+  assert.equal((await fetch(new URL('leaf.b3dm', `${baseUrl}${refreshedSession.model.assets.tiles}`))).status, 200);
 
   const rangedAsset = await fetch(`${baseUrl}${browserSession.model.assets.glb}`, {
     headers: { Range: 'bytes=2-5' },

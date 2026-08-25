@@ -138,9 +138,9 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       },
     });
   }
-  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.map(item=>runtime.archivedProjects.has(item.id)?{...item,status:'archived'}:item), nextCursor: null });
+  if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
-  if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.map(item=>runtime.archivedTasks.has(item.id)?{...item,status:'archived'}:item), nextCursor: null });
+  if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/processing/providers' && method === 'GET') return json({ providers: fixtures.providers });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
@@ -155,11 +155,10 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho') return { status: 200, body: orthophotoFixture, type: 'image/tiff' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
-  if (pathname === '/api/v1/processing/outputs/output-johnson/archive' && method === 'POST') return json({ output: fixtures.outputs[0] });
+  if (pathname === '/api/v1/processing/outputs/output-johnson' && method === 'DELETE') return json({ output: fixtures.outputs[0], trash: { id: 'trash-output-live' } });
   if (pathname === '/api/v1/processing/outputs/output-johnson-archived' && method === 'DELETE') return json({ output: fixtures.outputs[1], trash: { id: 'trash-output' } });
-  if (pathname === '/api/v1/projects/project-quarry/archive' && method === 'POST') { runtime.archivedProjects.add('project-quarry'); return json({ project: { ...fixtures.projects[1], status: 'archived' } }); }
-  if (pathname === '/api/v1/tasks/task-quarry/archive' && method === 'POST') { runtime.archivedTasks.add('task-quarry'); return json({ task: { ...fixtures.tasks[1], status: 'archived' } }); }
-  if (pathname === '/api/v1/datasets/dataset-johnson/archive' && method === 'POST') return json({ dataset: fixtures.datasets[0] });
+  if (pathname === '/api/v1/projects/project-quarry' && method === 'DELETE') { runtime.archivedProjects.add('project-quarry'); return json({ trash: { id: 'trash-project', entityType: 'project' } }); }
+  if (pathname === '/api/v1/tasks/task-quarry' && method === 'DELETE') { runtime.archivedTasks.add('task-quarry'); return json({ trash: { id: 'trash-task', entityType: 'task' } }); }
   if (pathname === '/api/v1/datasets/dataset-johnson' && method === 'DELETE') return json({ trash: { id: 'trash-dataset' } });
   if (pathname === '/api/v1/storage') return url.searchParams.get('cursor')
     ? json({ storage: {}, trash: { items: [{ id: 'trash-second-page', entityId: 'output-trash', entityType: 'output', displayName: 'Old output', byteSize: 1024 }], nextCursor: null } })
@@ -499,17 +498,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-task-disclosure="outputs"] summary').click()`);
     await waitFor(client, "document.querySelector('[data-task-disclosure=\"outputs\"]')?.open === true", `${viewport.name}: output disclosure did not open`);
 
-    await client.evaluate(`document.querySelector('[data-action="archive-output"][data-id="output-johnson"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/archive');
-    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output archive did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="trash-output"][data-id="output-johnson"]').click()`);
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/outputs/output-johnson');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output delete did not settle`);
     await client.evaluate(`document.querySelector('[data-action="trash-output"][data-id="output-johnson-archived"]').click()`);
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/outputs/output-johnson-archived');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output trash did not settle`);
     await client.evaluate(`document.querySelector('[data-task-disclosure="advanced"] summary').click()`);
     await waitFor(client, "document.querySelector('[data-task-disclosure=\"advanced\"]')?.open === true", `${viewport.name}: advanced task controls did not open`);
-    await client.evaluate(`document.querySelector('[data-action="archive-dataset"][data-id="dataset-johnson"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/datasets/dataset-johnson/archive');
-    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset archive did not settle`);
     await client.evaluate(`document.querySelector('[data-action="trash-dataset"][data-id="dataset-johnson"]').click()`);
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/datasets/dataset-johnson');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
@@ -526,15 +522,14 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="open-review"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-review-grant')", `${viewport.name}: ready output View did not open its isolated review session`);
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
-    await waitFor(client, "document.querySelector('[data-action=\"archive-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task archive was not reachable`);
-    await client.evaluate(`document.querySelector('[data-action="archive-task"][data-id="task-quarry"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/tasks/task-quarry/archive');
-    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: task archive did not settle`);
-    await waitFor(client, "document.querySelector('[data-action=\"archive-task\"][data-id=\"task-quarry\"]') === null && document.querySelector('.task-detail')?.textContent.includes('archived and read-only')", `${viewport.name}: archived task remained mutable`);
-    await client.evaluate(`document.querySelector('[data-action="archive-project"][data-id="project-quarry"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/projects/project-quarry/archive');
-    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: project archive did not settle`);
-    await waitFor(client, "document.querySelector('.project-detail')?.textContent.includes('project is archived and read-only') && document.querySelector('[data-action=\"project-process\"]') === null", `${viewport.name}: archived project remained mutable`);
+    await waitFor(client, "document.querySelector('[data-action=\"trash-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task Delete was not reachable`);
+    await client.evaluate(`document.querySelector('[data-action="trash-task"][data-id="task-quarry"]').click()`);
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/tasks/task-quarry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: task Delete did not settle`);
+    await waitFor(client, "document.querySelector('[data-action=\"trash-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project Delete was not reachable`);
+    await client.evaluate(`document.querySelector('[data-action="trash-project"][data-id="project-quarry"]').click()`);
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/projects/project-quarry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: project Delete did not settle`);
 
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
@@ -578,13 +573,12 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['PATCH', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['DELETE', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['POST', '/api/v1/processing/outputs/output-johnson/view-sessions'],
-      ['POST', '/api/v1/processing/outputs/output-johnson/archive'],
+      ['DELETE', '/api/v1/processing/outputs/output-johnson'],
       ['POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles'],
       ['DELETE', '/api/v1/processing/outputs/output-johnson-archived'],
-      ['POST', '/api/v1/datasets/dataset-johnson/archive'],
       ['DELETE', '/api/v1/datasets/dataset-johnson'],
-      ['POST', '/api/v1/tasks/task-quarry/archive'],
-      ['POST', '/api/v1/projects/project-quarry/archive'],
+      ['DELETE', '/api/v1/tasks/task-quarry'],
+      ['DELETE', '/api/v1/projects/project-quarry'],
       ['PATCH', '/api/v1/processing/providers/provider-nodeodm'],
       ['PUT', '/api/v1/processing/providers/provider-nodeodm/credential'],
       ['POST', '/api/v1/processing/presets'],

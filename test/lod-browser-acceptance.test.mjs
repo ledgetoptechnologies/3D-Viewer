@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -110,11 +110,12 @@ async function startFixture(tileRoot) {
   return { server, vite, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function startStreamingOnlyFixture() {
+async function startStreamingOnlyFixture(assetOverrides = {}) {
   const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
   const requests = [];
   const config = fixtureConfig();
   config.assets.tiles = null;
+  Object.assign(config.assets, assetOverrides);
   const server = createServer((request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     requests.push(url.pathname);
@@ -140,6 +141,60 @@ async function startStreamingOnlyFixture() {
     server.listen(0, '127.0.0.1', resolve);
   });
   return { server, vite, requests, glbPath: config.assets.glb, origin: `http://127.0.0.1:${server.address().port}` };
+}
+
+async function startSessionRefreshFixture(tileRoot) {
+  const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
+  const requests = [];
+  let currentRequests = 0;
+  const config = fixtureConfig();
+  const assetPrefix = `/session-assets/session-token/${fixtureId}/derivatives/`;
+  config.assets.glb = `${assetPrefix}odm_textured_model_geo.glb`;
+  config.assets.tiles = `${assetPrefix}tileset.json`;
+  const server = createServer((request, reply) => {
+    const url = new URL(request.url || '/', 'http://127.0.0.1');
+    requests.push(url.pathname);
+    if (url.pathname === '/api/v1/sessions/current') {
+      currentRequests += 1;
+      const model = structuredClone(config);
+      if (currentRequests === 1) model.assets.tiles = null;
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      reply.end(JSON.stringify({
+        model,
+        permissions: { view: true, measure: true, cameras: true },
+        sessionId: 'refresh-session',
+        accessToken: 'session-token',
+        expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+        allowedEmbedOrigins: [],
+      }));
+      return;
+    }
+    if (url.pathname.startsWith(assetPrefix)) {
+      const relative = decodeURIComponent(url.pathname.slice(assetPrefix.length));
+      const file = path.resolve(tileRoot, relative);
+      if (!file.startsWith(`${tileRoot}${path.sep}`) || !existsSync(file) || !statSync(file).isFile()) {
+        reply.writeHead(404);
+        reply.end('not found');
+        return;
+      }
+      reply.writeHead(200, { 'Content-Type': contentType(file), 'Content-Length': statSync(file).size });
+      createReadStream(file).pipe(reply);
+      return;
+    }
+    vite.middlewares(request, reply);
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    server,
+    vite,
+    requests,
+    glbPath: config.assets.glb,
+    currentRequests: () => currentRequests,
+    origin: `http://127.0.0.1:${server.address().port}`,
+  };
 }
 
 class CdpClient {
@@ -415,6 +470,131 @@ test('browser never requests the original GLB when verified streaming tiles are 
     await client.evaluate(`document.querySelector('#layer-tiles').click()`);
     await new Promise((resolve) => setTimeout(resolve, 500));
     assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'initialization or layer UI fetched the original GLB');
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    releaseLock();
+  }
+});
+
+test('an open authenticated workspace discovers completed LOD tiles without loading the original GLB', { timeout: 90_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for session LOD refresh acceptance.');
+    return;
+  }
+
+  const { makeB3dm, makeGlb, TRIANGLE_A, writeAuditableFixture } = await import('./helpers/lod-fixture.mjs');
+  const tileRoot = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-fixture-'));
+  const validPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  writeAuditableFixture(tileRoot, {
+    leafABytes: makeB3dm(makeGlb([TRIANGLE_A], validPng)),
+    leafBTexture: validPng,
+  });
+  const sessionTilesetPath = path.join(tileRoot, 'tileset.json');
+  const sessionTileset = JSON.parse(readFileSync(sessionTilesetPath, 'utf8'));
+  sessionTileset.root.content = { uri: 'leaf-a.b3dm' };
+  writeFileSync(sessionTilesetPath, JSON.stringify(sessionTileset));
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client, fixture;
+  try {
+    fixture = await startSessionRefreshFixture(tileRoot);
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Network.enable');
+    await client.command('Page.navigate', { url: `${fixture.origin}/session/active/refresh-session` });
+    await waitFor(client, `document.querySelector('#layer-tiles')?.textContent === 'Streaming LOD unavailable'`, 'initial unavailable LOD state did not render');
+    assert.equal(await client.evaluate(`document.querySelector('#loading-overlay')?.classList.contains('hidden')`), true, 'unavailable tiles left the workspace blocked by its initializing overlay');
+    const refreshDeadline = Date.now() + 15_000;
+    while (fixture.currentRequests() < 2 && Date.now() < refreshDeadline) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.ok(fixture.currentRequests() >= 2, 'open session never refreshed its live model configuration');
+    await waitFor(client, `window.__ltds?.state?.meshSource === 'tiles' && document.querySelector('#layer-tiles')?.textContent === 'Streamed LOD Mesh'`, 'completed LOD derivative was not applied to the open session');
+    const tilesetDeadline = Date.now() + 10_000;
+    while (!fixture.requests.includes('/session-assets/session-token/lod-browser-fixture/derivatives/tileset.json') && Date.now() < tilesetDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(fixture.requests.includes('/session-assets/session-token/lod-browser-fixture/derivatives/tileset.json'), 'refreshed session did not initialize the streaming tileset');
+    assert.ok(fixture.currentRequests() >= 2);
+    assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'session refresh fetched the original GLB');
+    assert.equal(await client.evaluate(`document.querySelector('#layer-tiles')?.textContent`), 'Streamed LOD Mesh');
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    if (profile) rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    rmSync(tileRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    releaseLock();
+  }
+});
+
+test('browser defaults to orthophoto and tears down point-cloud runtime across history navigation', { timeout: 60_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for view lifecycle browser acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const fixture = await startStreamingOnlyFixture({
+      ortho: '/fixtures/orthophoto.tif',
+      ept: '/fixtures/ept/ept.json',
+    });
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-view-mode-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, `location.search.includes('view=ortho') && document.querySelector('#tab-ortho')?.classList.contains('active')`, 'orthophoto was not selected by default');
+
+    await client.evaluate(`document.querySelector('#tab-cloud').click()`);
+    await waitFor(client, `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`, 'point-cloud mode did not start');
+    await client.evaluate(`document.querySelector('#tab-ortho').click()`);
+    await waitFor(client, `location.search.includes('view=ortho') && !document.querySelector('#pc-iframe')`, 'leaving point cloud did not stop its iframe');
+
+    await client.evaluate('history.back()');
+    await waitFor(client, `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`, 'browser history did not restore point-cloud mode');
+    await client.command('Page.reload');
+    await waitFor(client, `location.search.includes('view=cloud') && document.querySelector('#tab-cloud')?.classList.contains('active') && Boolean(document.querySelector('#pc-iframe'))`, 'refresh did not preserve point-cloud mode');
+
+    assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'view lifecycle fetched the original GLB');
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});

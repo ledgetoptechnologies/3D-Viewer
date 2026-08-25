@@ -17,6 +17,10 @@ test('viewer 3D mode is streaming-only and keeps original mesh access outside la
   assert.doesNotMatch(html, /data-layer="glb"|id="layer-glb"|Full-Res Mesh/);
   assert.match(main, /if \(state\.meshSource !== 'tiles'\) return/);
   assert.match(main, /if \(state\.meshSource === 'tiles'\) \{\s*tilesParent\.visible = true;\s*loadTiles\(\)/);
+  assert.match(main, /scheduleLodAvailabilityRefresh/);
+  assert.match(main, /await currentViewerSession\(\)/);
+  assert.match(main, /previousMeshSource === 'lod-required' && state\.meshSource === 'tiles'/);
+  assert.match(main, /hideLoading\(\);\s*scheduleLodAvailabilityRefresh\(\);/);
 });
 
 test('viewer streams root backdrop without preloading stale branches', () => {
@@ -66,6 +70,30 @@ test('point-cloud parent accepts health messages only from its same-origin ifram
   assert.match(main, /event\.origin !== location\.origin \|\| event\.source !== iframe\.contentWindow/);
   assert.match(main, /message\.source !== 'ltds-pointcloud'/);
   assert.match(main, /message\.type === 'ready' && message\.code === 'points_visible'/);
-  assert.match(main, /dom\.cloudStatus\.textContent = 'Cloud: unavailable'/);
+  assert.match(main, /POINT_CLOUD_FAILURE_CODES\.has\(message\.code\)/);
+  assert.match(main, /Cloud: unavailable \(\$\{code\}\)/);
   assert.doesNotMatch(main, /cloudStatus\.textContent\s*=\s*message\.(?:code|error|detail)/);
+});
+
+test('viewer mode lifecycle cancels stale initializers and persists history', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /viewerModeFromUrl\(location\.href\)/);
+  assert.match(main, /history\[historyMode === 'replace' \? 'replaceState' : 'pushState'\]/);
+  assert.match(main, /window\.addEventListener\('popstate'/);
+  assert.match(main, /modeEpoch \+= 1/);
+  assert.match(main, /stopPointCloudIframe\('superseded'\)/);
+  assert.match(main, /stopDirectPointCloud\('superseded'\)/);
+  assert.match(main, /directPointCloudLoad\.controller\.abort\(\)/);
+  assert.match(main, /iframe\.src = 'about:blank'/);
+  assert.match(main, /disposeTiles\(\)/);
+  assert.match(main, /epoch !== modeEpoch \|\| state\.activeMode !== 'ortho'/);
+  assert.match(main, /epoch !== modeEpoch \|\| state\.activeMode !== type/);
+});
+
+test('viewer diagnostics are bounded and never include asset URLs or exception details', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /const DIAGNOSTIC_EVENTS = new Set/);
+  assert.match(main, /const POINT_CLOUD_FAILURE_CODES = new Set/);
+  assert.match(main, /Never include\s*\/\/ asset URLs, project titles, session identifiers, or exception objects/);
+  assert.doesNotMatch(main, /showError\(`Failed to load point cloud from \$\{POINT_CLOUD_URL\}/);
 });

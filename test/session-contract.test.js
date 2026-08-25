@@ -9,7 +9,8 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 
 test('new-tab session contract is versioned, removes grants, and isolates its exact controller', () => {
   assert.match(source, /SESSION_STORAGE_PREFIX\}\$\{session\.sessionId\}/);
-  assert.match(source, /history\.replaceState\(null, '', `\/session\/active\/\$\{encodeURIComponent\(session\.sessionId\)\}`\)/);
+  assert.match(source, /activeUrl\.pathname = `\/session\/active\/\$\{encodeURIComponent\(session\.sessionId\)\}`/);
+  assert.match(source, /history\.replaceState\(null, '', `\$\{activeUrl\.pathname\}\$\{activeUrl\.search\}\$\{activeUrl\.hash\}`\)/);
   assert.match(source, /VIEW_MODE === 'session' \? 'view' : VIEW_MODE/);
   assert.match(source, /type: 'ltds-viewer:ready'/);
   assert.match(source, /window\.opener && !window\.opener\.closed/);

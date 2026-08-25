@@ -112,6 +112,18 @@ test('optional LOD failure is terminal until audited manual retry and preserves 
   assert.equal(c.processing.retryOptionalDerivative(claimed.id,'ops:test',{meshDerivativesEnabled:true}),null,'the single manual retry is bounded');
 });
 
+test('derivative progress exposes only bounded lifecycle summaries while the lease is live',t=>{
+  const c=fixture(t),item=readyModel(c);
+  c.processing.enqueueOptionalDerivatives(item.attempt.id,[{type:'mesh_tiles',request:{optional:true}}]);
+  const claimed=c.processing.claimDerivative('lod-worker');
+  assert.equal(c.processing.updateDerivativeProgress(claimed.id,'lod-worker','generating'),true);
+  const visible=c.processing.listDerivativeJobs(10).find(job=>job.id===claimed.id);
+  assert.deepEqual({phase:visible.result.phase,summary:visible.result.summary},{phase:'generating',summary:'Generating streaming 3D tiles.'});
+  assert.match(visible.result.startedAt,/^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(c.processing.updateDerivativeProgress(claimed.id,'lod-worker','C:\\secret\\customer.obj'),false);
+  assert.equal(c.processing.updateDerivativeProgress(claimed.id,'wrong-owner','verifying'),false);
+});
+
 test('failed imported tile audit quarantines tiles while preserving the GLB fallback',t=>{
   const c=fixture(t),item=readyModel(c,{assets:['glb']});
   c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64)});
@@ -175,7 +187,12 @@ test('the derivative worker executes a real external-GLB tile audit and register
   assert.equal(await processOneDerivative({processing:c.processing,storage:c.storage,config:{opsBaseUrl:'https://ops.example',meshDerivativesEnabled:true}},'lod-worker'),true);
   const job=c.db.prepare('SELECT status,result_json FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id);
   assert.equal(job.status,'complete');
-  assert.deepEqual(JSON.parse(job.result_json),{verified:true,reused:true});
+  const result=JSON.parse(job.result_json);
+  assert.equal(result.verified,true);
+  assert.equal(result.reused,true);
+  assert.equal(result.phase,'complete');
+  assert.equal(result.summary,'Verified derivative registered and ready for the Viewer.');
+  assert.ok(Number.isSafeInteger(result.durationMs)&&result.durationMs>=0);
   const tiles=c.processing.modelAssetsForVersion(item.versionId).find(asset=>asset.kind==='tiles');
   assert.ok(tiles);
   assert.equal(tiles.relativePath,`${tilesRelativePath}/tileset.json`);

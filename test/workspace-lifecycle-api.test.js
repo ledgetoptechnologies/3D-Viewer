@@ -13,6 +13,7 @@ const { createProcessingApi } = require('../server/processingApi');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
+const { purgeExpiredTrash } = require('../server/storageLifecycle');
 
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 
@@ -64,6 +65,17 @@ function finalizedDataset(context, project, displayName) {
   return context.processing.getDataset(dataset.id);
 }
 
+function readyManagedOutput(context, project, dataset, task, provider, displayName) {
+  const attempt = context.processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {}, createdBy: 'ops:lifecycle' });
+  const relativeRoot = `${task.id}/${attempt.id}`, directory = path.join(context.config.modelsMount, ...relativeRoot.split('/')), body = Buffer.from(`${displayName}-model`);
+  fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'model.glb'), body);
+  const model = context.repository.upsertModelVersion({ provider: 'ltds-processing', providerModelId: task.id, providerVersionId: attempt.id, displayName, status: 'ready', sourceLocator: { taskId: task.id, attemptId: attempt.id }, makeActive: false, assets: [{ kind: 'glb', rootKey: 'models', relativePath: `${relativeRoot}/model.glb`, format: 'glb', byteSize: body.length, sha256: digest(body), published: false }] });
+  const versionId = context.database.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;
+  context.processing.setAttemptResult(attempt.id, model.id, versionId); context.processing.transitionAttempt(attempt.id, 'ready_for_review', { progress: 1 });
+  context.processing.registerModelOutput({ versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: project.id, relativePath: relativeRoot, byteSize: body.length, assetCount: 1 });
+  return { attempt, model, versionId, directory };
+}
+
 test('workspace lifecycle routes enforce guarded archive, recoverable trash, restore, typed purge and failed retry', async t => {
   const context = await fixture(t);
   const project = context.processing.createProject({ displayName: 'Output lifecycle' });
@@ -89,11 +101,7 @@ test('workspace lifecycle routes enforce guarded archive, recoverable trash, res
 
   assert.equal((await context.request('POST', `/api/v1/processing/outputs/${versionId}/archive`, {})).status, 409, 'a live viewer session blocks archive');
   context.database.prepare("UPDATE viewer_sessions SET revoked_at=? WHERE model_id=? AND revoked_at IS NULL").run(new Date().toISOString(), model.id);
-  let response = await context.request('POST', `/api/v1/processing/outputs/${versionId}/archive`, {});
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).output.status, 'archived');
-
-  response = await context.request('DELETE', `/api/v1/processing/outputs/${versionId}`, {});
+  let response = await context.request('DELETE', `/api/v1/processing/outputs/${versionId}`, {});
   assert.equal(response.status, 200);
   let trash = (await response.json()).trash;
   assert.equal(context.processing.getModelOutput(versionId).status, 'trashed');
@@ -131,4 +139,28 @@ test('workspace lifecycle routes enforce guarded archive, recoverable trash, res
   assert.equal(response.status, 200);
   assert.equal((await response.json()).mutation.status, 'complete');
   assert.equal((await context.request('POST', `/api/v1/storage/mutations/${mutation.id}/retry`, {})).status, 409);
+});
+
+test('project Delete cascades owned storage into 30-day trash and restore/purge are durable', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Cascade project' }), dataset = finalizedDataset(context, project, 'Cascade dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Cascade task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Cascade ODM', endpoint: 'http://127.0.0.1:3001', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Cascade output'), datasetDirectory = path.join(context.config.datasetsMount, dataset.relativePath);
+  let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200);
+  let trash = (await response.json()).trash; assert.equal(trash.entityType, 'project'); assert.ok(Date.parse(trash.purgeAfter) - Date.now() > 29 * 86400_000);
+  assert.equal(context.processing.getProject(project.id).status, 'archived'); assert.equal(context.processing.getTask(task.id).status, 'archived'); assert.equal(context.processing.getDataset(dataset.id).status, 'trashed'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'trashed');
+  assert.equal(fs.existsSync(datasetDirectory), false); assert.equal(fs.existsSync(output.directory), false);
+  response = await context.request('GET', '/api/v1/storage?limit=100'); const visibleTrash = (await response.json()).trash.items; assert.deepEqual(visibleTrash.map(item => item.id), [trash.id], 'owned member trash is grouped beneath the project');
+  response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {}); assert.equal(response.status, 200); assert.equal((await response.json()).project.status, 'active');
+  assert.equal(fs.existsSync(datasetDirectory), true); assert.equal(fs.existsSync(output.directory), true); assert.equal(context.processing.getDataset(dataset.id).status, 'archived'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'archived');
+  response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); trash = (await response.json()).trash;
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: 'wrong' })).status, 400);
+  assert.equal((await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: project.id })).status, 204); assert.equal(fs.existsSync(datasetDirectory), false); assert.equal(fs.existsSync(output.directory), false);
+  const { purgeContainerTrash } = require('../server/containerLifecycle'); assert.equal(purgeContainerTrash(context.processing, context.storage, trash.id, 'ops:lifecycle').permanentlyDeletedAt !== null, true, 'repeat purge is idempotent');
+});
+
+test('expired task container trash automatically purges owned files once and preserves shared datasets', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Task retention' }), shared = finalizedDataset(context, project, 'Shared dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Deleted task' }), sibling = context.processing.createTask({ projectId: project.id, datasetId: shared.id, displayName: 'Sibling task' }), directory = path.join(context.config.datasetsMount, shared.relativePath);
+  let response = await context.request('DELETE', `/api/v1/tasks/${task.id}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
+  assert.equal(context.processing.getTask(task.id).status, 'archived'); assert.equal(context.processing.getTask(sibling.id).status, 'draft'); assert.equal(context.processing.getDataset(shared.id).status, 'finalized'); assert.equal(fs.existsSync(directory), true, 'dataset shared by another live task is outside the deleted task ownership boundary');
+  context.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run(new Date(Date.now()-1000).toISOString(), trash.id);
+  const first = purgeExpiredTrash(context.processing, context.storage); assert.equal(first.length, 1); assert.equal(first[0].status, 'complete'); assert.ok(context.processing.getTrash(trash.id).permanentlyDeletedAt);
+  assert.deepEqual(purgeExpiredTrash(context.processing, context.storage), [], 'automatic purge is idempotent'); assert.equal(fs.existsSync(directory), true);
 });

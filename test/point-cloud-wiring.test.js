@@ -14,7 +14,7 @@ test('LAZ wiring retains Float64 until RTC localization and point-cloud-only ini
   assert.match(mainSource, /las:\s*\{\s*colorDepth:\s*8,\s*fp64:\s*true\s*\}/);
   assert.match(mainSource, /localizePointPositions\(positions, RTC\)[\s\S]*new THREE\.BufferAttribute\(localized\.positions, 3\)/);
   assert.match(mainSource, /refreshPointGeometryBounds\(geometry\)/);
-  assert.match(mainSource, /if \(hasMeshSource\(state\.meshSource\)\) applyMeshLayer\(\)/);
+  assert.match(mainSource, /if \(is3D\) \{[\s\S]*?applyMeshLayer\(\);/);
   assert.match(
     mainSource,
     /pointCloudOffset\.add\(pointCloudObject\)[\s\S]*pointCloudParent\.updateMatrixWorld\(true\)[\s\S]*frameObjectHome\(pointCloudObject\)/,

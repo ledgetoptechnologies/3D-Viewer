@@ -1323,6 +1323,22 @@ const MIGRATIONS = [
         ON model_camera_photos(version_id,filename);
     `,
   },
+  {
+    version: 22,
+    name: 'container_trash_members',
+    sql: `
+      CREATE TABLE container_trash_members (
+        container_trash_id TEXT NOT NULL REFERENCES storage_trash(id) ON DELETE RESTRICT,
+        member_trash_id TEXT NOT NULL REFERENCES storage_trash(id) ON DELETE RESTRICT,
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('project','task','dataset','output')),
+        entity_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(container_trash_id,member_trash_id),
+        UNIQUE(container_trash_id,entity_type,entity_id)
+      );
+      CREATE INDEX container_trash_members_member_idx ON container_trash_members(member_trash_id);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

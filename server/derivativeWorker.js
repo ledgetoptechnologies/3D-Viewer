@@ -47,6 +47,16 @@ function run(bin, args, { timeoutMs = 24 * 3600_000, signal } = {}) {
   });
 }
 
+function derivativePhase(processing, job, owner, phase) {
+  if (!processing.updateDerivativeProgress(job.id, owner, phase)) {
+    throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
+  }
+  const type = ['lod_audit', 'mesh_tiles', 'ept'].includes(job.derivative_type)
+    ? job.derivative_type
+    : 'unsupported';
+  console.info(`[derivative] type=${type} phase=${phase}`);
+}
+
 function readyEvent(processing, config, attempt) {
   const task = processing.getTask(attempt.taskId);
   const project = processing.getProject(task.projectId);
@@ -111,7 +121,7 @@ async function verifiedLodAsset(input, directory, fullMeshPath) {
   };
 }
 
-async function generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal }) {
+async function generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal, onPhase = () => {} }) {
   if (!config.meshDerivativesEnabled) throw Object.assign(new Error('mesh derivative fallback is disabled'), { code: 'derivative_unavailable' });
   if (!obj || !glb) throw Object.assign(new Error('verified Obj2Tiles generation requires both OBJ and GLB mesh sources'), { code: 'unsupported_mesh_derivative_source' });
   const base = storage.resolve('models', `${task.id}/${attempt.id}`);
@@ -122,7 +132,9 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
   try {
     const source = storage.resolve(obj.root_key, obj.relative_path, { mustExist: true });
     const auditSource = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
+    onPhase('generating');
     await run(config.obj2TilesBin, ['--octree', '--lods', '3', '--divisions', '2', '--lod-texture-scale', '0.5', '--local', source, incomplete], { signal });
+    onPhase('auditing');
     await run(process.execPath, [
       audit,
       incomplete,
@@ -134,6 +146,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     ], { signal });
     fs.rmSync(output, { recursive: true, force: true });
     fs.renameSync(incomplete, output);
+    onPhase('verifying');
     const verified = await verifiedLodAsset({
       versionId: attempt.resultModelVersionId,
       rootKey: 'models',
@@ -143,6 +156,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
       byteSize: fs.statSync(path.join(output, 'tileset.json')).size,
       attemptId: attempt.id,
     }, output, auditSource);
+    onPhase('registering');
     if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance)) {
       throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
     }
@@ -155,6 +169,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
 async function processOneDerivative({ processing, storage, config, lodAuditScript = null }, owner) {
   const job = processing.claimDerivative(owner);
   if (!job) return false;
+  const startedAt = Date.now();
   const attempt = processing.getAttempt(job.attempt_id);
   const controller = new AbortController();
   let lost = false;
@@ -167,6 +182,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
   }, 20000);
   heartbeat.unref?.();
   try {
+    derivativePhase(processing, job, owner, 'claimed');
     if (['cancelled', 'failed'].includes(attempt.status)) throw Object.assign(new Error('attempt is no longer active'), { code: 'lease_lost' });
     request = JSON.parse(job.request_json || '{}');
     const assets = processing.database.prepare('SELECT * FROM model_assets WHERE version_id=?').all(attempt.resultModelVersionId);
@@ -184,7 +200,9 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
         const tiles = storage.resolve(tilesRootKey, request.tilesRelativePath, { mustExist: true });
         const source = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
         try {
+          derivativePhase(processing, job, owner, 'auditing');
           await run(process.execPath, [audit, tiles, source, '--external-source'], { signal: controller.signal });
+          derivativePhase(processing, job, owner, 'verifying');
           const verified = await verifiedLodAsset({
             versionId: attempt.resultModelVersionId,
             rootKey: tilesRootKey,
@@ -194,6 +212,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
             byteSize: fs.statSync(path.join(tiles, 'tileset.json')).size,
             attemptId: attempt.id,
           }, tiles, source);
+          derivativePhase(processing, job, owner, 'registering');
           if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance)) {
             throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
           }
@@ -205,7 +224,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
             throw Object.assign(new Error('derivative lease was lost during tile quarantine'), { code: 'lease_lost' });
           }
           if (request.generateFromObjOnFailure && obj) {
-            await generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal: controller.signal });
+            await generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal: controller.signal, onPhase: (phase) => derivativePhase(processing, job, owner, phase) });
             derivativeResult = { verified: true, reused: false, replacedInvalidTiles: true };
           } else derivativeResult = { verified: false, fallback: 'glb', reason: sanitizeLogMessage(error.message).slice(0, 500) };
         }
@@ -220,10 +239,12 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       const incomplete = `${output}.${job.id}.incomplete`;
       fs.rmSync(incomplete, { recursive: true, force: true });
       try {
+        derivativePhase(processing, job, owner, 'indexing');
         await run(config.entwineBin, ['build', '-i', storage.resolve(point.root_key, point.relative_path, { mustExist: true }), '-o', incomplete], { signal: controller.signal });
         if (!fs.existsSync(path.join(incomplete, 'ept.json'))) throw new Error('Entwine did not produce ept.json');
         fs.rmSync(output, { recursive: true, force: true });
         fs.renameSync(incomplete, output);
+        derivativePhase(processing, job, owner, 'registering');
         await registerTreeAsset(processing, {
           versionId: attempt.resultModelVersionId,
           kind: 'ept',
@@ -240,20 +261,31 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       }
       derivativeResult = { verified: true };
     } else if (job.derivative_type === 'mesh_tiles') {
-      await generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal: controller.signal });
+      await generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, audit, signal: controller.signal, onPhase: (phase) => derivativePhase(processing, job, owner, phase) });
       derivativeResult = { verified: true, reused: false };
     } else throw new Error('unsupported derivative type');
 
     if (lost) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
+    const completedResult = {
+      ...derivativeResult,
+      phase: 'complete',
+      summary: derivativeResult.verified === false
+        ? 'Existing streaming artifacts were rejected; no derivative was registered.'
+        : 'Verified derivative registered and ready for the Viewer.',
+      durationMs: Math.max(0, Date.now() - startedAt),
+    };
     if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) {
-      if (!processing.completeOptionalDerivative(job.id, owner, derivativeResult)) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
-    } else emitReady(processing, config, attempt, job, owner, derivativeResult);
+      if (!processing.completeOptionalDerivative(job.id, owner, completedResult)) throw Object.assign(new Error('derivative lease was lost'), { code: 'lease_lost' });
+    } else emitReady(processing, config, attempt, job, owner, completedResult);
+    console.info(`[derivative] type=${job.derivative_type} outcome=complete durationMs=${completedResult.durationMs}`);
     return true;
   } catch (error) {
     const safe = sanitizeLogMessage(error.message).slice(0, 1000);
+    const errorCode = String(error.code || 'derivative_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80) || 'derivative_failed';
+    console.error(`[derivative] type=${['lod_audit','mesh_tiles','ept'].includes(job.derivative_type)?job.derivative_type:'unsupported'} outcome=failed durationMs=${Math.max(0,Date.now()-startedAt)} code=${errorCode}`);
     if (error.code !== 'lease_lost') {
-      if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) processing.failOptionalDerivative(job.id, owner, safe, error.code || 'derivative_failed');
-      else processing.failDerivative(job.id, owner, safe, error.code || 'derivative_failed');
+      if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) processing.failOptionalDerivative(job.id, owner, safe, errorCode);
+      else processing.failDerivative(job.id, owner, safe, errorCode);
     }
     return true;
   } finally {

@@ -20,12 +20,13 @@ import {
   visibleLodFrontier,
 } from './lod-policy.mjs';
 import { EarthLikeControls } from './earth-controls.js';
-import { hasMeshSource, localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
+import { localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
+import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -114,7 +115,7 @@ let PROJECT_SHARE_CATALOG = null;
 let SHARE_PERMISSIONS = { measure: true, cameras: true };
 
 const state = {
-  activeMode: 'model',
+  activeMode: null,
   meshSource: 'none',       // 'tiles' | 'lod-required' | 'none'
   cloudMode: 'none',        // 'potree' (EPT via iframe) | 'direct' (LAZ/PLY in three.js) | 'none'
   pointCloudLoaded: false, pointCloudLoading: false,
@@ -149,6 +150,30 @@ let geoPool = null;
 let lastFps = performance.now(), frames = 0;
 let bvhQueue = [];
 let homeView = null;
+let modeEpoch = 0;
+let directPointCloudLoad = null;
+
+const DIAGNOSTIC_EVENTS = new Set([
+  'mode_start', 'mode_cancel', 'pointcloud_start', 'pointcloud_stop',
+  'pointcloud_ready', 'pointcloud_failure',
+]);
+const DIAGNOSTIC_REASONS = new Set(['navigation', 'history', 'startup', 'superseded', 'unavailable']);
+const POINT_CLOUD_FAILURE_CODES = new Set([
+  'startup_timeout', 'load_timeout', 'node_timeout', 'resource_failed',
+  'runtime_unavailable', 'metadata_failed', 'runtime_error', 'not_configured',
+]);
+
+// Diagnostics are deliberately finite and identifier-free. Never include
+// asset URLs, project titles, session identifiers, or exception objects here.
+function viewerDiagnostic(event, { mode = null, reason = null, code = null } = {}) {
+  if (!DIAGNOSTIC_EVENTS.has(event)) return;
+  const details = {};
+  if (['model', 'cloud', 'ortho', 'dsm', 'dtm'].includes(mode)) details.mode = mode;
+  if (DIAGNOSTIC_REASONS.has(reason)) details.reason = reason;
+  if (POINT_CLOUD_FAILURE_CODES.has(code)) details.code = code;
+  const method = event.endsWith('failure') ? 'warn' : 'info';
+  console[method](`[viewer-runtime] ${event}`, details);
+}
 
 bootstrap();
 
@@ -508,10 +533,19 @@ function applyProjectConfig(p) {
 function init() {
   initThree();
   bindUI();
-  applyAvailability();
-  // applyAvailability() already selects the point-cloud/map fallback when a
-  // project has no mesh. Do not then start a bogus GLB request with a null URL.
-  if (hasMeshSource(state.meshSource)) applyMeshLayer();
+  const available = applyAvailability();
+  const requested = viewerModeFromUrl(location.href);
+  const initialMode = chooseViewerMode(requested, available);
+  if (initialMode) {
+    switchMode(initialMode, { historyMode: 'replace', force: true, reason: 'startup' });
+  } else if (state.meshSource === 'lod-required') {
+    // The original mesh is intentionally download-only. Leave the workspace
+    // interactive while its verified streaming derivative is generated.
+    hideLoading();
+    updateStatus('Streaming LOD unavailable or processing');
+  } else {
+    updateLoading('No published views available', 'Original source files remain available for authenticated download in Operations.');
+  }
   loadCameras();         // prepare camera positions (hidden until toggled); no-op if unavailable
   startLoop();
 }
@@ -519,11 +553,18 @@ function init() {
 // Hide tabs/buttons for layers this project doesn't have, and make sure the
 // mesh-layer buttons reflect state.meshSource before applyMeshLayer() runs.
 function applyAvailability() {
+  const available = availableViewerModes({
+    meshSource: state.meshSource,
+    cloudMode: state.cloudMode,
+    ortho: Boolean(ORTHO_URL),
+    dsm: Boolean(DSM_URL),
+    dtm: Boolean(DTM_URL),
+  });
   const setVisible = (id, visible) => {
     const el = document.getElementById(id);
     if (el) el.style.display = visible ? '' : 'none';
   };
-  setVisible('tab-model', state.meshSource !== 'none');
+  setVisible('tab-model', available.includes('model'));
   setVisible('tab-cloud', state.cloudMode !== 'none');
   setVisible('tab-ortho', !!ORTHO_URL);
   setVisible('tab-dsm', !!DSM_URL);
@@ -532,7 +573,7 @@ function applyAvailability() {
   setVisible('panel-pc', state.cloudMode === 'potree');   // budget/size/EDL sliders only apply to Potree
   // A share link can disable measuring entirely (permissions.measure=false).
   if (dom.btnMeasureFloat) {
-    dom.btnMeasureFloat.style.display = (VIEW_MODE === 'embed' && SHARE_PERMISSIONS.measure && hasMeshSource(state.meshSource)) ? 'flex' : 'none';
+    dom.btnMeasureFloat.style.display = (VIEW_MODE === 'embed' && SHARE_PERMISSIONS.measure && state.meshSource === 'tiles') ? 'flex' : 'none';
   }
 
   const tilesBtn = document.getElementById('layer-tiles');
@@ -549,6 +590,11 @@ function applyAvailability() {
     tilesBtn.disabled = true;
     tilesBtn.title = 'Streaming tiles are still processing or unavailable. Download the original mesh from Operations if needed.';
     updateStatus('Streaming LOD unavailable or processing');
+    // There is no interactive full-mesh fallback to finish this loading state.
+    // Keep the workspace usable while the verified background derivative is
+    // pending, and let authenticated sessions discover it in place.
+    hideLoading();
+    scheduleLodAvailabilityRefresh();
   } else {
     tilesBtn.style.display = 'none';
   }
@@ -557,15 +603,7 @@ function applyAvailability() {
     tilesBtn.title = '';
   }
 
-  // land on the first available tab if "3D Model" isn't offered
-  if (state.meshSource === 'none') {
-    const fallback = state.cloudMode !== 'none' ? 'cloud'
-      : (ORTHO_URL ? 'ortho' : (DSM_URL ? 'dsm' : (DTM_URL ? 'dtm' : null)));
-    if (fallback) {
-      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === fallback));
-      switchMode(fallback);
-    }
-  }
+  return available;
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -787,6 +825,9 @@ function disposeTiles() {
 
 let sessionRenewalTimer = null;
 let sessionAllowedOrigins = [];
+const LOD_AVAILABILITY_REFRESH_MS = 5000;
+let lodAvailabilityTimer = null;
+let lodAvailabilityRefreshInFlight = false;
 
 async function redeemViewerGrant(grant) {
   const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
@@ -809,8 +850,48 @@ async function currentViewerSession() {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(body.error || `HTTP ${res.status}`), { status: res.status });
   return body;
+}
+
+function stopLodAvailabilityRefresh() {
+  if (lodAvailabilityTimer) clearTimeout(lodAvailabilityTimer);
+  lodAvailabilityTimer = null;
+}
+
+function scheduleLodAvailabilityRefresh(delay = LOD_AVAILABILITY_REFRESH_MS) {
+  if (VIEW_MODE !== 'session' || state.meshSource !== 'lod-required'
+    || lodAvailabilityTimer || lodAvailabilityRefreshInFlight) return;
+  lodAvailabilityTimer = setTimeout(refreshLodAvailability, delay);
+}
+
+async function refreshLodAvailability() {
+  lodAvailabilityTimer = null;
+  if (VIEW_MODE !== 'session' || state.meshSource !== 'lod-required'
+    || lodAvailabilityRefreshInFlight) return;
+  lodAvailabilityRefreshInFlight = true;
+  let retry = true;
+  try {
+    const session = await currentViewerSession();
+    if (!PROJECT || session.model.id !== PROJECT.id) return;
+    const previousMeshSource = state.meshSource;
+    applyViewerSession(session);
+    if (previousMeshSource === 'lod-required' && state.meshSource === 'tiles') {
+      const available = applyAvailability();
+      if (!state.activeMode) {
+        const mode = chooseViewerMode(viewerModeFromUrl(location.href), available);
+        if (mode) switchMode(mode, { historyMode: 'replace', force: true, reason: 'startup' });
+      }
+    }
+  } catch (error) {
+    // Session renewal/revocation has its own controller flow. Availability
+    // checks stay quiet and retry while the currently displayed session lives.
+    console.warn('LOD availability refresh failed', error?.status || error?.name || 'request_failed');
+    retry = error?.status !== 401 && error?.status !== 404;
+  } finally {
+    lodAvailabilityRefreshInFlight = false;
+    if (retry && state.meshSource === 'lod-required') scheduleLodAvailabilityRefresh();
+  }
 }
 
 function sessionControlWindow() {
@@ -864,6 +945,8 @@ function applyViewerSession(session, { initialize = false } = {}) {
     PROJECT = session.model;
     applyProjectConfig(PROJECT);
   }
+  if (state.meshSource === 'lod-required') scheduleLodAvailabilityRefresh();
+  else stopLodAvailabilityRefresh();
   scheduleSessionRenewal(session);
 }
 
@@ -873,7 +956,11 @@ async function bootstrapSession() {
     const session = SESSION_GRANT
       ? await redeemViewerGrant(SESSION_GRANT)
       : await currentViewerSession();
-    if (SESSION_GRANT) history.replaceState(null, '', `/session/active/${encodeURIComponent(session.sessionId)}`);
+    if (SESSION_GRANT) {
+      const activeUrl = new URL(location.href);
+      activeUrl.pathname = `/session/active/${encodeURIComponent(session.sessionId)}`;
+      history.replaceState(null, '', `${activeUrl.pathname}${activeUrl.search}${activeUrl.hash}`);
+    }
     applyViewerSession(session, { initialize: true });
   } catch (error) {
     if (sessionStorageKey) sessionStorage.removeItem(sessionStorageKey);
@@ -2149,47 +2236,54 @@ async function overviewCanvas(ds, renderFn, maxDim = 1400) {
   return { canvas, bounds: [[minLat, minLon], [maxLat, maxLon]] };
 }
 
-async function showOrtho() {
+async function showOrtho(epoch = modeEpoch) {
   updateStatus('Mode: Orthophoto');
   try {
     if (!orthoLayers) {
       updateLoading('Opening orthophoto (streaming)...', '');
       const ds = await getDataset(ORTHO_URL, false);
+      if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
       const ov = await overviewCanvas(ds, renderOrthoTile, 3400);
+      if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
       const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
       const grid = new GeoTiffGridLayer(ds, renderOrthoTile, {
         tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
       });
       orthoLayers = { overlay, grid, ds };
-      hideLoading();
+      if (epoch === modeEpoch) hideLoading();
     }
+    if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
     orthoLayers.overlay.addTo(map);
     orthoLayers.grid.addTo(map);
     restoreOrFit('ortho', orthoLayers.ds.llBounds);
     applyOrthoOpacity();
   } catch (err) {
-    console.error('ortho error', err);
+    if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
+    console.error('[viewer-runtime] orthophoto initialization failed');
     hideLoading();
     showError('Could not stream the orthophoto GeoTIFF.');
   }
 }
 
-async function showDEM(type) {
+async function showDEM(type, epoch = modeEpoch) {
   updateStatus(`Mode: ${type.toUpperCase()}`);
   const url = type === 'dsm' ? DSM_URL : DTM_URL;
   try {
     if (!demLayers[type]) {
       updateLoading(`Opening ${type.toUpperCase()} (streaming)...`, '');
       const ds = await getDataset(url, true);
+      if (epoch !== modeEpoch || state.activeMode !== type) return;
       const ov = await overviewCanvas(ds, renderDemTile, 2048);
+      if (epoch !== modeEpoch || state.activeMode !== type) return;
       const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 0.94 });
       const grid = new GeoTiffGridLayer(ds, renderDemTile, {
         tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff'
       });
       demLayers[type] = { overlay, grid, ds };
       syncMapVolumeAvailability();
-      hideLoading();
+      if (epoch === modeEpoch) hideLoading();
     }
+    if (epoch !== modeEpoch || state.activeMode !== type) return;
     const dl = demLayers[type];
     dl.overlay.addTo(map);
     dl.grid.addTo(map);
@@ -2198,7 +2292,8 @@ async function showDEM(type) {
     applyDemOpacity();
     refreshLegendFor(dl.ds);
   } catch (err) {
-    console.error(`${type} error`, err);
+    if (epoch !== modeEpoch || state.activeMode !== type) return;
+    console.error(`[viewer-runtime] ${type.toUpperCase()} initialization failed`);
     hideLoading();
     showError(`Could not stream the ${type.toUpperCase()} GeoTIFF.`);
   }
@@ -2439,18 +2534,27 @@ function hillshadeFactor(values, w, h, x, y) {
 // ────────────────────────────────────────────────
 function loadPointCloudDirect() {
   if (state.pointCloudLoaded || state.pointCloudLoading || !POINT_CLOUD_URL) return;
+  const attempt = { controller: new AbortController(), request: null, cancelled: false };
+  directPointCloudLoad = attempt;
   state.pointCloudLoading = true;
   const isLaz = POINT_CLOUD_FORMAT === 'laz' || /\.la[sz]$/i.test(POINT_CLOUD_URL);
   const label = isLaz ? 'LAZ' : 'PLY';
   updateLoading(`Loading point cloud (${label})...`, '');
 
   const onFail = (err) => {
-    console.error('Point cloud load error', err);
+    if (attempt.cancelled || directPointCloudLoad !== attempt || err?.name === 'AbortError') return;
+    console.error('[viewer-runtime] direct point-cloud load failed');
+    viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code: 'runtime_error' });
     state.pointCloudLoading = false;
+    directPointCloudLoad = null;
     hideLoading();
-    showError(`Failed to load point cloud from ${POINT_CLOUD_URL}.`);
+    showError('Failed to load the point cloud. Retry the Point Cloud view or check Background Work.');
   };
   const onGeometryReady = (geometry) => {
+    if (attempt.cancelled || directPointCloudLoad !== attempt || state.activeMode !== 'cloud') {
+      geometry?.dispose?.();
+      return;
+    }
     try {
       const sourcePositions = geometry.getAttribute('position')?.array;
       if (!sourcePositions) throw new Error(`${label} file had no POSITION attribute`);
@@ -2488,6 +2592,8 @@ function loadPointCloudDirect() {
       }
       state.pointCloudLoaded = true;
       state.pointCloudLoading = false;
+      directPointCloudLoad = null;
+      viewerDiagnostic('pointcloud_ready', { mode: 'cloud' });
       hideLoading();
     } catch (err) {
       onFail(err);
@@ -2500,7 +2606,9 @@ function loadPointCloudDirect() {
       // local RTC frame. Decoding straight to Float32 loses fine detail at
       // multi-million-metre northings before the GPU ever sees the points.
       las: { colorDepth: 8, fp64: true },
+      fetch: { signal: attempt.controller.signal },
     }).then((data) => {
+      if (attempt.cancelled || directPointCloudLoad !== attempt) return;
       const positions = data.attributes.POSITION && data.attributes.POSITION.value;
       if (!positions) throw new Error('LAZ/LAS file had no POSITION attribute');
       const geometry = new THREE.BufferGeometry();
@@ -2524,10 +2632,34 @@ function loadPointCloudDirect() {
       onGeometryReady(geometry);
     }).catch(onFail);
   } else {
-    new PLYLoader().load(POINT_CLOUD_URL, onGeometryReady, (xhr) => {
-      if (xhr.total) updateLoading(`Loading point cloud (${label})...`, `${((xhr.loaded / xhr.total) * 100).toFixed(0)}%`);
+    attempt.request = new PLYLoader().load(POINT_CLOUD_URL, onGeometryReady, (xhr) => {
+      if (!attempt.cancelled && directPointCloudLoad === attempt && xhr.total) {
+        updateLoading(`Loading point cloud (${label})...`, `${((xhr.loaded / xhr.total) * 100).toFixed(0)}%`);
+      }
     }, onFail);
   }
+}
+
+function stopDirectPointCloud(reason = 'superseded') {
+  const hadRuntime = Boolean(directPointCloudLoad || pointCloudObject);
+  if (directPointCloudLoad) {
+    directPointCloudLoad.cancelled = true;
+    directPointCloudLoad.controller.abort();
+    directPointCloudLoad.request?.abort?.();
+    directPointCloudLoad = null;
+    state.pointCloudLoading = false;
+    hideLoading();
+  }
+  if (pointCloudObject) {
+    pointCloudOffset.remove(pointCloudObject);
+    pointCloudObject.geometry?.dispose?.();
+    const materials = Array.isArray(pointCloudObject.material) ? pointCloudObject.material : [pointCloudObject.material];
+    materials.forEach((material) => material?.dispose?.());
+    pointCloudObject = null;
+    state.pointCloudLoaded = false;
+  }
+  if (pointCloudParent) pointCloudParent.visible = false;
+  if (hadRuntime) viewerDiagnostic('pointcloud_stop', { mode: 'cloud', reason });
 }
 
 // ────────────────────────────────────────────────
@@ -2546,8 +2678,20 @@ function showPointCloud() {
     iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:none;background:#050505;';
     dom.cloudContainer.appendChild(iframe);
     state.pcIframeLoaded = true;
+    viewerDiagnostic('pointcloud_start', { mode: 'cloud' });
   }
   dom.cloudStatus.textContent = 'Cloud: connecting…';
+}
+
+function stopPointCloudIframe(reason = 'superseded') {
+  const iframe = document.getElementById('pc-iframe');
+  if (!iframe) return;
+  try { pcApi()?.cancel?.(); } catch { /* iframe may already be unloading */ }
+  iframe.src = 'about:blank';
+  iframe.remove();
+  state.pcIframeLoaded = false;
+  dom.cloudStatus.textContent = 'Cloud: idle';
+  viewerDiagnostic('pointcloud_stop', { mode: 'cloud', reason });
 }
 
 window.addEventListener('message', (event) => {
@@ -2557,9 +2701,12 @@ window.addEventListener('message', (event) => {
   if (!message || message.source !== 'ltds-pointcloud') return;
   if (message.type === 'ready' && message.code === 'points_visible') {
     dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready';
+    viewerDiagnostic('pointcloud_ready', { mode: 'cloud' });
     applyPcPanelState();
   } else if (message.type === 'error') {
-    dom.cloudStatus.textContent = 'Cloud: unavailable';
+    const code = POINT_CLOUD_FAILURE_CODES.has(message.code) ? message.code : 'runtime_error';
+    dom.cloudStatus.textContent = `Cloud: unavailable (${code})`;
+    viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code });
   }
 });
 
@@ -2611,13 +2758,13 @@ function getViewTargetWorld() {
 }
 
 function pushViewToPointCloud(retries = 40) {
+  if (state.activeMode !== 'cloud' || state.cloudMode !== 'potree') return;
   const f = document.getElementById('pc-iframe');
   const w = f && f.contentWindow;
   if (!w || typeof w.__setViewUTM !== 'function') {
     if (retries > 0) setTimeout(() => pushViewToPointCloud(retries - 1), 250);
     return;
   }
-  if (state.activeMode !== 'cloud') return;   // user already left the tab
   const camU = worldToUtm(camera.position);
   const tgtU = worldToUtm(getViewTargetWorld());
   try { w.__setViewUTM(camU.e, camU.n, camU.alt, tgtU.e, tgtU.n, tgtU.alt); } catch (err) { /* iframe busy */ }
@@ -2644,10 +2791,19 @@ function pullViewFromPointCloud() {
 function bindUI() {
   document.querySelectorAll('.tab-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      switchMode(btn.dataset.mode);
+      switchMode(btn.dataset.mode, { reason: 'navigation' });
     });
+  });
+  window.addEventListener('popstate', () => {
+    const available = availableViewerModes({
+      meshSource: state.meshSource,
+      cloudMode: state.cloudMode,
+      ortho: Boolean(ORTHO_URL),
+      dsm: Boolean(DSM_URL),
+      dtm: Boolean(DTM_URL),
+    });
+    const mode = chooseViewerMode(viewerModeFromUrl(location.href), available);
+    if (mode) switchMode(mode, { updateHistory: false, force: true, reason: 'history' });
   });
 
   // 3D mode is streaming-only. Original GLB/OBJ sources remain downloadable
@@ -2738,13 +2894,20 @@ function applyMeshLayer() {
   }
 }
 
-// Restore the verified streaming layer when returning from point-cloud/map mode.
-function restoreMeshVisibility() {
-  tilesParent.visible = state.meshSource === 'tiles';
-  glbParent.visible = false;
-}
+function switchMode(mode, { historyMode = 'push', updateHistory = true, force = false, reason = 'navigation' } = {}) {
+  const available = availableViewerModes({
+    meshSource: state.meshSource,
+    cloudMode: state.cloudMode,
+    ortho: Boolean(ORTHO_URL),
+    dsm: Boolean(DSM_URL),
+    dtm: Boolean(DTM_URL),
+  });
+  if (!available.includes(mode)) {
+    viewerDiagnostic('mode_cancel', { mode, reason: 'unavailable' });
+    return false;
+  }
+  if (!force && state.activeMode === mode) return true;
 
-function switchMode(mode) {
   rememberMapView(state.activeMode);   // keep the view of the tab we're leaving
   const prevMode = state.activeMode;
   // disarm any active measure tool in the tab we're leaving (measurements persist)
@@ -2759,7 +2922,34 @@ function switchMode(mode) {
     dom.measureOutput.innerHTML = '';
     if (renderer) renderer.domElement.classList.remove('measuring');
   }
+
+  // Invalidate every asynchronous initializer before the next mode starts.
+  // This prevents a late GeoTIFF/LAZ completion from taking over the canvas.
+  modeEpoch += 1;
+  hideLoading();
+  if (prevMode && prevMode !== mode) {
+    viewerDiagnostic('mode_cancel', { mode: prevMode, reason: 'superseded' });
+  }
+  if (prevMode === 'model' && prevMode !== mode) {
+    tilesParent.visible = false;
+    disposeTiles();
+  }
+  if (prevMode === 'cloud' && prevMode !== mode) {
+    if (mode === 'model' && state.cloudMode === 'potree') pullViewFromPointCloud();
+    if (state.cloudMode === 'potree') stopPointCloudIframe('superseded');
+    else stopDirectPointCloud('superseded');
+  }
+  if (isMapMode(prevMode) && prevMode !== mode) removeMapOverlays();
+
   state.activeMode = mode;
+  document.querySelectorAll('.tab-btn').forEach((button) => {
+    button.classList.toggle('active', button.dataset.mode === mode);
+  });
+  if (updateHistory) {
+    const nextUrl = viewerModeUrl(location.href, mode);
+    history[historyMode === 'replace' ? 'replaceState' : 'pushState'](null, '', nextUrl);
+  }
+  viewerDiagnostic('mode_start', { mode, reason });
   const is3D = mode === 'model';
   const isPC = mode === 'cloud';
   const isPotreeCloud = isPC && state.cloudMode === 'potree';
@@ -2787,10 +2977,9 @@ function switchMode(mode) {
   syncMapVolumeAvailability();
 
   if (is3D) {
-    updateStatus(state.meshSource === 'lod-required' ? 'Streaming LOD unavailable or processing' : 'Mode: 3D Model');
+    updateStatus('Mode: 3D Model');
     if (pointCloudParent) pointCloudParent.visible = false;
-    restoreMeshVisibility();
-    if (prevMode === 'cloud') pullViewFromPointCloud();   // WebODM-style view carry-over (no-op for direct-cloud mode)
+    applyMeshLayer();
     onResize();
   } else if (isPotreeCloud) {
     updateStatus('Mode: Point Cloud');
@@ -2807,9 +2996,10 @@ function switchMode(mode) {
     ensureMap();
     removeMapOverlays();
     map.invalidateSize();
-    if (mode === 'ortho') showOrtho();
-    else showDEM(mode);
+    if (mode === 'ortho') showOrtho(modeEpoch);
+    else showDEM(mode, modeEpoch);
   }
+  return true;
 }
 
 function applyPcPanelState() {
