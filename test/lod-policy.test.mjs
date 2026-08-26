@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { TilesRenderer } from '3d-tiles-renderer';
 import {
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
-  enableRootLodBackdrop,
+  enableTransientRootLodBackdrop,
   inspectLodProvenance,
   inspectLodTileset,
+  lodQueuesSettled,
   lodCacheBudget,
   refreshLodResolution,
   releaseStaleLodDetails,
   screenSpaceErrorPriority,
+  syncTransientRootLodBackdrop,
   visibleLodFrontier,
 } from '../lod-policy.mjs';
 
@@ -24,7 +27,7 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.equal(detailToErrorTarget(undefined), 2, 'missing detail defaults to maximum quality');
 });
 
-test('renderer configuration prioritizes highest screen-space error without ancestor overfetch', () => {
+test('renderer configuration uses REPLACE transitions without ancestor or sibling overfetch', () => {
   const calls = [];
   const tiles = {
     lruCache: {},
@@ -70,6 +73,13 @@ test('renderer configuration prioritizes highest screen-space error without ance
   assert.equal(alreadyBounded.parseQueue.maxJobs, 1);
 });
 
+test('full-detail queue settlement includes lazy hierarchy preprocessing', () => {
+  assert.equal(lodQueuesSettled({ downloadQueue: {}, parseQueue: {}, processNodeQueue: {} }), true);
+  assert.equal(lodQueuesSettled({ downloadQueue: { running: true }, parseQueue: {}, processNodeQueue: {} }), false);
+  assert.equal(lodQueuesSettled({ downloadQueue: {}, parseQueue: { running: true }, processNodeQueue: {} }), false);
+  assert.equal(lodQueuesSettled({ downloadQueue: {}, parseQueue: {}, processNodeQueue: { running: true } }), false);
+});
+
 test('LOD queue priority favors visible high-error foreground tiles', () => {
   const tile = ({ used = true, inFrustum = true, error, distanceFromCamera, depth = 1 } = {}) => ({
     priority: 0,
@@ -85,127 +95,145 @@ test('LOD queue priority favors visible high-error foreground tiles', () => {
   assert.equal(screenSpaceErrorPriority(outside, foreground), -1);
 });
 
-test('a renderable root can become a runtime-only coarse backdrop', () => {
-  const root = { refine: 'REPLACE', content: { uri: 'root.b3dm' } };
-  assert.equal(enableRootLodBackdrop({ root }), true);
-  assert.equal(root.refine, 'ADD');
-
-  const externalRoot = { refine: 'REPLACE', content: { uri: 'nested/tileset.json' } };
-  assert.equal(enableRootLodBackdrop({ root: externalRoot }), false);
-  assert.equal(externalRoot.refine, 'REPLACE');
-
-  const emptyRoot = { refine: 'REPLACE' };
-  assert.equal(enableRootLodBackdrop({ root: emptyRoot }), false);
-  assert.equal(emptyRoot.refine, 'REPLACE');
-});
-
-test('stale full-detail leaves are released only after their parent is out of view or coarse enough', () => {
-  const oldLeaf = {
-    geometricError: 0,
-    traversal: { active: true, visible: true },
-    engineData: { scene: { visible: true } },
-    children: [],
-  };
-  const settledLeaf = {
-    geometricError: 0,
-    traversal: { active: true, visible: true },
-    engineData: { scene: { visible: true } },
-    children: [],
-  };
-  const activeLeaf = {
-    geometricError: 0,
-    traversal: { active: true, visible: true },
-    engineData: { scene: { visible: true } },
-    children: [],
-  };
-  const intermediate = {
-    geometricError: 3,
-    traversal: { active: true, visible: true },
-    engineData: { scene: { visible: true } },
-    children: [],
-  };
-  const root = {
-    refine: 'ADD',
-    geometricError: 100,
-    traversal: { active: true, visible: true },
-    engineData: { scene: { visible: true } },
-    children: [
-      { geometricError: 3, traversal: { inFrustum: false }, children: [oldLeaf] },
-      { geometricError: 3, traversal: { inFrustum: true, error: 6 }, children: [settledLeaf] },
-      { geometricError: 3, traversal: { inFrustum: true, error: 7 }, children: [activeLeaf] },
-      intermediate,
-    ],
-  };
-  const unused = [];
-  const visibilityChanges = [];
-  const activeChanges = [];
-  let unloads = 0;
-  const tiles = {
-    root,
-    errorTarget: 6,
-    setTileVisible: (tile, visible) => visibilityChanges.push([tile, visible]),
-    setTileActive: (tile, active) => activeChanges.push([tile, active]),
-    lruCache: {
-      markUnused: (tile) => unused.push(tile),
-      scheduleUnload: () => { unloads += 1; },
-    },
-  };
-
-  assert.equal(releaseStaleLodDetails(tiles), 2);
-  assert.equal(oldLeaf.engineData.scene.visible, true);
-  assert.equal(oldLeaf.traversal.active, false);
-  assert.equal(oldLeaf.traversal.visible, false);
-  assert.equal(settledLeaf.engineData.scene.visible, true);
-  assert.equal(activeLeaf.engineData.scene.visible, true);
-  assert.equal(intermediate.engineData.scene.visible, true);
-  assert.deepEqual(visibilityChanges, [[oldLeaf, false], [settledLeaf, false]]);
-  assert.deepEqual(activeChanges, [[oldLeaf, false], [settledLeaf, false]]);
-  assert.deepEqual(unused, [oldLeaf, settledLeaf]);
-  assert.equal(unloads, 1);
-});
-
-test('stale full-detail leaves stay intact without a coarse backdrop', () => {
-  const leaf = {
-    geometricError: 0,
-    traversal: { active: true, visible: true },
-    engineData: { scene: { visible: true } },
-    children: [],
-  };
+test('transient root backdrop hides only after every required visible fine leaf is attached', () => {
+  const rootMaterial = { visible: true };
+  const rootScene = { traverse: (callback) => callback({ isMesh: true, material: rootMaterial }) };
+  const leafSceneA = {};
+  const leafSceneB = {};
+  const leafA = { geometricError: 0, traversal: { used: true, inFrustum: true }, engineData: { scene: leafSceneA }, children: [] };
+  const leafB = { geometricError: 0, traversal: { used: true, inFrustum: true }, engineData: { scene: leafSceneB }, children: [] };
   const root = {
     refine: 'REPLACE',
-    geometricError: 100,
-    children: [{ geometricError: 3, traversal: { inFrustum: false }, children: [leaf] }],
+    content: { uri: 'root.b3dm' },
+    engineData: { scene: rootScene },
+    children: [leafA, leafB],
   };
-  const unused = [];
-  assert.equal(releaseStaleLodDetails({
-    root,
-    errorTarget: 6,
-    lruCache: { markUnused: (tile) => unused.push(tile), scheduleUnload: () => { throw new Error('must not unload'); } },
-  }), 0);
-  assert.equal(leaf.engineData.scene.visible, true);
-  assert.deepEqual(unused, []);
+  const tiles = { root, group: { children: [rootScene, leafSceneA] } };
+
+  assert.equal(enableTransientRootLodBackdrop(tiles), true);
+  assert.equal(root.refine, 'ADD');
+  assert.equal(leafA.refine, 'REPLACE');
+  assert.equal(leafB.refine, 'REPLACE');
+  assert.deepEqual(syncTransientRootLodBackdrop(tiles), {
+    complete: false,
+    requiredLeaves: 2,
+    attachedLeaves: 1,
+    backdropVisible: true,
+  });
+  assert.equal(rootMaterial.visible, true);
+
+  tiles.group.children.push(leafSceneB);
+  assert.deepEqual(syncTransientRootLodBackdrop(tiles), {
+    complete: true,
+    requiredLeaves: 2,
+    attachedLeaves: 2,
+    backdropVisible: false,
+  });
+  assert.equal(rootMaterial.visible, false);
+
+  leafB.traversal.inFrustum = false;
+  assert.deepEqual(syncTransientRootLodBackdrop(tiles), {
+    complete: true,
+    requiredLeaves: 1,
+    attachedLeaves: 1,
+    backdropVisible: false,
+  });
+
+  leafA.traversal.used = false;
+  assert.equal(syncTransientRootLodBackdrop(tiles).backdropVisible, true, 'coarse-only views retain the root');
+
+  const externalRoot = { refine: 'REPLACE', content: { uri: 'nested/tileset.json' } };
+  assert.equal(enableTransientRootLodBackdrop({ root: externalRoot }), false);
+  assert.equal(externalRoot.refine, 'REPLACE');
 });
 
-test('standard ancestor loading owns visibility transitions without manual cache eviction', () => {
+test('runtime root ADD does not contaminate lazy descendant REPLACE inheritance', () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { location: { href: 'http://localhost/' } };
+  try {
+    const child = {
+      geometricError: 0,
+      boundingVolume: { sphere: [0, 0, 0, 1] },
+      content: { uri: 'leaf.b3dm' },
+    };
+    const document = {
+      asset: { version: '1.0' },
+      geometricError: 10,
+      root: {
+        refine: 'REPLACE',
+        geometricError: 10,
+        boundingVolume: { sphere: [0, 0, 0, 2] },
+        content: { uri: 'root.b3dm' },
+        children: [child],
+      },
+    };
+    const renderer = new TilesRenderer('http://localhost/tileset.json');
+    renderer.preprocessTileset(document, 'http://localhost/tileset.json');
+    renderer.rootTileset = document;
+    assert.equal(enableTransientRootLodBackdrop(renderer), true);
+    renderer.preprocessNode(child, document.root.internal.basePath, document.root);
+    assert.equal(child.refine, 'REPLACE');
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('an in-frustum fine leaf survives a stale out-of-frustum parent result', () => {
+  const leafScene = {};
   const leaf = {
     geometricError: 0,
-    traversal: { active: true, visible: true },
     children: [],
+    traversal: { used: true, inFrustum: true, active: true, visible: true },
+    engineData: { scene: leafScene },
   };
-  const root = {
-    refine: 'ADD',
-    children: [{ geometricError: 3, traversal: { inFrustum: false }, children: [leaf] }],
+  const parent = {
+    geometricError: 3,
+    traversal: { used: false, inFrustum: false, error: 1 },
+    children: [leaf],
   };
+  const calls = [];
   const tiles = {
-    root,
-    loadAncestors: true,
-    errorTarget: 6,
-    setTileVisible: () => { throw new Error('standard traversal must own visibility'); },
-    setTileActive: () => { throw new Error('standard traversal must own activation'); },
-    lruCache: { markUnused: () => { throw new Error('standard traversal must own cache use'); } },
+    root: { refine: 'ADD', children: [parent] },
+    group: { children: [leafScene] },
+    errorTarget: 2,
+    setTileVisible: (...args) => calls.push(['visible', ...args]),
+    setTileActive: (...args) => calls.push(['active', ...args]),
+    lruCache: { markUnused: (...args) => calls.push(['unused', ...args]), scheduleUnload: () => calls.push(['unload']) },
   };
   assert.equal(releaseStaleLodDetails(tiles), 0);
-  assert.deepEqual(leaf.traversal, { active: true, visible: true });
+  assert.deepEqual(calls, []);
+  assert.equal(leaf.traversal.active, true);
+  assert.equal(leaf.traversal.visible, true);
+});
+
+test('a coarse Detail target releases a fine leaf once its in-frustum parent is sufficient', () => {
+  const leafScene = {};
+  const leaf = {
+    geometricError: 0,
+    children: [],
+    traversal: { used: true, inFrustum: true, active: true, visible: true },
+    engineData: { scene: leafScene },
+  };
+  const parent = {
+    geometricError: 3,
+    traversal: { used: true, inFrustum: true, error: 36 },
+    children: [leaf],
+  };
+  const calls = [];
+  const tiles = {
+    root: { refine: 'ADD', children: [parent] },
+    group: { children: [leafScene] },
+    errorTarget: 512,
+    setTileVisible: (...args) => calls.push(['visible', ...args]),
+    setTileActive: (...args) => calls.push(['active', ...args]),
+    lruCache: { markUnused: (...args) => calls.push(['unused', ...args]), scheduleUnload: () => calls.push(['unload']) },
+  };
+  assert.equal(releaseStaleLodDetails(tiles), 1);
+  assert.deepEqual(calls.map((call) => call[0]), ['visible', 'active', 'unused', 'unload']);
+  assert.equal(leaf.traversal.active, false);
+  assert.equal(leaf.traversal.visible, false);
+  assert.equal(leafScene.visible, undefined, 'cached scene visibility must not be mutated');
 });
 
 test('resize refreshes the renderer resolution used by SSE calculations', () => {

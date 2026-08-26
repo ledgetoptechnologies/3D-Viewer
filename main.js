@@ -12,11 +12,13 @@ import {
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
-  enableRootLodBackdrop,
+  enableTransientRootLodBackdrop,
   inspectLodProvenance,
   inspectLodTileset,
+  lodQueuesSettled,
   refreshLodResolution,
   releaseStaleLodDetails,
+  syncTransientRootLodBackdrop,
   visibleLodFrontier,
 } from './lod-policy.mjs';
 import { EarthLikeControls, safeTopViewPosition } from './earth-controls.js';
@@ -24,7 +26,7 @@ import { pickDirectPointSurface } from './direct-pointcloud-picking.mjs';
 import { localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
-import { CAMERA_MARKER_COLORS, cameraMarkerGeometryData } from './camera-markers.mjs';
+import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives } from './camera-markers.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
@@ -136,7 +138,8 @@ let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
-let camGroupParent, camInstances = null, camDirectionInstances = null, camFeatures = [];
+let transientRootBackdropEnabled = false;
+let camGroupParent, camInstances = null, camLensInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
 let mapViews = {};            // per-tab map center/zoom retention
@@ -805,14 +808,15 @@ function loadTiles() {
       failLod(decision.reason);
       return;
     }
-    // Keep the persisted manifest REPLACE through validation. Only after the
-    // valid startup decision do we make a capable runtime root into the coarse
-    // backdrop.
-    enableRootLodBackdrop(rendererInstance);
+    transientRootBackdropEnabled = enableTransientRootLodBackdrop(rendererInstance);
+    state.lodRootBackdrop = transientRootBackdropEnabled ? { complete: false, backdropVisible: true } : null;
+    if (transientRootBackdropEnabled && rendererInstance.root?.internal?.hasRenderableContent) {
+      rendererInstance.requestTileContents(rendererInstance.root);
+    }
     if (!report.canConvergeToZeroError) {
       console.warn('LOD root delegates to external tilesets; validate each child manifest.', report);
     }
-    hideLoading();
+    if (!transientRootBackdropEnabled) hideLoading();
     const bounds = tilesetWorldBounds(rendererInstance);
     if (bounds && frameBoundsHome(bounds, { apply: !preserveIncomingModelView })) {
       preserveIncomingModelView = false;
@@ -827,7 +831,7 @@ function loadTiles() {
   });
   rendererInstance.addEventListener('load-model', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
-    const isCoarseBackdrop = ev.tile === rendererInstance.root;
+    const isTransientBackdrop = transientRootBackdropEnabled && ev.tile === rendererInstance.root;
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -837,11 +841,15 @@ function loadTiles() {
         // Preserve every primitive's texture assignment. WebODM/Obj2Tiles can
         // emit a material array; treating it as one material drops every map
         // and renders the streamed mesh white.
-        c.material = preserveLodMaterials(c.material, { coarseBackdrop: isCoarseBackdrop });
-        if (isCoarseBackdrop) c.renderOrder = -100;
+        c.material = preserveLodMaterials(c.material, { transientBackdrop: isTransientBackdrop });
+        if (isTransientBackdrop) c.renderOrder = -100;
         queueBVH(c);
       }
     });
+    if (isTransientBackdrop) {
+      state.lodRootBackdrop = syncTransientRootLodBackdrop(rendererInstance);
+      hideLoading();
+    }
   });
   rendererInstance.addEventListener('load-error', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
@@ -858,6 +866,8 @@ function disposeTiles() {
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
   tilesRenderer = null;
+  transientRootBackdropEnabled = false;
+  state.lodRootBackdrop = null;
   bvhQueue.length = 0;
 }
 
@@ -1114,10 +1124,10 @@ function buildCameraMarkerGeometries() {
   const bodyGeometry = new THREE.BufferGeometry();
   bodyGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.body, 3));
   bodyGeometry.computeVertexNormals();
-  const directionGeometry = new THREE.BufferGeometry();
-  directionGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.direction, 3));
-  directionGeometry.computeVertexNormals();
-  return { bodyGeometry, directionGeometry };
+  const lensGeometry = new THREE.BufferGeometry();
+  lensGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.lens, 3));
+  lensGeometry.computeVertexNormals();
+  return { bodyGeometry, lensGeometry };
 }
 
 async function loadCameras() {
@@ -1135,27 +1145,27 @@ async function loadCameras() {
       return;
     }
 
-    const { bodyGeometry, directionGeometry } = buildCameraMarkerGeometries();
+    const { bodyGeometry, lensGeometry } = buildCameraMarkerGeometries();
     const bodyMaterial = new THREE.MeshBasicMaterial({
-      transparent: true, opacity: 0.48, side: THREE.DoubleSide, depthWrite: false
+      transparent: true, opacity: CAMERA_MARKER_OPACITY.body, side: THREE.DoubleSide, depthWrite: false
     });
-    const directionMaterial = new THREE.MeshBasicMaterial({
-      transparent: true, opacity: 0.96, side: THREE.DoubleSide, depthWrite: false
+    const lensMaterial = new THREE.MeshBasicMaterial({
+      transparent: true, opacity: CAMERA_MARKER_OPACITY.lens, side: THREE.DoubleSide, depthWrite: false
     });
     camInstances = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, camFeatures.length);
-    camDirectionInstances = new THREE.InstancedMesh(directionGeometry, directionMaterial, camFeatures.length);
+    camLensInstances = new THREE.InstancedMesh(lensGeometry, lensMaterial, camFeatures.length);
     camInstances.frustumCulled = false;
-    camDirectionInstances.frustumCulled = false;
-    camDirectionInstances.renderOrder = 1;
+    camLensInstances.frustumCulled = false;
+    camLensInstances.renderOrder = 1;
 
-    const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
     const axis = new THREE.Vector3();
-    const pos = new THREE.Vector3();
-    const scl = new THREE.Vector3();
-    const baseScale = 1.0;   // WebODM-like small markers; user adjusts via slider
-    const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
-    const direction = new THREE.Color(CAMERA_MARKER_COLORS.direction);
+    camMarkerLocalPositions = new Float64Array(camFeatures.length * 3);
+    camMarkerQuaternions = new Float32Array(camFeatures.length * 4);
+    camMarkerDepths = new Float64Array(camFeatures.length);
+    camSourceToDraw = new Int32Array(camFeatures.length);
+    camSourceToDraw.fill(-1);
+    camDrawToSource = [];
 
     camFeatures.forEach((feat, i) => {
       const t = feat.properties.translation;
@@ -1164,19 +1174,18 @@ async function loadCameras() {
       if (angle > 1e-9) axis.set(-r[0]/angle, -r[1]/angle, -r[2]/angle);
       else axis.set(0, 0, 1);
       q.setFromAxisAngle(axis, angle);
-      pos.set(t[0] - RTC.e, t[1] - RTC.n, t[2] - RTC.z);
-      scl.setScalar(baseScale);
-      m.compose(pos, q, scl);
-      camInstances.setMatrixAt(i, m);
-      camDirectionInstances.setMatrixAt(i, m);
-      camInstances.setColorAt(i, body);
-      camDirectionInstances.setColorAt(i, direction);
+      camMarkerLocalPositions[i * 3] = t[0] - RTC.e;
+      camMarkerLocalPositions[i * 3 + 1] = t[1] - RTC.n;
+      camMarkerLocalPositions[i * 3 + 2] = t[2] - RTC.z;
+      camMarkerQuaternions[i * 4] = q.x;
+      camMarkerQuaternions[i * 4 + 1] = q.y;
+      camMarkerQuaternions[i * 4 + 2] = q.z;
+      camMarkerQuaternions[i * 4 + 3] = q.w;
     });
-    camInstances.instanceMatrix.needsUpdate = true;
-    camInstances.instanceColor.needsUpdate = true;
-    camDirectionInstances.instanceMatrix.needsUpdate = true;
-    camDirectionInstances.instanceColor.needsUpdate = true;
-    camGroupParent.getObjectByName('camOffset').add(camInstances, camDirectionInstances);
+    camInstances.count = 0;
+    camLensInstances.count = 0;
+    camGroupParent.getObjectByName('camOffset').add(camInstances, camLensInstances);
+    refreshCameraMarkerScales(true);
     state.camerasLoaded = true;
     window.__ltdsCams = camFeatures.length;
     syncCameraLayer();
@@ -1187,46 +1196,124 @@ async function loadCameras() {
   }
 }
 
-function setCameraScale(s) {
-  if (!camInstances) return;
-  const m = new THREE.Matrix4();
-  const p = new THREE.Vector3(), q = new THREE.Quaternion(), old = new THREE.Vector3();
-  for (let i = 0; i < camInstances.count; i++) {
-    camInstances.getMatrixAt(i, m);
-    m.decompose(p, q, old);
-    m.compose(p, q, new THREE.Vector3(s, s, s));
-    camInstances.setMatrixAt(i, m);
-    camDirectionInstances?.setMatrixAt(i, m);
-  }
-  camInstances.instanceMatrix.needsUpdate = true;
-  if (camDirectionInstances) camDirectionInstances.instanceMatrix.needsUpdate = true;
-  pcApi()?.setCameraScale?.(s);
+let cameraMarkerUserScale = 1;
+let cameraMarkerScaleSignature = '';
+let cameraMarkerScaleUpdatedAt = 0;
+let hoveredCam = -1;
+let camWorldPos = null;   // Float64Array of source world positions (lazy)
+let camMarkerLocalPositions = null, camMarkerQuaternions = null, camMarkerDepths = null;
+let camDrawToSource = [], camSourceToDraw = null;
+
+function setCameraScale(value) {
+  cameraMarkerUserScale = Math.max(0.1, Math.min(4, Number(value) || 1));
+  refreshCameraMarkerScales(true);
+  pcApi()?.setCameraScale?.(cameraMarkerUserScale);
 }
 
-let hoveredCam = -1;
-let camWorldPos = null;   // Float32Array of instance world positions (lazy)
-
 function ensureCamWorldPositions() {
-  if (camWorldPos || !camInstances) return;
+  if (camWorldPos || !camInstances || !camMarkerLocalPositions) return;
   camInstances.updateMatrixWorld(true);
-  const n = camInstances.count;
-  camWorldPos = new Float32Array(n * 3);
-  const a = camInstances.instanceMatrix.array;
+  const n = camMarkerLocalPositions.length / 3;
+  camWorldPos = new Float64Array(n * 3);
   const mw = camInstances.matrixWorld.elements;
   for (let i = 0; i < n; i++) {
-    const o = i * 16;
-    const ix = a[o + 12], iy = a[o + 13], iz = a[o + 14];
+    const o = i * 3;
+    const ix = camMarkerLocalPositions[o], iy = camMarkerLocalPositions[o + 1], iz = camMarkerLocalPositions[o + 2];
     camWorldPos[i*3]   = mw[0]*ix + mw[4]*iy + mw[8]*iz  + mw[12];
     camWorldPos[i*3+1] = mw[1]*ix + mw[5]*iy + mw[9]*iz  + mw[13];
     camWorldPos[i*3+2] = mw[2]*ix + mw[6]*iy + mw[10]*iz + mw[14];
   }
 }
 
+function refreshCameraMarkerScales(force = false) {
+  if (!camInstances || !camLensInstances || !camera || !renderer) return false;
+  const now = performance.now();
+  if (!force && now - cameraMarkerScaleUpdatedAt < 100) return false;
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (!rect.width || !rect.height) return false;
+  camera.updateMatrixWorld(true);
+  ensureCamWorldPositions();
+  if (!camWorldPos) return false;
+
+  const signature = [
+    camera.position.x, camera.position.y, camera.position.z,
+    camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w,
+    camera.fov, camera.zoom, rect.width, rect.height, cameraMarkerUserScale,
+  ].map((value) => Number(value).toFixed(3)).join(':');
+  cameraMarkerScaleUpdatedAt = now;
+  if (!force && signature === cameraMarkerScaleSignature) return false;
+  cameraMarkerScaleSignature = signature;
+
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const markerScale = new THREE.Vector3();
+  const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
+  const bodyHover = new THREE.Color(CAMERA_MARKER_COLORS.bodyHover);
+  const lens = new THREE.Color(CAMERA_MARKER_COLORS.lens);
+  const lensHover = new THREE.Color(CAMERA_MARKER_COLORS.lensHover);
+  const candidates = [];
+  const pm = camera.projectionMatrix.elements;
+  const vm = camera.matrixWorldInverse.elements;
+  for (let source = 0; source < camFeatures.length; source += 1) {
+    const offset = source * 3;
+    const wx = camWorldPos[offset], wy = camWorldPos[offset + 1], wz = camWorldPos[offset + 2];
+    const vx = vm[0]*wx + vm[4]*wy + vm[8]*wz + vm[12];
+    const vy = vm[1]*wx + vm[5]*wy + vm[9]*wz + vm[13];
+    const vz = vm[2]*wx + vm[6]*wy + vm[10]*wz + vm[14];
+    const depth = -vz;
+    camMarkerDepths[source] = depth;
+    const cx = pm[0]*vx + pm[4]*vy + pm[8]*vz + pm[12];
+    const cy = pm[1]*vx + pm[5]*vy + pm[9]*vz + pm[13];
+    const cw = pm[3]*vx + pm[7]*vy + pm[11]*vz + pm[15];
+    if (cw <= 0) continue;
+    candidates.push({
+      index: source,
+      x: (cx / cw * 0.5 + 0.5) * rect.width,
+      y: (-cy / cw * 0.5 + 0.5) * rect.height,
+      depth,
+    });
+  }
+  const visibleSources = selectCameraMarkerRepresentatives(candidates, { width: rect.width, height: rect.height });
+  camDrawToSource = visibleSources;
+  camSourceToDraw.fill(-1);
+  for (let draw = 0; draw < visibleSources.length; draw += 1) {
+    const source = visibleSources[draw];
+    camSourceToDraw[source] = draw;
+    const positionOffset = source * 3;
+    const quaternionOffset = source * 4;
+    position.fromArray(camMarkerLocalPositions, positionOffset);
+    quaternion.fromArray(camMarkerQuaternions, quaternionOffset);
+    const scale = cameraMarkerScaleForView({
+      baseScale: cameraMarkerUserScale,
+      depth: camMarkerDepths[source],
+      fovDegrees: camera.fov,
+      zoom: camera.zoom,
+      viewportHeight: rect.height,
+    });
+    markerScale.setScalar(scale);
+    matrix.compose(position, quaternion, markerScale);
+    camInstances.setMatrixAt(draw, matrix);
+    camLensInstances.setMatrixAt(draw, matrix);
+    camInstances.setColorAt(draw, source === hoveredCam ? bodyHover : body);
+    camLensInstances.setColorAt(draw, source === hoveredCam ? lensHover : lens);
+  }
+  camInstances.count = visibleSources.length;
+  camLensInstances.count = visibleSources.length;
+  camInstances.instanceMatrix.needsUpdate = true;
+  if (camInstances.instanceColor) camInstances.instanceColor.needsUpdate = true;
+  camLensInstances.instanceMatrix.needsUpdate = true;
+  if (camLensInstances.instanceColor) camLensInstances.instanceColor.needsUpdate = true;
+  window.__ltdsCamDrawn = visibleSources.length;
+  window.__ltdsCamDrawToSource = visibleSources.slice();
+  return true;
+}
+
 function pickCameraInstance(ndc) {
   if (!state.camerasVisible || !camInstances) return -1;
   hoverRaycaster.setFromCamera(ndc, camera);
-  const hits = hoverRaycaster.intersectObjects([camInstances, camDirectionInstances], false);
-  if (hits.length) return hits[0].instanceId;
+  const hits = hoverRaycaster.intersectObjects([camInstances, camLensInstances], false);
+  if (hits.length) return camDrawToSource[hits[0].instanceId];
 
   // Fallback: markers can be a few pixels at default size — pick the nearest
   // instance whose projection is within ~12 px of the cursor.
@@ -1235,10 +1322,10 @@ function pickCameraInstance(ndc) {
   const rect = renderer.domElement.getBoundingClientRect();
   const pm = camera.projectionMatrix.elements;
   const vm = camera.matrixWorldInverse.elements;
-  const thresholdNdcX = (24 / rect.width);    // ~12px radius in NDC
-  const thresholdNdcY = (24 / rect.height);
+  const thresholdNdcX = (CAMERA_MARKER_STYLE.pickRadius * 2 / rect.width);
+  const thresholdNdcY = (CAMERA_MARKER_STYLE.pickRadius * 2 / rect.height);
   let best = -1, bestD = Infinity;
-  for (let i = 0; i < camInstances.count; i++) {
+  for (const i of camDrawToSource) {
     const wx = camWorldPos[i*3], wy = camWorldPos[i*3+1], wz = camWorldPos[i*3+2];
     const vx = vm[0]*wx + vm[4]*wy + vm[8]*wz  + vm[12];
     const vy = vm[1]*wx + vm[5]*wy + vm[9]*wz  + vm[13];
@@ -1259,18 +1346,24 @@ function highlightCam(idx) {
   if (!camInstances) return;
   const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
   const bodyHover = new THREE.Color(CAMERA_MARKER_COLORS.bodyHover);
-  const direction = new THREE.Color(CAMERA_MARKER_COLORS.direction);
-  const directionHover = new THREE.Color(CAMERA_MARKER_COLORS.directionHover);
+  const lens = new THREE.Color(CAMERA_MARKER_COLORS.lens);
+  const lensHover = new THREE.Color(CAMERA_MARKER_COLORS.lensHover);
   if (hoveredCam >= 0 && hoveredCam !== idx) {
-    camInstances.setColorAt(hoveredCam, body);
-    camDirectionInstances?.setColorAt(hoveredCam, direction);
+    const previousDraw = camSourceToDraw?.[hoveredCam] ?? -1;
+    if (previousDraw >= 0) {
+      camInstances.setColorAt(previousDraw, body);
+      camLensInstances?.setColorAt(previousDraw, lens);
+    }
   }
   if (idx >= 0) {
-    camInstances.setColorAt(idx, bodyHover);
-    camDirectionInstances.setColorAt(idx, directionHover);
+    const nextDraw = camSourceToDraw?.[idx] ?? -1;
+    if (nextDraw >= 0) {
+      camInstances.setColorAt(nextDraw, bodyHover);
+      camLensInstances.setColorAt(nextDraw, lensHover);
+    }
   }
-  camInstances.instanceColor.needsUpdate = true;
-  if (camDirectionInstances) camDirectionInstances.instanceColor.needsUpdate = true;
+  if (camInstances.instanceColor) camInstances.instanceColor.needsUpdate = true;
+  if (camLensInstances?.instanceColor) camLensInstances.instanceColor.needsUpdate = true;
   hoveredCam = idx;
 }
 
@@ -2864,6 +2957,7 @@ function syncCameraLayer() {
   const localVisible = state.camerasVisible
     && (state.activeMode === 'model' || (state.activeMode === 'cloud' && state.cloudMode === 'direct'));
   camGroupParent.visible = localVisible;
+  if (localVisible) refreshCameraMarkerScales(true);
   const button = document.getElementById('layer-cameras');
   if (button) {
     button.classList.toggle('active', state.camerasVisible);
@@ -3259,9 +3353,13 @@ function startLoop() {
     if (renderThree) {
       controls.update(dt);
       camera.updateMatrixWorld();
+      if (camGroupParent?.visible) refreshCameraMarkerScales();
       if (tilesRenderer && tilesParent.visible) {
         tilesRenderer.update();
         releaseStaleLodDetails(tilesRenderer);
+        state.lodRootBackdrop = transientRootBackdropEnabled
+          ? syncTransientRootLodBackdrop(tilesRenderer)
+          : { complete: true, backdropVisible: false };
       }
       drainBVH();
 
@@ -3305,7 +3403,9 @@ function updateStats() {
     countVisible(tilesRenderer.group);
     const frontier = visibleLodFrontier(tilesRenderer.root);
     const vis = frontier.visibleCount || (tilesRenderer.stats ? tilesRenderer.stats.visible : 0);
-    const quality = frontier.fullDetail ? 'full-detail' : 'streaming';
+    const queuesSettled = lodQueuesSettled(tilesRenderer);
+    const backdropComplete = !transientRootBackdropEnabled || state.lodRootBackdrop?.complete === true;
+    const quality = frontier.fullDetail && queuesSettled && backdropComplete ? 'full-detail' : 'streaming';
     dom.lodStatus.textContent = `LOD: ${quality} (${vis} tile${vis === 1 ? '' : 's'})`;
   } else if (glbParent.visible) {
     glbOffset.traverse((o) => {
@@ -3319,6 +3419,7 @@ function updateStats() {
 // expose for debugging/verification
 window.__ltds = { scene: () => scene, camera: () => camera, controls: () => controls,
   tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon,
+  cameraWorldPositions: () => camWorldPos ? Array.from(camWorldPos) : [],
   // Georeferencing self-test: latlon -> UTM -> source px -> linear window -> UTM -> latlon roundtrip.
   // Expect maxRoundtripM to be tiny (sub-mm); large values mean the warp mapping drifted.
   warpSelfTest: (mode) => {

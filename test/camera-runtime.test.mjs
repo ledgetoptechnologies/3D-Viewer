@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from '../camera-runtime.mjs';
-import { CAMERA_MARKER_COLORS, cameraMarkerGeometryData } from '../camera-markers.mjs';
+import {
+  CAMERA_MARKER_COLORS,
+  CAMERA_MARKER_OPACITY,
+  CAMERA_MARKER_STYLE,
+  cameraMarkerGeometryData,
+  cameraMarkerScaleForView,
+  selectCameraMarkerRepresentatives,
+} from '../camera-markers.mjs';
 
 test('WebODM camera features accept translation or geometry coordinates and skip malformed shots independently', () => {
   const converted = [];
@@ -36,14 +43,79 @@ test('camera photo keys allow exact nested JPEG paths without allowing traversal
   }
 });
 
-test('camera markers use a contrasting forward spear that extends beyond the image plane', () => {
+test('camera markers use a compact WebODM-style body and forward lens', () => {
   const geometry = cameraMarkerGeometryData();
-  assert.ok(geometry.body.length >= 18);
-  assert.ok(geometry.direction.length >= 18);
-  const bodyZ = geometry.body.filter((_value, index) => index % 3 === 2);
-  const directionZ = geometry.direction.filter((_value, index) => index % 3 === 2);
-  assert.ok(Math.max(...directionZ) > Math.max(...bodyZ) * 2);
-  assert.ok(Math.min(...directionZ) >= 0);
-  assert.notEqual(CAMERA_MARKER_COLORS.body, CAMERA_MARKER_COLORS.direction);
-  assert.notEqual(CAMERA_MARKER_COLORS.direction, CAMERA_MARKER_COLORS.directionHover);
+  const bounds = (positions) => {
+    const axes = [[], [], []];
+    positions.forEach((value, index) => axes[index % 3].push(value));
+    return axes.map((axis) => ({ min: Math.min(...axis), max: Math.max(...axis) }));
+  };
+  assert.ok(geometry.body.length >= 36 && geometry.body.length % 9 === 0);
+  assert.ok(geometry.lens.length >= 36 && geometry.lens.length % 9 === 0);
+  assert.equal(geometry.direction, undefined, 'the long filled direction spear is removed');
+  const [bodyX, bodyY, bodyZ] = bounds(geometry.body);
+  const [lensX, lensY, lensZ] = bounds(geometry.lens);
+  const bodyWidth = bodyX.max - bodyX.min;
+  const bodyHeight = bodyY.max - bodyY.min;
+  assert.ok(bodyWidth > bodyHeight, 'camera body keeps a recognizable landscape silhouette');
+  assert.ok(bodyZ.min < 0 && bodyZ.max > 0, 'camera position remains inside the compact body');
+  assert.ok(lensZ.min >= bodyZ.max - 1e-9, 'lens begins at the front face');
+  assert.ok(lensZ.max - bodyZ.max <= bodyWidth * 0.25, 'lens stays compact instead of becoming a direction wedge');
+  assert.ok(lensX.min > bodyX.min && lensX.max < bodyX.max);
+  assert.ok(lensY.min > bodyY.min && lensY.max < bodyY.max);
+  assert.equal(CAMERA_MARKER_COLORS.body, 0xEE5007);
+  assert.equal(CAMERA_MARKER_COLORS.lens, 0xF8CB2E);
+  assert.equal(CAMERA_MARKER_COLORS.bodyHover, 0xF8CB2E);
+  assert.equal(CAMERA_MARKER_COLORS.lensHover, 0xFFFFFF);
+  assert.deepEqual(CAMERA_MARKER_OPACITY, { body: 0.62, lens: 0.72 });
+  const markerDiameter = Math.hypot(
+    Math.max(bodyX.max, lensX.max) - Math.min(bodyX.min, lensX.min),
+    Math.max(bodyY.max, lensY.max) - Math.min(bodyY.min, lensY.min),
+    Math.max(bodyZ.max, lensZ.max) - Math.min(bodyZ.min, lensZ.min),
+  );
+  assert.deepEqual(CAMERA_MARKER_STYLE, {
+    width: markerDiameter,
+    maxPixels: 10,
+    cellPixels: 18,
+    maxVisible: 4000,
+    pickRadius: 12,
+  });
+});
+
+test('camera marker scale only shrinks glyphs that would exceed the projected size ceiling', () => {
+  const projectionPixels = ({ scale, depth, zoom = 1 }) => (
+    CAMERA_MARKER_STYLE.width * scale * 900 * zoom
+      / (2 * depth * Math.tan(60 * Math.PI / 360))
+  );
+  const near = cameraMarkerScaleForView({ baseScale: 1, depth: 3, fovDegrees: 60, zoom: 1, viewportHeight: 900 });
+  const nearZoomed = cameraMarkerScaleForView({ baseScale: 1, depth: 3, fovDegrees: 60, zoom: 2, viewportHeight: 900 });
+  const nearPlane = cameraMarkerScaleForView({ baseScale: 1, depth: 0.1, fovDegrees: 60, zoom: 1, viewportHeight: 900 });
+  const far = cameraMarkerScaleForView({ baseScale: 1, depth: 200, fovDegrees: 60, zoom: 1, viewportHeight: 900 });
+  assert.ok(near > 0 && near < 1);
+  assert.ok(projectionPixels({ scale: near, depth: 3 }) <= CAMERA_MARKER_STYLE.maxPixels + 1e-9);
+  assert.ok(nearZoomed < near, 'camera zoom tightens the projected-size cap');
+  assert.ok(projectionPixels({ scale: nearZoomed, depth: 3, zoom: 2 }) <= CAMERA_MARKER_STYLE.maxPixels + 1e-9);
+  assert.ok(nearPlane > 0);
+  assert.ok(projectionPixels({ scale: nearPlane, depth: 0.1 }) <= CAMERA_MARKER_STYLE.maxPixels + 1e-9, 'near-plane glyphs remain pixel-bounded');
+  assert.equal(far, 1, 'distant markers retain the user-selected scale instead of becoming constant-size clutter');
+  assert.equal(cameraMarkerScaleForView({ baseScale: 0.5, depth: -1, fovDegrees: 60, viewportHeight: 900 }), 0.5);
+});
+
+test('dense camera projections keep the nearest stable representative in each screen cell', () => {
+  const candidates = [
+    { index: 0, x: 5, y: 5, depth: 20 },
+    { index: 1, x: 7, y: 7, depth: 10 },
+    { index: 2, x: 25, y: 5, depth: 30 },
+    { index: 3, x: 95, y: 95, depth: 5 },
+    { index: 4, x: -20, y: 20, depth: 2 },
+    { index: 5, x: 50, y: 50, depth: -1 },
+    { index: 6, x: Number.NaN, y: 10, depth: 1 },
+  ];
+  assert.deepEqual(selectCameraMarkerRepresentatives(candidates, { width: 100, height: 100 }), [1, 2, 3]);
+  assert.deepEqual(
+    selectCameraMarkerRepresentatives(candidates, { width: 100, height: 100, maxVisible: 2 }),
+    [1, 3],
+    'the nearest representatives survive the global cap while output remains source-index stable',
+  );
+  assert.deepEqual(selectCameraMarkerRepresentatives(candidates, { width: 0, height: 100 }), []);
 });

@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/potree/build/potree/potree.css">
   <link rel="stylesheet" href="/potree/libs/jquery-ui/jquery-ui.min.css">
   <link rel="stylesheet" href="/potree/libs/spectrum/spectrum.css">
-  <link rel="stylesheet" href="/potree/libs/jstree/themes/style.min.css">
+  <link rel="stylesheet" href="/potree/libs/jstree/themes/mixed/style.min.css">
   <style>
     :root { --brand-orange: #EE5007; }
     html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; background: #050505; font-family: 'Outfit', sans-serif; }
@@ -172,6 +172,7 @@
       dom: viewer.renderer.domElement,
       getCamera: () => viewer.scene.getActiveCamera(),
     });
+    viewer.addEventListener('update', () => pointCloudCameraLayer.updateView());
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
     // Start at a useful high-detail desktop baseline. Auto-LOD can still lower

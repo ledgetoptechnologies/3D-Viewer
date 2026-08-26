@@ -23,24 +23,30 @@ test('viewer 3D mode is streaming-only and keeps original mesh access outside la
   assert.match(main, /hideLoading\(\);\s*scheduleLodAvailabilityRefresh\(\);/);
 });
 
-test('viewer streams root backdrop without preloading stale branches', () => {
+test('viewer uses a transient root underlay without ancestor or sibling overfetch', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const materials = fs.readFileSync(path.join(__dirname, '..', 'lod-materials.mjs'), 'utf8');
-  assert.match(main, /enableRootLodBackdrop,/);
-  assert.match(main, /releaseStaleLodDetails,/);
+  const lodPolicy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
+  assert.match(main, /enableTransientRootLodBackdrop/);
+  assert.match(main, /syncTransientRootLodBackdrop/);
+  assert.match(main, /releaseStaleLodDetails/);
+  assert.match(lodPolicy, /tilesRenderer\.loadAncestors = false/);
+  assert.match(lodPolicy, /tilesRenderer\.loadSiblings = false/);
   const rootStart = main.indexOf("rendererInstance.addEventListener('load-root-tileset'");
   const tilesetStart = main.indexOf("rendererInstance.addEventListener('load-tileset'");
   const modelStart = main.indexOf("rendererInstance.addEventListener('load-model'");
   assert.ok(rootStart >= 0 && tilesetStart > rootStart && modelStart > tilesetStart, 'LOD event handlers are present in order');
   const rootHandler = main.slice(rootStart, tilesetStart);
-  const tilesetHandler = main.slice(tilesetStart, modelStart);
   assert.match(rootHandler, /const decision = decideLodStartup\(/);
-  assert.match(rootHandler, /if \(decision\.action !== 'stream-lod'\)\s*\{[\s\S]*?return;\s*\}[\s\S]*?enableRootLodBackdrop\(rendererInstance\);/);
-  assert.match(rootHandler, /const bounds = tilesetWorldBounds\(rendererInstance\);/);
+  assert.match(rootHandler, /if \(decision\.action !== 'stream-lod'\)\s*\{[\s\S]*?return;\s*\}/);
+  assert.doesNotMatch(rootHandler, /root\.refine\s*=/);
+  assert.match(rootHandler, /transientRootBackdropEnabled = enableTransientRootLodBackdrop\(rendererInstance\)/);
+  assert.match(rootHandler, /transientRootBackdropEnabled && rendererInstance\.root\?\.internal\?\.hasRenderableContent/);
+  assert.match(rootHandler, /rendererInstance\.requestTileContents\(rendererInstance\.root\)/);
+  assert.match(rootHandler, /if \(!transientRootBackdropEnabled\) hideLoading\(\)/);
+  assert.match(rootHandler, /const bounds = tilesetWorldBounds/);
   assert.match(rootHandler, /frameBoundsHome\(bounds, \{ apply: !preserveIncomingModelView \}\)/);
   assert.doesNotMatch(rootHandler, /if \(!homeView\)/);
-  assert.doesNotMatch(tilesetHandler, /enableRootLodBackdrop\(rendererInstance\)/);
-  assert.match(main, /const isCoarseBackdrop = ev\.tile === rendererInstance\.root;/);
   assert.match(main, /if \(tilesRenderer !== rendererInstance\) return;/);
   assert.match(main, /import \{ homeViewForBounds, tilesetWorldBounds \} from '\.\/viewer-framing\.mjs'/);
   assert.match(main, /import \{ preserveLodMaterials \} from '\.\/lod-materials\.mjs'/);
@@ -49,12 +55,13 @@ test('viewer streams root backdrop without preloading stale branches', () => {
   assert.match(materials, /const replacements = originals\.map\(\(material\) => unlitLodMaterial\(material, options\)\)/);
   assert.match(materials, /map,\s*lightMap: source\?\.lightMap/);
   assert.match(materials, /vertexColors: Boolean\(source\?\.vertexColors\)/);
-  assert.match(main, /c\.material = preserveLodMaterials\(c\.material, \{ coarseBackdrop: isCoarseBackdrop \}\)/);
+  assert.match(main, /const isTransientBackdrop = transientRootBackdropEnabled && ev\.tile === rendererInstance\.root/);
+  assert.match(main, /c\.material = preserveLodMaterials\(c\.material, \{ transientBackdrop: isTransientBackdrop \}\)/);
+  assert.match(main, /if \(isTransientBackdrop\) c\.renderOrder = -100/);
+  assert.match(main, /if \(isTransientBackdrop\) \{[\s\S]*?syncTransientRootLodBackdrop\(rendererInstance\);[\s\S]*?hideLoading\(\);[\s\S]*?\}/);
   assert.match(main, /preserveIncomingModelView = !tilesRenderer\?\.root;\s*controls\.setView\(camW, tgtW\)/);
-  assert.match(materials, /material\.depthWrite = false;/);
-  assert.match(materials, /material\.polygonOffset = true;/);
-  assert.match(main, /c\.renderOrder = -100;/);
-  assert.match(main, /tilesRenderer\.update\(\);\s*releaseStaleLodDetails\(tilesRenderer\);/);
+  assert.doesNotMatch(main, /engineData\.scene\.visible\s*=/);
+  assert.match(main, /tilesRenderer\.update\(\);\s*releaseStaleLodDetails\(tilesRenderer\);\s*state\.lodRootBackdrop = transientRootBackdropEnabled\s*\? syncTransientRootLodBackdrop\(tilesRenderer\)/);
 });
 
 test('orthophoto nodata uses the supported GeoTIFF image API', () => {
@@ -148,6 +155,9 @@ test('LOD detail starts at maximum and applies every slider change to the active
   assert.match(html, /id="lod-detail"[^>]*max="24"[^>]*value="24"/);
   assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(e\.target\.value\)/);
   assert.match(main, /releaseStaleLodDetails\(tilesRenderer\)/);
+  assert.match(main, /const queuesSettled = lodQueuesSettled\(tilesRenderer\)/);
+  assert.match(main, /const backdropComplete = !transientRootBackdropEnabled \|\| state\.lodRootBackdrop\?\.complete === true/);
+  assert.match(main, /frontier\.fullDetail && queuesSettled && backdropComplete \? 'full-detail' : 'streaming'/);
 });
 
 test('Top View starts just inside the stable polar range instead of at the singular pole', () => {

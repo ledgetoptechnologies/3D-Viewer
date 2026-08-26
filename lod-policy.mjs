@@ -97,6 +97,12 @@ export function refreshLodResolution(tilesRenderer, camera, renderer) {
   return true;
 }
 
+export function lodQueuesSettled(tilesRenderer) {
+  return !tilesRenderer?.downloadQueue?.running
+    && !tilesRenderer?.parseQueue?.running
+    && !tilesRenderer?.processNodeQueue?.running;
+}
+
 function contentUri(tile) {
   return tile?.content?.uri || tile?.content?.url || '';
 }
@@ -105,70 +111,82 @@ function isExternalTileset(uri) {
   return /\.json(?:[?#].*)?$/i.test(uri);
 }
 
-// The manifest is validated as REPLACE before this runs. A root B3DM can then
-// remain as a coarse visual underlay at runtime while its child branches retain
-// normal REPLACE selection. Roots that only delegate to another tileset cannot
-// provide that coverage and are deliberately left alone.
-export function enableRootLodBackdrop(tilesRenderer) {
+export function enableTransientRootLodBackdrop(tilesRenderer) {
   const root = tilesRenderer?.root;
   const uri = contentUri(root);
   if (!root || !uri || isExternalTileset(uri)) return false;
+  const materializeRefinement = (tile, inherited) => {
+    const effective = tile?.refine || inherited || 'REPLACE';
+    if (tile) tile.refine = effective;
+    for (const child of (Array.isArray(tile?.children) ? tile.children : [])) {
+      materializeRefinement(child, effective);
+    }
+  };
+  const inherited = root.refine || 'REPLACE';
+  for (const child of (Array.isArray(root.children) ? root.children : [])) {
+    materializeRefinement(child, inherited);
+  }
   root.refine = 'ADD';
   return true;
 }
 
-// `3d-tiles-renderer` keeps a REPLACE leaf visible while its replacement
-// transition settles. With the root backdrop present, a zero-error leaf can be
-// released once its parent is outside the frustum or already meets the current
-// error target. That lets an old close-up frontier make room for the next one.
-export function releaseStaleLodDetails(tilesRenderer) {
-  // Standard ancestor mode owns active, visible, and LRU transitions. Manually
-  // forcing those flags after update() can make a cached leaf impossible to
-  // reactivate when the camera returns to it.
-  if (tilesRenderer?.loadAncestors) return 0;
+export function syncTransientRootLodBackdrop(tilesRenderer) {
   const root = tilesRenderer?.root;
-  if (!root || String(root.refine || '').toUpperCase() !== 'ADD') return 0;
+  const groupChildren = tilesRenderer?.group?.children;
+  let requiredLeaves = 0;
+  let attachedLeaves = 0;
+  const visit = (tile) => {
+    const children = Array.isArray(tile?.children) ? tile.children : [];
+    for (const child of children) visit(child);
+    if (children.length || Number(tile?.geometricError) !== 0
+      || tile?.traversal?.used !== true || tile?.traversal?.inFrustum !== true) return;
+    requiredLeaves += 1;
+    if (tile?.engineData?.scene && groupChildren?.includes?.(tile.engineData.scene)) attachedLeaves += 1;
+  };
+  visit(root);
+  const complete = requiredLeaves > 0 && attachedLeaves === requiredLeaves;
+  const backdropVisible = !complete;
+  root?.engineData?.scene?.traverse?.((object) => {
+    if (!object?.isMesh || !object.material) return;
+    for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
+      material.visible = backdropVisible;
+    }
+  });
+  return { complete, requiredLeaves, attachedLeaves, backdropVisible };
+}
 
-  const { errorTarget, lruCache } = tilesRenderer;
+export function releaseStaleLodDetails(tilesRenderer) {
+  const root = tilesRenderer?.root;
+  if (!root || root.refine !== 'ADD') return 0;
+  const groupChildren = tilesRenderer?.group?.children;
+  const errorTarget = Number(tilesRenderer?.errorTarget);
   let released = 0;
   const visit = (tile, parent = null) => {
     const children = Array.isArray(tile?.children) ? tile.children : [];
     for (const child of children) visit(child, tile);
+    if (children.length || Number(tile?.geometricError) !== 0 || !parent) return;
+    const scene = tile?.engineData?.scene;
+    const attached = Boolean(scene && groupChildren?.includes?.(scene));
+    if (!attached && tile?.traversal?.active !== true && tile?.traversal?.visible !== true) return;
 
-    const isFineLeaf = tile?.geometricError === 0 && children.length === 0;
-    const parentTraversal = parent?.traversal;
-    if (!isFineLeaf || !parentTraversal) return;
+    const leafIsStale = tile?.traversal?.used === false || tile?.traversal?.inFrustum === false;
+    const parentMeetsTarget = parent?.traversal?.inFrustum === true
+      && Number.isFinite(parent?.traversal?.error)
+      && Number.isFinite(errorTarget)
+      && parent.traversal.error <= errorTarget;
+    if (!leafIsStale && !parentMeetsTarget) return;
 
-    const parentIsOutOfView = parentTraversal.inFrustum === false;
-    const parentIsCoarseEnough = Number.isFinite(parentTraversal.error)
-      && parentTraversal.error <= errorTarget;
-    if (!parentIsOutOfView && !parentIsCoarseEnough) return;
-
-    const wasVisible = Boolean(tile?.traversal?.visible);
-    const wasActive = Boolean(tile?.traversal?.active);
-    if (!wasVisible && !wasActive) return;
-
-    // 3d-tiles-renderer caches scene objects. Its visibility API detaches and
-    // reattaches those objects, so changing scene.visible here would leave a
-    // cached leaf permanently hidden when the camera returns.
-    if (wasVisible) tilesRenderer.setTileVisible?.(tile, false);
-    if (wasActive) tilesRenderer.setTileActive?.(tile, false);
+    tilesRenderer.setTileVisible?.(tile, false);
+    tilesRenderer.setTileActive?.(tile, false);
     if (tile.traversal) {
       tile.traversal.visible = false;
       tile.traversal.active = false;
     }
-    lruCache?.markUnused?.(tile);
-    if (wasVisible && Number.isFinite(tilesRenderer.stats?.visible)) {
-      tilesRenderer.stats.visible = Math.max(0, tilesRenderer.stats.visible - 1);
-    }
-    if (wasActive && Number.isFinite(tilesRenderer.stats?.active)) {
-      tilesRenderer.stats.active = Math.max(0, tilesRenderer.stats.active - 1);
-    }
+    tilesRenderer.lruCache?.markUnused?.(tile);
     released += 1;
   };
-
   visit(root);
-  if (released) lruCache?.scheduleUnload?.();
+  if (released) tilesRenderer.lruCache?.scheduleUnload?.();
   return released;
 }
 

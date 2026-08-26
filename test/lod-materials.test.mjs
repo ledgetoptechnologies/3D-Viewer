@@ -31,7 +31,7 @@ test('multi-material LOD conversion retains independent texture and render state
   originalA.dispose = () => { disposedA += 1; };
   originalB.dispose = () => { disposedB += 1; };
 
-  const converted = preserveLodMaterials([originalA, originalB], { coarseBackdrop: true });
+  const converted = preserveLodMaterials([originalA, originalB]);
 
   assert.equal(converted.length, 2);
   assert.notEqual(converted[0], converted[1]);
@@ -46,8 +46,8 @@ test('multi-material LOD conversion retains independent texture and render state
   assert.equal(converted[0].alphaTest, 0.25);
   assert.equal(converted[0].color.getHex(), 0x884422);
   assert.equal(converted[1].color.getHex(), 0x226688);
-  assert.equal(converted[0].depthWrite, false);
-  assert.equal(converted[1].depthWrite, false);
+  assert.equal(converted[0].depthWrite, true);
+  assert.equal(converted[1].depthWrite, true);
   assert.equal(mapA.colorSpace, THREE.SRGBColorSpace);
   assert.equal(mapB.colorSpace, THREE.SRGBColorSpace);
   assert.equal(disposedA, 1);
@@ -59,4 +59,13 @@ test('single material conversion preserves the non-array API shape', () => {
   const converted = preserveLodMaterials(original);
   assert.equal(Array.isArray(converted), false);
   assert.equal(converted.map, original.map);
+});
+
+test('transient root underlay renders first without writing depth', () => {
+  const original = new THREE.MeshStandardMaterial({ map: new THREE.Texture() });
+  const converted = preserveLodMaterials(original, { transientBackdrop: true });
+  assert.equal(converted.depthWrite, false);
+  assert.equal(converted.polygonOffset, true);
+  assert.equal(converted.polygonOffsetFactor, 1);
+  assert.equal(converted.polygonOffsetUnits, 1);
 });

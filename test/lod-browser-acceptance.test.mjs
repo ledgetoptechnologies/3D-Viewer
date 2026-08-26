@@ -111,15 +111,22 @@ async function startFixture(tileRoot) {
     }
     if (url.pathname === `${assetPrefix}shots.geojson`) {
       const center = config.georef.bboxCenter;
-      const features = [0, 1, 2].map((index) => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [center.x + index * 4, center.y + index * 3, center.z + 20 + index] },
-        properties: {
-          translation: [center.x + index * 4, center.y + index * 3, center.z + 20 + index],
-          rotation: [0, 0, 0],
-          filename: `photo-${index}.jpg`,
-        },
-      }));
+      const features = [0, 1, 2].map((index) => {
+        const translation = [
+          config.georef.rtc.e + center.x + index * 4,
+          config.georef.rtc.n + center.y + index * 3,
+          config.georef.rtc.z + center.z + 20 + index,
+        ];
+        return {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: translation.slice() },
+          properties: {
+            translation,
+            rotation: [0, 0, 0],
+            filename: `photo-${index}.jpg`,
+          },
+        };
+      });
       reply.writeHead(200, { 'Content-Type': 'application/geo+json; charset=utf-8' });
       reply.end(JSON.stringify({ type: 'FeatureCollection', features }));
       return;
@@ -339,11 +346,35 @@ function snapshotExpression() {
     const tiles = window.__ltds.tiles();
     const root = tiles?.root;
     const visibleLeaves = [];
+    const attachedTiles = [];
+    const renderedTiles = [];
+    const attachedMaterials = [];
     const visit = (tile) => {
       if (!tile) return;
       const children = tile.children || [];
       if (children.length) children.forEach(visit);
-      if (!children.length && Number(tile.geometricError) === 0 && tile.traversal?.visible && tile.engineData?.scene?.visible) {
+      const attached = Boolean(tile.engineData?.scene && tiles.group.children.includes(tile.engineData.scene));
+      let rendered = false;
+      if (attached) {
+        tile.engineData.scene.traverse((object) => {
+          if (!object.isMesh || !object.material) return;
+          for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
+            if (material.visible !== false) rendered = true;
+            attachedMaterials.push({
+              visible: material.visible !== false,
+              depthWrite: material.depthWrite,
+              polygonOffset: material.polygonOffset,
+              renderOrder: object.renderOrder,
+              hasMap: Boolean(material.map),
+              imageReady: Boolean(material.map && (material.map.image?.width || material.map.source?.data?.width)),
+            });
+          }
+        });
+        const row = { uri: tile.content?.uri || tile.content?.url || null, error: Number(tile.geometricError), rendered };
+        attachedTiles.push(row);
+        if (rendered) renderedTiles.push(row);
+      }
+      if (!children.length && Number(tile.geometricError) === 0 && rendered) {
         visibleLeaves.push(tile.content?.uri || tile.content?.url || null);
       }
     };
@@ -353,6 +384,7 @@ function snapshotExpression() {
       if (!object.isMesh || !object.material) return;
       for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
         materials.push({
+          visible: material.visible !== false,
           depthWrite: material.depthWrite,
           polygonOffset: material.polygonOffset,
           renderOrder: object.renderOrder,
@@ -363,10 +395,68 @@ function snapshotExpression() {
     });
     return {
       errorPanel: getComputedStyle(document.querySelector('#error-panel')).display,
+      lodStatus: document.querySelector('#lod-status')?.textContent || '',
+      backdrop: window.__ltds.state?.lodRootBackdrop || null,
       manifestValid: window.__ltds.state?.lodManifestReport?.valid === true,
-      root: { refine: root?.refine || null, visible: Boolean(root?.traversal?.visible && root?.engineData?.scene?.visible), materials },
+      root: {
+        refine: root?.refine || null,
+        visible: Boolean(root?.traversal?.visible && root?.engineData?.scene?.visible),
+        attached: Boolean(root?.engineData?.scene && tiles?.group?.children?.includes(root.engineData.scene)),
+        rendered: Boolean(root?.engineData?.scene && tiles?.group?.children?.includes(root.engineData.scene)
+          && materials.some((material) => material.visible)),
+        materials,
+      },
       visibleLeaves,
+      attachedTiles,
+      renderedTiles,
+      attachedMaterials,
       cache: { minBytesSize: tiles?.lruCache?.minBytesSize, maxBytesSize: tiles?.lruCache?.maxBytesSize, minSize: tiles?.lruCache?.minSize, maxSize: tiles?.lruCache?.maxSize, unloadPercent: tiles?.lruCache?.unloadPercent },
+    };
+  })()`;
+}
+
+function foregroundCoverageExpression() {
+  return `(() => {
+    const tiles = window.__ltds.tiles();
+    const root = tiles?.root;
+    const rootScene = root?.engineData?.scene;
+    const fineScenes = [];
+    const visit = (tile) => {
+      (tile?.children || []).forEach(visit);
+      if (!(tile?.children || []).length && Number(tile?.geometricError) === 0
+        && tile.engineData?.scene && tiles.group.children.includes(tile.engineData.scene)) fineScenes.push(tile.engineData.scene);
+    };
+    visit(root);
+    tiles?.group?.updateWorldMatrix(true, true);
+    const Raycaster = window.__ltds.controls()._raycaster.constructor;
+    const raycaster = new Raycaster();
+    raycaster.firstHitOnly = true;
+    const rows = [];
+    let fineSamples = 0;
+    for (const y of [-0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6]) {
+      for (const x of [-0.6, -0.4, -0.2, 0, 0.2, 0.4, 0.6]) {
+        raycaster.setFromCamera({ x, y }, window.__ltds.camera());
+        const rootHit = Boolean(rootScene && raycaster.intersectObject(rootScene, true).length);
+        const fineHit = Boolean(fineScenes.length && raycaster.intersectObjects(fineScenes, true).length);
+        if (fineHit) fineSamples += 1;
+        if (rootHit) rows.push({ x, y, fineHit });
+      }
+    }
+    let rootRendered = false;
+    rootScene?.traverse?.((object) => {
+      if (!object.isMesh || !object.material) return;
+      for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
+        if (material.visible !== false) rootRendered = true;
+      }
+    });
+    return {
+      rootSamples: rows.length,
+      fineSamples,
+      fineScenes: fineScenes.length,
+      rootAttached: Boolean(rootScene && tiles?.group?.children?.includes(rootScene)),
+      rootRendered: rootRendered && Boolean(rootScene && tiles?.group?.children?.includes(rootScene)),
+      rootOnly: rows.filter((row) => !row.fineHit),
+      queueRunning: Boolean(tiles?.downloadQueue?.running || tiles?.parseQueue?.running),
     };
   })()`;
 }
@@ -379,7 +469,30 @@ async function setView(client, position, lookAt) {
   })()`);
 }
 
-test('browser LOD stream preserves the root backdrop through close, far, pan, and return views', { timeout: 300_000 }, async (t) => {
+async function setViewAtFirstCamera(client) {
+  await client.evaluate(`(() => {
+    const values = window.__ltds.cameraWorldPositions();
+    if (values.length < 3) return false;
+    const Vector3 = window.__ltds.camera().position.constructor;
+    const target = new Vector3(values[0], values[1], values[2]);
+    window.__ltds.controls().setView(target.clone().add(new Vector3(40, 30, 40)), target);
+    return true;
+  })()`);
+}
+
+function assertHonestBackdrop(snapshot, label) {
+  assert.equal(snapshot.root.rendered, snapshot.backdrop?.backdropVisible === true, `${label}: backdrop state disagrees with rendered root`);
+  if (snapshot.root.rendered) {
+    assert.equal(snapshot.backdrop?.complete, false, `${label}: rendered root was marked complete`);
+    assert.match(snapshot.lodStatus, /streaming/, `${label}: rendered root was mislabeled full-detail`);
+  } else {
+    assert.equal(snapshot.backdrop?.complete, true, `${label}: hidden root lacked complete fine coverage`);
+    assert.ok(snapshot.renderedTiles.length > 0, `${label}: hidden root left no rendered detail`);
+    assert.ok(snapshot.renderedTiles.every((tile) => tile.error === 0), `${label}: hidden root left coarse rendered tiles: ${JSON.stringify(snapshot.renderedTiles)}`);
+  }
+}
+
+test('browser LOD stream hides the coarse root after complete top-down foreground coverage', { timeout: 420_000 }, async (t) => {
   const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
   const executable = browserPath();
   if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
@@ -407,7 +520,7 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, screenWidth: 1440, screenHeight: 900 });
     await client.command('Page.navigate', { url: `${origin}/?project=${fixtureId}` });
     await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'verified LOD was not selected over the available orthophoto');
-    await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'root B3DM did not load');
+    await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
 
     const home = await client.evaluate(`(() => {
@@ -439,7 +552,7 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
       const distance = Math.max(20, diameter * 0.9);
       const expected = new V(center.x, center.y + distance * 0.55, center.z + distance * 0.75);
       const actual = window.__ltds.camera().position;
-      return { expected: expected.toArray(), actual: actual.toArray(), error: expected.distanceTo(actual), center: center.toArray() };
+      return { expected: expected.toArray(), actual: actual.toArray(), error: expected.distanceTo(actual), center: center.toArray(), diameter };
     })()`);
     assert.ok(home && home.error < 1e-5, `initial LOD framing ignored rendered world bounds: ${JSON.stringify(home)}`);
 
@@ -451,6 +564,41 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
       return Math.hypot(p.x-expected[0], p.y-expected[1], p.z-expected[2]);
     })()`);
     assert.ok(reset < 1e-5, `Reset View did not restore world-bounds home: ${reset}`);
+
+    const topRadius = Math.max(25, home.diameter * 0.15);
+    const topPolar = 0.04;
+    await setView(client, [
+      home.center[0] + Math.sin(topPolar) * topRadius,
+      home.center[1] + Math.cos(topPolar) * topRadius,
+      home.center[2],
+    ], home.center);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    try {
+      await waitFor(client, `(() => {
+        const tiles = window.__ltds.tiles();
+        let visibleFine = 0;
+        const visit = (tile) => {
+          (tile?.children || []).forEach(visit);
+          if (!(tile?.children || []).length && Number(tile?.geometricError) === 0
+            && tile.engineData?.scene && tiles.group.children.includes(tile.engineData.scene)) visibleFine += 1;
+        };
+        visit(tiles?.root);
+        return visibleFine > 0 && window.__ltds.state.lodRootBackdrop?.complete === true
+          && !tiles?.downloadQueue?.running && !tiles?.parseQueue?.running;
+      })()`, 'top-down foreground did not settle to visible fine leaves', 90_000);
+    } catch (error) {
+      const diagnostics = await client.evaluate(`(() => {
+        const tiles=window.__ltds.tiles(); const rows=[];
+        const visit=(tile,parent=null)=>{(tile?.children||[]).forEach(child=>visit(child,tile));rows.push({uri:tile?.content?.uri||tile?.content?.url||'',error:tile?.geometricError,used:tile?.traversal?.used,inFrustum:tile?.traversal?.inFrustum,active:tile?.traversal?.active,visible:tile?.traversal?.visible,attached:Boolean(tile?.engineData?.scene&&tiles.group.children.includes(tile.engineData.scene)),loadingState:tile?.internal?.loadingState,parent:parent?.content?.uri||parent?.content?.url||''});};visit(tiles.root);return {loadAncestors:tiles.loadAncestors,loadSiblings:tiles.loadSiblings,errorTarget:tiles.errorTarget,rootRefine:tiles.root?.refine,groupChildren:tiles.group.children.length,downloadRunning:tiles.downloadQueue?.running,parseRunning:tiles.parseQueue?.running,cacheBytes:tiles.lruCache?.bytesSize,cacheCount:tiles.lruCache?.itemSet?.size,rows};
+      })()`);
+      throw new Error(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}`);
+    }
+    const topCoverage = await client.evaluate(foregroundCoverageExpression());
+    assert.ok(topCoverage.fineSamples > 0, `top-down coverage probe did not intersect attached full-detail geometry: ${JSON.stringify(topCoverage)}`);
+    assert.ok(topCoverage.fineScenes > 0, `top-down view exposed no full-detail scenes: ${JSON.stringify(topCoverage)}`);
+    assert.equal(topCoverage.rootRendered, false, `settled top-down view still rendered the coarse root: ${JSON.stringify(topCoverage)}`);
+    assert.equal(topCoverage.queueRunning, false);
+    await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
 
     const pole = await client.evaluate(`(() => {
       document.querySelector('#btn-top').click();
@@ -490,19 +638,40 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     assert.ok(pole.minimumPolar >= pole.configuredMinimum - 1e-8, `top-down orbit crossed the polar limit: ${JSON.stringify(pole)}`);
     assert.ok(pole.minimumQuaternionDot > 0.99, `top-down orbit orientation jumped or flipped: ${JSON.stringify(pole)}`);
     await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
-    await waitFor(client, 'Boolean(window.__ltds.tiles()?.root?.engineData?.scene?.visible)', 'root backdrop did not return after Top View reset');
+    await waitFor(client, `(() => {
+      const tiles = window.__ltds.tiles();
+      const root = tiles?.root;
+      return root?.refine === 'ADD'
+        && !tiles?.downloadQueue?.running && !tiles?.parseQueue?.running
+        && Boolean(tiles?.group?.children?.length)
+        && tiles.group.children.includes(root?.engineData?.scene);
+    })()`, 'settled home view did not retain a valid transient root', 90_000);
 
     const initial = await client.evaluate(snapshotExpression());
     assert.equal(initial.errorPanel, 'none');
     assert.equal(initial.root.refine, 'ADD');
-    assert.equal(initial.root.visible, true);
-    assert.ok(initial.root.materials.length > 0);
-    assert.ok(initial.root.materials.every((item) => item.depthWrite === false && item.polygonOffset === true && item.renderOrder === -100));
-    assert.ok(initial.root.materials.every((item) => item.hasMap && item.imageReady), 'root B3DM textures were not decoded and bound');
+    assert.equal(initial.root.attached, true);
+    assert.equal(initial.root.rendered, initial.backdrop?.backdropVisible === true);
+    if (initial.root.rendered) {
+      assert.equal(initial.backdrop?.complete, false);
+      assert.match(initial.lodStatus, /streaming/);
+    } else {
+      assert.equal(initial.backdrop?.complete, true);
+      assert.ok(initial.renderedTiles.length > 0);
+      assert.ok(initial.renderedTiles.every((tile) => tile.error === 0), JSON.stringify(initial.renderedTiles));
+    }
+    assert.ok(initial.attachedMaterials.length > 0);
+    const visibleInitialMaterials = initial.attachedMaterials.filter((item) => item.visible);
+    assert.ok(visibleInitialMaterials.length > 0);
+    assert.ok(visibleInitialMaterials.filter((item) => item.renderOrder !== -100).every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
+    assert.ok(initial.root.materials.every((item) => item.visible === initial.root.rendered && item.depthWrite === false && item.polygonOffset === true && item.renderOrder === -100));
+    assert.ok(initial.attachedMaterials.every((item) => item.hasMap && item.imageReady), 'attached full-detail B3DM textures were not decoded and bound');
     assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 1.75 * GiB, minSize: 8, maxSize: 48, unloadPercent: 0.20 });
 
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
+    await setViewAtFirstCamera(client);
+    await waitFor(client, 'window.__ltdsCamDrawn > 0', 'camera-facing view did not expose a representative', 30_000);
     const visibleCameras = await client.evaluate(`(() => {
       const meshes = [];
       window.__ltds.scene().traverse((object) => {
@@ -514,20 +683,22 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
           meshes.push({ count: object.count, color });
         }
       });
-      return { totalInstances: meshes.reduce((sum, item) => sum + item.count, 0), meshes };
+      return { totalInstances: meshes.reduce((sum, item) => sum + item.count, 0), meshes, drawn: window.__ltdsCamDrawn, drawToSource: window.__ltdsCamDrawToSource };
     })()`);
-    assert.equal(visibleCameras.totalInstances, 6, 'each camera renders one body plus one forward accent');
-    assert.deepEqual(visibleCameras.meshes.map(item => item.count).sort((a, b) => a - b), [3, 3]);
+    assert.ok(visibleCameras.drawn > 0 && visibleCameras.drawn <= 3, JSON.stringify(visibleCameras));
+    assert.equal(visibleCameras.totalInstances, visibleCameras.drawn * 2, 'each selected camera renders one compact body plus one lens accent');
+    assert.deepEqual(visibleCameras.meshes.map(item => item.count).sort((a, b) => a - b), [visibleCameras.drawn, visibleCameras.drawn]);
+    assert.equal(visibleCameras.drawToSource.length, visibleCameras.drawn);
     assert.deepEqual(visibleCameras.meshes.map(item => item.color).sort((a, b) => a - b), [0xEE5007, 0xF8CB2E].sort((a, b) => a - b));
     const cameraClick = await client.evaluate(`(() => {
       const meshes = [];
-      window.__ltds.scene().traverse((object) => { if (object.isInstancedMesh && object.count === 3 && object.parent?.parent?.visible) meshes.push(object); });
+      window.__ltds.scene().traverse((object) => { if (object.isInstancedMesh && object.count === window.__ltdsCamDrawn && object.parent?.parent?.visible) meshes.push(object); });
       if (meshes.length !== 2) return null;
       const M = meshes[0].matrixWorld.constructor, V = window.__ltds.camera().position.constructor;
       const instance = new M();
       meshes[0].getMatrixAt(0, instance);
       meshes[0].updateWorldMatrix(true, false);
-      const markerTarget = new V(0, 0, 0.8).applyMatrix4(instance).applyMatrix4(meshes[0].matrixWorld);
+      const markerTarget = new V(0, 0, 0.24).applyMatrix4(instance).applyMatrix4(meshes[0].matrixWorld);
       window.__ltds.controls().setView(markerTarget.clone().add(new V(40, 30, 40)), markerTarget);
       window.__ltds.camera().updateMatrixWorld(true);
       const center = markerTarget.clone().project(window.__ltds.camera());
@@ -550,7 +721,7 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 0, clickCount: 1 });
     await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'camera marker did not open its photo modal');
     const photoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
-    assert.match(photoUrl, /\/camera-photos\/photo-0\.jpg$/);
+    assert.match(photoUrl, new RegExp(`/camera-photos/photo-${visibleCameras.drawToSource[0]}\\.jpg$`));
     assert.doesNotMatch(photoUrl, /storage|mnt|dataset/i);
     await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1`, 'capability-scoped camera image did not decode');
     await client.evaluate(`document.querySelector('#photo-close').click()`);
@@ -594,7 +765,8 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
       };
     })()`);
     assert.ok(transferred.beforeRootError < 1e-5, `point-cloud view was not transferred before LOD startup: ${JSON.stringify(transferred)}`);
-    await waitFor(client, 'Boolean(window.__ltds.tiles()?.root?.engineData?.scene)', 'reloaded root B3DM did not load after point-cloud transfer');
+    await waitFor(client, 'Boolean(window.__ltds.tiles()?.root && window.__ltds.tiles().group.children.length)', 'reloaded LOD view did not attach a tile after point-cloud transfer');
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); const root=t?.root; return Boolean(root?.engineData?.scene && t.group.children.includes(root.engineData.scene) && document.querySelector('#loading-overlay')?.classList.contains('hidden')); })()`, 'reloaded LOD view exposed the canvas before its root fallback attached', 90_000);
     const transferAfterRoot = await client.evaluate(`(() => {
       const expected = ${JSON.stringify([35, 75, 95])};
       const p = window.__ltds.camera().position;
@@ -603,9 +775,10 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     assert.ok(transferAfterRoot < 1e-5, `LOD startup overwrote the transferred point-cloud view: ${transferAfterRoot}`);
 
     await setView(client, [0, 44, 52], [0, 18, 0]);
-    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return n>0; })()`, 'close view did not refine');
+    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return n>0; })()`, 'close view did not refine');
     const close = await client.evaluate(snapshotExpression());
     assert.ok(close.visibleLeaves.length > 0);
+    assertHonestBackdrop(close, 'close view');
 
     const orbitPixels = await client.evaluate(`(() => {
       const controls=window.__ltds.controls(); const rect=controls.dom.getBoundingClientRect();
@@ -653,7 +826,7 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
       return true;
     })()`);
     try {
-      await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return window.__ltds.tiles().errorTarget===512&&n===0; })()`, 'minimum Detail setting did not coarsen the active frontier', 10_000);
+      await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return window.__ltds.tiles().errorTarget===512&&n===0; })()`, 'minimum Detail setting did not coarsen the active frontier', 10_000);
     } catch (error) {
       const detailDiagnostics = await client.evaluate(`(() => {
         const tiles=window.__ltds.tiles(); const rows=[];
@@ -668,13 +841,15 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
       slider.dispatchEvent(new Event('input', { bubbles: true }));
       return true;
     })()`);
-    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return window.__ltds.tiles().errorTarget===2&&n>0; })()`, 'maximum Detail setting did not restore full-detail leaves');
+    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return window.__ltds.tiles().errorTarget===2&&n>0; })()`, 'maximum Detail setting did not restore full-detail leaves');
 
     await setView(client, [0, 1300, 1300], [0, 18, 0]);
-    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return n===0; })()`, 'far view kept LOD-0 leaves');
+    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return n===0; })()`, 'far view kept LOD-0 leaves');
     const far = await client.evaluate(snapshotExpression());
     assert.equal(far.visibleLeaves.length, 0);
-    assert.equal(far.root.visible, true);
+    assert.equal(far.root.rendered, true);
+    assert.ok(far.attachedTiles.length > 0, JSON.stringify(far));
+    assert.ok(far.attachedTiles.some((tile) => tile.error > 0), JSON.stringify(far.attachedTiles));
 
     const closeSet = new Set(close.visibleLeaves);
     const candidates = await client.evaluate(`(() => {
@@ -713,16 +888,16 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
       }
     }
     assert.ok(panned, `panning did not replace the detailed frontier: ${JSON.stringify({ close: [...closeSet], panSamples })}`);
-    assert.equal(panned.root.visible, true);
+    panned = await client.evaluate(snapshotExpression());
+    assertHonestBackdrop(panned, 'panned view');
 
-    // The original close-up leaves normally stay cached. Returning to that view
-    // must make those same scene objects render again rather than leaving an
-    // invisible cached hole beneath the coarse root backdrop.
+    // Returning to the original close-up must restore its detailed REPLACE
+    // frontier without retaining a coarse ancestor over or under it.
     await setView(client, [0, 44, 52], [0, 18, 0]);
-    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; const expected=new Set(${JSON.stringify([...closeSet])}); let found=false; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible&&expected.has(tile.content?.uri||tile.content?.url))found=true;};f(r);return found; })()`, 'returning to the close view did not restore cached full-detail leaves');
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify([...closeSet])}); let found=false; const f=(tile)=>{(tile?.children||[]).forEach(f);const rendered=tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&(()=>{let visible=false;tile.engineData.scene.traverse(object=>{if(object.isMesh&&object.material)for(const material of(Array.isArray(object.material)?object.material:[object.material]))if(material.visible!==false)visible=true;});return visible;})();if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&rendered&&expected.has(tile.content?.uri||tile.content?.url))found=true;};f(t.root);return found; })()`, 'returning to the close view did not restore its detailed leaf', 90_000);
     const returned = await client.evaluate(snapshotExpression());
     assert.ok(returned.visibleLeaves.some((uri) => closeSet.has(uri)));
-    assert.equal(returned.root.visible, true);
+    assertHonestBackdrop(returned, 'returned close view');
 
     const failures = client.events.filter((event) => event.method === 'Network.responseReceived' && event.params.response.status >= 400);
     // Middleware-mode Vite has no HMR WebSocket endpoint. Its injected client
@@ -741,6 +916,82 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     ) && !isViteHmrEvent(event));
     assert.deepEqual(failures, []);
     assert.deepEqual(errors, []);
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock();
+    removeBrowserProfile(profile);
+  }
+});
+
+test('browser camera layer activates a bounded representative draw set', { timeout: 90_000 }, async (t) => {
+  const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
+  const executable = browserPath();
+  if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
+    t.skip('Set LTDS_LOD_TEST_TILE_ROOT and CHROME_PATH/EDGE_PATH to run real camera browser acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const fixture = await startFixture(path.resolve(tileRoot));
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-camera-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Log.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
+    await client.evaluate(`document.querySelector('#layer-cameras').click()`);
+    try {
+      await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load', 20_000);
+    } catch (error) {
+      const diagnostics = await client.evaluate(`({ cams: window.__ltdsCams, drawn: window.__ltdsCamDrawn, loading: window.__ltds?.state?.camerasLoading, loaded: window.__ltds?.state?.camerasLoaded })`).catch(() => null);
+      const browserErrors = client.events.filter((event) => event.method === 'Runtime.exceptionThrown' || (event.method === 'Log.entryAdded' && event.params?.entry?.level === 'error'));
+      assert.fail(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}; browserErrors=${JSON.stringify(browserErrors)}`);
+    }
+    await setViewAtFirstCamera(client);
+    try {
+      await waitFor(client, 'window.__ltdsCamDrawn > 0', 'camera-facing view did not expose a representative', 30_000);
+    } catch (error) {
+      const diagnostics = await client.evaluate(`(() => {
+        const camera=window.__ltds.camera(); camera.updateMatrixWorld(true);
+        const V=camera.position.constructor;
+        const projected=[[0,20,0],[4,21,-3],[8,22,-6]].map(value=>{const p=new V(...value),view=p.clone().applyMatrix4(camera.matrixWorldInverse),ndc=p.clone().project(camera);return {value,view:view.toArray(),ndc:ndc.toArray()};});
+        const meshes=[];window.__ltds.scene().traverse(object=>{if(object.isInstancedMesh)meshes.push({count:object.count,parentVisible:object.parent?.parent?.visible,group:object.parent?.parent?.name||''});});
+        return {cams:window.__ltdsCams,drawn:window.__ltdsCamDrawn,drawToSource:window.__ltdsCamDrawToSource,camera:camera.position.toArray(),cameraWorldPositions:window.__ltds.cameraWorldPositions(),projected,meshes};
+      })()`);
+      assert.fail(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}`);
+    }
+    const state = await client.evaluate(`(() => {
+      const meshes = [];
+      window.__ltds.scene().traverse((object) => { if (object.isInstancedMesh && object.parent?.parent?.visible) meshes.push(object.count); });
+      return { source: window.__ltdsCams, drawn: window.__ltdsCamDrawn, meshCounts: meshes };
+    })()`);
+    assert.equal(state.source, 3);
+    assert.ok(state.drawn >= 0 && state.drawn <= 3, JSON.stringify(state));
+    assert.deepEqual(state.meshCounts, [state.drawn, state.drawn]);
+
+
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});

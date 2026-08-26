@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-export function unlitLodMaterial(source, { coarseBackdrop = false } = {}) {
+export function unlitLodMaterial(source, { transientBackdrop = false } = {}) {
   const map = source?.map || null;
   if (map) map.colorSpace = THREE.SRGBColorSpace;
   const material = new THREE.MeshBasicMaterial({
@@ -21,7 +21,7 @@ export function unlitLodMaterial(source, { coarseBackdrop = false } = {}) {
   material.name = source?.name || '';
   material.depthTest = source?.depthTest ?? true;
   material.toneMapped = false;
-  if (coarseBackdrop) {
+  if (transientBackdrop) {
     material.depthWrite = false;
     material.polygonOffset = true;
     material.polygonOffsetFactor = 1;

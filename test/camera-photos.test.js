@@ -303,11 +303,20 @@ test('server starts accepting requests before bounded legacy camera-photo mainte
   assert.ok(listen > 0 && deferred > listen && reconcile > deferred);
 });
 
-test('camera layer renders and highlights a separate forward-direction accent', () => {
+test('camera layer renders and highlights a compact WebODM-style lens accent', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  assert.match(main, /import \{ CAMERA_MARKER_COLORS, cameraMarkerGeometryData \} from '\.\/camera-markers\.mjs'/);
-  assert.match(main, /let camGroupParent, camInstances = null, camDirectionInstances = null/);
-  assert.match(main, /camDirectionInstances = new THREE\.InstancedMesh\(directionGeometry, directionMaterial, camFeatures\.length\)/);
-  assert.match(main, /hoverRaycaster\.intersectObjects\(\[camInstances, camDirectionInstances\], false\)/);
-  assert.match(main, /camDirectionInstances\.setColorAt\(idx, directionHover\)/);
+  assert.match(main, /import \{ CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives \} from '\.\/camera-markers\.mjs'/);
+  assert.match(main, /let camGroupParent, camInstances = null, camLensInstances = null/);
+  assert.match(main, /camLensInstances = new THREE\.InstancedMesh\(lensGeometry, lensMaterial, camFeatures\.length\)/);
+  assert.match(main, /bodyMaterial[\s\S]*opacity: CAMERA_MARKER_OPACITY\.body/);
+  assert.match(main, /lensMaterial[\s\S]*opacity: CAMERA_MARKER_OPACITY\.lens/);
+  assert.match(main, /let camDrawToSource = \[\], camSourceToDraw = null/);
+  assert.match(main, /const visibleSources = selectCameraMarkerRepresentatives\(candidates/);
+  assert.match(main, /camInstances\.count = visibleSources\.length/);
+  assert.match(main, /camLensInstances\.count = visibleSources\.length/);
+  assert.match(main, /if \(camInstances\.instanceColor\) camInstances\.instanceColor\.needsUpdate = true/);
+  assert.match(main, /if \(camLensInstances\.instanceColor\) camLensInstances\.instanceColor\.needsUpdate = true/);
+  assert.match(main, /hoverRaycaster\.intersectObjects\(\[camInstances, camLensInstances\], false\)/);
+  assert.match(main, /return camDrawToSource\[hits\[0\]\.instanceId\]/);
+  assert.match(main, /CAMERA_MARKER_STYLE\.pickRadius/);
 });

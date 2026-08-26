@@ -30,6 +30,8 @@ test('production image copies and asserts the complete Potree release layout', (
   assert.match(dockerSource, /test -s \/potree\/libs\/plasio\/js\/laslaz\.js/);
   assert.match(pointCloudShell, /\/potree\/libs\/jquery\/jquery-3\.1\.1\.min\.js/);
   assert.match(pointCloudShell, /\/potree\/libs\/copc\/index\.js/);
+  assert.match(pointCloudShell, /\/potree\/libs\/jstree\/themes\/mixed\/style\.min\.css/);
+  assert.doesNotMatch(pointCloudShell, /\/potree\/libs\/jstree\/themes\/style\.min\.css/);
 });
 
 test('Potree controls preserve panel state and match mesh navigation feedback', () => {
@@ -99,13 +101,24 @@ test('point-cloud distance and height labels use thousandth-inch precision in im
 
 test('camera positions persist across model and point-cloud modes and remain clickable', () => {
   const viewerShell = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const cameraRuntime = fs.readFileSync(path.join(root, 'public', 'pointcloud-cameras.js'), 'utf8');
   assert.match(viewerShell, /id="panel-camera-positions"[\s\S]*id="layer-cameras"[\s\S]*id="cam-size"/);
   assert.match(pointCloudShell, /<script src="\/pointcloud-cameras\.js"><\/script>/);
   assert.match(pointCloudShell, /createPointCloudCameraLayer\(\{[\s\S]*scene: viewer\.scene\.scene/);
   assert.match(pointCloudShell, /setCameras\(markers\)[\s\S]*pointCloudCameraLayer\.setMarkers\(markers\)/);
   assert.match(pointCloudShell, /setCameraVisibility\(visible\)[\s\S]*pointCloudCameraLayer\.setVisible\(visible\)/);
+  assert.match(pointCloudShell, /viewer\.addEventListener\('update', \(\) => pointCloudCameraLayer\.updateView\(\)\)/);
+  assert.match(cameraRuntime, /let drawToSource = \[\]/);
+  assert.match(cameraRuntime, /const visibleSources = selectCameraMarkerRepresentatives\(candidates/);
+  assert.match(cameraRuntime, /bodyMesh\.count = visibleSources\.length/);
+  assert.match(cameraRuntime, /lensMesh\.count = visibleSources\.length/);
+  assert.match(cameraRuntime, /if \(bodyMesh\.instanceColor\) bodyMesh\.instanceColor\.needsUpdate = true/);
+  assert.match(cameraRuntime, /if \(lensMesh\.instanceColor\) lensMesh\.instanceColor\.needsUpdate = true/);
+  assert.match(cameraRuntime, /return drawToSource\[hit\.instanceId\]/);
   assert.match(pointCloudShell, /type: 'camera-open'[\s\S]*index[\s\S]*correlationId/);
   assert.match(mainSource, /function syncCameraLayer\(\)/);
+  assert.match(mainSource, /function refreshCameraMarkerScales\(force = false\)/);
+  assert.match(mainSource, /refreshCameraMarkerScales\(\)/);
   assert.match(mainSource, /api\.setCameras\(cameraPayload\)/);
   assert.match(mainSource, /api\.setCameraVisibility\(state\.camerasVisible\)/);
   assert.match(mainSource, /message\.type === 'camera-open'[\s\S]*openPhoto\(message\.index\)/);
