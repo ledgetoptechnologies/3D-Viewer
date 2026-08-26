@@ -13,17 +13,8 @@
   const CAMERA_MARKER_OPACITY = Object.freeze({ body: 0.62, lens: 0.72 });
   const CAMERA_MARKER_STYLE = Object.freeze({ width: Math.hypot(1.62, 1, 0.70), maxPixels: 10, cellPixels: 18, maxVisible: 4000, pickRadius: 12 });
 
-  function cameraMarkerScaleForView({ baseScale = 1, depth, fovDegrees, zoom = 1, viewportHeight } = {}) {
-    const requested = Math.max(0.1, Math.min(4, Number(baseScale) || 1));
-    const positiveDepth = Number(depth), fov = Number(fovDegrees);
-    const cameraZoom = Number(zoom), height = Number(viewportHeight);
-    if (!Number.isFinite(positiveDepth) || positiveDepth <= 0
-      || !Number.isFinite(fov) || fov <= 0 || fov >= 179
-      || !Number.isFinite(cameraZoom) || cameraZoom <= 0
-      || !Number.isFinite(height) || height <= 0) return requested;
-    const worldPerPixel = 2 * positiveDepth * Math.tan(fov * Math.PI / 360) / (height * cameraZoom);
-    const projectedCap = CAMERA_MARKER_STYLE.maxPixels * worldPerPixel / CAMERA_MARKER_STYLE.width;
-    return Math.min(requested, projectedCap);
+  function cameraMarkerScaleForView({ baseScale = 1 } = {}) {
+    return Math.max(0.1, Math.min(4, Number(baseScale) || 1));
   }
 
   function selectCameraMarkerRepresentatives(candidates, { width, height, cellPixels = CAMERA_MARKER_STYLE.cellPixels, maxVisible = CAMERA_MARKER_STYLE.maxVisible, margin = CAMERA_MARKER_STYLE.maxPixels } = {}) {

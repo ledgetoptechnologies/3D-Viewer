@@ -82,23 +82,18 @@ test('camera markers use a compact WebODM-style body and forward lens', () => {
   });
 });
 
-test('camera marker scale only shrinks glyphs that would exceed the projected size ceiling', () => {
-  const projectionPixels = ({ scale, depth, zoom = 1 }) => (
-    CAMERA_MARKER_STYLE.width * scale * 900 * zoom
-      / (2 * depth * Math.tan(60 * Math.PI / 360))
-  );
-  const near = cameraMarkerScaleForView({ baseScale: 1, depth: 3, fovDegrees: 60, zoom: 1, viewportHeight: 900 });
-  const nearZoomed = cameraMarkerScaleForView({ baseScale: 1, depth: 3, fovDegrees: 60, zoom: 2, viewportHeight: 900 });
-  const nearPlane = cameraMarkerScaleForView({ baseScale: 1, depth: 0.1, fovDegrees: 60, zoom: 1, viewportHeight: 900 });
-  const far = cameraMarkerScaleForView({ baseScale: 1, depth: 200, fovDegrees: 60, zoom: 1, viewportHeight: 900 });
-  assert.ok(near > 0 && near < 1);
-  assert.ok(projectionPixels({ scale: near, depth: 3 }) <= CAMERA_MARKER_STYLE.maxPixels + 1e-9);
-  assert.ok(nearZoomed < near, 'camera zoom tightens the projected-size cap');
-  assert.ok(projectionPixels({ scale: nearZoomed, depth: 3, zoom: 2 }) <= CAMERA_MARKER_STYLE.maxPixels + 1e-9);
-  assert.ok(nearPlane > 0);
-  assert.ok(projectionPixels({ scale: nearPlane, depth: 0.1 }) <= CAMERA_MARKER_STYLE.maxPixels + 1e-9, 'near-plane glyphs remain pixel-bounded');
-  assert.equal(far, 1, 'distant markers retain the user-selected scale instead of becoming constant-size clutter');
-  assert.equal(cameraMarkerScaleForView({ baseScale: 0.5, depth: -1, fovDegrees: 60, viewportHeight: 900 }), 0.5);
+test('camera marker scale remains fixed in world space across zoom and depth', () => {
+  const requested = 0.7;
+  const views = [
+    { depth: 0.1, fovDegrees: 60, zoom: 10, viewportHeight: 900 },
+    { depth: 3, fovDegrees: 35, zoom: 2, viewportHeight: 1440 },
+    { depth: 200, fovDegrees: 90, zoom: 0.1, viewportHeight: 480 },
+  ];
+  for (const view of views) {
+    assert.equal(cameraMarkerScaleForView({ baseScale: requested, ...view }), requested);
+  }
+  assert.equal(cameraMarkerScaleForView({ baseScale: 0.01, depth: 10, fovDegrees: 60, zoom: 1, viewportHeight: 900 }), 0.1);
+  assert.equal(cameraMarkerScaleForView({ baseScale: 10, depth: 10, fovDegrees: 60, zoom: 1, viewportHeight: 900 }), 4);
 });
 
 test('dense camera projections keep the nearest stable representative in each screen cell', () => {

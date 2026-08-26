@@ -492,7 +492,7 @@ function assertHonestBackdrop(snapshot, label) {
   }
 }
 
-test('browser LOD stream hides the coarse root after complete top-down foreground coverage', { timeout: 420_000 }, async (t) => {
+test('browser LOD stream hides the coarse root after complete top-down foreground coverage', { timeout: 580_000 }, async (t) => {
   const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
   const executable = browserPath();
   if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
@@ -642,10 +642,10 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       const tiles = window.__ltds.tiles();
       const root = tiles?.root;
       return root?.refine === 'ADD'
-        && !tiles?.downloadQueue?.running && !tiles?.parseQueue?.running
+        && !tiles?.downloadQueue?.running && !tiles?.parseQueue?.running && !tiles?.processNodeQueue?.running
         && Boolean(tiles?.group?.children?.length)
         && tiles.group.children.includes(root?.engineData?.scene);
-    })()`, 'settled home view did not retain a valid transient root', 90_000);
+    })()`, 'settled home view did not retain a valid transient root', 210_000);
 
     const initial = await client.evaluate(snapshotExpression());
     assert.equal(initial.errorPanel, 'none');
@@ -666,7 +666,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(visibleInitialMaterials.filter((item) => item.renderOrder !== -100).every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.root.materials.every((item) => item.visible === initial.root.rendered && item.depthWrite === false && item.polygonOffset === true && item.renderOrder === -100));
     assert.ok(initial.attachedMaterials.every((item) => item.hasMap && item.imageReady), 'attached full-detail B3DM textures were not decoded and bound');
-    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 1.75 * GiB, minSize: 8, maxSize: 48, unloadPercent: 0.20 });
+    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 2.75 * GiB, minSize: 8, maxSize: 48, unloadPercent: 0.20 });
 
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
@@ -776,8 +776,10 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
 
     await setView(client, [0, 44, 52], [0, 18, 0]);
     await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return n>0; })()`, 'close view did not refine');
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return window.__ltds.state.lodRootBackdrop?.complete === true && !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'close view did not complete foreground coverage', 210_000);
     const close = await client.evaluate(snapshotExpression());
     assert.ok(close.visibleLeaves.length > 0);
+    assert.equal(close.root.rendered, false, `close view retained its coarse root: ${JSON.stringify(close)}`);
     assertHonestBackdrop(close, 'close view');
 
     const orbitPixels = await client.evaluate(`(() => {
@@ -879,7 +881,9 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     const panSamples = [];
     for (const candidate of candidates) {
       await setView(client, candidate.position, candidate.lookAt);
-      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      try {
+        await waitFor(client, `(() => { const t=window.__ltds.tiles(); const close=new Set(${JSON.stringify([...closeSet])}); let found=false; const f=(tile)=>{(tile?.children||[]).forEach(f);const uri=tile.content?.uri||tile.content?.url;if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&!close.has(uri))found=true;};f(t.root);return found; })()`, 'alternate detailed leaf did not attach', 30_000);
+      } catch {}
       const sample = await client.evaluate(snapshotExpression());
       panSamples.push({ candidate, visibleLeaves: sample.visibleLeaves, camera: sample.camera });
       if (sample.visibleLeaves.some((uri) => !closeSet.has(uri))) {
@@ -894,7 +898,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     // Returning to the original close-up must restore its detailed REPLACE
     // frontier without retaining a coarse ancestor over or under it.
     await setView(client, [0, 44, 52], [0, 18, 0]);
-    await waitFor(client, `(() => { const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify([...closeSet])}); let found=false; const f=(tile)=>{(tile?.children||[]).forEach(f);const rendered=tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&(()=>{let visible=false;tile.engineData.scene.traverse(object=>{if(object.isMesh&&object.material)for(const material of(Array.isArray(object.material)?object.material:[object.material]))if(material.visible!==false)visible=true;});return visible;})();if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&rendered&&expected.has(tile.content?.uri||tile.content?.url))found=true;};f(t.root);return found; })()`, 'returning to the close view did not restore its detailed leaf', 90_000);
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify([...closeSet])}); let found=false; const f=(tile)=>{(tile?.children||[]).forEach(f);const rendered=tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&(()=>{let visible=false;tile.engineData.scene.traverse(object=>{if(object.isMesh&&object.material)for(const material of(Array.isArray(object.material)?object.material:[object.material]))if(material.visible!==false)visible=true;});return visible;})();if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&rendered&&expected.has(tile.content?.uri||tile.content?.url))found=true;};f(t.root);return found; })()`, 'returning to the close view did not restore its detailed leaf', 120_000);
     const returned = await client.evaluate(snapshotExpression());
     assert.ok(returned.visibleLeaves.some((uri) => closeSet.has(uri)));
     assertHonestBackdrop(returned, 'returned close view');
@@ -991,7 +995,230 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     assert.ok(state.drawn >= 0 && state.drawn <= 3, JSON.stringify(state));
     assert.deepEqual(state.meshCounts, [state.drawn, state.drawn]);
 
+    const readScale = async (source = null) => client.evaluate(`(() => {
+      const source = ${source === null ? 'window.__ltdsCamDrawToSource[0]' : Number(source)};
+      const draw = window.__ltdsCamDrawToSource.indexOf(source);
+      const mesh = (() => { let found = null; window.__ltds.scene().traverse((object) => {
+        if (!found && object.isInstancedMesh && object.parent?.parent?.visible) found = object;
+      }); return found; })();
+      if (!mesh || draw < 0) return null;
+      const matrix = new mesh.matrixWorld.constructor();
+      const position = new mesh.position.constructor();
+      const quaternion = new mesh.quaternion.constructor();
+      const scale = new mesh.scale.constructor();
+      mesh.getMatrixAt(draw, matrix);
+      matrix.decompose(position, quaternion, scale);
+      return { source, scale: scale.toArray() };
+    })()`);
+    const initialScale = await readScale();
+    assert.ok(initialScale, 'initial representative scale was unavailable');
+    const setCameraOffset = async (offset) => {
+      await client.evaluate(`(() => {
+        const values = window.__ltds.cameraWorldPositions();
+        const Vector3 = window.__ltds.camera().position.constructor;
+        const target = new Vector3(values[0], values[1], values[2]);
+        window.__ltds.controls().setView(target.clone().add(new Vector3(${offset.join(',')})), target);
+      })()`);
+      await waitFor(client, `window.__ltdsCamDrawToSource.includes(${initialScale.source})`, 'source camera disappeared while zooming');
+      return readScale(initialScale.source);
+    };
+    const closeScale = await setCameraOffset([4, 3, 4]);
+    if (process.env.LTDS_CAMERA_SCREENSHOT_PREFIX) {
+      const closeCapture = await client.command('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(`${process.env.LTDS_CAMERA_SCREENSHOT_PREFIX}-close.png`, Buffer.from(closeCapture.data, 'base64'));
+    }
+    const farScale = await setCameraOffset([100, 75, 100]);
+    if (process.env.LTDS_CAMERA_SCREENSHOT_PREFIX) {
+      const farCapture = await client.command('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(`${process.env.LTDS_CAMERA_SCREENSHOT_PREFIX}-far.png`, Buffer.from(farCapture.data, 'base64'));
+    }
+    assert.deepEqual(closeScale.scale, initialScale.scale, 'close zoom changed camera world scale');
+    assert.deepEqual(farScale.scale, initialScale.scale, 'far zoom changed camera world scale');
+    await client.evaluate(`(() => {
+      const values = window.__ltds.cameraWorldPositions();
+      const Vector3 = window.__ltds.camera().position.constructor;
+      const target = new Vector3(values[0], values[1], values[2]);
+      window.__ltds.controls().setView(target.clone().add(new Vector3(1000, 750, 1000)), target);
+    })()`);
+    await waitFor(client, `window.__ltdsCamDrawn > 0`, 'extreme far view exposed no camera representative');
+    const extremeClick = await client.evaluate(`(() => {
+      const source = window.__ltdsCamDrawToSource[0];
+      const values = window.__ltds.cameraWorldPositions();
+      const Vector3 = window.__ltds.camera().position.constructor;
+      const point = new Vector3(values[source * 3], values[source * 3 + 1], values[source * 3 + 2]).project(window.__ltds.camera());
+      const rect = document.querySelector('#three-container canvas').getBoundingClientRect();
+      return { source, x: rect.left + (point.x + 1) * rect.width / 2 + 8, y: rect.top + (1 - point.y) * rect.height / 2 };
+    })()`);
+    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: extremeClick.x, y: extremeClick.y, button: 'left', buttons: 1, clickCount: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: extremeClick.x, y: extremeClick.y, button: 'left', buttons: 0, clickCount: 1 });
+    await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'screen-space fallback did not pick a sub-pixel distant camera');
+    const extremePhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
+    assert.match(extremePhotoUrl, new RegExp(`/camera-photos/photo-${extremeClick.source}\\.jpg$`));
+    await client.evaluate(`document.querySelector('#photo-close').click()`);
 
+
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock();
+    removeBrowserProfile(profile);
+  }
+});
+
+test('browser hides the coarse root when every visible branch meets the active Detail target', { timeout: 580_000 }, async (t) => {
+  const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
+  const executable = browserPath();
+  if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
+    t.skip('Set LTDS_LOD_TEST_TILE_ROOT and CHROME_PATH/EDGE_PATH to run real foreground coverage acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const fixture = await startFixture(path.resolve(tileRoot));
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-foreground-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Log.enable');
+    await client.command('Network.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
+    const cacheOverrideGiB = Number(process.env.LTDS_LOD_TEST_CACHE_GIB);
+    if (Number.isFinite(cacheOverrideGiB) && cacheOverrideGiB > 0) {
+      await client.evaluate(`window.__ltds.tiles().lruCache.maxBytesSize = ${cacheOverrideGiB} * 2 ** 30`);
+    }
+    await setView(client, [0, 44, 52], [0, 18, 0]);
+    await waitFor(client, `(() => {
+      const tiles = window.__ltds.tiles();
+      const rootScene = tiles?.root?.engineData?.scene;
+      const hasDetail = tiles?.group?.children?.some((scene) => scene !== rootScene);
+      const idle = !tiles?.downloadQueue?.running && !tiles?.parseQueue?.running && !tiles?.processNodeQueue?.running;
+      const terminal = idle || tiles?.lruCache?.isFull?.();
+      window.__ltdsForegroundIdleFrames = terminal && hasDetail ? (window.__ltdsForegroundIdleFrames || 0) + 1 : 0;
+      return window.__ltdsForegroundIdleFrames >= 20;
+    })()`, 'close foreground reached neither complete idle nor a reproducible cache block', 210_000);
+
+    const diagnostic = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const root = tiles.root;
+      const attachedScenes = tiles.group.children;
+      const target = Number(tiles.errorTarget);
+      const isAttached = (tile) => Boolean(tile?.engineData?.scene && attachedScenes.includes(tile.engineData.scene));
+      const targetCovered = [];
+      const uncovered = [];
+      const strictLeaves = [];
+      const visitStrict = (tile, parent = null) => {
+        for (const child of (tile?.children || [])) visitStrict(child, tile);
+        if ((tile?.children || []).length || Number(tile?.geometricError) !== 0
+          || tile?.traversal?.used !== true || tile?.traversal?.inFrustum !== true) return;
+        strictLeaves.push({
+          uri: tile.content?.uri || tile.content?.url || '', attached: isAttached(tile),
+          loadingState: tile.internal?.loadingState ?? null,
+          parentError: parent?.traversal?.error ?? null,
+          parentAttached: isAttached(parent),
+        });
+      };
+      const visitCoverage = (tile, path = 'root') => {
+        if (!tile || tile.traversal?.used !== true || tile.traversal?.inFrustum !== true) return;
+        const attached = isAttached(tile);
+        const error = Number(tile.traversal?.error);
+        if (tile !== root && attached && Number.isFinite(error) && error <= target) {
+          targetCovered.push({ path, uri: tile.content?.uri || tile.content?.url || '', error, geometricError: tile.geometricError });
+          return;
+        }
+        const children = tile.children || [];
+        if (children.length) {
+          children.forEach((child, index) => visitCoverage(child, path + '.' + index));
+        } else if (Number(tile.geometricError) === 0) {
+          if (attached) targetCovered.push({ path, uri: tile.content?.uri || tile.content?.url || '', error: 0, geometricError: 0 });
+          else uncovered.push({ path, uri: tile.content?.uri || tile.content?.url || '', loadingState: tile.internal?.loadingState ?? null });
+        }
+      };
+      visitStrict(root);
+      for (const child of (root.children || [])) visitCoverage(child);
+      const rootMaterials = [];
+      root.engineData.scene.traverse((object) => {
+        if (!object.isMesh || !object.material) return;
+        for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
+          rootMaterials.push({ visible: material.visible !== false, transparent: material.transparent, opacity: material.opacity,
+            alphaTest: material.alphaTest, hasAlphaMap: Boolean(material.alphaMap), depthWrite: material.depthWrite });
+        }
+      });
+      return {
+        target, targetCovered, uncovered, strictLeaves,
+        rootAttached: isAttached(root),
+        rootRendered: isAttached(root) && rootMaterials.some((material) => material.visible),
+        rootMaterials,
+        cache: {
+          isFull: tiles.lruCache.isFull(),
+          cachedBytes: tiles.lruCache.cachedBytes,
+          maxBytesSize: tiles.lruCache.maxBytesSize,
+          itemCount: tiles.lruCache.itemSet?.size ?? null,
+          maxSize: tiles.lruCache.maxSize,
+          items: [...(tiles.lruCache.bytesMap?.entries?.() || [])].map(([tile, bytes]) => ({
+            uri: tile?.content?.uri || tile?.content?.url || 'root', bytes,
+            used: tiles.lruCache.isUsed?.(tile) ?? null,
+            loaded: tile?.internal?.loadingState ?? null,
+          })).sort((left, right) => right.bytes - left.bytes),
+        },
+        queues: {
+          download: Boolean(tiles.downloadQueue?.running), parse: Boolean(tiles.parseQueue?.running),
+          process: Boolean(tiles.processNodeQueue?.running),
+        },
+      };
+    })()`);
+
+    assert.ok(diagnostic.targetCovered.length > 0, JSON.stringify(diagnostic));
+    assert.equal(diagnostic.cache.isFull, false, `foreground refinement was blocked by a full LRU cache: ${JSON.stringify(diagnostic)}`);
+    assert.deepEqual(diagnostic.uncovered, [], `foreground branches remained unloaded and unqueued: ${JSON.stringify(diagnostic)}`);
+    assert.equal(diagnostic.rootRendered, false, `coarse root remained rendered over target-satisfied foreground: ${JSON.stringify(diagnostic)}`);
+    if (process.env.LTDS_LOD_SCREENSHOT_PATH) {
+      const capture = await client.command('Page.captureScreenshot', { format: 'png' });
+      writeFileSync(process.env.LTDS_LOD_SCREENSHOT_PATH, Buffer.from(capture.data, 'base64'));
+    }
+
+    const closeUris = diagnostic.strictLeaves.map((leaf) => leaf.uri).sort();
+    await setView(client, [0, 1300, 1300], [0, 18, 0]);
+    await waitFor(client, `(() => {
+      const t=window.__ltds.tiles(); let attached=0;
+      const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene))attached++;};
+      f(t.root); return attached===0 && t.lruCache.cachedBytes < 1024 ** 3;
+    })()`, 'far view did not detach close leaves and drain the warm cache', 120_000);
+    await setView(client, [0, 44, 52], [0, 18, 0]);
+    await waitFor(client, `(() => {
+      const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify(closeUris)});
+      const attached=new Set();
+      const f=(tile)=>{(tile?.children||[]).forEach(f);const uri=tile.content?.uri||tile.content?.url;if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&expected.has(uri))attached.add(uri);};
+      f(t.root); return attached.size===expected.size && window.__ltds.state.lodRootBackdrop?.complete===true && !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running;
+    })()`, 'returning to close view did not restore every foreground leaf', 240_000);
+    const returned = await client.evaluate(`(() => {
+      const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify(closeUris)}); const attached=[];
+      const f=(tile)=>{(tile?.children||[]).forEach(f);const uri=tile.content?.uri||tile.content?.url;if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&expected.has(uri))attached.push(uri);};
+      f(t.root); let rootRendered=false;t.root.engineData.scene.traverse(object=>{if(object.isMesh&&object.material)for(const material of(Array.isArray(object.material)?object.material:[object.material]))if(material.visible!==false)rootRendered=true;});
+      return {attached:attached.sort(),rootRendered,cacheBytes:t.lruCache.cachedBytes};
+    })()`);
+    assert.deepEqual(returned.attached, closeUris);
+    assert.equal(returned.rootRendered, false, `returned view retained coarse root: ${JSON.stringify(returned)}`);
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});

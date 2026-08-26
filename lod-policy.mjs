@@ -42,9 +42,17 @@ export function screenSpaceErrorPriority(a, b) {
 // The active close-up REPLACE frontier needs room to finish loading before an
 // eviction pass begins. Once it is no longer in the view, keep only a bounded
 // warm cache so a pan can refine a new area instead of pinning the whole model.
+// The renderer registers decoded bytes only after concurrent downloads/parses
+// complete, so several in-flight tiles can make cachedBytes overshoot the hard
+// ceiling before isFull() blocks the next request. The desktop cap therefore
+// needs bounded headroom above the measured complete active frontier, while
+// minBytesSize still drives unused content back to a small warm cache.
 export function lodCacheBudget(deviceMemoryGiB) {
   const memory = Number(deviceMemoryGiB);
   if (Number.isFinite(memory) && memory <= 4) {
+    // Low-memory clients intentionally retain a coarse/fallback profile. The
+    // measured full-detail frontier for the large Rome Dam fixture is over
+    // 2.3 GiB, which is not safe to promise inside a 4 GiB browser process.
     return {
       minBytesSize: 384 * 1024 * 1024,
       maxBytesSize: 768 * 1024 * 1024,
@@ -56,7 +64,7 @@ export function lodCacheBudget(deviceMemoryGiB) {
 
   return {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    maxBytesSize: 2.75 * 1024 * 1024 * 1024,
     minSize: 8,
     maxSize: 48,
     unloadPercent: 0.20,

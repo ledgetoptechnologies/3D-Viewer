@@ -20,23 +20,8 @@ export const CAMERA_MARKER_STYLE = Object.freeze({
 
 export function cameraMarkerScaleForView({
   baseScale = 1,
-  depth,
-  fovDegrees,
-  zoom = 1,
-  viewportHeight,
 } = {}) {
-  const requested = Math.max(0.1, Math.min(4, Number(baseScale) || 1));
-  const positiveDepth = Number(depth);
-  const fov = Number(fovDegrees);
-  const cameraZoom = Number(zoom);
-  const height = Number(viewportHeight);
-  if (!Number.isFinite(positiveDepth) || positiveDepth <= 0
-    || !Number.isFinite(fov) || fov <= 0 || fov >= 179
-    || !Number.isFinite(cameraZoom) || cameraZoom <= 0
-    || !Number.isFinite(height) || height <= 0) return requested;
-  const worldPerPixel = 2 * positiveDepth * Math.tan(fov * Math.PI / 360) / (height * cameraZoom);
-  const projectedCap = CAMERA_MARKER_STYLE.maxPixels * worldPerPixel / CAMERA_MARKER_STYLE.width;
-  return Math.min(requested, projectedCap);
+  return Math.max(0.1, Math.min(4, Number(baseScale) || 1));
 }
 
 export function selectCameraMarkerRepresentatives(candidates, {

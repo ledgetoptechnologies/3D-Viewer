@@ -58,7 +58,7 @@ test('renderer configuration uses REPLACE transitions without ancestor or siblin
   });
   assert.deepEqual(lodCacheBudget(8), {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    maxBytesSize: 2.75 * 1024 * 1024 * 1024,
     minSize: 8,
     maxSize: 48,
     unloadPercent: 0.20,
