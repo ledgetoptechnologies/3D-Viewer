@@ -13,13 +13,16 @@ test('new-tab session contract is versioned, removes grants, and isolates its ex
   assert.match(source, /history\.replaceState\(null, '', `\$\{activeUrl\.pathname\}\$\{activeUrl\.search\}\$\{activeUrl\.hash\}`\)/);
   assert.match(source, /VIEW_MODE === 'session' \? 'view' : VIEW_MODE/);
   assert.match(source, /type: 'ltds-viewer:ready'/);
-  assert.match(source, /window\.opener && !window\.opener\.closed/);
-  assert.match(source, /event\.source !== controller \|\| !sessionAllowedOrigins\.includes\(event\.origin\)/);
-  assert.match(source, /event\.data\.version !== 1/);
+  assert.match(source, /new BroadcastChannel\(`ltds-viewer-review:\$\{REVIEW_CONTROLLER_ID\}`\)/);
+  assert.match(source, /function sessionControllerOrigins\(\)/);
+  assert.doesNotMatch(source, /window\.opener/);
+  assert.match(source, /event\.source !== controller \|\| !sessionControllerOrigins\(\)\.includes\(event\.origin\)/);
+  assert.match(source, /data\.version !== 1/);
+  assert.match(source, /data\.requestId !== pendingReviewRenewalRequestId/);
 });
 
 test('retryable renewal failure preserves the current stable capability', () => {
-  const renewalHandler = source.slice(source.indexOf("window.addEventListener('message'"));
+  const renewalHandler = source.slice(source.indexOf('async function handleSessionRenewalMessage'));
   assert.match(renewalHandler, /retryable: true/);
   assert.doesNotMatch(renewalHandler, /sessionStorage\.removeItem/);
 });

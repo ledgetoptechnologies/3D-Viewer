@@ -49,6 +49,7 @@ function fixtureConfig() {
       obj: null,
       tiles: `${base}/tileset.json`,
       shots: `${base}/shots.geojson`,
+      cameraPhotos: `${base}/camera-photos`,
       ortho: null,
       dsm: null,
       dtm: null,
@@ -116,11 +117,19 @@ async function startFixture(tileRoot) {
         properties: {
           translation: [center.x + index * 4, center.y + index * 3, center.z + 20 + index],
           rotation: [0, 0, 0],
-          photoKey: `photo-${index}.jpg`,
+          filename: `photo-${index}.jpg`,
         },
       }));
       reply.writeHead(200, { 'Content-Type': 'application/geo+json; charset=utf-8' });
       reply.end(JSON.stringify({ type: 'FeatureCollection', features }));
+      return;
+    }
+    if (url.pathname.startsWith(`${assetPrefix}camera-photos/`)) {
+      const filename = decodeURIComponent(url.pathname.slice(`${assetPrefix}camera-photos/`.length));
+      if (!/^photo-[0-2]\.jpg$/.test(filename)) { reply.writeHead(404); reply.end(); return; }
+      const body = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8ZkAAAAASUVORK5CYII=', 'base64');
+      reply.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': body.length, 'Cache-Control': 'no-store' });
+      reply.end(body);
       return;
     }
     if (url.pathname.startsWith(assetPrefix)) {
@@ -370,7 +379,7 @@ async function setView(client, position, lookAt) {
   })()`);
 }
 
-test('browser LOD stream preserves the root backdrop through close, far, pan, and return views', { timeout: 180_000 }, async (t) => {
+test('browser LOD stream preserves the root backdrop through close, far, pan, and return views', { timeout: 300_000 }, async (t) => {
   const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
   const executable = browserPath();
   if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
@@ -443,6 +452,46 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     })()`);
     assert.ok(reset < 1e-5, `Reset View did not restore world-bounds home: ${reset}`);
 
+    const pole = await client.evaluate(`(() => {
+      document.querySelector('#btn-top').click();
+      const controls = window.__ltds.controls();
+      const camera = window.__ltds.camera();
+      const V = camera.position.constructor;
+      const target = new V(0, 18, 0);
+      const topPosition = camera.position.clone();
+      const topRadius = topPosition.distanceTo(target);
+      const initialPolar = Math.acos(Math.max(-1, Math.min(1, topPosition.clone().sub(target).normalize().y)));
+      controls._applyOrbit(target, 0, 0.001);
+      const firstOrbitDelta = camera.position.distanceTo(topPosition);
+      let minimumPolar = Infinity;
+      let minimumQuaternionDot = 1;
+      let previous = camera.quaternion.clone();
+      for (let i = 0; i < 80; i += 1) {
+        controls._applyOrbit(target, i % 2 ? 0.012 : -0.012, -0.25);
+        const offset = camera.position.clone().sub(target).normalize();
+        const polar = Math.acos(Math.max(-1, Math.min(1, offset.y)));
+        minimumPolar = Math.min(minimumPolar, polar);
+        minimumQuaternionDot = Math.min(minimumQuaternionDot, Math.abs(previous.dot(camera.quaternion)));
+        previous.copy(camera.quaternion);
+      }
+      return {
+        minimumPolar,
+        configuredMinimum: controls.minPolar,
+        initialPolar,
+        topRadius,
+        firstOrbitDelta,
+        minimumQuaternionDot,
+        finite: [...camera.position.toArray(), ...camera.quaternion.toArray()].every(Number.isFinite),
+      };
+    })()`);
+    assert.equal(pole.finite, true, `top-down orbit produced non-finite camera state: ${JSON.stringify(pole)}`);
+    assert.ok(pole.initialPolar > pole.configuredMinimum, `Top View began on the polar clamp instead of inside it: ${JSON.stringify(pole)}`);
+    assert.ok(pole.firstOrbitDelta < pole.topRadius * 0.002, `first top-down orbit made a clamp catch-up jump: ${JSON.stringify(pole)}`);
+    assert.ok(pole.minimumPolar >= pole.configuredMinimum - 1e-8, `top-down orbit crossed the polar limit: ${JSON.stringify(pole)}`);
+    assert.ok(pole.minimumQuaternionDot > 0.99, `top-down orbit orientation jumped or flipped: ${JSON.stringify(pole)}`);
+    await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
+    await waitFor(client, 'Boolean(window.__ltds.tiles()?.root?.engineData?.scene?.visible)', 'root backdrop did not return after Top View reset');
+
     const initial = await client.evaluate(snapshotExpression());
     assert.equal(initial.errorPanel, 'none');
     assert.equal(initial.root.refine, 'ADD');
@@ -455,13 +504,64 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
     const visibleCameras = await client.evaluate(`(() => {
-      let count = 0;
+      const meshes = [];
       window.__ltds.scene().traverse((object) => {
-        if (object.isInstancedMesh && object.visible && object.parent?.parent?.visible) count += object.count;
+        if (object.isInstancedMesh && object.visible && object.parent?.parent?.visible) {
+          const colors = object.instanceColor;
+          const sampled = object.material?.color?.clone?.();
+          if (sampled && colors) sampled.fromBufferAttribute(colors, 0);
+          const color = sampled?.getHex?.() ?? null;
+          meshes.push({ count: object.count, color });
+        }
       });
-      return count;
+      return { totalInstances: meshes.reduce((sum, item) => sum + item.count, 0), meshes };
     })()`);
-    assert.equal(visibleCameras, 3);
+    assert.equal(visibleCameras.totalInstances, 6, 'each camera renders one body plus one forward accent');
+    assert.deepEqual(visibleCameras.meshes.map(item => item.count).sort((a, b) => a - b), [3, 3]);
+    assert.deepEqual(visibleCameras.meshes.map(item => item.color).sort((a, b) => a - b), [0xEE5007, 0xF8CB2E].sort((a, b) => a - b));
+    const cameraClick = await client.evaluate(`(() => {
+      const meshes = [];
+      window.__ltds.scene().traverse((object) => { if (object.isInstancedMesh && object.count === 3 && object.parent?.parent?.visible) meshes.push(object); });
+      if (meshes.length !== 2) return null;
+      const M = meshes[0].matrixWorld.constructor, V = window.__ltds.camera().position.constructor;
+      const instance = new M();
+      meshes[0].getMatrixAt(0, instance);
+      meshes[0].updateWorldMatrix(true, false);
+      const markerTarget = new V(0, 0, 0.8).applyMatrix4(instance).applyMatrix4(meshes[0].matrixWorld);
+      window.__ltds.controls().setView(markerTarget.clone().add(new V(40, 30, 40)), markerTarget);
+      window.__ltds.camera().updateMatrixWorld(true);
+      const center = markerTarget.clone().project(window.__ltds.camera());
+      const canvas = document.querySelector('#three-container canvas'), rect = canvas.getBoundingClientRect();
+      const projected = { x: rect.left + (center.x + 1) * rect.width / 2, y: rect.top + (1 - center.y) * rect.height / 2 };
+      const raycaster = new (window.__ltds.controls()._raycaster.constructor)();
+      for (let radius = 0; radius <= 40; radius += 2) {
+        for (let dy = -radius; dy <= radius; dy += 2) for (let dx = -radius; dx <= radius; dx += 2) {
+          if (radius && Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          const x = projected.x + dx, y = projected.y + dy;
+          raycaster.setFromCamera(window.__ltds.controls()._ndc({ clientX: x, clientY: y }), window.__ltds.camera());
+          const hit = raycaster.intersectObjects(meshes, false)[0];
+          if (hit?.instanceId === 0) return { x, y, projected, meshHits: meshes.length };
+        }
+      }
+      return { projected, meshHits: meshes.length, missed: true };
+    })()`);
+    assert.ok(cameraClick && !cameraClick.missed && Number.isFinite(cameraClick.x) && Number.isFinite(cameraClick.y), `no raycastable camera marker pixel: ${JSON.stringify(cameraClick)}`);
+    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 0, clickCount: 1 });
+    await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'camera marker did not open its photo modal');
+    const photoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
+    assert.match(photoUrl, /\/camera-photos\/photo-0\.jpg$/);
+    assert.doesNotMatch(photoUrl, /storage|mnt|dataset/i);
+    await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1`, 'capability-scoped camera image did not decode');
+    await client.evaluate(`document.querySelector('#photo-close').click()`);
+    await client.evaluate(`(() => { window.__ltds.state.activeMode='cloud'; window.__ltds.state.cloudMode='direct'; return true; })()`);
+    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 0, clickCount: 1 });
+    await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'direct LAZ/PLY camera marker did not open its photo modal');
+    const directPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
+    assert.equal(directPhotoUrl, photoUrl, 'Model and direct Point Cloud markers did not use the same scoped photo URL');
+    await client.evaluate(`(() => { document.querySelector('#photo-close').click(); window.__ltds.state.activeMode='model'; window.__ltds.state.cloudMode='none'; return true; })()`);
+    await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
 
     const transferred = await client.evaluate(`(() => {
@@ -506,6 +606,69 @@ test('browser LOD stream preserves the root backdrop through close, far, pan, an
     await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return n>0; })()`, 'close view did not refine');
     const close = await client.evaluate(snapshotExpression());
     assert.ok(close.visibleLeaves.length > 0);
+
+    const orbitPixels = await client.evaluate(`(() => {
+      const controls=window.__ltds.controls(); const rect=controls.dom.getBoundingClientRect();
+      const rows=[],positions=[[0.08,0.08],[0.92,0.08],[0.08,0.92],[0.92,0.92],[0.5,0.5],[0.35,0.5],[0.65,0.5],[0.5,0.35],[0.5,0.65],[0.2,0.2],[0.8,0.2],[0.2,0.8],[0.8,0.8]];
+      for(const [fx,fy] of positions){
+        const x=rect.left+rect.width*fx,y=rect.top+rect.height*fy;
+        const ndc={x:((x-rect.left)/rect.width)*2-1,y:-((y-rect.top)/rect.height)*2+1};
+        rows.push({x,y,hit:Boolean(controls.surfacePick(ndc))});
+        if(rows.some(row=>row.hit)&&rows.some(row=>!row.hit))break;
+      }
+      return {rect:{left:rect.left,top:rect.top,width:rect.width,height:rect.height},surface:rows.find(row=>row.hit)||null,empty:rows.find(row=>!row.hit)||null};
+    })()`);
+    assert.ok(orbitPixels.surface && orbitPixels.empty, `could not locate both model and background pixels: ${JSON.stringify(orbitPixels)}`);
+    const cameraState = () => client.evaluate(`({position:window.__ltds.camera().position.toArray(),quaternion:window.__ltds.camera().quaternion.toArray()})`);
+    const dragFrom = async (point) => {
+      const centerX=orbitPixels.rect.left+orbitPixels.rect.width/2;
+      const centerY=orbitPixels.rect.top+orbitPixels.rect.height/2;
+      const endX=point.x+(point.x<centerX?32:-32),endY=point.y+(point.y<centerY?18:-18);
+      await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});
+      await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:endX,y:endY,button:'left',buttons:1});
+      await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:endX,y:endY,button:'left',buttons:0,clickCount:1});
+    };
+    const emptyBefore = await cameraState();
+    await dragFrom(orbitPixels.empty);
+    const emptyAfter = await cameraState();
+    const cameraDelta = (before,after) => Math.max(...before.position.map((value,index)=>Math.abs(value-after.position[index])),1-Math.abs(before.quaternion.reduce((sum,value,index)=>sum+value*after.quaternion[index],0)));
+    assert.ok(cameraDelta(emptyBefore,emptyAfter)<1e-8,`empty-background drag moved the camera: ${JSON.stringify({emptyBefore,emptyAfter,orbitPixels})}`);
+    const surfaceBefore = await cameraState();
+    await dragFrom(orbitPixels.surface);
+    const surfaceAfter = await cameraState();
+    assert.ok(cameraDelta(surfaceBefore,surfaceAfter)>1e-4,'valid model-surface drag did not orbit');
+    await setView(client, [0, 44, 52], [0, 18, 0]);
+
+    const defaultDetail = await client.evaluate(`({
+      slider: document.querySelector('#lod-detail').value,
+      errorTarget: window.__ltds.tiles().errorTarget,
+      downloadJobs: window.__ltds.tiles().downloadQueue.maxJobs,
+      parseJobs: window.__ltds.tiles().parseQueue.maxJobs,
+    })`);
+    assert.deepEqual(defaultDetail, { slider: '24', errorTarget: 2, downloadJobs: 6, parseJobs: 2 });
+    await client.evaluate(`(() => {
+      const slider = document.querySelector('#lod-detail');
+      slider.value = '2';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    try {
+      await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return window.__ltds.tiles().errorTarget===512&&n===0; })()`, 'minimum Detail setting did not coarsen the active frontier', 10_000);
+    } catch (error) {
+      const detailDiagnostics = await client.evaluate(`(() => {
+        const tiles=window.__ltds.tiles(); const rows=[];
+        const visit=(tile,parent=null)=>{(tile?.children||[]).forEach(child=>visit(child,tile));if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible)rows.push({uri:tile.content?.uri||'',parentError:parent?.traversal?.error,parentInFrustum:parent?.traversal?.inFrustum,active:tile.traversal?.active,sceneVisible:tile.engineData?.scene?.visible});};
+        visit(tiles.root); return {errorTarget:tiles.errorTarget,loadAncestors:tiles.loadAncestors,rootRefine:tiles.root?.refine,rows};
+      })()`);
+      throw new Error(`${error.message}; diagnostics=${JSON.stringify(detailDiagnostics)}`);
+    }
+    await client.evaluate(`(() => {
+      const slider = document.querySelector('#lod-detail');
+      slider.value = '24';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return window.__ltds.tiles().errorTarget===2&&n>0; })()`, 'maximum Detail setting did not restore full-detail leaves');
 
     await setView(client, [0, 1300, 1300], [0, 18, 0]);
     await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.traversal?.visible&&tile.engineData?.scene?.visible)n++;};f(r);return n===0; })()`, 'far view kept LOD-0 leaves');

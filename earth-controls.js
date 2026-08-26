@@ -14,6 +14,49 @@ import * as THREE from 'three';
 
 const UP = new THREE.Vector3(0, 1, 0);
 
+export function clampPolarOffset(offset, minPolar, maxPolar, fallbackHorizontal = new THREE.Vector3(0, 0, 1)) {
+  const value = offset.clone();
+  const radius = value.length();
+  if (!Number.isFinite(radius) || radius < 1e-9) return value;
+  const polar = Math.acos(THREE.MathUtils.clamp(value.y / radius, -1, 1));
+  const target = THREE.MathUtils.clamp(polar, minPolar, maxPolar);
+  if (Math.abs(target - polar) < 1e-12) return value;
+  const horizontal = new THREE.Vector3(value.x, 0, value.z);
+  if (horizontal.lengthSq() < 1e-12) {
+    horizontal.copy(fallbackHorizontal);
+    horizontal.y = 0;
+  }
+  if (horizontal.lengthSq() < 1e-12) horizontal.set(0, 0, 1);
+  horizontal.normalize().multiplyScalar(radius * Math.sin(target));
+  horizontal.y = radius * Math.cos(target);
+  return horizontal;
+}
+
+export function safeTopViewPosition(target, radius, minPolar, epsilon = 0.001) {
+  const distance = Number(radius);
+  const minimum = Number(minPolar);
+  if (!target?.clone || !Number.isFinite(distance) || distance <= 0 || !Number.isFinite(minimum)) {
+    throw new TypeError('invalid top-view geometry');
+  }
+  const polar = THREE.MathUtils.clamp(minimum + Math.max(0.0001, Number(epsilon) || 0.001), 0.0001, Math.PI - 0.0001);
+  return target.clone().add(new THREE.Vector3(0, distance * Math.cos(polar), distance * Math.sin(polar)));
+}
+
+export function stableLookQuaternion(forward, expectedRight, target = new THREE.Quaternion()) {
+  const fwd = forward.clone().normalize();
+  let right = new THREE.Vector3().crossVectors(fwd, UP);
+  const expected = expectedRight.clone().addScaledVector(fwd, -expectedRight.dot(fwd));
+  if (right.lengthSq() < 0.12 ** 2) right.copy(expected);
+  if (right.lengthSq() < 1e-10) {
+    right.crossVectors(fwd, Math.abs(fwd.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0));
+  }
+  right.normalize();
+  if (expected.lengthSq() > 1e-10 && right.dot(expected) < 0) right.negate();
+  const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
+  const basis = new THREE.Matrix4().makeBasis(right, up, fwd.clone().negate());
+  return target.setFromRotationMatrix(basis).normalize();
+}
+
 export class EarthLikeControls {
   /**
    * @param {THREE.PerspectiveCamera} camera
@@ -141,7 +184,12 @@ export class EarthLikeControls {
     const ndc = this._ndc(e);
 
     if (e.button === 0 || e.pointerType === 'touch') {
-      this._pivot.copy(this._anchor(ndc));
+      const surface = this.surfacePick(ndc);
+      if (!surface) {
+        this._mode = 'none';
+        return;
+      }
+      this._pivot.copy(surface);
       this._mode = 'orbit';
       this.pivotIndicator.position.copy(this._pivot);
       this.pivotIndicator.material.opacity = 0;
@@ -264,12 +312,17 @@ export class EarthLikeControls {
 
   _applyOrbit(pivot, yawDelta, pitchDelta) {
     const cam = this.camera;
-    const offset = new THREE.Vector3().subVectors(cam.position, pivot);
+    const offset = clampPolarOffset(
+      new THREE.Vector3().subVectors(cam.position, pivot),
+      this.minPolar,
+      this.maxPolar,
+      new THREE.Vector3(0, 0, 1),
+    );
     const r = offset.length();
     if (r < 1e-6) return;
 
     // side axis = camera right, projected horizontal
-    let side = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+    let side = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
     side.y = 0;
     if (side.lengthSq() < 1e-8) {
       side = new THREE.Vector3().crossVectors(offset, UP);
@@ -294,17 +347,15 @@ export class EarthLikeControls {
     const qYaw = new THREE.Quaternion().setFromAxisAngle(UP, yawDelta);
     const q = new THREE.Quaternion().multiplyQuaternions(qYaw, qPitch);
 
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).applyQuaternion(q);
+    const expectedRight = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion).applyQuaternion(q);
+
     offset.applyQuaternion(q);
     cam.position.copy(pivot).add(offset);
-    cam.quaternion.premultiply(q);
-
-    // zero-roll correction: rebuild orientation from forward + world up so
-    // repeated quaternion multiplies never accumulate roll drift
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-    if (Math.abs(fwd.dot(UP)) < 0.9995) {
-      const m = new THREE.Matrix4().lookAt(new THREE.Vector3(), fwd, UP);
-      cam.quaternion.setFromRotationMatrix(m);
-    }
+    // Keep the previous right-axis hemisphere while the view direction is
+    // nearly vertical. A raw world-up lookAt becomes singular there and can
+    // jump by 180 degrees even though the orbit offset never crossed the pole.
+    stableLookQuaternion(fwd, expectedRight, cam.quaternion);
   }
 
   _zoomTowards(hit, s) {
@@ -356,7 +407,13 @@ export class EarthLikeControls {
 
   /** point the camera at a target from a position (used by reset/home/top) */
   setView(position, lookAt) {
-    this.camera.position.copy(position);
+    const offset = clampPolarOffset(
+      new THREE.Vector3().subVectors(position, lookAt),
+      this.minPolar,
+      this.maxPolar,
+      new THREE.Vector3(0, 0, 1),
+    );
+    this.camera.position.copy(lookAt).add(offset);
     this.camera.lookAt(lookAt);
     this._inertia.active = false;
   }

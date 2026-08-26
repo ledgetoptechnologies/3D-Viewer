@@ -253,6 +253,31 @@ class ViewerRepository {
     return this.database.prepare('SELECT filename,root_key,relative_path,content_type,byte_size,sha256 FROM model_camera_photos WHERE version_id=? ORDER BY filename').all(versionId).map((row) => ({ filename: row.filename, rootKey: row.root_key, relativePath: row.relative_path, contentType: row.content_type, byteSize: row.byte_size, sha256: row.sha256 }));
   }
 
+  replaceCameraPhotos(versionId, photos, { onlyIfEmpty = false } = {}) {
+    const timestamp = now();
+    const normalized = (photos || []).map((photo) => {
+      const filename = validCameraFilename(photo.filename);
+      const rawRelativePath = String(photo.relativePath || '');
+      const relativePath = path.posix.normalize(rawRelativePath);
+      const rootKey = String(photo.rootKey || '');
+      if (!filename || !rootKey || rawRelativePath.includes('\\') || relativePath !== rawRelativePath
+        || path.posix.isAbsolute(relativePath) || !relativePath || relativePath === '..' || relativePath.startsWith('../')
+        || photo.contentType !== 'image/jpeg' || !Number.isSafeInteger(photo.byteSize) || photo.byteSize < 0
+        || typeof photo.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(photo.sha256)) throw new TypeError('invalid camera photo link');
+      return { filename, rootKey, relativePath, contentType: photo.contentType, byteSize: photo.byteSize, sha256: photo.sha256 };
+    });
+    return this.transaction(() => {
+      if (!this.database.prepare('SELECT 1 FROM model_versions WHERE id=?').get(versionId)) return 0;
+      if (onlyIfEmpty && this.database.prepare('SELECT 1 FROM model_camera_photos WHERE version_id=? LIMIT 1').get(versionId)) return 0;
+      this.database.prepare('DELETE FROM model_camera_photos WHERE version_id=?').run(versionId);
+      const insert = this.database.prepare(`INSERT INTO model_camera_photos(
+        version_id,filename,root_key,relative_path,content_type,byte_size,sha256,created_at
+      ) VALUES (?,?,?,?,?,?,?,?)`);
+      for (const photo of normalized) insert.run(versionId, photo.filename, photo.rootKey, photo.relativePath, photo.contentType, photo.byteSize, photo.sha256, timestamp);
+      return normalized.length;
+    });
+  }
+
   publishModelVersion(modelId, versionId, selectedKinds) {
     const allowed = new Set(selectedKinds);
     const timestamp = now();

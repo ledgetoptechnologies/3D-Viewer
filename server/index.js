@@ -21,6 +21,7 @@ const { sanitizeLogMessage } = require('./processingSecurity');
 const { createProxyGate } = require('./proxyGate');
 const { ProviderCredentials } = require('./providerCredentials');
 const { runtimeIdentity, setRuntimeIdentityHeaders } = require('./runtimeIdentity');
+const { reconcileImportedCameraPhotoLinks } = require('./cameraPhotos');
 
 const problems = validate();
 if (problems.length) {
@@ -214,6 +215,15 @@ const server = app.listen(config.port, () => {
   console.log(`LTDS 3D Viewer server listening on :${config.port}`);
   console.log('WebODM migration: mounted task folders and exported ZIP archives');
   if (config.derivativesMount) console.log(`Derivatives mount: ${config.derivativesMount}`);
+  if (processingRepository && storageManager) setImmediate(() => {
+    try {
+      const cameraPhotoMigration = reconcileImportedCameraPhotoLinks({ repository, processing: processingRepository, storage: storageManager });
+      if (cameraPhotoMigration.photosLinked) console.log(`[migration] restored ${cameraPhotoMigration.photosLinked} camera photo link(s) across ${cameraPhotoMigration.versionsReconciled} imported model version(s)`);
+      if (cameraPhotoMigration.versionsFailed) console.warn(`[migration] camera photo reconciliation deferred ${cameraPhotoMigration.versionsFailed} imported model version(s)`);
+    } catch {
+      console.warn('[migration] camera photo reconciliation deferred after a bounded maintenance failure');
+    }
+  });
 });
 
 let shuttingDown = false;

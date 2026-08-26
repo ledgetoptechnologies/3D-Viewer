@@ -1408,6 +1408,23 @@ const MIGRATIONS = [
         ON webodm_task_imports(source_fingerprint,created_at DESC,id DESC);
     `,
   },
+  {
+    version: 26,
+    name: 'bound_camera_photo_reconciliation',
+    sql: `
+      CREATE TABLE camera_photo_reconciliation_state (
+        version_id TEXT PRIMARY KEY REFERENCES model_versions(id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK(status IN ('terminal','retry')),
+        reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 80),
+        attempt_count INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count BETWEEN 1 AND 1000000),
+        next_attempt_at TEXT,
+        updated_at TEXT NOT NULL,
+        CHECK((status='terminal' AND next_attempt_at IS NULL) OR (status='retry' AND next_attempt_at IS NOT NULL))
+      );
+      CREATE INDEX camera_photo_reconciliation_retry_idx
+        ON camera_photo_reconciliation_state(status,next_attempt_at,version_id);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

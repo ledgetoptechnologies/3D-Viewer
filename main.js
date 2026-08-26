@@ -19,10 +19,12 @@ import {
   releaseStaleLodDetails,
   visibleLodFrontier,
 } from './lod-policy.mjs';
-import { EarthLikeControls } from './earth-controls.js';
+import { EarthLikeControls, safeTopViewPosition } from './earth-controls.js';
+import { pickDirectPointSurface } from './direct-pointcloud-picking.mjs';
 import { localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
+import { CAMERA_MARKER_COLORS, cameraMarkerGeometryData } from './camera-markers.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
@@ -134,7 +136,7 @@ let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
-let camGroupParent, camInstances = null, camFeatures = [];
+let camGroupParent, camInstances = null, camDirectionInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
 let mapViews = {};            // per-tab map center/zoom retention
@@ -159,6 +161,7 @@ let mapToolEpoch = 0;
 let directPointCloudLoad = null;
 let pendingPointCloudView = null;
 let preserveIncomingModelView = false;
+let pcCameraSyncedWindow = null;
 
 const DIAGNOSTIC_CORRELATION_ID = (() => {
   const value = globalThis.crypto?.randomUUID?.();
@@ -719,7 +722,7 @@ function initThree() {
 
   controls = new EarthLikeControls(camera, renderer.domElement, {
     surfacePick: pickSurface,
-    minPolar: 0.02,
+    minPolar: 0.04,
     maxPolar: Math.PI - 0.03,      // full range: orbit under the model like WebODM
     fallbackPlaneY: 18,            // ~avg terrain height in world frame
     minDistance: closeZoomDistanceForDiameter(1000, { cameraNear: camera.near }),
@@ -746,8 +749,13 @@ function onResize() {
   if (map) setTimeout(() => map.invalidateSize(), 80);
 }
 
-// Raycast pick against whichever mesh layers are visible
+// Raycast pick against the active Model or direct point-cloud content.
 function pickSurface(ndc) {
+  if (state.activeMode === 'cloud' && state.cloudMode === 'direct') {
+    if (!pointCloudParent?.visible || !pointCloudObject) return null;
+    const viewportHeight = renderer.domElement.clientHeight || renderer.domElement.getBoundingClientRect().height;
+    return pickDirectPointSurface({ raycaster, camera, points: pointCloudObject, ndc, viewportHeight });
+  }
   raycaster.setFromCamera(ndc, camera);
   const targets = [];
   if (tilesParent.visible && tilesRenderer) targets.push(tilesRenderer.group);
@@ -855,6 +863,12 @@ function disposeTiles() {
 
 let sessionRenewalTimer = null;
 let sessionAllowedOrigins = [];
+const reviewControllerCandidate = new URLSearchParams(location.hash.replace(/^#/, '')).get('reviewController');
+const REVIEW_CONTROLLER_ID = window.parent === window && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reviewControllerCandidate || '')
+  ? reviewControllerCandidate : null;
+const reviewSessionChannel = REVIEW_CONTROLLER_ID && typeof BroadcastChannel === 'function'
+  ? new BroadcastChannel(`ltds-viewer-review:${REVIEW_CONTROLLER_ID}`) : null;
+let pendingReviewRenewalRequestId = null;
 const LOD_AVAILABILITY_REFRESH_MS = 5000;
 let lodAvailabilityTimer = null;
 let lodAvailabilityRefreshInFlight = false;
@@ -926,17 +940,23 @@ async function refreshLodAvailability() {
 
 function sessionControlWindow() {
   if (window.parent !== window) return window.parent;
-  // A dedicated Viewer tab deliberately retains only this opener channel so
-  // its LTDS control-plane tab can renew one-time grants. Both sides require
-  // the exact Window and an allowlisted origin before acting on a message.
-  if (window.opener && !window.opener.closed) return window.opener;
   return null;
 }
 
+function sessionControllerOrigins() {
+  const controller = sessionControlWindow();
+  if (!controller) return [];
+  return sessionAllowedOrigins;
+}
+
 function postToAllowedController(message) {
+  if (reviewSessionChannel) {
+    reviewSessionChannel.postMessage(message);
+    return;
+  }
   const controller = sessionControlWindow();
   if (!controller) return;
-  for (const origin of sessionAllowedOrigins) controller.postMessage(message, origin);
+  for (const origin of sessionControllerOrigins()) controller.postMessage(message, origin);
 }
 
 function scheduleSessionRenewal(session) {
@@ -944,9 +964,11 @@ function scheduleSessionRenewal(session) {
   const expiresAtMs = Date.parse(session.expiresAt);
   const delay = Math.max(1000, expiresAtMs - Date.now() - 5 * 60 * 1000);
   sessionRenewalTimer = setTimeout(() => {
+    pendingReviewRenewalRequestId = reviewSessionChannel ? crypto.randomUUID() : null;
     postToAllowedController({
       version: 1,
       type: 'ltds-viewer:session-expiring',
+      ...(pendingReviewRenewalRequestId ? { requestId: pendingReviewRenewalRequestId } : {}),
       modelId: session.model.id,
       expiresAt: session.expiresAt,
     });
@@ -998,12 +1020,13 @@ async function bootstrapSession() {
   }
 }
 
-window.addEventListener('message', async (event) => {
-  const controller = sessionControlWindow();
-  if (VIEW_MODE !== 'session' || !controller || event.source !== controller || !sessionAllowedOrigins.includes(event.origin)) return;
-  if (!event.data || event.data.version !== 1 || event.data.type !== 'ltds-viewer:renew-session') return;
-  const grant = event.data.grant;
+async function handleSessionRenewalMessage(data, { reviewChannel = false } = {}) {
+  if (VIEW_MODE !== 'session' || !data || data.version !== 1 || data.type !== 'ltds-viewer:renew-session') return;
+  if (reviewChannel && (!pendingReviewRenewalRequestId || data.requestId !== pendingReviewRenewalRequestId
+    || Object.keys(data).sort().join('\n') !== ['version','type','requestId','grant'].sort().join('\n'))) return;
+  const grant = data.grant;
   if (typeof grant !== 'string' || !/^[0-9a-f-]{36}$/i.test(grant)) return;
+  const requestId = reviewChannel ? pendingReviewRenewalRequestId : null;
   try {
     const session = await redeemViewerGrant(grant);
     if (!PROJECT || session.model.id !== PROJECT.id) throw new Error('renewal grant is scoped to a different model');
@@ -1011,20 +1034,31 @@ window.addEventListener('message', async (event) => {
     postToAllowedController({
       version: 1,
       type: 'ltds-viewer:session-renewed',
+      ...(requestId ? { requestId } : {}),
       modelId: session.model.id,
       expiresAt: session.expiresAt,
     });
+    if (requestId) pendingReviewRenewalRequestId = null;
   } catch (error) {
     // Keep the still-live capability and credential-bearing loader URLs.
     // The parent can issue another one-time grant and retry in place.
     postToAllowedController({
       version: 1,
       type: 'ltds-viewer:session-renewal-failed',
+      ...(requestId ? { requestId } : {}),
       modelId: PROJECT && PROJECT.id,
-      error: String(error.message || error),
-      retryable: true,
+      ...(!requestId ? { error: String(error.message || error), retryable: true } : {}),
     });
+    if (requestId) pendingReviewRenewalRequestId = null;
   }
+}
+
+if (reviewSessionChannel) reviewSessionChannel.onmessage = event => { void handleSessionRenewalMessage(event.data, { reviewChannel: true }); };
+window.addEventListener('pagehide', () => reviewSessionChannel?.close(), { once: true });
+window.addEventListener('message', event => {
+  const controller = sessionControlWindow();
+  if (!controller || event.source !== controller || !sessionControllerOrigins().includes(event.origin)) return;
+  void handleSessionRenewalMessage(event.data);
 });
 
 function failLod(message) {
@@ -1051,7 +1085,8 @@ function resetCamera() {
 }
 
 function topDownView() {
-  controls.setView(new THREE.Vector3(0, 560, 0.01), new THREE.Vector3(0, 18, 0));
+  const target = new THREE.Vector3(0, 18, 0);
+  controls.setView(safeTopViewPosition(target, 542, controls.minPolar), target);
 }
 
 // Auto-frame the camera on a freshly loaded object whose bounds aren't known
@@ -1074,21 +1109,15 @@ function frameObjectHome(object3D, options) {
 // ────────────────────────────────────────────────
 // Camera positions (shots.geojson -> instanced frustums)
 // ───────────────────────────────────────────────────────────────
-function buildFrustumGeometry() {
-  // Pyramid: apex at origin (camera center), base = image plane along +Z (view dir)
-  const w = 0.55, h = 0.41, L = 0.72;
-  const v = [
-    0,0,0,  -w,-h,L,   w,-h,L,     // bottom
-    0,0,0,   w,-h,L,   w, h,L,     // right
-    0,0,0,   w, h,L,  -w, h,L,     // top
-    0,0,0,  -w, h,L,  -w,-h,L,     // left
-    -w,-h,L,  w,-h,L,  w,h,L,      // base 1
-    -w,-h,L,  w,h,L,  -w,h,L       // base 2
-  ];
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
-  g.computeVertexNormals();
-  return g;
+function buildCameraMarkerGeometries() {
+  const data = cameraMarkerGeometryData();
+  const bodyGeometry = new THREE.BufferGeometry();
+  bodyGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.body, 3));
+  bodyGeometry.computeVertexNormals();
+  const directionGeometry = new THREE.BufferGeometry();
+  directionGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.direction, 3));
+  directionGeometry.computeVertexNormals();
+  return { bodyGeometry, directionGeometry };
 }
 
 async function loadCameras() {
@@ -1106,12 +1135,18 @@ async function loadCameras() {
       return;
     }
 
-    const geo = buildFrustumGeometry();
-    const mat = new THREE.MeshBasicMaterial({
-      transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false
+    const { bodyGeometry, directionGeometry } = buildCameraMarkerGeometries();
+    const bodyMaterial = new THREE.MeshBasicMaterial({
+      transparent: true, opacity: 0.48, side: THREE.DoubleSide, depthWrite: false
     });
-    camInstances = new THREE.InstancedMesh(geo, mat, camFeatures.length);
+    const directionMaterial = new THREE.MeshBasicMaterial({
+      transparent: true, opacity: 0.96, side: THREE.DoubleSide, depthWrite: false
+    });
+    camInstances = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, camFeatures.length);
+    camDirectionInstances = new THREE.InstancedMesh(directionGeometry, directionMaterial, camFeatures.length);
     camInstances.frustumCulled = false;
+    camDirectionInstances.frustumCulled = false;
+    camDirectionInstances.renderOrder = 1;
 
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
@@ -1119,7 +1154,8 @@ async function loadCameras() {
     const pos = new THREE.Vector3();
     const scl = new THREE.Vector3();
     const baseScale = 1.0;   // WebODM-like small markers; user adjusts via slider
-    const orange = new THREE.Color(0xEE5007);
+    const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
+    const direction = new THREE.Color(CAMERA_MARKER_COLORS.direction);
 
     camFeatures.forEach((feat, i) => {
       const t = feat.properties.translation;
@@ -1132,13 +1168,18 @@ async function loadCameras() {
       scl.setScalar(baseScale);
       m.compose(pos, q, scl);
       camInstances.setMatrixAt(i, m);
-      camInstances.setColorAt(i, orange);
+      camDirectionInstances.setMatrixAt(i, m);
+      camInstances.setColorAt(i, body);
+      camDirectionInstances.setColorAt(i, direction);
     });
     camInstances.instanceMatrix.needsUpdate = true;
     camInstances.instanceColor.needsUpdate = true;
-    camGroupParent.getObjectByName('camOffset').add(camInstances);
+    camDirectionInstances.instanceMatrix.needsUpdate = true;
+    camDirectionInstances.instanceColor.needsUpdate = true;
+    camGroupParent.getObjectByName('camOffset').add(camInstances, camDirectionInstances);
     state.camerasLoaded = true;
     window.__ltdsCams = camFeatures.length;
+    syncCameraLayer();
   } catch (err) {
     console.error('Camera shots load failed', err);
   } finally {
@@ -1155,8 +1196,11 @@ function setCameraScale(s) {
     m.decompose(p, q, old);
     m.compose(p, q, new THREE.Vector3(s, s, s));
     camInstances.setMatrixAt(i, m);
+    camDirectionInstances?.setMatrixAt(i, m);
   }
   camInstances.instanceMatrix.needsUpdate = true;
+  if (camDirectionInstances) camDirectionInstances.instanceMatrix.needsUpdate = true;
+  pcApi()?.setCameraScale?.(s);
 }
 
 let hoveredCam = -1;
@@ -1181,7 +1225,7 @@ function ensureCamWorldPositions() {
 function pickCameraInstance(ndc) {
   if (!state.camerasVisible || !camInstances) return -1;
   hoverRaycaster.setFromCamera(ndc, camera);
-  const hits = hoverRaycaster.intersectObject(camInstances, false);
+  const hits = hoverRaycaster.intersectObjects([camInstances, camDirectionInstances], false);
   if (hits.length) return hits[0].instanceId;
 
   // Fallback: markers can be a few pixels at default size — pick the nearest
@@ -1213,11 +1257,20 @@ function pickCameraInstance(ndc) {
 
 function highlightCam(idx) {
   if (!camInstances) return;
-  const orange = new THREE.Color(0xEE5007);
-  const gold = new THREE.Color(0xF8CB2E);
-  if (hoveredCam >= 0 && hoveredCam !== idx) camInstances.setColorAt(hoveredCam, orange);
-  if (idx >= 0) camInstances.setColorAt(idx, gold);
+  const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
+  const bodyHover = new THREE.Color(CAMERA_MARKER_COLORS.bodyHover);
+  const direction = new THREE.Color(CAMERA_MARKER_COLORS.direction);
+  const directionHover = new THREE.Color(CAMERA_MARKER_COLORS.directionHover);
+  if (hoveredCam >= 0 && hoveredCam !== idx) {
+    camInstances.setColorAt(hoveredCam, body);
+    camDirectionInstances?.setColorAt(hoveredCam, direction);
+  }
+  if (idx >= 0) {
+    camInstances.setColorAt(idx, bodyHover);
+    camDirectionInstances.setColorAt(idx, directionHover);
+  }
   camInstances.instanceColor.needsUpdate = true;
+  if (camDirectionInstances) camDirectionInstances.instanceColor.needsUpdate = true;
   hoveredCam = idx;
 }
 
@@ -1877,19 +1930,25 @@ function eventNdc(e) {
   return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
 }
 
+function localCameraRendererActive() {
+  return state.activeMode === 'model'
+    || (state.activeMode === 'cloud' && state.cloudMode === 'direct');
+}
+
 function onPointerUp(e) {
-  if (state.activeMode !== 'model') return;
+  if (!localCameraRendererActive()) return;
   if (!controls.wasClick()) return;
 
   const ndc = eventNdc(e);
   if (e.button === 2) {
     // right-click: finish or cancel the measurement in progress
-    if (state.activeTool !== 'none') { exitMeasureTool(); }
+    if (state.activeMode === 'model' && state.activeTool !== 'none') { exitMeasureTool(); }
     return;
   }
   if (e.button !== 0) return;
 
   if (state.activeTool !== 'none') {
+    if (state.activeMode !== 'model') return;
     const hit = pickSurface(ndc);
     if (hit) addMeasurePoint(hit);
     return;
@@ -1901,20 +1960,20 @@ function onPointerUp(e) {
 
 let lastHover = 0;
 function onPointerMove(e) {
-  if (state.activeMode !== 'model') return;
+  if (!localCameraRendererActive()) return;
   const now = performance.now();
   if (now - lastHover < 70) return;
   lastHover = now;
   const ndc = eventNdc(e);
 
   // measurement rubber band
-  if (state.measure && state.measure.points.length >= 1) {
+  if (state.activeMode === 'model' && state.measure && state.measure.points.length >= 1) {
     const hit = pickSurface(ndc);
     if (hit) redrawActiveMeasure(hit);
   }
 
   // statusbar coordinates under cursor
-  const surf = (state.measure) ? null : pickSurface(ndc);
+  const surf = state.activeMode === 'model' && !state.measure ? pickSurface(ndc) : null;
   if (surf) {
     const u = worldToUtm(surf);
     dom.coords.textContent = `E ${u.e.toFixed(1)}  N ${u.n.toFixed(1)}  El ${formatElevation(u.alt, DISPLAY_UNITS)}`;
@@ -2765,6 +2824,7 @@ function stopPointCloudIframe(reason = 'superseded') {
   iframe.src = 'about:blank';
   iframe.remove();
   state.pcIframeLoaded = false;
+  pcCameraSyncedWindow = null;
   dom.cloudStatus.textContent = 'Cloud: idle';
   viewerDiagnostic('pointcloud_stop', { mode: 'cloud', reason });
 }
@@ -2779,6 +2839,11 @@ window.addEventListener('message', (event) => {
     dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready';
     viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
     applyPcPanelState();
+    syncCameraLayer();
+  } else if (message.type === 'camera-open') {
+    if (!state.camerasVisible || !SHARE_PERMISSIONS.cameras
+      || !Number.isSafeInteger(message.index) || message.index < 0 || message.index >= camFeatures.length) return;
+    openPhoto(message.index);
   } else if (message.type === 'error') {
     const code = POINT_CLOUD_FAILURE_CODES.has(message.code) ? message.code : 'runtime_error';
     const stage = DIAGNOSTIC_STAGES.has(message.stage) ? message.stage : 'runtime';
@@ -2792,6 +2857,39 @@ function pcApi() {
   const f = document.getElementById('pc-iframe');
   const w = f && f.contentWindow;
   return (w && w.__pcApi) ? w.__pcApi : null;
+}
+
+function syncCameraLayer() {
+  if (!camGroupParent) return false;
+  const localVisible = state.camerasVisible
+    && (state.activeMode === 'model' || (state.activeMode === 'cloud' && state.cloudMode === 'direct'));
+  camGroupParent.visible = localVisible;
+  const button = document.getElementById('layer-cameras');
+  if (button) {
+    button.classList.toggle('active', state.camerasVisible);
+    button.textContent = state.camerasVisible ? 'Hide Camera Positions' : 'Show Camera Positions';
+  }
+  const sizeRow = document.getElementById('cam-size-row');
+  if (sizeRow) sizeRow.style.display = state.camerasVisible ? 'flex' : 'none';
+  if (state.camerasVisible && !state.camerasLoaded && !state.camerasLoading) {
+    loadCameras();
+    return false;
+  }
+  if (state.activeMode !== 'cloud' || state.cloudMode !== 'potree') return true;
+  const iframe = document.getElementById('pc-iframe');
+  const api = pcApi();
+  if (!iframe?.contentWindow || !api) return false;
+  if (state.camerasLoaded && pcCameraSyncedWindow !== iframe.contentWindow) {
+    const cameraPayload = camFeatures.map((feature) => ({
+      translation: feature.properties.translation.slice(),
+      rotation: feature.properties.rotation.slice(),
+    }));
+    if (api.setCameras(cameraPayload) !== cameraPayload.length) return false;
+    pcCameraSyncedWindow = iframe.contentWindow;
+  }
+  api.setCameraScale(parseFloat(document.getElementById('cam-size')?.value || '1'));
+  api.setCameraVisibility(state.camerasVisible);
+  return true;
 }
 
 function bindPcPanel() {
@@ -2913,9 +3011,7 @@ function bindUI() {
     const btn = e.currentTarget;
     btn.classList.toggle('active');
     state.camerasVisible = btn.classList.contains('active');
-    camGroupParent.visible = state.camerasVisible;
-    document.getElementById('cam-size-row').style.display = state.camerasVisible ? 'flex' : 'none';
-    if (state.camerasVisible && !state.camerasLoaded) loadCameras();
+    syncCameraLayer();
     if (!state.camerasVisible) { dom.camTooltip.style.display = 'none'; renderer.domElement.style.cursor = ''; }
   });
   document.getElementById('cam-size').addEventListener('input', (e) => {
@@ -3072,6 +3168,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   // sidebar panel visibility per tab
   const isDem = mode === 'dsm' || mode === 'dtm';
   document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
+  document.getElementById('panel-camera-positions').style.display = (is3D || isPC) && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
@@ -3103,6 +3200,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
     if (mode === 'ortho') showOrtho(modeEpoch, modeSignal);
     else showDEM(mode, modeEpoch, modeSignal);
   }
+  syncCameraLayer();
   return true;
 }
 

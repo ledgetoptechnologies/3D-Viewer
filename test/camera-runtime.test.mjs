@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from '../camera-runtime.mjs';
+import { CAMERA_MARKER_COLORS, cameraMarkerGeometryData } from '../camera-markers.mjs';
 
 test('WebODM camera features accept translation or geometry coordinates and skip malformed shots independently', () => {
   const converted = [];
@@ -33,4 +34,16 @@ test('camera photo keys allow exact nested JPEG paths without allowing traversal
   for (const value of ['../DJI.JPG', 'images/../DJI.JPG', '/images/DJI.JPG', 'images\\DJI.JPG', 'images//DJI.JPG', 'DJI.png']) {
     assert.equal(normalizeCameraPhotoKey(value), null, value);
   }
+});
+
+test('camera markers use a contrasting forward spear that extends beyond the image plane', () => {
+  const geometry = cameraMarkerGeometryData();
+  assert.ok(geometry.body.length >= 18);
+  assert.ok(geometry.direction.length >= 18);
+  const bodyZ = geometry.body.filter((_value, index) => index % 3 === 2);
+  const directionZ = geometry.direction.filter((_value, index) => index % 3 === 2);
+  assert.ok(Math.max(...directionZ) > Math.max(...bodyZ) * 2);
+  assert.ok(Math.min(...directionZ) >= 0);
+  assert.notEqual(CAMERA_MARKER_COLORS.body, CAMERA_MARKER_COLORS.direction);
+  assert.notEqual(CAMERA_MARKER_COLORS.direction, CAMERA_MARKER_COLORS.directionHover);
 });

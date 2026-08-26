@@ -69,3 +69,55 @@ test('pre-metadata mesh view remains exact when the cloud finishes loading', () 
   assert.doesNotMatch(pointCloudShell, /syncedTargetIsRelevant|pendingSyncedTarget/);
   assert.match(pointCloudShell, /viewer\.fitToScreen\(0\.7\)/);
 });
+
+test('sparse cloud navigation rejects broad or distant background picks', () => {
+  assert.match(pointCloudShell, /<script src="\/pointcloud-navigation\.js"><\/script>/);
+  assert.match(pointCloudShell, /const \{ POINT_PICK_WINDOW, isPlausibleAnchorDistance \} = window\.LtdsPointCloudNavigation/);
+  assert.match(pointCloudShell, /pointcloud\.pick\(this\.viewer, camera, ray, \{[\s\S]*pickWindowSize: POINT_PICK_WINDOW/);
+  assert.match(pointCloudShell, /_depthAnchor\(px\)[\s\S]*camera\.getWorldDirection\(normal\)[\s\S]*setFromNormalAndCoplanarPoint\(normal, pivot\)/);
+  assert.match(pointCloudShell, /isPlausibleAnchorDistance\(hitDistance, referenceDistance\)/);
+  assert.doesNotMatch(pointCloudShell, /_anchor\(px\)[\s\S]{0,900}this\._bboxMidZ\(\)/);
+});
+
+test('point-cloud orbit ignores left drags that begin without a plausible point hit', () => {
+  assert.match(pointCloudShell, /_surfaceAnchor\(px, depthAnchor = this\._depthAnchor\(px\)\)/);
+  assert.match(pointCloudShell, /const pivot = this\._surfaceAnchor\(this\._px\(e\)\);\s*if \(!pivot\) \{ this\._mode = 'none'; return; \}/);
+  assert.match(pointCloudShell, /this\.pivot\.copy\(pivot\);\s*this\._showPivot\(\);\s*this\._mode = 'orbit'/);
+});
+
+test('direct LAZ/PLY orbit picker is wired to the visible Three.js Points object', () => {
+  assert.match(mainSource, /import \{ pickDirectPointSurface \} from '\.\/direct-pointcloud-picking\.mjs'/);
+  assert.match(mainSource, /state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
+  assert.match(mainSource, /!pointCloudParent\?\.visible \|\| !pointCloudObject/);
+  assert.match(mainSource, /pickDirectPointSurface\(\{ raycaster, camera, points: pointCloudObject, ndc, viewportHeight \}\)/);
+});
+
+test('point-cloud distance and height labels use thousandth-inch precision in imperial mode', () => {
+  assert.match(pointCloudShell, /<script src="\/pointcloud-measurements\.js"><\/script>/);
+  assert.match(pointCloudShell, /installPotreeMeasurementPrecision\(Potree, \{ displayUnits: DISPLAY_UNITS \}\)/);
+});
+
+test('camera positions persist across model and point-cloud modes and remain clickable', () => {
+  const viewerShell = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  assert.match(viewerShell, /id="panel-camera-positions"[\s\S]*id="layer-cameras"[\s\S]*id="cam-size"/);
+  assert.match(pointCloudShell, /<script src="\/pointcloud-cameras\.js"><\/script>/);
+  assert.match(pointCloudShell, /createPointCloudCameraLayer\(\{[\s\S]*scene: viewer\.scene\.scene/);
+  assert.match(pointCloudShell, /setCameras\(markers\)[\s\S]*pointCloudCameraLayer\.setMarkers\(markers\)/);
+  assert.match(pointCloudShell, /setCameraVisibility\(visible\)[\s\S]*pointCloudCameraLayer\.setVisible\(visible\)/);
+  assert.match(pointCloudShell, /type: 'camera-open'[\s\S]*index[\s\S]*correlationId/);
+  assert.match(mainSource, /function syncCameraLayer\(\)/);
+  assert.match(mainSource, /api\.setCameras\(cameraPayload\)/);
+  assert.match(mainSource, /api\.setCameraVisibility\(state\.camerasVisible\)/);
+  assert.match(mainSource, /message\.type === 'camera-open'[\s\S]*openPhoto\(message\.index\)/);
+  assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC\)/);
+  assert.match(mainSource, /function localCameraRendererActive\(\)[\s\S]*state\.activeMode === 'model'[\s\S]*state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
+  assert.match(mainSource, /function onPointerUp\(e\) \{\s*if \(!localCameraRendererActive\(\)\) return;/);
+  assert.match(mainSource, /if \(state\.activeTool !== 'none'\) \{\s*if \(state\.activeMode !== 'model'\) return;/);
+});
+
+test('two-finger gestures and moved pointers cannot open a point-cloud camera photo', () => {
+  assert.match(pointCloudShell, /createCameraClickTracker\(\{ threshold: 5 \}\)/);
+  assert.match(pointCloudShell, /pointerdown[\s\S]*cameraClickTracker\.pointerDown\(event\)/);
+  assert.match(pointCloudShell, /pointermove[\s\S]*cameraClickTracker\.pointerMove\(event\)/);
+  assert.match(pointCloudShell, /pointercancel[\s\S]*cameraClickTracker\.pointerCancel\(event\)/);
+});

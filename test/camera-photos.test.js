@@ -10,11 +10,13 @@ const test = require('node:test');
 const auth = require('../server/auth');
 const assets = require('../server/assets');
 const { toViewerConfig } = require('../server/apiV1');
-const { discoverCameraPhotoLinks, validCameraFilename } = require('../server/cameraPhotos');
+const { MAX_CAMERA_FEATURES, discoverCameraPhotoLinks, reconcileImportedCameraPhotoLinks, validCameraFilename } = require('../server/cameraPhotos');
 const { config } = require('../server/config');
 const { openDatabase } = require('../server/database');
+const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { extractZipFile } = require('../server/safeZip');
+const { StorageManager } = require('../server/storageManager');
 
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 
@@ -77,8 +79,148 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
   assert.equal(validCameraFilename('photo.png'), null);
   assert.equal(validCameraFilename('photo.jpeg'), 'photo.jpeg');
 
+  const oversizedDocument = { type: 'FeatureCollection', features: Array.from({ length: MAX_CAMERA_FEATURES + 1 }, () => ({ properties: { filename: 'DJI_0001.JPG' } })) };
+  const oversizedBody = JSON.stringify(oversizedDocument);
+  fs.writeFileSync(path.join(root, 'assets', 'odm_report', 'shots.geojson'), oversizedBody);
+  discovered.assets[0].byteSize = Buffer.byteLength(oversizedBody);
+  assert.deepEqual(discoverCameraPhotoLinks(root, discovered), [], 'camera indexing fails closed before materializing an unbounded feature set');
+
   fs.writeFileSync(path.join(root, 'assets', 'odm_report', 'shots.geojson'), '{');
   assert.deepEqual(discoverCameraPhotoLinks(root, discovered), [], 'malformed optional photo metadata fails closed');
+});
+
+test('startup reconciliation restores exact camera-photo links for imports created before photo support', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-camera-backfill-'));
+  const mounts = Object.fromEntries(['datasets', 'models', 'cache', 'trash'].map((name) => [name, path.join(root, name)]));
+  const storage = new StorageManager({
+    datasetsMount: mounts.datasets,
+    modelsMount: mounts.models,
+    cacheMount: mounts.cache,
+    trashMount: mounts.trash,
+    storageReserveBytes: 0,
+    storageReservePercent: 0,
+  });
+  storage.initialize();
+  const database = openDatabase(path.join(root, 'viewer.sqlite'));
+  const repository = new ViewerRepository(database);
+  const processing = new ProcessingRepository(database);
+  t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+
+  const datasetId = 'legacy-camera-dataset';
+  const datasetRoot = path.join(mounts.datasets, datasetId);
+  fs.mkdirSync(path.join(datasetRoot, 'assets', 'odm_report'), { recursive: true });
+  fs.mkdirSync(path.join(datasetRoot, 'images'), { recursive: true });
+  const rootPhoto = Buffer.from('legacy-root-photo');
+  const nestedPhoto = Buffer.from('legacy-nested-photo');
+  const unreferencedPhoto = Buffer.from('private-unreferenced-photo');
+  const shots = Buffer.from(JSON.stringify({
+    type: 'FeatureCollection',
+    features: [
+      { type: 'Feature', properties: { filename: 'DJI_0001.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 200] } },
+      { type: 'Feature', properties: { filename: 'images/DJI_0002.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 201] } },
+      { type: 'Feature', properties: { filename: 'missing.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 202] } },
+      { type: 'Feature', properties: { filename: '../escape.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 203] } },
+    ],
+  }));
+  const fixtures = [
+    ['DJI_0001.JPG', rootPhoto, 'image/jpeg'],
+    ['images/DJI_0002.JPG', nestedPhoto, 'image/jpeg'],
+    ['unreferenced.JPG', unreferencedPhoto, 'image/jpeg'],
+    ['assets/odm_report/shots.geojson', shots, 'application/geo+json'],
+  ];
+  for (const [relativePath, body] of fixtures) {
+    const target = path.join(datasetRoot, ...relativePath.split('/'));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, body);
+  }
+
+  const project = processing.createProject({ displayName: 'Legacy camera project' });
+  processing.createDataset({
+    id: datasetId,
+    projectId: project.id,
+    displayName: 'Legacy camera source',
+    sourceType: 'webodm',
+    storageMode: 'adopted',
+    rootKey: 'datasets',
+    relativePath: datasetId,
+    status: 'finalizing',
+  });
+  processing.finalizeDataset(datasetId, fixtures.map(([relativePath, body, contentType]) => ({
+    relativePath,
+    byteSize: body.length,
+    sha256: digest(body),
+    contentType,
+  })), digest('legacy-camera-manifest'));
+  const task = processing.createTask({ projectId: project.id, datasetId, displayName: 'Legacy camera task' });
+  const attempt = processing.createImportedAttempt({
+    id: 'legacy-camera-attempt',
+    taskId: task.id,
+    datasetId,
+    providerTaskId: 'webodm-import:legacy-camera',
+    displayName: task.displayName,
+  });
+  const versionId = 'legacy-camera-version';
+  const model = repository.upsertModelVersion({
+    modelId: 'legacy-camera-model',
+    versionId,
+    provider: 'webodm',
+    providerModelId: 'task-import:legacy-camera',
+    providerVersionId: 'legacy-camera-source',
+    displayName: 'Legacy camera model',
+    status: 'ready',
+    sourceLocator: { webodmTaskImport: true },
+    assets: [{
+      kind: 'shots',
+      rootKey: 'datasets',
+      relativePath: `${datasetId}/assets/odm_report/shots.geojson`,
+      contentType: 'application/geo+json',
+      byteSize: shots.length,
+      sha256: digest(shots),
+      published: false,
+      sourceAttemptId: attempt.id,
+    }],
+    makeActive: true,
+  });
+  processing.setAttemptResult(attempt.id, model.id, versionId);
+  processing.registerModelOutput({
+    versionId,
+    modelId: model.id,
+    taskId: task.id,
+    attemptId: attempt.id,
+    projectId: project.id,
+    rootKey: 'datasets',
+    relativePath: datasetId,
+    storageMode: 'adopted',
+    byteSize: fixtures.reduce((sum, [, body]) => sum + body.length, 0),
+    assetCount: 1,
+  });
+
+  assert.equal(repository.listCameraPhotos(versionId).length, 0, 'fixture reproduces the pre-support import');
+  assert.deepEqual(reconcileImportedCameraPhotoLinks({ repository, processing, storage }), {
+    versionsScanned: 1,
+    versionsReconciled: 1,
+    photosLinked: 2,
+    versionsFailed: 0,
+  });
+  assert.equal(repository.getCameraPhoto(versionId, 'DJI_0001.JPG').sha256, digest(rootPhoto));
+  assert.equal(repository.getCameraPhoto(versionId, 'images/DJI_0002.JPG').sha256, digest(nestedPhoto));
+  assert.equal(repository.getCameraPhoto(versionId, 'unreferenced.JPG'), null, 'unreferenced private JPEGs stay unavailable');
+  assert.equal(repository.getCameraPhoto(versionId, '../escape.JPG'), null);
+  assert.deepEqual(reconcileImportedCameraPhotoLinks({ repository, processing, storage }), {
+    versionsScanned: 0,
+    versionsReconciled: 0,
+    photosLinked: 0,
+    versionsFailed: 0,
+  }, 'reconciliation is idempotent after links exist');
+
+  database.prepare('DELETE FROM model_camera_photos WHERE version_id=?').run(versionId);
+  fs.writeFileSync(path.join(datasetRoot, 'assets', 'odm_report', 'shots.geojson'), '{"corrupt":true}');
+  assert.deepEqual(reconcileImportedCameraPhotoLinks({ repository, processing, storage }), {
+    versionsScanned: 1, versionsReconciled: 0, photosLinked: 0, versionsFailed: 0,
+  });
+  assert.equal(database.prepare('SELECT status FROM camera_photo_reconciliation_state WHERE version_id=?').get(versionId)?.status, 'terminal');
+  fs.writeFileSync(path.join(datasetRoot, 'assets', 'odm_report', 'shots.geojson'), shots);
+  assert.equal(reconcileImportedCameraPhotoLinks({ repository, processing, storage }).versionsScanned, 0, 'terminal candidates no longer starve later versions on every startup');
 });
 
 test('a scoped camera capability serves an integrity-checked linked photo without exposing storage paths', async (t) => {
@@ -150,4 +292,22 @@ test('camera photo persistence rejects path escapes and the viewer has an explic
   assert.match(main, /dom\.photoEmpty\.textContent = 'No photo available'/);
   assert.match(html, /id="photo-empty"[^>]*>No photo available</);
   assert.doesNotMatch(main, /if \(!PHOTO_BASE \|\| !feat\) return/);
+});
+
+test('server starts accepting requests before bounded legacy camera-photo maintenance runs', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  assert.match(server, /const \{ reconcileImportedCameraPhotoLinks \} = require\('\.\/cameraPhotos'\)/);
+  const listen = server.indexOf('const server = app.listen');
+  const deferred = server.indexOf('setImmediate(() =>', listen);
+  const reconcile = server.indexOf('reconcileImportedCameraPhotoLinks({ repository, processing: processingRepository, storage: storageManager })', deferred);
+  assert.ok(listen > 0 && deferred > listen && reconcile > deferred);
+});
+
+test('camera layer renders and highlights a separate forward-direction accent', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /import \{ CAMERA_MARKER_COLORS, cameraMarkerGeometryData \} from '\.\/camera-markers\.mjs'/);
+  assert.match(main, /let camGroupParent, camInstances = null, camDirectionInstances = null/);
+  assert.match(main, /camDirectionInstances = new THREE\.InstancedMesh\(directionGeometry, directionMaterial, camFeatures\.length\)/);
+  assert.match(main, /hoverRaycaster\.intersectObjects\(\[camInstances, camDirectionInstances\], false\)/);
+  assert.match(main, /camDirectionInstances\.setColorAt\(idx, directionHover\)/);
 });

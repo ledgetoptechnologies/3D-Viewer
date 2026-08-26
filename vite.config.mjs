@@ -21,6 +21,7 @@ export default defineConfig({
       input: {
         viewer: resolve(import.meta.dirname, 'index.html'),
         workspace: resolve(import.meta.dirname, 'workspace.html'),
+        reviewLaunch: resolve(import.meta.dirname, 'review-launch.html'),
       },
     },
   },

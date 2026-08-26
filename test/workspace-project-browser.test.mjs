@@ -150,8 +150,8 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname.startsWith('/api/v1/processing/presets/') && ['PATCH', 'DELETE'].includes(method)) return method === 'DELETE' ? { status: 204, body: Buffer.alloc(0), type: 'application/json' } : json({ preset: { ...fixtures.presets[0], ...body } });
   if (pathname === '/api/v1/processing/outputs') return json({ outputs: fixtures.outputs, nextCursor: null });
   if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
-  if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-published-grant' }, 201);
-  if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ embedUrl: '/session/browser-review-grant', assetKinds: ['glb', 'ortho', 'report'] }, 201);
+  if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/99999999-8888-4777-8666-555555555555' }, 201);
+  if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ grant: '11111111-2222-4333-8444-555555555555', sessionMode: 'review', sessionTtlSeconds: 1800, attemptId: 'attempt-quarry', modelId: 'model-quarry', modelVersionId: 'output-quarry-ready', embedUrl: '/session/11111111-2222-4333-8444-555555555555', assetKinds: ['glb', 'ortho', 'report'] }, 201);
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho') return { status: 200, body: orthophotoFixture, type: 'image/tiff' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
@@ -340,6 +340,7 @@ async function waitFor(client, expression, message, timeout = 10_000) {
     title: document.title,
     content: document.querySelector('#workspace-content')?.textContent?.trim().slice(0, 240),
     tokenPresent: Boolean(sessionStorage.getItem('ltds-viewer-admin-token')),
+    viewerActions: window.__viewerActions?.slice(-12),
   })`).catch(error => ({ evaluationError: error.message }));
   const exceptions = client.events
     .filter(event => event.method === 'Runtime.exceptionThrown')
@@ -400,7 +401,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
         window.__promptValue='dataset-trash';
         window.confirm=()=>true;
         window.prompt=()=>window.__promptValue;
-        window.open=()=>({opener:null,closed:false,location:{replace:url=>window.__viewerActions.push({type:'open',url})},close(){}});
+        window.__broadcastChannels=new Map();
+        window.BroadcastChannel=class FakeBroadcastChannel{
+          constructor(name){this.name=name;this.onmessage=null;this.closed=false;const channels=window.__broadcastChannels.get(name)||[];channels.push(this);window.__broadcastChannels.set(name,channels)}
+          postMessage(message){window.__viewerActions.push({type:'post',name:this.name,message});for(const channel of window.__broadcastChannels.get(this.name)||[])if(channel!==this&&!channel.closed)queueMicrotask(()=>channel.onmessage?.({data:structuredClone(message)}))}
+          close(){this.closed=true;const channels=window.__broadcastChannels.get(this.name)||[];window.__broadcastChannels.set(this.name,channels.filter(channel=>channel!==this))}
+        };
+        window.open=(url,name,features)=>{window.__viewerActions.push({type:'launcher',url,name,features});if(window.__blockNextLauncher){window.__blockNextLauncher=false;return null}const channelId=decodeURIComponent(new URL(url,location.origin).hash.slice(1).split('=')[1]),launcher=new BroadcastChannel('ltds-viewer-review:'+channelId);launcher.onmessage=event=>{if(event.data?.type==='ltds-viewer:navigate'){window.__viewerActions.push({type:'open',url:event.data.url});launcher.close()}};setTimeout(()=>launcher.postMessage({version:1,type:'ltds-viewer:launcher-ready',channelId}),25);return null};
         const originalAnchorClick=HTMLAnchorElement.prototype.click;
         HTMLAnchorElement.prototype.click=function(){window.__viewerActions.push({type:'download',name:this.download});};
       `,
@@ -490,7 +497,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="download-report"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="view-output"]').click()`);
-    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-published-grant')", `${viewport.name}: published output session did not open`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/99999999-8888-4777-8666-555555555555#launchController='))", `${viewport.name}: published output session did not open`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="share-output"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.share-form')?.dataset.outputId === 'output-johnson'", `${viewport.name}: task Share shortcut did not target the published output`);
     await client.evaluate(`document.querySelector('.modal-close').click()`);
@@ -520,7 +527,22 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles');
     await waitFor(client, "document.querySelector('.task-quick-actions')?.textContent.includes('3D tiles queued')", `${viewport.name}: queued tile derivative did not replace the generate action`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="open-review"]').click()`);
-    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url==='/session/browser-review-grant')", `${viewport.name}: ready output View did not open its isolated review session`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/11111111-2222-4333-8444-555555555555#reviewController='))", `${viewport.name}: ready output View did not open its isolated review session`);
+    await client.evaluate(`(() => {
+      const launch=window.__viewerActions.filter(item=>item.type==='launcher').at(-1),channelId=new URL(launch.url,location.origin).hash.slice(1).split('=')[1],channel=new BroadcastChannel('ltds-viewer-review:'+decodeURIComponent(channelId)),expiresAt=new Date(Date.now()+4*60*1000).toISOString();
+      window.__reviewViewerChannel=channel;
+      channel.postMessage({version:1,type:'ltds-viewer:ready',modelId:'model-quarry',expiresAt});
+      channel.postMessage({version:1,type:'ltds-viewer:session-expiring',requestId:'22222222-3333-4444-8555-666666666666',modelId:'model-quarry',expiresAt});
+      return true;
+    })()`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='post'&&item.message?.type==='ltds-viewer:renew-session'&&item.message?.requestId==='22222222-3333-4444-8555-666666666666'&&item.message?.grant==='11111111-2222-4333-8444-555555555555')", `${viewport.name}: review child did not receive its exact scoped renewal grant`);
+    if (viewport.name === 'desktop') {
+      const grantsBeforeBlockedPopup = runtime.requests.filter(item => item.method === 'POST' && item.path === '/api/v1/attempts/attempt-quarry/review-sessions').length;
+      await client.evaluate(`(() => { window.__blockNextLauncher=true; document.querySelector('.task-quick-actions [data-action="open-review"]').click(); return true; })()`);
+      await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('Viewer popup was blocked or failed to initialize')", `${viewport.name}: blocked popup did not fail through the bounded launcher timeout`, 10_000);
+      const grantsAfterBlockedPopup = runtime.requests.filter(item => item.method === 'POST' && item.path === '/api/v1/attempts/attempt-quarry/review-sessions').length;
+      assert.equal(grantsAfterBlockedPopup, grantsBeforeBlockedPopup, `${viewport.name}: blocked popup minted a review grant before readiness`);
+    }
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"trash-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task Delete was not reachable`);
     await client.evaluate(`document.querySelector('[data-action="trash-task"][data-id="task-quarry"]').click()`);
@@ -613,11 +635,12 @@ test('project-first workspace is interactive and overflow-free in real desktop a
       '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
     ], { windowsHide: true, stdio: 'ignore' });
     const devTools = await waitForDevTools(profile);
+    const requestedViewport = process.env.LTDS_WORKSPACE_BROWSER_VIEWPORT;
     for (const viewport of [
       { name: 'desktop', width: 1440, height: 900, mobile: false },
       { name: '390px mobile', width: 390, height: 844, mobile: true },
       { name: '320px mobile', width: 320, height: 720, mobile: true },
-    ]) await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime));
+    ].filter(viewport => !requestedViewport || viewport.name === requestedViewport)) await t.test(viewport.name, () => verifyViewport(devTools, origin, viewport, runtime));
   } finally {
     try {
       if (browser) {

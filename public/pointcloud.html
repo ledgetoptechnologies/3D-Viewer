@@ -105,6 +105,9 @@
   </script>
 
   <script src="/pointcloud-health.js"></script>
+  <script src="/pointcloud-navigation.js"></script>
+  <script src="/pointcloud-cameras.js"></script>
+  <script src="/pointcloud-measurements.js"></script>
   <script>
     if (!window.LtdsPointCloudHealth?.createPointCloudHealth
       || !window.LtdsPointCloudHealth?.hasVisiblePointCloudNodes) {
@@ -152,8 +155,23 @@
     if (!window.Potree?.Viewer) {
       throw new Error('Potree runtime did not initialize');
     }
+    if (!window.LtdsPointCloudNavigation?.isPlausibleAnchorDistance) {
+      throw new Error('point-cloud navigation runtime unavailable');
+    }
+    if (!window.LtdsPointCloudMeasurements?.installPotreeMeasurementPrecision) {
+      throw new Error('point-cloud measurement runtime unavailable');
+    }
+    const { POINT_PICK_WINDOW, isPlausibleAnchorDistance } = window.LtdsPointCloudNavigation;
+    const { installPotreeMeasurementPrecision } = window.LtdsPointCloudMeasurements;
+    installPotreeMeasurementPrecision(Potree, { displayUnits: DISPLAY_UNITS });
     const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
     window.viewer = viewer;
+    const pointCloudCameraLayer = window.LtdsPointCloudCameras.createPointCloudCameraLayer({
+      THREE,
+      scene: viewer.scene.scene,
+      dom: viewer.renderer.domElement,
+      getCamera: () => viewer.scene.getActiveCamera(),
+    });
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
     // Start at a useful high-detail desktop baseline. Auto-LOD can still lower
@@ -272,6 +290,9 @@
       },
       setColor(a) { eachMat(mat => { mat.activeAttributeName = a; }); },
       setEDL(b) { viewer.setEDLEnabled(!!b); },
+      setCameras(markers) { return pointCloudCameraLayer.setMarkers(markers); },
+      setCameraVisibility(visible) { pointCloudCameraLayer.setVisible(visible); },
+      setCameraScale(value) { pointCloudCameraLayer.setScale(value); },
       fit() {
         if (viewer.scene.pointclouds.length) viewer.fitToScreen(0.7);
       },
@@ -476,12 +497,6 @@
         rc.setFromCamera(this._ndc(px), this._cam());
         return rc.ray;
       }
-      _bboxMidZ() {
-        const pcs = this.viewer.scene.pointclouds;
-        if (!pcs.length) return null;
-        const bb = pcs[0].boundingBox.clone().applyMatrix4(pcs[0].matrixWorld);
-        return (bb.min.z + bb.max.z) / 2;
-      }
       _planeHit(px, plane, minDist) {
         const ray = this._ray(px);
         const denom = ray.direction.dot(plane.normal);
@@ -492,22 +507,61 @@
         if (!isFinite(t) || t < (minDist ?? 0.5) || t > 200000) return null;
         return ray.origin.clone().add(ray.direction.clone().multiplyScalar(t));
       }
-      // pick chain: GPU point pick -> bbox mid-plane -> current pivot. Never null.
-      _anchor(px) {
+      _pointPick(px) {
         const pcs = this.viewer.scene.pointclouds;
-        if (pcs.length) {
+        if (!pcs.length) return null;
+        const camera = this._cam();
+        const ray = this._ray(px);
+        const mouse = this._nms(px);
+        let closest = null;
+        let closestDistance = Infinity;
+        for (const pointcloud of pcs) {
           try {
-            const I = Potree.Utils.getMousePointCloudIntersection(
-              this._nms(px), this._cam(), this.viewer, pcs, {});
-            if (I && I.location) return I.location.clone();
-          } catch (err) { /* pick can fail on empty octree regions */ }
-          const mz = this._bboxMidZ();
-          if (mz !== null) {
-            const hit = this._planeHit(px, new THREE.Plane(new THREE.Vector3(0, 0, 1), -mz));
-            if (hit) return hit;
-          }
+            const point = pointcloud.pick(this.viewer, camera, ray, {
+              x: mouse.x,
+              y: this.dom.clientHeight - mouse.y,
+              pickWindowSize: POINT_PICK_WINDOW,
+            });
+            if (!point?.position) continue;
+            const distance = camera.position.distanceTo(point.position);
+            if (distance < closestDistance) {
+              closest = point.position.clone();
+              closestDistance = distance;
+            }
+          } catch { /* sparse or not-yet-decoded octree nodes are not pickable */ }
         }
-        return this.view.getPivot();
+        return closest;
+      }
+      _depthAnchor(px) {
+        const pivot = this.view.getPivot();
+        if (!pivot || ![pivot.x, pivot.y, pivot.z].every(Number.isFinite)) return null;
+        const camera = this._cam();
+        const normal = new THREE.Vector3();
+        camera.getWorldDirection(normal);
+        if (normal.lengthSq() < 1e-9) return pivot.clone();
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, pivot);
+        return this._planeHit(px, plane, 0.1) || pivot.clone();
+      }
+      // A left-drag may orbit only from an actual plausible cloud point. The
+      // focal plane is a depth check, not permission to orbit empty background.
+      _surfaceAnchor(px, depthAnchor = this._depthAnchor(px)) {
+        const hit = this._pointPick(px);
+        if (!hit) return null;
+        if (!depthAnchor) return hit;
+        const camera = this._cam();
+        const hitDistance = camera.position.distanceTo(hit);
+        const referenceDistance = camera.position.distanceTo(depthAnchor);
+        return isPlausibleAnchorDistance(hitDistance, referenceDistance) ? hit : null;
+      }
+      // Pan and wheel zoom retain a focal-plane fallback. Potree's default
+      // 65px point window is never used, so sparse gaps cannot grab far points.
+      _anchor(px) {
+        const depthAnchor = this._depthAnchor(px);
+        const hit = this._surfaceAnchor(px, depthAnchor);
+        if (hit && depthAnchor) {
+          return hit;
+        }
+        return depthAnchor || this.view.getPivot();
       }
 
       _pointerDown(e) {
@@ -532,9 +586,15 @@
             this._touch.pinchStart.copy(s || a);
             this._touch.mode = 'pinch';
           } else {
-            this._touch.mode = 'orbit';
             this._lastPx = this._px(e);
-            this.pivot.copy(this._anchor(this._lastPx));
+            const pivot = this._surfaceAnchor(this._lastPx);
+            if (!pivot) {
+              this._touch.pts.delete(e.pointerId);
+              this._touch.mode = 'none';
+              return;
+            }
+            this.pivot.copy(pivot);
+            this._touch.mode = 'orbit';
           }
           return;
         }
@@ -544,7 +604,9 @@
         this._lastPx = this._px(e);
 
         if (e.button === 0) {
-          this.pivot.copy(this._anchor(this._px(e)));
+          const pivot = this._surfaceAnchor(this._px(e));
+          if (!pivot) { this._mode = 'none'; return; }
+          this.pivot.copy(pivot);
           this._showPivot();
           this._mode = 'orbit';
         } else if (e.button === 2) {
@@ -712,9 +774,14 @@
           if (this._touch.pts.size === 0) {
             this._touch.mode = 'none';
           } else if (this._touch.pts.size === 1 && this._touch.mode === 'pinch') {
-            this._touch.mode = 'orbit';
             this._lastPx = [...this._touch.pts.values()][0];
-            this.pivot.copy(this._anchor(this._lastPx));
+            const pivot = this._surfaceAnchor(this._lastPx);
+            if (pivot) {
+              this.pivot.copy(pivot);
+              this._touch.mode = 'orbit';
+            } else {
+              this._touch.mode = 'none';
+            }
           }
           return;
         }
@@ -785,6 +852,28 @@
     viewer.inputHandler.removeInputListener(viewer.earthControls);
     if (viewer.earthControls?.pivotIndicator) viewer.earthControls.pivotIndicator.visible = false;
     const pcControls = new PCPointerControls(viewer);
+    const cameraClickTracker = window.LtdsPointCloudCameras.createCameraClickTracker({ threshold: 5 });
+    viewer.renderer.domElement.addEventListener('pointerdown', (event) => {
+      cameraClickTracker.pointerDown(event);
+    });
+    viewer.renderer.domElement.addEventListener('pointermove', (event) => {
+      cameraClickTracker.pointerMove(event);
+    });
+    window.addEventListener('pointerup', (event) => {
+      const click = cameraClickTracker.pointerUp(event);
+      if (!click || insertionActive.m || insertionActive.v) return;
+      const index = pointCloudCameraLayer.pick(click.x, click.y);
+      if (index < 0 || !window.parent || window.parent === window) return;
+      window.parent.postMessage({
+        source: 'ltds-pointcloud',
+        type: 'camera-open',
+        index,
+        correlationId: window.__pointCloudDiagnosticContext.correlationId,
+      }, location.origin);
+    });
+    window.addEventListener('pointercancel', (event) => {
+      cameraClickTracker.pointerCancel(event);
+    });
 
     if (!EPT_URL) {
       pointCloudHealth.fail('not_configured', { retryable: false });

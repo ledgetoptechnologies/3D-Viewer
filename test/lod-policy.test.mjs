@@ -10,21 +10,26 @@ import {
   lodCacheBudget,
   refreshLodResolution,
   releaseStaleLodDetails,
+  screenSpaceErrorPriority,
   visibleLodFrontier,
 } from '../lod-policy.mjs';
 
-test('detail slider maps monotonically to a bounded SSE target', () => {
-  assert.equal(detailToErrorTarget(2), 24);
-  assert.equal(detailToErrorTarget(20), 6);
+test('detail slider maps monotonically across a perceptible bounded SSE range', () => {
+  assert.equal(detailToErrorTarget(2), 512);
   assert.equal(detailToErrorTarget(24), 2);
-  assert.equal(detailToErrorTarget(-100), 24);
+  assert.ok(detailToErrorTarget(20) > 2 && detailToErrorTarget(20) < detailToErrorTarget(12));
+  assert.ok(detailToErrorTarget(12) < 512);
+  assert.equal(detailToErrorTarget(-100), 512);
   assert.equal(detailToErrorTarget(100), 2);
+  assert.equal(detailToErrorTarget(undefined), 2, 'missing detail defaults to maximum quality');
 });
 
-test('renderer configuration keeps only the current view local and bounded', () => {
+test('renderer configuration prioritizes highest screen-space error without ancestor overfetch', () => {
   const calls = [];
   const tiles = {
     lruCache: {},
+    downloadQueue: { maxJobs: 25 },
+    parseQueue: { maxJobs: 5 },
     setCamera: (camera) => calls.push(['camera', camera]),
     setResolutionFromRenderer: (camera, renderer) => calls.push(['resolution', camera, renderer]),
   };
@@ -35,6 +40,10 @@ test('renderer configuration keeps only the current view local and bounded', () 
   assert.equal(tiles.errorTarget, 2);
   assert.equal(tiles.loadAncestors, false);
   assert.equal(tiles.loadSiblings, false);
+  assert.equal(tiles.downloadQueue.priorityCallback, screenSpaceErrorPriority);
+  assert.equal(tiles.parseQueue.priorityCallback, screenSpaceErrorPriority);
+  assert.equal(tiles.downloadQueue.maxJobs, 6, 'foreground priority must survive the first request batch');
+  assert.equal(tiles.parseQueue.maxJobs, 2, 'parsing must yield often enough to reprioritize after camera moves');
   assert.equal(tiles.maxDepth, Infinity);
   assert.deepEqual(tiles.lruCache, budget);
   assert.deepEqual(budget, {
@@ -51,6 +60,29 @@ test('renderer configuration keeps only the current view local and bounded', () 
     maxSize: 48,
     unloadPercent: 0.20,
   });
+
+  const alreadyBounded = {
+    lruCache: {}, downloadQueue: { maxJobs: 4 }, parseQueue: { maxJobs: 1 },
+    setCamera() {}, setResolutionFromRenderer() {},
+  };
+  configureLodRenderer(alreadyBounded, { camera, renderer });
+  assert.equal(alreadyBounded.downloadQueue.maxJobs, 4);
+  assert.equal(alreadyBounded.parseQueue.maxJobs, 1);
+});
+
+test('LOD queue priority favors visible high-error foreground tiles', () => {
+  const tile = ({ used = true, inFrustum = true, error, distanceFromCamera, depth = 1 } = {}) => ({
+    priority: 0,
+    traversal: { used, inFrustum, error, distanceFromCamera },
+    internal: { depthFromRenderedParent: depth },
+  });
+  const foreground = tile({ error: 18, distanceFromCamera: 30 });
+  const background = tile({ error: 4, distanceFromCamera: 10 });
+  const outside = tile({ inFrustum: false, error: 100, distanceFromCamera: 1 });
+  assert.equal(screenSpaceErrorPriority(foreground, background), 1);
+  assert.equal(screenSpaceErrorPriority(background, foreground), -1);
+  assert.equal(screenSpaceErrorPriority(foreground, outside), 1);
+  assert.equal(screenSpaceErrorPriority(outside, foreground), -1);
 });
 
 test('a renderable root can become a runtime-only coarse backdrop', () => {
@@ -152,6 +184,28 @@ test('stale full-detail leaves stay intact without a coarse backdrop', () => {
   }), 0);
   assert.equal(leaf.engineData.scene.visible, true);
   assert.deepEqual(unused, []);
+});
+
+test('standard ancestor loading owns visibility transitions without manual cache eviction', () => {
+  const leaf = {
+    geometricError: 0,
+    traversal: { active: true, visible: true },
+    children: [],
+  };
+  const root = {
+    refine: 'ADD',
+    children: [{ geometricError: 3, traversal: { inFrustum: false }, children: [leaf] }],
+  };
+  const tiles = {
+    root,
+    loadAncestors: true,
+    errorTarget: 6,
+    setTileVisible: () => { throw new Error('standard traversal must own visibility'); },
+    setTileActive: () => { throw new Error('standard traversal must own activation'); },
+    lruCache: { markUnused: () => { throw new Error('standard traversal must own cache use'); } },
+  };
+  assert.equal(releaseStaleLodDetails(tiles), 0);
+  assert.deepEqual(leaf.traversal, { active: true, visible: true });
 });
 
 test('resize refreshes the renderer resolution used by SSE calculations', () => {

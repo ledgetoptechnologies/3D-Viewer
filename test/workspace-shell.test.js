@@ -69,6 +69,16 @@ test('workspace route remains separate from model sessions',()=>{
   assert.match(server,/app\.get\(\['\/workspace', '\/workspace\/\*'\]/);
   assert.match(server,/workspace\.html/);
 });
+test('review tabs use an isolated random channel for bounded session renewal',()=>{
+  const openers=source.slice(source.indexOf('async function openReview'),source.indexOf('async function downloadOutputAsset'));
+  assert.match(source,/import \{ ReviewSessionController \} from '\.\/review-session-controller\.mjs'/);
+  assert.match(source,/import \{ beginIsolatedViewerLaunch \} from '\.\/isolated-viewer-launch\.mjs'/);
+  assert.match(source,/new ReviewSessionController\(/);
+  assert.match(openers,/launch=await readyViewerLauncher\(\)/);
+  assert.match(openers,/reviewSessionController\.track\(launch\.channelId,\{attemptId:result\.attemptId,modelId:result\.modelId,modelVersionId:result\.modelVersionId,sessionTtlSeconds:result\.sessionTtlSeconds\}\)/);
+  assert.match(openers,/launch\.navigate\(result\.embedUrl,\{renewable:true\}\)/);
+  assert.doesNotMatch(openers,/about:blank|target\.opener|target\.location/);
+});
 test('invalid server task-import projects are rejected before durable receipt reservation',()=>{
   const guard=api.indexOf('router.use(serverTaskImportPaths');
   const route=api.indexOf('router.post(serverTaskImportPaths');

@@ -5,6 +5,7 @@ const path=require('node:path');
 const test=require('node:test');
 
 const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
+const launcher=fs.readFileSync(path.join(__dirname,'..','isolated-viewer-launch.mjs'),'utf8');
 
 test('staff output actions keep the admin bearer on downloads and mint published sessions',()=>{
   assert.match(source,/async function authenticatedDownload/);
@@ -13,9 +14,11 @@ test('staff output actions keep the admin bearer on downloads and mint published
   assert.match(source,/URL\.revokeObjectURL\(url\)/);
   assert.match(source,/async function viewPublishedOutput/);
   assert.match(source,/\/processing\/outputs\/\$\{encodeURIComponent\(id\)\}\/view-sessions/);
-  assert.match(source,/window\.open\('about:blank','_blank'\)/);
-  assert.match(source,/target\.opener=null/);
-  assert.match(source,/target\.location\.replace\(result\.embedUrl\)/);
+  assert.match(source,/import \{ beginIsolatedViewerLaunch \} from '\.\/isolated-viewer-launch\.mjs'/);
+  assert.match(launcher,/windowRef\.open\(launcherUrl, windowName, 'noopener'\)/);
+  assert.doesNotMatch(source,/window\.open\('about:blank'/);
+  assert.match(source,/reviewSessionController\.track\(launch\.channelId,\{attemptId:result\.attemptId,modelId:result\.modelId,modelVersionId:result\.modelVersionId,sessionTtlSeconds:result\.sessionTtlSeconds\}\)/);
+  assert.match(source,/launch\.navigate\(result\.embedUrl,\{renewable:false\}\)/);
   assert.match(source,/output\.activePublished.*button\('share-output'/);
   assert.match(source,/state\.outputs\.filter\(output=>output\.activePublished\)/);
   assert.doesNotMatch(source,/<a[^>]+href="\$\{esc\(output\.(?:download|report)Url\)\}/);

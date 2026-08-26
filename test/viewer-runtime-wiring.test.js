@@ -141,3 +141,17 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
   assert.match(main, /message\.correlationId !== iframe\.dataset\.correlationId/);
   assert.doesNotMatch(main, /showError\(`Failed to load point cloud from \$\{POINT_CLOUD_URL\}/);
 });
+
+test('LOD detail starts at maximum and applies every slider change to the active renderer', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(html, /id="lod-detail"[^>]*max="24"[^>]*value="24"/);
+  assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(e\.target\.value\)/);
+  assert.match(main, /releaseStaleLodDetails\(tilesRenderer\)/);
+});
+
+test('Top View starts just inside the stable polar range instead of at the singular pole', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /import \{ EarthLikeControls, safeTopViewPosition \} from '\.\/earth-controls\.js'/);
+  assert.match(main, /function topDownView\(\) \{\s*const target = new THREE\.Vector3\(0, 18, 0\);\s*controls\.setView\(safeTopViewPosition\(target, 542, controls\.minPolar\), target\);\s*\}/);
+});

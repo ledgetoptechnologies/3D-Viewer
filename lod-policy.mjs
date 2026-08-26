@@ -6,8 +6,37 @@ export function detailToErrorTarget(value) {
   const parsed = Number.parseInt(value, 10);
   const detail = Number.isFinite(parsed)
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsed))
-    : 20;
-  return 26 - detail;
+    : MAX_LOD_DETAIL;
+  const coarseFraction = (MAX_LOD_DETAIL - detail) / (MAX_LOD_DETAIL - MIN_LOD_DETAIL);
+  return Number((2 * Math.pow(256, coarseFraction)).toFixed(3));
+}
+
+// PriorityQueue callbacks return 1 when `a` should be processed first. Keep
+// optimized traversal (no ancestor/sibling overfetch), but prefer the currently
+// visible tile with the greatest screen-space error before camera distance.
+export function screenSpaceErrorPriority(a, b) {
+  const aPriority = a?.priority ?? 0;
+  const bPriority = b?.priority ?? 0;
+  if (aPriority !== bPriority) return aPriority > bPriority ? 1 : -1;
+
+  const at = a?.traversal;
+  const bt = b?.traversal;
+  if (!at || !bt) return 0;
+  if (at.used !== bt.used) return at.used ? 1 : -1;
+  if (at.inFrustum !== bt.inFrustum) return at.inFrustum ? 1 : -1;
+
+  const aError = Number.isFinite(at.error) ? at.error : -Infinity;
+  const bError = Number.isFinite(bt.error) ? bt.error : -Infinity;
+  if (aError !== bError) return aError > bError ? 1 : -1;
+
+  const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
+  const bDistance = Number.isFinite(bt.distanceFromCamera) ? bt.distanceFromCamera : Infinity;
+  if (aDistance !== bDistance) return aDistance > bDistance ? -1 : 1;
+
+  const aDepth = a?.internal?.depthFromRenderedParent ?? 0;
+  const bDepth = b?.internal?.depthFromRenderedParent ?? 0;
+  if (aDepth !== bDepth) return aDepth > bDepth ? -1 : 1;
+  return 0;
 }
 
 // The active close-up REPLACE frontier needs room to finish loading before an
@@ -37,7 +66,7 @@ export function lodCacheBudget(deviceMemoryGiB) {
 export function configureLodRenderer(tilesRenderer, {
   camera,
   renderer,
-  detail = 20,
+  detail = MAX_LOD_DETAIL,
   deviceMemoryGiB,
 } = {}) {
   tilesRenderer.setCamera(camera);
@@ -46,6 +75,16 @@ export function configureLodRenderer(tilesRenderer, {
   tilesRenderer.loadAncestors = false;
   tilesRenderer.loadSiblings = false;
   tilesRenderer.maxDepth = Infinity;
+  if (tilesRenderer.downloadQueue) {
+    tilesRenderer.downloadQueue.priorityCallback = screenSpaceErrorPriority;
+    const current = Number(tilesRenderer.downloadQueue.maxJobs);
+    tilesRenderer.downloadQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 6) : 6;
+  }
+  if (tilesRenderer.parseQueue) {
+    tilesRenderer.parseQueue.priorityCallback = screenSpaceErrorPriority;
+    const current = Number(tilesRenderer.parseQueue.maxJobs);
+    tilesRenderer.parseQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 2) : 2;
+  }
 
   const budget = lodCacheBudget(deviceMemoryGiB);
   Object.assign(tilesRenderer.lruCache, budget);
@@ -83,6 +122,10 @@ export function enableRootLodBackdrop(tilesRenderer) {
 // released once its parent is outside the frustum or already meets the current
 // error target. That lets an old close-up frontier make room for the next one.
 export function releaseStaleLodDetails(tilesRenderer) {
+  // Standard ancestor mode owns active, visible, and LRU transitions. Manually
+  // forcing those flags after update() can make a cached leaf impossible to
+  // reactivate when the camera returns to it.
+  if (tilesRenderer?.loadAncestors) return 0;
   const root = tilesRenderer?.root;
   if (!root || String(root.refine || '').toUpperCase() !== 'ADD') return 0;
 
