@@ -2,7 +2,7 @@
 
 Client-facing photogrammetry viewer and optional self-hosted processing
 platform. The Three.js app provides Earth-style navigation, verified streamed
-LOD with a full-detail fallback, camera-position browsing, measurements,
+LOD with zero-error full-detail leaves, camera-position browsing, measurements,
 Potree EPT point clouds, and streamed GeoTIFF layers. It can display legacy
 WebODM media in place or manage immutable uploaded/imported datasets and send
 them to NodeODM/ClusterODM for native EPT, 3D Tiles, and GLB production.
@@ -603,8 +603,10 @@ WGS84 UTM 16N
 ## Feature notes
 
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
-  REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom). Detail
-  slider maps to `tilesRenderer.errorTarget` (26 − slider). The status bar says
+  REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
+  Detail `2..24` maps exponentially to `tilesRenderer.errorTarget` from 512
+  down to 2. Desktop high-detail requests warm at Detail 13 before advancing;
+  clients reporting 4 GiB or less are capped at Detail 13. The status bar says
   `LOD: full-detail` only when every visible tile is on the declared zero-error
   frontier. Invalid hierarchy or tile-load failures remain unavailable until a
   verified streaming derivative exists; original GLB/OBJ files are download-only
@@ -619,9 +621,9 @@ WGS84 UTM 16N
   so filename conventions alone cannot prove equivalence.
 
   Production LOD sets therefore require `lod-provenance.json` beside
-  `tileset.json`. Without a valid record, the viewer safely switches to the
-  actual full mesh when the runtime memory guard permits it (or disables the
-  invalid LOD layer when no safe full-mesh path exists):
+  `tileset.json`. Without a valid record, the Viewer keeps the invalid LOD
+  layer unavailable. The original GLB/OBJ remains an authenticated download
+  and is not decoded as an interactive browser fallback:
 
   Generate the record with the offline equivalence audit; never hand-author it:
 
@@ -655,14 +657,18 @@ WGS84 UTM 16N
   applies node/tile/JSON-RTC transforms, and compares winding-preserving
   triangles, vertex attributes, render material state, samplers, and exact
   texture bytes. It binds every tileset, leaf, and external texture by digest.
-  During import validation the Viewer re-hashes the selected full GLB and every bound
-  artifact before exposing the evidence. Otherwise the client attempts the
-  actual full mesh only within its device/heap-aware decode budget. See
+  During import validation the Viewer re-hashes the selected full GLB and every
+  bound artifact before exposing the evidence. See
   [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
   for the intentionally fail-closed supported subset and why a tiler that clips
-  or retriangulates partition boundaries cannot receive an exact v2 proof.
-- **Camera positions**: one `InstancedMesh` of view-frustum pyramids, gold
-  highlight on hover, tooltip with filename. Size slider.
+  or retriangulates partition boundaries cannot receive an exact v2 proof. The
+  current unresolved runtime investigation, measured working sets, attempted
+  fixes, and safe diagnostic procedure are recorded in
+  [docs/VIEWER_LOD_CAMERA_HANDOFF.md](docs/VIEWER_LOD_CAMERA_HANDOFF.md).
+- **Camera positions**: three synchronized instanced meshes form an independently
+  drawn orange, white, and yellow camera/frustum. Markers use fixed world-space
+  scale with a default of `0.5`, source-index hover/picking, density
+  decluttering, a 12-pixel fallback, tooltip, photo opening, and a size slider.
 - **Measurements**: distance / area / volume with CSS2D labels pinned to the
   geometry. Imperial is the default; project/session/share state can select
   metric, and distance, elevation, area, and volume use one consistent unit

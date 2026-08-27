@@ -23,15 +23,22 @@ Viewer instead streams 3D Tiles to the browser and renders them locally.
 
 The renderer calculates screen-space error every frame. Its configured error
 target decides when a tile refines; there is no fixed camera-distance switch.
-The persisted hierarchy remains `REPLACE`. Only after a renderable root passes
-validation may the runtime set that root to `ADD` as a whole-model coarse
-backdrop; it never changes the source manifest. Ancestor/sibling preload stays
-disabled so only the active view branch remains pinned. When the backdrop is
-active, a post-update pass releases a stale zero-error leaf only after its
-parent is out of the frustum or already meets the error target. The cache is
-reduced on mobile/low-memory devices. Moving away naturally makes the coarse
-parent meet the error target again, after which inactive detailed children can
-be evicted.
+The persisted and runtime hierarchy remain `REPLACE`. Ancestor and sibling
+preload stay disabled so only the active view branches remain pinned. The
+Viewer does not manually toggle cached scene visibility, tile active/visible
+state, or LRU usage.
+
+Desktop clients begin high-detail requests at Detail 13 and advance to the
+requested Detail only after the visible frontier meets the active target and
+all renderer queues settle. Clients reporting 4 GiB or less are capped at
+Detail 13 and use a separate 768 MiB cache profile. The default desktop cache
+ceiling is 3 GiB, based on a measured 2.784 GiB replacement-transition peak.
+Moving away allows standard renderer traversal and eviction to return to
+coarser parents.
+
+The post-release live visual issue remains under investigation. See
+[`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for measured
+evidence, superseded approaches, diagnostics, and open hypotheses.
 
 ## Full-quality attestation
 
