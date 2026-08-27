@@ -5,16 +5,20 @@ import {
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
-  enableTransientRootLodBackdrop,
   inspectLodProvenance,
   inspectLodTileset,
+  LOD_WARMUP_DETAIL,
   lodQueuesSettled,
   lodCacheBudget,
+  lodDebugSnapshot,
+  lodRuntimeProfile,
+  lodWarmupSatisfiedByDetail,
   refreshLodResolution,
-  releaseStaleLodDetails,
+  resolveLodDetailRequest,
+  resolveLodWarmupAdvance,
   screenSpaceErrorPriority,
-  syncTransientRootLodBackdrop,
   visibleLodFrontier,
+  visibleLodTargetSatisfied,
 } from '../lod-policy.mjs';
 
 test('detail slider maps monotonically across a perceptible bounded SSE range', () => {
@@ -38,9 +42,10 @@ test('renderer configuration uses REPLACE transitions without ancestor or siblin
   };
   const camera = {};
   const renderer = {};
-  const budget = configureLodRenderer(tiles, { camera, renderer, detail: 24, deviceMemoryGiB: 4 });
+  const profile = configureLodRenderer(tiles, { camera, renderer, detail: 24, deviceMemoryGiB: 4 });
   assert.deepEqual(calls, [['camera', camera], ['resolution', camera, renderer]]);
-  assert.equal(tiles.errorTarget, 2);
+  assert.equal(LOD_WARMUP_DETAIL, 13);
+  assert.equal(tiles.errorTarget, 32, 'low-memory clients start and remain on the LOD-1 warmup target');
   assert.equal(tiles.loadAncestors, false);
   assert.equal(tiles.loadSiblings, false);
   assert.equal(tiles.downloadQueue.priorityCallback, screenSpaceErrorPriority);
@@ -48,17 +53,30 @@ test('renderer configuration uses REPLACE transitions without ancestor or siblin
   assert.equal(tiles.downloadQueue.maxJobs, 6, 'foreground priority must survive the first request batch');
   assert.equal(tiles.parseQueue.maxJobs, 2, 'parsing must yield often enough to reprioritize after camera moves');
   assert.equal(tiles.maxDepth, Infinity);
-  assert.deepEqual(tiles.lruCache, budget);
-  assert.deepEqual(budget, {
-    minBytesSize: 384 * 1024 * 1024,
-    maxBytesSize: 768 * 1024 * 1024,
-    minSize: 8,
-    maxSize: 24,
-    unloadPercent: 0.20,
+  assert.deepEqual(profile, {
+    budget: {
+      minBytesSize: 384 * 1024 * 1024,
+      maxBytesSize: 768 * 1024 * 1024,
+      minSize: 8,
+      maxSize: 24,
+      unloadPercent: 0.20,
+    },
+    requestedDetail: 24,
+    activeDetail: 13,
+    maximumDetail: 13,
+    reduced: true,
+  });
+  assert.deepEqual(tiles.lruCache, profile.budget);
+  assert.deepEqual(lodRuntimeProfile(24, 8), {
+    budget: lodCacheBudget(8),
+    requestedDetail: 24,
+    activeDetail: 13,
+    maximumDetail: 24,
+    reduced: false,
   });
   assert.deepEqual(lodCacheBudget(8), {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 2.75 * 1024 * 1024 * 1024,
+    maxBytesSize: 3 * 1024 * 1024 * 1024,
     minSize: 8,
     maxSize: 48,
     unloadPercent: 0.20,
@@ -80,6 +98,84 @@ test('full-detail queue settlement includes lazy hierarchy preprocessing', () =>
   assert.equal(lodQueuesSettled({ downloadQueue: {}, parseQueue: {}, processNodeQueue: { running: true } }), false);
 });
 
+test('LOD warmup advances only after the visible REPLACE frontier satisfies its target', () => {
+  const root = { traversal: { visible: true, error: 140 }, children: [] };
+  assert.equal(visibleLodTargetSatisfied(root, 32), false);
+  root.traversal.visible = false;
+  root.children = [
+    { traversal: { visible: true, error: 18 }, children: [] },
+    { traversal: { visible: true, error: 31.5 }, children: [] },
+  ];
+  assert.equal(visibleLodTargetSatisfied(root, 32), true);
+  root.children[1].traversal.error = 33;
+  assert.equal(visibleLodTargetSatisfied(root, 32), false);
+  root.children[1].traversal.visible = false;
+  assert.equal(visibleLodTargetSatisfied(root, 32), true, 'only the rendered frontier gates warmup');
+  assert.equal(visibleLodTargetSatisfied(null, 32), false);
+});
+
+test('Detail changes cannot bypass an unfinished desktop warmup', () => {
+  const desktop = { maximumDetail: 24, reduced: false };
+  assert.deepEqual(resolveLodDetailRequest(desktop, false, 2), {
+    requestedDetail: 2, activeDetail: 2, warmupComplete: false,
+  });
+  assert.deepEqual(resolveLodDetailRequest(desktop, false, 24), {
+    requestedDetail: 24, activeDetail: 13, warmupComplete: false,
+  });
+  assert.deepEqual(resolveLodDetailRequest(desktop, true, 24), {
+    requestedDetail: 24, activeDetail: 24, warmupComplete: true,
+  });
+  const loweredAfterWarmup = resolveLodDetailRequest(desktop, true, 2);
+  assert.deepEqual(loweredAfterWarmup, {
+    requestedDetail: 2, activeDetail: 2, warmupComplete: false,
+  });
+  assert.deepEqual(resolveLodDetailRequest(desktop, loweredAfterWarmup.warmupComplete, 24), {
+    requestedDetail: 24, activeDetail: 13, warmupComplete: false,
+  });
+  assert.equal(resolveLodWarmupAdvance({ ...desktop, ...loweredAfterWarmup }), null);
+  const restaged = resolveLodDetailRequest(desktop, loweredAfterWarmup.warmupComplete, 24);
+  assert.deepEqual(resolveLodWarmupAdvance({ ...desktop, ...restaged }), {
+    requestedDetail: 24, activeDetail: 24, warmupComplete: true,
+  });
+  assert.deepEqual(resolveLodDetailRequest({ maximumDetail: 13, reduced: true }, false, 24), {
+    requestedDetail: 24, activeDetail: 13, warmupComplete: true,
+  });
+  assert.equal(lodWarmupSatisfiedByDetail(2), false);
+  assert.equal(lodWarmupSatisfiedByDetail(12), false);
+  assert.equal(lodWarmupSatisfiedByDetail(13), true);
+  assert.equal(lodWarmupSatisfiedByDetail(24), true);
+});
+
+test('LOD console diagnostics are bounded and strip origins query strings and credentials', () => {
+  const attachedScene = {};
+  const pendingScene = {};
+  const attached = {
+    geometricError: 0, children: [], content: { uri: 'LOD-0/Mesh-A.b3dm' },
+    traversal: { used: true, inFrustum: true, visible: true }, engineData: { scene: attachedScene },
+  };
+  const pending = {
+    geometricError: 0, children: [], content: { uri: 'https://private.example/customer-42/LOD-0/Mesh-B.b3dm?token=secret' },
+    traversal: { used: true, inFrustum: true, visible: false }, engineData: { scene: pendingScene },
+  };
+  const root = {
+    geometricError: 496, refine: 'REPLACE', children: [attached, pending], content: { uri: 'LOD-2/root.b3dm' },
+    traversal: { visible: false }, engineData: { scene: {} },
+  };
+  const value = lodDebugSnapshot({
+    root, group: { children: [attachedScene] }, errorTarget: 2,
+    downloadQueue: { running: false }, parseQueue: { running: true }, processNodeQueue: { running: false },
+    lruCache: { cachedBytes: 1536 * 1024 * 1024, maxBytesSize: 3 * 1024 * 1024 * 1024, isFull: () => false },
+  }, { requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false }, true);
+  assert.deepEqual(value, {
+    phase: 'requested-detail', requestedDetail: 24, activeDetail: 24, maximumDetail: 24,
+    errorTarget: 2, visible: { root: 0, lod0: 1, lod1: 0, other: 0 },
+    requiredLeaves: 2, attachedRequiredLeaves: 1, pendingRequiredLeaves: 1,
+    queues: { download: false, parse: true, process: false },
+    cache: { usedMiB: 1536, maxMiB: 3072, full: false },
+  });
+  assert.doesNotMatch(JSON.stringify(value), /private\.example|customer-42|Mesh-B\.b3dm|token|secret/);
+});
+
 test('LOD queue priority favors visible high-error foreground tiles', () => {
   const tile = ({ used = true, inFrustum = true, error, distanceFromCamera, depth = 1 } = {}) => ({
     priority: 0,
@@ -95,59 +191,7 @@ test('LOD queue priority favors visible high-error foreground tiles', () => {
   assert.equal(screenSpaceErrorPriority(outside, foreground), -1);
 });
 
-test('transient root backdrop hides only after every required visible fine leaf is attached', () => {
-  const rootMaterial = { visible: true };
-  const rootScene = { traverse: (callback) => callback({ isMesh: true, material: rootMaterial }) };
-  const leafSceneA = {};
-  const leafSceneB = {};
-  const leafA = { geometricError: 0, traversal: { used: true, inFrustum: true }, engineData: { scene: leafSceneA }, children: [] };
-  const leafB = { geometricError: 0, traversal: { used: true, inFrustum: true }, engineData: { scene: leafSceneB }, children: [] };
-  const root = {
-    refine: 'REPLACE',
-    content: { uri: 'root.b3dm' },
-    engineData: { scene: rootScene },
-    children: [leafA, leafB],
-  };
-  const tiles = { root, group: { children: [rootScene, leafSceneA] } };
-
-  assert.equal(enableTransientRootLodBackdrop(tiles), true);
-  assert.equal(root.refine, 'ADD');
-  assert.equal(leafA.refine, 'REPLACE');
-  assert.equal(leafB.refine, 'REPLACE');
-  assert.deepEqual(syncTransientRootLodBackdrop(tiles), {
-    complete: false,
-    requiredLeaves: 2,
-    attachedLeaves: 1,
-    backdropVisible: true,
-  });
-  assert.equal(rootMaterial.visible, true);
-
-  tiles.group.children.push(leafSceneB);
-  assert.deepEqual(syncTransientRootLodBackdrop(tiles), {
-    complete: true,
-    requiredLeaves: 2,
-    attachedLeaves: 2,
-    backdropVisible: false,
-  });
-  assert.equal(rootMaterial.visible, false);
-
-  leafB.traversal.inFrustum = false;
-  assert.deepEqual(syncTransientRootLodBackdrop(tiles), {
-    complete: true,
-    requiredLeaves: 1,
-    attachedLeaves: 1,
-    backdropVisible: false,
-  });
-
-  leafA.traversal.used = false;
-  assert.equal(syncTransientRootLodBackdrop(tiles).backdropVisible, true, 'coarse-only views retain the root');
-
-  const externalRoot = { refine: 'REPLACE', content: { uri: 'nested/tileset.json' } };
-  assert.equal(enableTransientRootLodBackdrop({ root: externalRoot }), false);
-  assert.equal(externalRoot.refine, 'REPLACE');
-});
-
-test('runtime root ADD does not contaminate lazy descendant REPLACE inheritance', () => {
+test('standard root REPLACE refinement is inherited by lazy descendants without runtime mutation', () => {
   const previousWindow = globalThis.window;
   globalThis.window = { location: { href: 'http://localhost/' } };
   try {
@@ -170,70 +214,13 @@ test('runtime root ADD does not contaminate lazy descendant REPLACE inheritance'
     const renderer = new TilesRenderer('http://localhost/tileset.json');
     renderer.preprocessTileset(document, 'http://localhost/tileset.json');
     renderer.rootTileset = document;
-    assert.equal(enableTransientRootLodBackdrop(renderer), true);
+    assert.equal(document.root.refine, 'REPLACE');
     renderer.preprocessNode(child, document.root.internal.basePath, document.root);
     assert.equal(child.refine, 'REPLACE');
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
-});
-
-test('an in-frustum fine leaf survives a stale out-of-frustum parent result', () => {
-  const leafScene = {};
-  const leaf = {
-    geometricError: 0,
-    children: [],
-    traversal: { used: true, inFrustum: true, active: true, visible: true },
-    engineData: { scene: leafScene },
-  };
-  const parent = {
-    geometricError: 3,
-    traversal: { used: false, inFrustum: false, error: 1 },
-    children: [leaf],
-  };
-  const calls = [];
-  const tiles = {
-    root: { refine: 'ADD', children: [parent] },
-    group: { children: [leafScene] },
-    errorTarget: 2,
-    setTileVisible: (...args) => calls.push(['visible', ...args]),
-    setTileActive: (...args) => calls.push(['active', ...args]),
-    lruCache: { markUnused: (...args) => calls.push(['unused', ...args]), scheduleUnload: () => calls.push(['unload']) },
-  };
-  assert.equal(releaseStaleLodDetails(tiles), 0);
-  assert.deepEqual(calls, []);
-  assert.equal(leaf.traversal.active, true);
-  assert.equal(leaf.traversal.visible, true);
-});
-
-test('a coarse Detail target releases a fine leaf once its in-frustum parent is sufficient', () => {
-  const leafScene = {};
-  const leaf = {
-    geometricError: 0,
-    children: [],
-    traversal: { used: true, inFrustum: true, active: true, visible: true },
-    engineData: { scene: leafScene },
-  };
-  const parent = {
-    geometricError: 3,
-    traversal: { used: true, inFrustum: true, error: 36 },
-    children: [leaf],
-  };
-  const calls = [];
-  const tiles = {
-    root: { refine: 'ADD', children: [parent] },
-    group: { children: [leafScene] },
-    errorTarget: 512,
-    setTileVisible: (...args) => calls.push(['visible', ...args]),
-    setTileActive: (...args) => calls.push(['active', ...args]),
-    lruCache: { markUnused: (...args) => calls.push(['unused', ...args]), scheduleUnload: () => calls.push(['unload']) },
-  };
-  assert.equal(releaseStaleLodDetails(tiles), 1);
-  assert.deepEqual(calls.map((call) => call[0]), ['visible', 'active', 'unused', 'unload']);
-  assert.equal(leaf.traversal.active, false);
-  assert.equal(leaf.traversal.visible, false);
-  assert.equal(leafScene.visible, undefined, 'cached scene visibility must not be mutated');
 });
 
 test('resize refreshes the renderer resolution used by SSE calculations', () => {

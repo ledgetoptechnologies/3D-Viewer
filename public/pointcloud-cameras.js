@@ -4,17 +4,19 @@
   if (root) root.LtdsPointCloudCameras = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function createPointCloudCameraModule() {
   const CAMERA_MARKER_COLORS = Object.freeze({
-    body: 0xEE5007,
-    bodyHover: 0xF8CB2E,
-    lens: 0xF8CB2E,
-    lensHover: 0xFFFFFF,
+    orange: 0xEE5007,
+    white: 0xFFFFFF,
+    yellow: 0xFFA200,
   });
 
-  const CAMERA_MARKER_OPACITY = Object.freeze({ body: 0.62, lens: 0.72 });
-  const CAMERA_MARKER_STYLE = Object.freeze({ width: Math.hypot(1.62, 1, 0.70), maxPixels: 10, cellPixels: 18, maxVisible: 4000, pickRadius: 12 });
+  const CAMERA_MARKER_OPACITY = Object.freeze({ normal: 0.7, hover: 1 });
+  const DEFAULT_CAMERA_MARKER_SCALE = 0.5;
+  const CAMERA_MARKER_STYLE = Object.freeze({ width: Math.hypot(1.64, 1.12, 0.76), maxPixels: 10, cellPixels: 18, maxVisible: 4000, pickRadius: 12 });
 
-  function cameraMarkerScaleForView({ baseScale = 1 } = {}) {
-    return Math.max(0.1, Math.min(4, Number(baseScale) || 1));
+  function cameraMarkerScaleForView({ baseScale = DEFAULT_CAMERA_MARKER_SCALE } = {}) {
+    const parsed = Number(baseScale);
+    const requested = Number.isFinite(parsed) ? parsed : DEFAULT_CAMERA_MARKER_SCALE;
+    return Math.max(0.1, Math.min(4, requested));
   }
 
   function selectCameraMarkerRepresentatives(candidates, { width, height, cellPixels = CAMERA_MARKER_STYLE.cellPixels, maxVisible = CAMERA_MARKER_STYLE.maxVisible, margin = CAMERA_MARKER_STYLE.maxPixels } = {}) {
@@ -58,32 +60,27 @@
     pushQuad(target, npn, npp, ppp, ppn);
     pushQuad(target, nnn, pnn, pnp, nnp);
   }
-  function pushLens(target) {
-    const centerX = -0.08, centerY = 0, radius = 0.25;
-    const backZ = 0.20, frontZ = 0.48, segments = 12;
-    const backCenter = [centerX, centerY, backZ];
-    const frontCenter = [centerX, centerY, frontZ];
-    for (let index = 0; index < segments; index += 1) {
-      const angle = index * Math.PI * 2 / segments;
-      const nextAngle = (index + 1) * Math.PI * 2 / segments;
-      const back = [centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius, backZ];
-      const nextBack = [centerX + Math.cos(nextAngle) * radius, centerY + Math.sin(nextAngle) * radius, backZ];
-      const front = [back[0], back[1], frontZ];
-      const nextFront = [nextBack[0], nextBack[1], frontZ];
-      pushQuad(target, back, nextBack, nextFront, front);
-      pushTriangle(target, backCenter, nextBack, back);
-      pushTriangle(target, frontCenter, front, nextFront);
+  function pushFrustumShell(target, { backX, backY, backZ, frontX, frontY, frontZ, caps = false }) {
+    const back = [[-backX,-backY,backZ],[backX,-backY,backZ],[backX,backY,backZ],[-backX,backY,backZ]];
+    const front = [[-frontX,-frontY,frontZ],[frontX,-frontY,frontZ],[frontX,frontY,frontZ],[-frontX,frontY,frontZ]];
+    for (let index = 0; index < 4; index += 1) {
+      const next = (index + 1) % 4;
+      pushQuad(target, back[index], back[next], front[next], front[index]);
+    }
+    if (caps) {
+      pushQuad(target, back[0], back[3], back[2], back[1]);
+      pushQuad(target, front[0], front[1], front[2], front[3]);
     }
   }
 
   function cameraMarkerGeometryData() {
-    const body = [];
-    pushBox(body, -0.72, 0.72, -0.42, 0.42, -0.22, 0.20);
-    pushBox(body, -0.30, 0.18, 0.42, 0.58, -0.12, 0.12);
-    pushBox(body, 0.72, 0.90, -0.32, 0.28, -0.18, 0.16);
-    const lens = [];
-    pushLens(lens);
-    return { body, lens };
+    const orange = [];
+    pushBox(orange, -0.72, 0.72, -0.46, 0.46, -0.28, 0.02);
+    const white = [];
+    pushFrustumShell(white, { backX:0.82, backY:0.56, backZ:-0.02, frontX:0.44, frontY:0.30, frontZ:0.25 });
+    const yellow = [];
+    pushFrustumShell(yellow, { backX:0.34, backY:0.23, backZ:0.20, frontX:0.19, frontY:0.13, frontZ:0.48, caps:true });
+    return { orange, white, yellow };
   }
 
   function normalizeCameraMarkers(value) {
@@ -154,33 +151,37 @@
     group.visible = false;
     scene.add(group);
     const raycaster = new THREE.Raycaster();
-    let bodyMesh = null;
-    let lensMesh = null;
-    let scale = 1;
+    let orangeMesh = null;
+    let whiteMesh = null;
+    let yellowMesh = null;
+    let scale = DEFAULT_CAMERA_MARKER_SCALE;
     let markerWorldPositions = null;
     let markerLocalPositions = null;
     let markerQuaternions = null;
     let markerDepths = null;
     let drawToSource = [];
     let sourceToDraw = null;
+    let hoveredSource = -1;
     let scaleSignature = '';
     let scaleUpdatedAt = 0;
 
     function disposeMeshes() {
-      for (const mesh of [bodyMesh, lensMesh]) {
+      for (const mesh of [orangeMesh, whiteMesh, yellowMesh]) {
         if (!mesh) continue;
         group.remove(mesh);
         mesh.geometry.dispose();
         mesh.material.dispose();
       }
-      bodyMesh = null;
-      lensMesh = null;
+      orangeMesh = null;
+      whiteMesh = null;
+      yellowMesh = null;
       markerWorldPositions = null;
       markerLocalPositions = null;
       markerQuaternions = null;
       markerDepths = null;
       drawToSource = [];
       sourceToDraw = null;
+      hoveredSource = -1;
       scaleSignature = '';
     }
 
@@ -204,13 +205,14 @@
       sourceToDraw = new Int32Array(markers.length);
       sourceToDraw.fill(-1);
       const data = cameraMarkerGeometryData();
-      const bodyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: CAMERA_MARKER_OPACITY.body, side: THREE.DoubleSide, depthWrite: false });
-      const lensMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: CAMERA_MARKER_OPACITY.lens, side: THREE.DoubleSide, depthWrite: false });
-      bodyMesh = new THREE.InstancedMesh(geometry(data.body), bodyMaterial, markers.length);
-      lensMesh = new THREE.InstancedMesh(geometry(data.lens), lensMaterial, markers.length);
-      bodyMesh.frustumCulled = false;
-      lensMesh.frustumCulled = false;
-      lensMesh.renderOrder = 1;
+      const material = () => new THREE.MeshBasicMaterial({ transparent: true, opacity: CAMERA_MARKER_OPACITY.normal, side: THREE.FrontSide, depthWrite: false });
+      orangeMesh = new THREE.InstancedMesh(geometry(data.orange), material(), markers.length);
+      whiteMesh = new THREE.InstancedMesh(geometry(data.white), material(), markers.length);
+      yellowMesh = new THREE.InstancedMesh(geometry(data.yellow), material(), markers.length);
+      [orangeMesh, whiteMesh, yellowMesh].forEach((mesh, index) => {
+        mesh.frustumCulled = false;
+        mesh.renderOrder = index;
+      });
       const quaternion = new THREE.Quaternion();
       const axis = new THREE.Vector3();
       markers.forEach((marker, index) => {
@@ -230,22 +232,24 @@
         markerWorldPositions[index * 3 + 1] = frame.origin[1] + marker.translation[1];
         markerWorldPositions[index * 3 + 2] = frame.origin[2] + marker.translation[2];
       });
-      bodyMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.body));
-      lensMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.lens));
-      bodyMesh.count = 0;
-      lensMesh.count = 0;
-      group.add(bodyMesh, lensMesh);
+      orangeMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.orange));
+      whiteMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.white));
+      yellowMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.yellow));
+      orangeMesh.count = 0;
+      whiteMesh.count = 0;
+      yellowMesh.count = 0;
+      group.add(orangeMesh, whiteMesh, yellowMesh);
       updateView(true);
       return markers.length;
     }
 
     function setScale(value) {
-      scale = Math.max(0.1, Math.min(4, Number(value) || 1));
+      scale = cameraMarkerScaleForView({ baseScale: value });
       updateView(true);
     }
 
     function updateView(force = false) {
-      if (!bodyMesh || !lensMesh || !markerWorldPositions || !markerLocalPositions || !markerQuaternions) return false;
+      if (!orangeMesh || !whiteMesh || !yellowMesh || !markerWorldPositions || !markerLocalPositions || !markerQuaternions) return false;
       const camera = getCamera();
       const rect = dom.getBoundingClientRect();
       if (!camera || !rect.width || !rect.height) return false;
@@ -265,8 +269,10 @@
       const position = new THREE.Vector3();
       const quaternion = new THREE.Quaternion();
       const nextScale = new THREE.Vector3();
-      const bodyColor = new THREE.Color(CAMERA_MARKER_COLORS.body);
-      const lensColor = new THREE.Color(CAMERA_MARKER_COLORS.lens);
+      const orangeColor = new THREE.Color(CAMERA_MARKER_COLORS.orange);
+      const whiteColor = new THREE.Color(CAMERA_MARKER_COLORS.white);
+      const yellowColor = new THREE.Color(CAMERA_MARKER_COLORS.yellow);
+      const orangeHoverColor = orangeColor.clone().lerp(whiteColor, 0.25);
       const candidates = [];
       const pm = camera.projectionMatrix.elements;
       const vm = camera.matrixWorldInverse.elements;
@@ -306,27 +312,59 @@
         });
         nextScale.setScalar(visualScale);
         matrix.compose(position, quaternion, nextScale);
-        bodyMesh.setMatrixAt(draw, matrix);
-        lensMesh.setMatrixAt(draw, matrix);
-        bodyMesh.setColorAt(draw, bodyColor);
-        lensMesh.setColorAt(draw, lensColor);
+        orangeMesh.setMatrixAt(draw, matrix);
+        whiteMesh.setMatrixAt(draw, matrix);
+        yellowMesh.setMatrixAt(draw, matrix);
+        const hovered = source === hoveredSource;
+        orangeMesh.setColorAt(draw, hovered ? orangeHoverColor : orangeColor);
+        whiteMesh.setColorAt(draw, whiteColor);
+        yellowMesh.setColorAt(draw, hovered ? whiteColor : yellowColor);
       }
-      bodyMesh.count = visibleSources.length;
-      lensMesh.count = visibleSources.length;
-      bodyMesh.instanceMatrix.needsUpdate = true;
-      if (bodyMesh.instanceColor) bodyMesh.instanceColor.needsUpdate = true;
-      lensMesh.instanceMatrix.needsUpdate = true;
-      if (lensMesh.instanceColor) lensMesh.instanceColor.needsUpdate = true;
+      orangeMesh.count = visibleSources.length;
+      whiteMesh.count = visibleSources.length;
+      yellowMesh.count = visibleSources.length;
+      for (const mesh of [orangeMesh, whiteMesh, yellowMesh]) {
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
+      return true;
+    }
+
+    function applySourceColor(source) {
+      if (!sourceToDraw || !Number.isInteger(source) || source < 0 || source >= sourceToDraw.length) return;
+      const draw = sourceToDraw[source];
+      if (!Number.isInteger(draw) || draw < 0) return;
+      const orange = new THREE.Color(CAMERA_MARKER_COLORS.orange);
+      const white = new THREE.Color(CAMERA_MARKER_COLORS.white);
+      const yellow = new THREE.Color(CAMERA_MARKER_COLORS.yellow);
+      const hovered = source === hoveredSource;
+      orangeMesh.setColorAt(draw, hovered ? orange.clone().lerp(white, 0.25) : orange);
+      whiteMesh.setColorAt(draw, white);
+      yellowMesh.setColorAt(draw, hovered ? white : yellow);
+      for (const mesh of [orangeMesh, whiteMesh, yellowMesh]) {
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
+    }
+
+    function setHovered(sourceIndex) {
+      const parsed = Number(sourceIndex);
+      const next = Number.isInteger(parsed) && parsed >= 0 && parsed < (sourceToDraw?.length || 0) ? parsed : -1;
+      if (next === hoveredSource) return false;
+      const previous = hoveredSource;
+      hoveredSource = next;
+      applySourceColor(previous);
+      applySourceColor(next);
       return true;
     }
 
     function setVisible(value) {
       group.visible = Boolean(value);
       if (group.visible) updateView(true);
+      else setHovered(-1);
     }
 
     function pick(clientX, clientY) {
-      if (!group.visible || !bodyMesh || !lensMesh) return -1;
+      if (!group.visible || !orangeMesh || !whiteMesh || !yellowMesh) return -1;
       const rect = dom.getBoundingClientRect();
       if (!rect.width || !rect.height) return -1;
       const ndc = new THREE.Vector2(
@@ -335,7 +373,7 @@
       );
       const camera = getCamera();
       raycaster.setFromCamera(ndc, camera);
-      const hit = raycaster.intersectObjects([bodyMesh, lensMesh], false)[0];
+      const hit = raycaster.intersectObjects([orangeMesh, whiteMesh, yellowMesh], false)[0];
       if (Number.isInteger(hit?.instanceId)) return drawToSource[hit.instanceId];
 
       camera.updateMatrixWorld?.(true);
@@ -368,11 +406,11 @@
     }
 
     return Object.freeze({
-      setMarkers, setScale, setVisible, updateView, pick, dispose, group,
+      setMarkers, setScale, setVisible, setHovered, updateView, pick, dispose, group,
       get count() { return markerWorldPositions ? markerWorldPositions.length / 3 : 0; },
-      get drawnCount() { return bodyMesh?.count || 0; },
+      get drawnCount() { return orangeMesh?.count || 0; },
     });
   }
 
-  return Object.freeze({ CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, cameraMarkerGeometryData, cameraMarkerLocalFrame, cameraMarkerScaleForView, selectCameraMarkerRepresentatives, createCameraClickTracker, normalizeCameraMarkers, createPointCloudCameraLayer });
+  return Object.freeze({ CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerLocalFrame, cameraMarkerScaleForView, selectCameraMarkerRepresentatives, createCameraClickTracker, normalizeCameraMarkers, createPointCloudCameraLayer });
 }));

@@ -5,6 +5,7 @@ import {
   CAMERA_MARKER_COLORS,
   CAMERA_MARKER_OPACITY,
   CAMERA_MARKER_STYLE,
+  DEFAULT_CAMERA_MARKER_SCALE,
   cameraMarkerGeometryData,
   cameraMarkerScaleForView,
   selectCameraMarkerRepresentatives,
@@ -43,35 +44,38 @@ test('camera photo keys allow exact nested JPEG paths without allowing traversal
   }
 });
 
-test('camera markers use a compact WebODM-style body and forward lens', () => {
+test('camera markers use an independent WebODM-like orange white and yellow frustum', () => {
   const geometry = cameraMarkerGeometryData();
   const bounds = (positions) => {
     const axes = [[], [], []];
     positions.forEach((value, index) => axes[index % 3].push(value));
     return axes.map((axis) => ({ min: Math.min(...axis), max: Math.max(...axis) }));
   };
-  assert.ok(geometry.body.length >= 36 && geometry.body.length % 9 === 0);
-  assert.ok(geometry.lens.length >= 36 && geometry.lens.length % 9 === 0);
-  assert.equal(geometry.direction, undefined, 'the long filled direction spear is removed');
-  const [bodyX, bodyY, bodyZ] = bounds(geometry.body);
-  const [lensX, lensY, lensZ] = bounds(geometry.lens);
-  const bodyWidth = bodyX.max - bodyX.min;
-  const bodyHeight = bodyY.max - bodyY.min;
-  assert.ok(bodyWidth > bodyHeight, 'camera body keeps a recognizable landscape silhouette');
-  assert.ok(bodyZ.min < 0 && bodyZ.max > 0, 'camera position remains inside the compact body');
-  assert.ok(lensZ.min >= bodyZ.max - 1e-9, 'lens begins at the front face');
-  assert.ok(lensZ.max - bodyZ.max <= bodyWidth * 0.25, 'lens stays compact instead of becoming a direction wedge');
-  assert.ok(lensX.min > bodyX.min && lensX.max < bodyX.max);
-  assert.ok(lensY.min > bodyY.min && lensY.max < bodyY.max);
-  assert.equal(CAMERA_MARKER_COLORS.body, 0xEE5007);
-  assert.equal(CAMERA_MARKER_COLORS.lens, 0xF8CB2E);
-  assert.equal(CAMERA_MARKER_COLORS.bodyHover, 0xF8CB2E);
-  assert.equal(CAMERA_MARKER_COLORS.lensHover, 0xFFFFFF);
-  assert.deepEqual(CAMERA_MARKER_OPACITY, { body: 0.62, lens: 0.72 });
+  for (const key of ['orange', 'white', 'yellow']) {
+    assert.ok(geometry[key].length >= 36 && geometry[key].length % 9 === 0, `${key} primitive is triangulated`);
+  }
+  assert.equal(geometry.body, undefined, 'the prior solid camera housing is removed');
+  assert.equal(geometry.lens, undefined, 'the prior cylinder lens is removed');
+  const [orangeX, orangeY, orangeZ] = bounds(geometry.orange);
+  const [whiteX, whiteY, whiteZ] = bounds(geometry.white);
+  const [yellowX, yellowY, yellowZ] = bounds(geometry.yellow);
+  assert.ok(orangeZ.min < 0 && orangeZ.max >= 0, 'orange rear housing contains the camera position');
+  assert.ok(whiteZ.min <= orangeZ.max && whiteZ.max > orangeZ.max, 'white frustum bridges housing to lens');
+  assert.ok(yellowZ.max > whiteZ.min, 'yellow forward primitive makes view direction legible');
+  assert.ok(yellowX.min > whiteX.min && yellowX.max < whiteX.max);
+  assert.ok(yellowY.min > whiteY.min && yellowY.max < whiteY.max);
+  assert.equal(CAMERA_MARKER_COLORS.orange, 0xEE5007);
+  assert.equal(CAMERA_MARKER_COLORS.white, 0xFFFFFF);
+  assert.equal(CAMERA_MARKER_COLORS.yellow, 0xFFA200);
+  assert.deepEqual(CAMERA_MARKER_OPACITY, { normal: 0.7, hover: 1 });
+  assert.equal(DEFAULT_CAMERA_MARKER_SCALE, 0.5);
+  const allX = { min: Math.min(orangeX.min, whiteX.min, yellowX.min), max: Math.max(orangeX.max, whiteX.max, yellowX.max) };
+  const allY = { min: Math.min(orangeY.min, whiteY.min, yellowY.min), max: Math.max(orangeY.max, whiteY.max, yellowY.max) };
+  const allZ = { min: Math.min(orangeZ.min, whiteZ.min, yellowZ.min), max: Math.max(orangeZ.max, whiteZ.max, yellowZ.max) };
   const markerDiameter = Math.hypot(
-    Math.max(bodyX.max, lensX.max) - Math.min(bodyX.min, lensX.min),
-    Math.max(bodyY.max, lensY.max) - Math.min(bodyY.min, lensY.min),
-    Math.max(bodyZ.max, lensZ.max) - Math.min(bodyZ.min, lensZ.min),
+    allX.max - allX.min,
+    allY.max - allY.min,
+    allZ.max - allZ.min,
   );
   assert.deepEqual(CAMERA_MARKER_STYLE, {
     width: markerDiameter,

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-export function unlitLodMaterial(source, { transientBackdrop = false } = {}) {
+export function unlitLodMaterial(source) {
   const map = source?.map || null;
   if (map) map.colorSpace = THREE.SRGBColorSpace;
   const material = new THREE.MeshBasicMaterial({
@@ -21,20 +21,13 @@ export function unlitLodMaterial(source, { transientBackdrop = false } = {}) {
   material.name = source?.name || '';
   material.depthTest = source?.depthTest ?? true;
   material.toneMapped = false;
-  if (transientBackdrop) {
-    material.depthWrite = false;
-    material.polygonOffset = true;
-    material.polygonOffsetFactor = 1;
-    material.polygonOffsetUnits = 1;
-  } else {
-    material.depthWrite = source?.depthWrite ?? true;
-  }
+  material.depthWrite = source?.depthWrite ?? true;
   return material;
 }
 
-export function preserveLodMaterials(source, options) {
+export function preserveLodMaterials(source) {
   const originals = Array.isArray(source) ? source : [source];
-  const replacements = originals.map((material) => unlitLodMaterial(material, options));
+  const replacements = originals.map((material) => unlitLodMaterial(material));
   originals.forEach((material) => material?.dispose?.());
   return Array.isArray(source) ? replacements : replacements[0];
 }

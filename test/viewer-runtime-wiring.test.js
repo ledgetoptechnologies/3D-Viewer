@@ -23,13 +23,12 @@ test('viewer 3D mode is streaming-only and keeps original mesh access outside la
   assert.match(main, /hideLoading\(\);\s*scheduleLodAvailabilityRefresh\(\);/);
 });
 
-test('viewer uses a transient root underlay without ancestor or sibling overfetch', () => {
+test('viewer keeps standard REPLACE traversal and stages desktop detail after a visible warmup frontier', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const materials = fs.readFileSync(path.join(__dirname, '..', 'lod-materials.mjs'), 'utf8');
   const lodPolicy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
-  assert.match(main, /enableTransientRootLodBackdrop/);
-  assert.match(main, /syncTransientRootLodBackdrop/);
-  assert.match(main, /releaseStaleLodDetails/);
+  assert.doesNotMatch(main, /enableTransientRootLodBackdrop|syncTransientRootLodBackdrop|releaseStaleLodDetails|transientRootBackdropEnabled/);
+  assert.doesNotMatch(lodPolicy, /root\.refine\s*=\s*['"]ADD['"]/);
   assert.match(lodPolicy, /tilesRenderer\.loadAncestors = false/);
   assert.match(lodPolicy, /tilesRenderer\.loadSiblings = false/);
   const rootStart = main.indexOf("rendererInstance.addEventListener('load-root-tileset'");
@@ -40,28 +39,31 @@ test('viewer uses a transient root underlay without ancestor or sibling overfetc
   assert.match(rootHandler, /const decision = decideLodStartup\(/);
   assert.match(rootHandler, /if \(decision\.action !== 'stream-lod'\)\s*\{[\s\S]*?return;\s*\}/);
   assert.doesNotMatch(rootHandler, /root\.refine\s*=/);
-  assert.match(rootHandler, /transientRootBackdropEnabled = enableTransientRootLodBackdrop\(rendererInstance\)/);
-  assert.match(rootHandler, /transientRootBackdropEnabled && rendererInstance\.root\?\.internal\?\.hasRenderableContent/);
+  assert.match(rootHandler, /rendererInstance\.root\?\.internal\?\.hasRenderableContent/);
   assert.match(rootHandler, /rendererInstance\.requestTileContents\(rendererInstance\.root\)/);
-  assert.match(rootHandler, /if \(!transientRootBackdropEnabled\) hideLoading\(\)/);
   assert.match(rootHandler, /const bounds = tilesetWorldBounds/);
   assert.match(rootHandler, /frameBoundsHome\(bounds, \{ apply: !preserveIncomingModelView \}\)/);
   assert.doesNotMatch(rootHandler, /if \(!homeView\)/);
   assert.match(main, /if \(tilesRenderer !== rendererInstance\) return;/);
   assert.match(main, /import \{ homeViewForBounds, tilesetWorldBounds \} from '\.\/viewer-framing\.mjs'/);
   assert.match(main, /import \{ preserveLodMaterials \} from '\.\/lod-materials\.mjs'/);
-  assert.match(materials, /function preserveLodMaterials\(source, options\)/);
+  assert.match(materials, /function preserveLodMaterials\(source\)/);
   assert.match(materials, /const originals = Array\.isArray\(source\) \? source : \[source\]/);
-  assert.match(materials, /const replacements = originals\.map\(\(material\) => unlitLodMaterial\(material, options\)\)/);
+  assert.match(materials, /const replacements = originals\.map\(\(material\) => unlitLodMaterial\(material\)\)/);
   assert.match(materials, /map,\s*lightMap: source\?\.lightMap/);
   assert.match(materials, /vertexColors: Boolean\(source\?\.vertexColors\)/);
-  assert.match(main, /const isTransientBackdrop = transientRootBackdropEnabled && ev\.tile === rendererInstance\.root/);
-  assert.match(main, /c\.material = preserveLodMaterials\(c\.material, \{ transientBackdrop: isTransientBackdrop \}\)/);
-  assert.match(main, /if \(isTransientBackdrop\) c\.renderOrder = -100/);
-  assert.match(main, /if \(isTransientBackdrop\) \{[\s\S]*?syncTransientRootLodBackdrop\(rendererInstance\);[\s\S]*?hideLoading\(\);[\s\S]*?\}/);
-  assert.match(main, /preserveIncomingModelView = !tilesRenderer\?\.root;\s*controls\.setView\(camW, tgtW\)/);
+  assert.match(main, /c\.material = preserveLodMaterials\(c\.material\)/);
+  assert.match(main, /if \(ev\.tile === rendererInstance\.root\) hideLoading\(\)/);
+  assert.match(main, /function maybeAdvanceLodWarmup\(\)/);
+  assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
+  assert.match(main, /const advance = resolveLodWarmupAdvance\(lodRuntimeProfileState\)/);
+  assert.match(main, /Object\.assign\(lodRuntimeProfileState, advance\)/);
+  assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(targetDetail\)/);
+  assert.match(main, /lodWarmupComplete = lodRuntimeProfileState\.reduced/);
+  assert.match(main, /LOD: reduced-memory/);
   assert.doesNotMatch(main, /engineData\.scene\.visible\s*=/);
-  assert.match(main, /tilesRenderer\.update\(\);\s*releaseStaleLodDetails\(tilesRenderer\);\s*state\.lodRootBackdrop = transientRootBackdropEnabled\s*\? syncTransientRootLodBackdrop\(tilesRenderer\)/);
+  assert.match(main, /tilesRenderer\.update\(\);\s*maybeAdvanceLodWarmup\(\)/);
+  assert.match(main, /preserveIncomingModelView = !tilesRenderer\?\.root;\s*controls\.setView\(camW, tgtW\)/);
 });
 
 test('orthophoto nodata uses the supported GeoTIFF image API', () => {
@@ -149,15 +151,31 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
   assert.doesNotMatch(main, /showError\(`Failed to load point cloud from \$\{POINT_CLOUD_URL\}/);
 });
 
-test('LOD detail starts at maximum and applies every slider change to the active renderer', () => {
+test('LOD detail stages through a visible warmup and caps reduced-memory clients honestly', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   assert.match(html, /id="lod-detail"[^>]*max="24"[^>]*value="24"/);
-  assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(e\.target\.value\)/);
-  assert.match(main, /releaseStaleLodDetails\(tilesRenderer\)/);
+  assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
+  assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
+  assert.match(main, /lodRuntimeProfileState\.requestedDetail = next\.requestedDetail/);
+  assert.match(main, /lodRuntimeProfileState\.activeDetail = next\.activeDetail/);
+  assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(next\.activeDetail\)/);
+  assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
   assert.match(main, /const queuesSettled = lodQueuesSettled\(tilesRenderer\)/);
-  assert.match(main, /const backdropComplete = !transientRootBackdropEnabled \|\| state\.lodRootBackdrop\?\.complete === true/);
-  assert.match(main, /frontier\.fullDetail && queuesSettled && backdropComplete \? 'full-detail' : 'streaming'/);
+  assert.match(main, /reduced-memory Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
+  assert.match(main, /frontier\.fullDetail && queuesSettled \? 'full-detail' : 'streaming'/);
+  assert.doesNotMatch(main, /releaseStaleLodDetails|transientRootBackdropEnabled|syncTransientRootLodBackdrop/);
+});
+
+test('LOD console telemetry is deduplicated sanitized and manually callable', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(main, /lodDebugSnapshot/);
+  assert.match(main, /function emitLodDebugSnapshot\(reason = 'status', force = false\)/);
+  assert.match(main, /console\.info\('\[LTDS LOD\]', reason, snapshot\)/);
+  assert.match(main, /emitLodDebugSnapshot\('status'\)/);
+  assert.match(main, /lodDiagnostics: \(\) => emitLodDebugSnapshot\('manual', true\)/);
+  assert.match(main, /tile load failed; run window\.__ltds\.lodDiagnostics\(\)/);
+  assert.doesNotMatch(main, /console\.error\('Tiles load error', ev\)/);
 });
 
 test('Top View starts just inside the stable polar range instead of at the singular pole', () => {

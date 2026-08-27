@@ -859,6 +859,15 @@
     });
     viewer.renderer.domElement.addEventListener('pointermove', (event) => {
       cameraClickTracker.pointerMove(event);
+      if (insertionActive.m || insertionActive.v) {
+        pointCloudCameraLayer.setHovered(-1);
+        return;
+      }
+      const hovered = pointCloudCameraLayer.pick(event.clientX, event.clientY);
+      pointCloudCameraLayer.setHovered(hovered);
+    });
+    viewer.renderer.domElement.addEventListener('pointerleave', () => {
+      pointCloudCameraLayer.setHovered(-1);
     });
     window.addEventListener('pointerup', (event) => {
       const click = cameraClickTracker.pointerUp(event);
@@ -874,6 +883,7 @@
     });
     window.addEventListener('pointercancel', (event) => {
       cameraClickTracker.pointerCancel(event);
+      pointCloudCameraLayer.setHovered(-1);
     });
 
     if (!EPT_URL) {

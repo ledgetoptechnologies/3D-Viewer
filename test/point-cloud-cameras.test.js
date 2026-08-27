@@ -8,11 +8,13 @@ const {
   CAMERA_MARKER_COLORS,
   CAMERA_MARKER_OPACITY,
   CAMERA_MARKER_STYLE,
+  DEFAULT_CAMERA_MARKER_SCALE,
   cameraMarkerGeometryData,
   cameraMarkerLocalFrame,
   cameraMarkerScaleForView,
   selectCameraMarkerRepresentatives,
   createCameraClickTracker,
+  createPointCloudCameraLayer,
   normalizeCameraMarkers,
 } = require('../public/pointcloud-cameras.js');
 
@@ -21,11 +23,13 @@ test('point-cloud cameras use the same compact WebODM-style marker as the model'
   assert.deepEqual(CAMERA_MARKER_COLORS, model.CAMERA_MARKER_COLORS);
   assert.deepEqual(CAMERA_MARKER_OPACITY, model.CAMERA_MARKER_OPACITY);
   assert.deepEqual(CAMERA_MARKER_STYLE, model.CAMERA_MARKER_STYLE);
+  assert.equal(DEFAULT_CAMERA_MARKER_SCALE, model.DEFAULT_CAMERA_MARKER_SCALE);
   assert.deepEqual(cameraMarkerGeometryData(), model.cameraMarkerGeometryData());
   assert.equal(
     cameraMarkerScaleForView({ baseScale: 1, depth: 3, fovDegrees: 60, viewportHeight: 900 }),
     model.cameraMarkerScaleForView({ baseScale: 1, depth: 3, fovDegrees: 60, viewportHeight: 900 }),
   );
+  assert.equal(cameraMarkerScaleForView(), 0.5);
   assert.deepEqual(
     selectCameraMarkerRepresentatives([{ index: 3, x: 10, y: 10, depth: 2 }], { width: 100, height: 100 }),
     model.selectCameraMarkerRepresentatives([{ index: 3, x: 10, y: 10, depth: 2 }], { width: 100, height: 100 }),
@@ -55,13 +59,45 @@ test('large projected camera positions are rebased before Float32 instance matri
   assert.deepEqual(markers[0].translation, [367000.125, 4760000.25, 220.5], 'input payload remains immutable');
 });
 
-test('Potree r124 allocates full instance-color buffers before the active draw count becomes zero', () => {
+test('Potree r124 allocates all WebODM-like instance-color buffers before the active draw count becomes zero', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'pointcloud-cameras.js'), 'utf8');
-  const bodyAllocation = source.indexOf('bodyMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.body))');
-  const lensAllocation = source.indexOf('lensMesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.lens))');
-  const zeroCount = source.indexOf('bodyMesh.count = 0');
-  assert.ok(bodyAllocation >= 0 && lensAllocation >= 0, 'both full-capacity instance-color buffers are initialized');
-  assert.ok(bodyAllocation < zeroCount && lensAllocation < zeroCount, 'legacy Three allocates from mesh.count, so colors must precede count=0');
+  const allocations = ['orange', 'white', 'yellow'].map((name) => source.indexOf(`${name}Mesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.${name}))`));
+  const zeroCount = source.indexOf('orangeMesh.count = 0');
+  assert.ok(allocations.every((index) => index >= 0), 'all three full-capacity instance-color buffers are initialized');
+  assert.ok(allocations.every((index) => index < zeroCount), 'legacy Three allocates from mesh.count, so colors must precede count=0');
+});
+
+test('point-cloud hover follows source indices when representative draw slots change', async () => {
+  const THREE = await import('three');
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  camera.position.set(0, 0, 0);
+  camera.lookAt(0, 0, -1);
+  camera.updateMatrixWorld(true);
+  camera.updateProjectionMatrix();
+  const dom = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+  const layer = createPointCloudCameraLayer({ THREE, scene, dom, getCamera: () => camera });
+  layer.setMarkers([
+    { translation: [0, 0, -2], rotation: [0, 0, 0] },
+    { translation: [0.01, 0, -1], rotation: [0, 0, 0] },
+    { translation: [0.8, 0, -2], rotation: [0, 0, 0] },
+  ]);
+  layer.setVisible(true);
+  const [orange] = layer.group.children;
+  const normal = orange.getColorAt(0, new THREE.Color()).toArray();
+  assert.equal(layer.setHovered(1), true);
+  const highlighted = orange.getColorAt(0, new THREE.Color()).toArray();
+  assert.notDeepEqual(highlighted, normal);
+
+  camera.position.set(0, 0, -3);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld(true);
+  layer.updateView(true);
+  const replacement = orange.getColorAt(0, new THREE.Color()).toArray();
+  replacement.forEach((component, index) => assert.ok(Math.abs(component - normal[index]) < 1e-9));
+  assert.equal(layer.setHovered(0), true);
+  assert.notDeepEqual(orange.getColorAt(0, new THREE.Color()).toArray(), normal);
+  layer.dispose();
 });
 
 test('camera click tracker accepts one tap and rejects drags, pinches, and cancellations', () => {

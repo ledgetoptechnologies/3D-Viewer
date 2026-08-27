@@ -1,17 +1,18 @@
 export const CAMERA_MARKER_COLORS = Object.freeze({
-  body: 0xEE5007,
-  bodyHover: 0xF8CB2E,
-  lens: 0xF8CB2E,
-  lensHover: 0xFFFFFF,
+  orange: 0xEE5007,
+  white: 0xFFFFFF,
+  yellow: 0xFFA200,
 });
 
 export const CAMERA_MARKER_OPACITY = Object.freeze({
-  body: 0.62,
-  lens: 0.72,
+  normal: 0.7,
+  hover: 1,
 });
 
+export const DEFAULT_CAMERA_MARKER_SCALE = 0.5;
+
 export const CAMERA_MARKER_STYLE = Object.freeze({
-  width: Math.hypot(1.62, 1, 0.70),
+  width: Math.hypot(1.64, 1.12, 0.76),
   maxPixels: 10,
   cellPixels: 18,
   maxVisible: 4000,
@@ -19,9 +20,11 @@ export const CAMERA_MARKER_STYLE = Object.freeze({
 });
 
 export function cameraMarkerScaleForView({
-  baseScale = 1,
+  baseScale = DEFAULT_CAMERA_MARKER_SCALE,
 } = {}) {
-  return Math.max(0.1, Math.min(4, Number(baseScale) || 1));
+  const parsed = Number(baseScale);
+  const requested = Number.isFinite(parsed) ? parsed : DEFAULT_CAMERA_MARKER_SCALE;
+  return Math.max(0.1, Math.min(4, requested));
 }
 
 export function selectCameraMarkerRepresentatives(candidates, {
@@ -89,37 +92,45 @@ function pushBox(target, minX, maxX, minY, maxY, minZ, maxZ) {
   pushQuad(target, nnn, pnn, pnp, nnp);
 }
 
-function pushLens(target, {
-  centerX = -0.08,
-  centerY = 0,
-  radius = 0.25,
-  backZ = 0.20,
-  frontZ = 0.48,
-  segments = 12,
-} = {}) {
-  const backCenter = [centerX, centerY, backZ];
-  const frontCenter = [centerX, centerY, frontZ];
-  for (let index = 0; index < segments; index += 1) {
-    const angle = index * Math.PI * 2 / segments;
-    const nextAngle = (index + 1) * Math.PI * 2 / segments;
-    const back = [centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius, backZ];
-    const nextBack = [centerX + Math.cos(nextAngle) * radius, centerY + Math.sin(nextAngle) * radius, backZ];
-    const front = [back[0], back[1], frontZ];
-    const nextFront = [nextBack[0], nextBack[1], frontZ];
-    pushQuad(target, back, nextBack, nextFront, front);
-    pushTriangle(target, backCenter, nextBack, back);
-    pushTriangle(target, frontCenter, front, nextFront);
+function pushFrustumShell(target, {
+  backX, backY, backZ, frontX, frontY, frontZ, caps = false,
+}) {
+  const back = [
+    [-backX, -backY, backZ], [backX, -backY, backZ],
+    [backX, backY, backZ], [-backX, backY, backZ],
+  ];
+  const front = [
+    [-frontX, -frontY, frontZ], [frontX, -frontY, frontZ],
+    [frontX, frontY, frontZ], [-frontX, frontY, frontZ],
+  ];
+  for (let index = 0; index < 4; index += 1) {
+    const next = (index + 1) % 4;
+    pushQuad(target, back[index], back[next], front[next], front[index]);
+  }
+  if (caps) {
+    pushQuad(target, back[0], back[3], back[2], back[1]);
+    pushQuad(target, front[0], front[1], front[2], front[3]);
   }
 }
 
 export function cameraMarkerGeometryData() {
-  const body = [];
-  // Compact WebODM-style camera housing centered on the optical origin.
-  pushBox(body, -0.72, 0.72, -0.42, 0.42, -0.22, 0.20);
-  pushBox(body, -0.30, 0.18, 0.42, 0.58, -0.12, 0.12);
-  pushBox(body, 0.72, 0.90, -0.32, 0.28, -0.18, 0.16);
+  // Independently drawn camera-view glyph. The orange rear housing marks the
+  // shot position, the translucent white bevel reads as a camera frustum, and
+  // the yellow tapered lens makes the +Z viewing direction unmistakable.
+  const orange = [];
+  pushBox(orange, -0.72, 0.72, -0.46, 0.46, -0.28, 0.02);
 
-  const lens = [];
-  pushLens(lens);
-  return { body, lens };
+  const white = [];
+  pushFrustumShell(white, {
+    backX: 0.82, backY: 0.56, backZ: -0.02,
+    frontX: 0.44, frontY: 0.30, frontZ: 0.25,
+  });
+
+  const yellow = [];
+  pushFrustumShell(yellow, {
+    backX: 0.34, backY: 0.23, backZ: 0.20,
+    frontX: 0.19, frontY: 0.13, frontZ: 0.48,
+    caps: true,
+  });
+  return { orange, white, yellow };
 }

@@ -102,7 +102,8 @@ test('point-cloud distance and height labels use thousandth-inch precision in im
 test('camera positions persist across model and point-cloud modes and remain clickable', () => {
   const viewerShell = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   const cameraRuntime = fs.readFileSync(path.join(root, 'public', 'pointcloud-cameras.js'), 'utf8');
-  assert.match(viewerShell, /id="panel-camera-positions"[\s\S]*id="layer-cameras"[\s\S]*id="cam-size"/);
+  assert.match(viewerShell, /id="panel-camera-positions"[\s\S]*id="layer-cameras"[\s\S]*id="cam-size"[^>]*value="0\.5"/);
+  assert.doesNotMatch(viewerShell, /yellow spear/i);
   assert.match(pointCloudShell, /<script src="\/pointcloud-cameras\.js"><\/script>/);
   assert.match(pointCloudShell, /createPointCloudCameraLayer\(\{[\s\S]*scene: viewer\.scene\.scene/);
   assert.match(pointCloudShell, /setCameras\(markers\)[\s\S]*pointCloudCameraLayer\.setMarkers\(markers\)/);
@@ -110,11 +111,21 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(pointCloudShell, /viewer\.addEventListener\('update', \(\) => pointCloudCameraLayer\.updateView\(\)\)/);
   assert.match(cameraRuntime, /let drawToSource = \[\]/);
   assert.match(cameraRuntime, /const visibleSources = selectCameraMarkerRepresentatives\(candidates/);
-  assert.match(cameraRuntime, /bodyMesh\.count = visibleSources\.length/);
-  assert.match(cameraRuntime, /lensMesh\.count = visibleSources\.length/);
-  assert.match(cameraRuntime, /if \(bodyMesh\.instanceColor\) bodyMesh\.instanceColor\.needsUpdate = true/);
-  assert.match(cameraRuntime, /if \(lensMesh\.instanceColor\) lensMesh\.instanceColor\.needsUpdate = true/);
+  for (const mesh of ['orangeMesh', 'whiteMesh', 'yellowMesh']) {
+    assert.match(cameraRuntime, new RegExp(`${mesh}\\.count = visibleSources\\.length`));
+  }
+  assert.match(cameraRuntime, /for \(const mesh of \[orangeMesh, whiteMesh, yellowMesh\]\)[\s\S]*if \(mesh\.instanceColor\) mesh\.instanceColor\.needsUpdate = true/);
+  assert.match(cameraRuntime, /new THREE\.MeshBasicMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
+  assert.match(mainSource, /new THREE\.MeshStandardMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
   assert.match(cameraRuntime, /return drawToSource\[hit\.instanceId\]/);
+  assert.match(cameraRuntime, /let hoveredSource = -1/);
+  assert.match(cameraRuntime, /function setHovered\(sourceIndex\)/);
+  assert.match(cameraRuntime, /const hovered = source === hoveredSource/);
+  assert.match(cameraRuntime, /sourceToDraw\[source\][\s\S]*setColorAt\(draw/);
+  assert.match(cameraRuntime, /setMarkers, setScale, setVisible, setHovered, updateView, pick, dispose/);
+  assert.match(pointCloudShell, /addEventListener\('pointermove',[\s\S]*pointCloudCameraLayer\.pick\(event\.clientX, event\.clientY\)[\s\S]*pointCloudCameraLayer\.setHovered/);
+  assert.match(pointCloudShell, /addEventListener\('pointerleave',[\s\S]*pointCloudCameraLayer\.setHovered\(-1\)/);
+  assert.match(pointCloudShell, /addEventListener\('pointercancel',[\s\S]*pointCloudCameraLayer\.setHovered\(-1\)/);
   assert.match(pointCloudShell, /type: 'camera-open'[\s\S]*index[\s\S]*correlationId/);
   assert.match(mainSource, /function syncCameraLayer\(\)/);
   assert.match(mainSource, /function refreshCameraMarkerScales\(force = false\)/);

@@ -12,21 +12,22 @@ import {
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
-  enableTransientRootLodBackdrop,
   inspectLodProvenance,
   inspectLodTileset,
+  lodDebugSnapshot,
   lodQueuesSettled,
   refreshLodResolution,
-  releaseStaleLodDetails,
-  syncTransientRootLodBackdrop,
+  resolveLodDetailRequest,
+  resolveLodWarmupAdvance,
   visibleLodFrontier,
+  visibleLodTargetSatisfied,
 } from './lod-policy.mjs';
 import { EarthLikeControls, safeTopViewPosition } from './earth-controls.js';
 import { pickDirectPointSurface } from './direct-pointcloud-picking.mjs';
 import { localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
 import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
-import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives } from './camera-markers.mjs';
+import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives } from './camera-markers.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
@@ -138,8 +139,10 @@ let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
-let transientRootBackdropEnabled = false;
-let camGroupParent, camInstances = null, camLensInstances = null, camFeatures = [];
+let lodRuntimeProfileState = null;
+let lodWarmupComplete = false;
+let lodDebugSignature = '';
+let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
 let mapViews = {};            // per-tab map center/zoom retention
@@ -789,13 +792,23 @@ function loadTiles() {
   const rendererInstance = new TilesRenderer(TILES_URL);
   tilesRenderer = rendererInstance;
   const detailSlider = document.getElementById('lod-detail');
-  configureLodRenderer(rendererInstance, {
+  const deviceMemoryGiB = navigator.deviceMemory
+    ?? (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ? 4 : 8);
+  lodRuntimeProfileState = configureLodRenderer(rendererInstance, {
     camera,
     renderer,
     detail: detailSlider?.value,
-    deviceMemoryGiB: navigator.deviceMemory
-      ?? (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ? 4 : 8),
+    deviceMemoryGiB,
   });
+  state.lodRuntimeProfile = { ...lodRuntimeProfileState, deviceMemoryGiB };
+  lodWarmupComplete = lodRuntimeProfileState.reduced;
+  state.lodRootBackdrop = null;
+  if (lodRuntimeProfileState.reduced) {
+    dom.lodStatus.textContent = `LOD: reduced-memory (Detail ${lodRuntimeProfileState.maximumDetail} max)`;
+  } else if (lodRuntimeProfileState.activeDetail < lodRuntimeProfileState.requestedDetail) {
+    dom.lodStatus.textContent = `LOD: warming (Detail ${lodRuntimeProfileState.activeDetail} → ${lodRuntimeProfileState.requestedDetail})`;
+  }
+  emitLodDebugSnapshot('startup', true);
   lodFailureHandled = false;
 
   rendererInstance.addEventListener('load-root-tileset', (ev) => {
@@ -808,19 +821,17 @@ function loadTiles() {
       failLod(decision.reason);
       return;
     }
-    transientRootBackdropEnabled = enableTransientRootLodBackdrop(rendererInstance);
-    state.lodRootBackdrop = transientRootBackdropEnabled ? { complete: false, backdropVisible: true } : null;
-    if (transientRootBackdropEnabled && rendererInstance.root?.internal?.hasRenderableContent) {
+    if (rendererInstance.root?.internal?.hasRenderableContent) {
       rendererInstance.requestTileContents(rendererInstance.root);
     }
     if (!report.canConvergeToZeroError) {
       console.warn('LOD root delegates to external tilesets; validate each child manifest.', report);
     }
-    if (!transientRootBackdropEnabled) hideLoading();
     const bounds = tilesetWorldBounds(rendererInstance);
     if (bounds && frameBoundsHome(bounds, { apply: !preserveIncomingModelView })) {
       preserveIncomingModelView = false;
     }
+    emitLodDebugSnapshot('root-ready', true);
   });
   rendererInstance.addEventListener('load-tileset', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
@@ -831,7 +842,6 @@ function loadTiles() {
   });
   rendererInstance.addEventListener('load-model', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
-    const isTransientBackdrop = transientRootBackdropEnabled && ev.tile === rendererInstance.root;
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -841,19 +851,20 @@ function loadTiles() {
         // Preserve every primitive's texture assignment. WebODM/Obj2Tiles can
         // emit a material array; treating it as one material drops every map
         // and renders the streamed mesh white.
-        c.material = preserveLodMaterials(c.material, { transientBackdrop: isTransientBackdrop });
-        if (isTransientBackdrop) c.renderOrder = -100;
+        c.material = preserveLodMaterials(c.material);
         queueBVH(c);
       }
     });
-    if (isTransientBackdrop) {
-      state.lodRootBackdrop = syncTransientRootLodBackdrop(rendererInstance);
-      hideLoading();
-    }
+    if (ev.tile === rendererInstance.root) hideLoading();
+    else if (!rendererInstance.root?.internal?.hasRenderableContent) hideLoading();
   });
   rendererInstance.addEventListener('load-error', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
-    console.error('Tiles load error', ev);
+    const status = Number(ev?.status);
+    console.error('[LTDS LOD] tile load failed; run window.__ltds.lodDiagnostics()', {
+      status: Number.isFinite(status) ? status : null,
+    });
+    emitLodDebugSnapshot('load-error', true);
     failLod('A required LOD tile failed to load.');
   });
   tilesParent.add(rendererInstance.group);
@@ -866,7 +877,10 @@ function disposeTiles() {
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
   tilesRenderer = null;
-  transientRootBackdropEnabled = false;
+  lodRuntimeProfileState = null;
+  lodWarmupComplete = false;
+  lodDebugSignature = '';
+  state.lodRuntimeProfile = null;
   state.lodRootBackdrop = null;
   bvhQueue.length = 0;
 }
@@ -1121,13 +1135,13 @@ function frameObjectHome(object3D, options) {
 // ───────────────────────────────────────────────────────────────
 function buildCameraMarkerGeometries() {
   const data = cameraMarkerGeometryData();
-  const bodyGeometry = new THREE.BufferGeometry();
-  bodyGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.body, 3));
-  bodyGeometry.computeVertexNormals();
-  const lensGeometry = new THREE.BufferGeometry();
-  lensGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.lens, 3));
-  lensGeometry.computeVertexNormals();
-  return { bodyGeometry, lensGeometry };
+  const geometry = (positions) => {
+    const result = new THREE.BufferGeometry();
+    result.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    result.computeVertexNormals();
+    return result;
+  };
+  return { orangeGeometry: geometry(data.orange), whiteGeometry: geometry(data.white), yellowGeometry: geometry(data.yellow) };
 }
 
 async function loadCameras() {
@@ -1145,18 +1159,18 @@ async function loadCameras() {
       return;
     }
 
-    const { bodyGeometry, lensGeometry } = buildCameraMarkerGeometries();
-    const bodyMaterial = new THREE.MeshBasicMaterial({
-      transparent: true, opacity: CAMERA_MARKER_OPACITY.body, side: THREE.DoubleSide, depthWrite: false
+    const { orangeGeometry, whiteGeometry, yellowGeometry } = buildCameraMarkerGeometries();
+    const material = () => new THREE.MeshStandardMaterial({
+      transparent: true, opacity: CAMERA_MARKER_OPACITY.normal, side: THREE.FrontSide, depthWrite: false,
+      metalness: 0, roughness: 0.5
     });
-    const lensMaterial = new THREE.MeshBasicMaterial({
-      transparent: true, opacity: CAMERA_MARKER_OPACITY.lens, side: THREE.DoubleSide, depthWrite: false
-    });
-    camInstances = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, camFeatures.length);
-    camLensInstances = new THREE.InstancedMesh(lensGeometry, lensMaterial, camFeatures.length);
-    camInstances.frustumCulled = false;
-    camLensInstances.frustumCulled = false;
-    camLensInstances.renderOrder = 1;
+    camInstances = new THREE.InstancedMesh(orangeGeometry, material(), camFeatures.length);
+    camWhiteInstances = new THREE.InstancedMesh(whiteGeometry, material(), camFeatures.length);
+    camYellowInstances = new THREE.InstancedMesh(yellowGeometry, material(), camFeatures.length);
+    for (const [index, mesh] of [camInstances, camWhiteInstances, camYellowInstances].entries()) {
+      mesh.frustumCulled = false;
+      mesh.renderOrder = index;
+    }
 
     const q = new THREE.Quaternion();
     const axis = new THREE.Vector3();
@@ -1183,8 +1197,9 @@ async function loadCameras() {
       camMarkerQuaternions[i * 4 + 3] = q.w;
     });
     camInstances.count = 0;
-    camLensInstances.count = 0;
-    camGroupParent.getObjectByName('camOffset').add(camInstances, camLensInstances);
+    camWhiteInstances.count = 0;
+    camYellowInstances.count = 0;
+    camGroupParent.getObjectByName('camOffset').add(camInstances, camWhiteInstances, camYellowInstances);
     refreshCameraMarkerScales(true);
     state.camerasLoaded = true;
     window.__ltdsCams = camFeatures.length;
@@ -1196,7 +1211,7 @@ async function loadCameras() {
   }
 }
 
-let cameraMarkerUserScale = 1;
+let cameraMarkerUserScale = DEFAULT_CAMERA_MARKER_SCALE;
 let cameraMarkerScaleSignature = '';
 let cameraMarkerScaleUpdatedAt = 0;
 let hoveredCam = -1;
@@ -1205,7 +1220,7 @@ let camMarkerLocalPositions = null, camMarkerQuaternions = null, camMarkerDepths
 let camDrawToSource = [], camSourceToDraw = null;
 
 function setCameraScale(value) {
-  cameraMarkerUserScale = Math.max(0.1, Math.min(4, Number(value) || 1));
+  cameraMarkerUserScale = cameraMarkerScaleForView({ baseScale: value });
   refreshCameraMarkerScales(true);
   pcApi()?.setCameraScale?.(cameraMarkerUserScale);
 }
@@ -1226,7 +1241,7 @@ function ensureCamWorldPositions() {
 }
 
 function refreshCameraMarkerScales(force = false) {
-  if (!camInstances || !camLensInstances || !camera || !renderer) return false;
+  if (!camInstances || !camWhiteInstances || !camYellowInstances || !camera || !renderer) return false;
   const now = performance.now();
   if (!force && now - cameraMarkerScaleUpdatedAt < 100) return false;
   const rect = renderer.domElement.getBoundingClientRect();
@@ -1248,10 +1263,11 @@ function refreshCameraMarkerScales(force = false) {
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
   const markerScale = new THREE.Vector3();
-  const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
-  const bodyHover = new THREE.Color(CAMERA_MARKER_COLORS.bodyHover);
-  const lens = new THREE.Color(CAMERA_MARKER_COLORS.lens);
-  const lensHover = new THREE.Color(CAMERA_MARKER_COLORS.lensHover);
+  const orange = new THREE.Color(CAMERA_MARKER_COLORS.orange);
+  const orangeHover = orange.clone().lerp(new THREE.Color(0xffffff), 0.25);
+  const white = new THREE.Color(CAMERA_MARKER_COLORS.white);
+  const yellow = new THREE.Color(CAMERA_MARKER_COLORS.yellow);
+  const yellowHover = yellow.clone().lerp(new THREE.Color(0xffffff), 0.25);
   const candidates = [];
   const pm = camera.projectionMatrix.elements;
   const vm = camera.matrixWorldInverse.elements;
@@ -1294,16 +1310,19 @@ function refreshCameraMarkerScales(force = false) {
     markerScale.setScalar(scale);
     matrix.compose(position, quaternion, markerScale);
     camInstances.setMatrixAt(draw, matrix);
-    camLensInstances.setMatrixAt(draw, matrix);
-    camInstances.setColorAt(draw, source === hoveredCam ? bodyHover : body);
-    camLensInstances.setColorAt(draw, source === hoveredCam ? lensHover : lens);
+    camWhiteInstances.setMatrixAt(draw, matrix);
+    camYellowInstances.setMatrixAt(draw, matrix);
+    camInstances.setColorAt(draw, source === hoveredCam ? orangeHover : orange);
+    camWhiteInstances.setColorAt(draw, white);
+    camYellowInstances.setColorAt(draw, source === hoveredCam ? yellowHover : yellow);
   }
   camInstances.count = visibleSources.length;
-  camLensInstances.count = visibleSources.length;
-  camInstances.instanceMatrix.needsUpdate = true;
-  if (camInstances.instanceColor) camInstances.instanceColor.needsUpdate = true;
-  camLensInstances.instanceMatrix.needsUpdate = true;
-  if (camLensInstances.instanceColor) camLensInstances.instanceColor.needsUpdate = true;
+  camWhiteInstances.count = visibleSources.length;
+  camYellowInstances.count = visibleSources.length;
+  for (const mesh of [camInstances, camWhiteInstances, camYellowInstances]) {
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
   window.__ltdsCamDrawn = visibleSources.length;
   window.__ltdsCamDrawToSource = visibleSources.slice();
   return true;
@@ -1312,7 +1331,7 @@ function refreshCameraMarkerScales(force = false) {
 function pickCameraInstance(ndc) {
   if (!state.camerasVisible || !camInstances) return -1;
   hoverRaycaster.setFromCamera(ndc, camera);
-  const hits = hoverRaycaster.intersectObjects([camInstances, camLensInstances], false);
+  const hits = hoverRaycaster.intersectObjects([camInstances, camWhiteInstances, camYellowInstances], false);
   if (hits.length) return camDrawToSource[hits[0].instanceId];
 
   // Fallback: markers can be a few pixels at default size — pick the nearest
@@ -1344,26 +1363,30 @@ function pickCameraInstance(ndc) {
 
 function highlightCam(idx) {
   if (!camInstances) return;
-  const body = new THREE.Color(CAMERA_MARKER_COLORS.body);
-  const bodyHover = new THREE.Color(CAMERA_MARKER_COLORS.bodyHover);
-  const lens = new THREE.Color(CAMERA_MARKER_COLORS.lens);
-  const lensHover = new THREE.Color(CAMERA_MARKER_COLORS.lensHover);
+  const orange = new THREE.Color(CAMERA_MARKER_COLORS.orange);
+  const orangeHover = orange.clone().lerp(new THREE.Color(0xffffff), 0.25);
+  const white = new THREE.Color(CAMERA_MARKER_COLORS.white);
+  const yellow = new THREE.Color(CAMERA_MARKER_COLORS.yellow);
+  const yellowHover = yellow.clone().lerp(new THREE.Color(0xffffff), 0.25);
   if (hoveredCam >= 0 && hoveredCam !== idx) {
     const previousDraw = camSourceToDraw?.[hoveredCam] ?? -1;
     if (previousDraw >= 0) {
-      camInstances.setColorAt(previousDraw, body);
-      camLensInstances?.setColorAt(previousDraw, lens);
+      camInstances.setColorAt(previousDraw, orange);
+      camWhiteInstances?.setColorAt(previousDraw, white);
+      camYellowInstances?.setColorAt(previousDraw, yellow);
     }
   }
   if (idx >= 0) {
     const nextDraw = camSourceToDraw?.[idx] ?? -1;
     if (nextDraw >= 0) {
-      camInstances.setColorAt(nextDraw, bodyHover);
-      camLensInstances.setColorAt(nextDraw, lensHover);
+      camInstances.setColorAt(nextDraw, orangeHover);
+      camWhiteInstances?.setColorAt(nextDraw, white);
+      camYellowInstances?.setColorAt(nextDraw, yellowHover);
     }
   }
   if (camInstances.instanceColor) camInstances.instanceColor.needsUpdate = true;
-  if (camLensInstances?.instanceColor) camLensInstances.instanceColor.needsUpdate = true;
+  if (camWhiteInstances?.instanceColor) camWhiteInstances.instanceColor.needsUpdate = true;
+  if (camYellowInstances?.instanceColor) camYellowInstances.instanceColor.needsUpdate = true;
   hoveredCam = idx;
 }
 
@@ -2981,7 +3004,7 @@ function syncCameraLayer() {
     if (api.setCameras(cameraPayload) !== cameraPayload.length) return false;
     pcCameraSyncedWindow = iframe.contentWindow;
   }
-  api.setCameraScale(parseFloat(document.getElementById('cam-size')?.value || '1'));
+  api.setCameraScale(parseFloat(document.getElementById('cam-size')?.value || String(DEFAULT_CAMERA_MARKER_SCALE)));
   api.setCameraVisibility(state.camerasVisible);
   return true;
 }
@@ -3130,7 +3153,17 @@ function bindUI() {
 
   // LOD detail slider
   document.getElementById('lod-detail').addEventListener('input', (e) => {
-    if (tilesRenderer) tilesRenderer.errorTarget = detailToErrorTarget(e.target.value);
+    if (!tilesRenderer || !lodRuntimeProfileState) return;
+    const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
+    lodRuntimeProfileState.requestedDetail = next.requestedDetail;
+    lodRuntimeProfileState.activeDetail = next.activeDetail;
+    lodWarmupComplete = next.warmupComplete;
+    tilesRenderer.errorTarget = detailToErrorTarget(next.activeDetail);
+    state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState };
+    dom.lodStatus.textContent = lodRuntimeProfileState.reduced
+      ? `LOD: reduced-memory (Detail ${next.activeDetail}; ${lodRuntimeProfileState.maximumDetail} max)`
+      : lodWarmupComplete ? `LOD: Detail ${next.activeDetail}` : `LOD: warming (Detail 13 → ${next.requestedDetail})`;
+    emitLodDebugSnapshot('detail-change', true);
   });
 
   document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach((btn) => {
@@ -3344,6 +3377,31 @@ function toggleFullscreen() {
 // Render loop
 // ───────────────────────────────────────────────────────────────
 let statTimer = 0;
+function emitLodDebugSnapshot(reason = 'status', force = false) {
+  const snapshot = lodDebugSnapshot(tilesRenderer, lodRuntimeProfileState, lodWarmupComplete);
+  const signature = JSON.stringify(snapshot);
+  if (!force && signature === lodDebugSignature) return snapshot;
+  lodDebugSignature = signature;
+  console.info('[LTDS LOD]', reason, snapshot);
+  return snapshot;
+}
+
+function maybeAdvanceLodWarmup() {
+  if (!tilesRenderer || !lodRuntimeProfileState || lodWarmupComplete || lodRuntimeProfileState.reduced) return false;
+  if (!lodQueuesSettled(tilesRenderer)
+    || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
+  const advance = resolveLodWarmupAdvance(lodRuntimeProfileState);
+  if (!advance) return false;
+  Object.assign(lodRuntimeProfileState, advance);
+  const targetDetail = advance.activeDetail;
+  tilesRenderer.errorTarget = detailToErrorTarget(targetDetail);
+  lodWarmupComplete = advance.warmupComplete;
+  state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState };
+  dom.lodStatus.textContent = `LOD: Detail ${targetDetail}`;
+  emitLodDebugSnapshot('warmup-complete', true);
+  return true;
+}
+
 function startLoop() {
   function loop() {
     requestAnimationFrame(loop);
@@ -3356,10 +3414,7 @@ function startLoop() {
       if (camGroupParent?.visible) refreshCameraMarkerScales();
       if (tilesRenderer && tilesParent.visible) {
         tilesRenderer.update();
-        releaseStaleLodDetails(tilesRenderer);
-        state.lodRootBackdrop = transientRootBackdropEnabled
-          ? syncTransientRootLodBackdrop(tilesRenderer)
-          : { complete: true, backdropVisible: false };
+        maybeAdvanceLodWarmup();
       }
       drainBVH();
 
@@ -3404,9 +3459,13 @@ function updateStats() {
     const frontier = visibleLodFrontier(tilesRenderer.root);
     const vis = frontier.visibleCount || (tilesRenderer.stats ? tilesRenderer.stats.visible : 0);
     const queuesSettled = lodQueuesSettled(tilesRenderer);
-    const backdropComplete = !transientRootBackdropEnabled || state.lodRootBackdrop?.complete === true;
-    const quality = frontier.fullDetail && queuesSettled && backdropComplete ? 'full-detail' : 'streaming';
+    const quality = lodRuntimeProfileState?.reduced
+      ? `reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`
+      : !lodWarmupComplete
+        ? `warming Detail ${lodRuntimeProfileState?.activeDetail ?? 13}`
+        : frontier.fullDetail && queuesSettled ? 'full-detail' : 'streaming';
     dom.lodStatus.textContent = `LOD: ${quality} (${vis} tile${vis === 1 ? '' : 's'})`;
+    emitLodDebugSnapshot('status');
   } else if (glbParent.visible) {
     glbOffset.traverse((o) => {
       if (o.isMesh && o.geometry) tris += o.geometry.index ? o.geometry.index.count / 3 : (o.geometry.attributes.position?.count || 0) / 3;
@@ -3419,6 +3478,7 @@ function updateStats() {
 // expose for debugging/verification
 window.__ltds = { scene: () => scene, camera: () => camera, controls: () => controls,
   tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon,
+  lodDiagnostics: () => emitLodDebugSnapshot('manual', true),
   cameraWorldPositions: () => camWorldPos ? Array.from(camWorldPos) : [],
   // Georeferencing self-test: latlon -> UTM -> source px -> linear window -> UTM -> latlon roundtrip.
   // Expect maxRoundtripM to be tiny (sub-mm); large values mean the warp mapping drifted.

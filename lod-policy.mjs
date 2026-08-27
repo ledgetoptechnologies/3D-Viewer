@@ -1,5 +1,7 @@
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
+export const LOD_WARMUP_DETAIL = 13;
+export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 
 export function detailToErrorTarget(value) {
@@ -45,8 +47,9 @@ export function screenSpaceErrorPriority(a, b) {
 // The renderer registers decoded bytes only after concurrent downloads/parses
 // complete, so several in-flight tiles can make cachedBytes overshoot the hard
 // ceiling before isFull() blocks the next request. The desktop cap therefore
-// needs bounded headroom above the measured complete active frontier, while
-// minBytesSize still drives unused content back to a small warm cache.
+// needs bounded headroom above both the 2.53 GiB complete active frontier and
+// the measured 2.784 GiB branch-replacement transition peak. minBytesSize
+// still drives unused content back to a small warm cache.
 export function lodCacheBudget(deviceMemoryGiB) {
   const memory = Number(deviceMemoryGiB);
   if (Number.isFinite(memory) && memory <= 4) {
@@ -64,11 +67,63 @@ export function lodCacheBudget(deviceMemoryGiB) {
 
   return {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 2.75 * 1024 * 1024 * 1024,
+    maxBytesSize: 3 * 1024 * 1024 * 1024,
     minSize: 8,
     maxSize: 48,
     unloadPercent: 0.20,
   };
+}
+
+export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
+  const parsed = Number.parseInt(requestedDetail, 10);
+  const requested = Number.isFinite(parsed)
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsed))
+    : MAX_LOD_DETAIL;
+  const memory = Number(deviceMemoryGiB);
+  const reduced = Number.isFinite(memory) && memory <= 4;
+  const maximumDetail = reduced ? LOW_MEMORY_MAX_LOD_DETAIL : MAX_LOD_DETAIL;
+  const cappedRequest = Math.min(requested, maximumDetail);
+  return {
+    budget: lodCacheBudget(deviceMemoryGiB),
+    requestedDetail: requested,
+    activeDetail: Math.min(cappedRequest, LOD_WARMUP_DETAIL),
+    maximumDetail,
+    reduced,
+  };
+}
+
+export function lodWarmupSatisfiedByDetail(activeDetail) {
+  const parsed = Number.parseInt(activeDetail, 10);
+  return Number.isFinite(parsed) && parsed >= LOD_WARMUP_DETAIL;
+}
+
+export function resolveLodDetailRequest(profile, warmupComplete, requestedDetail) {
+  const parsed = Number.parseInt(requestedDetail, 10);
+  const requested = Number.isFinite(parsed)
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsed))
+    : MAX_LOD_DETAIL;
+  const maximumDetail = Number.isFinite(Number(profile?.maximumDetail))
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, Number(profile.maximumDetail)))
+    : MAX_LOD_DETAIL;
+  const targetDetail = Math.min(requested, maximumDetail);
+  if (profile?.reduced) {
+    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: true };
+  }
+  if (targetDetail < LOD_WARMUP_DETAIL) {
+    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: false };
+  }
+  if (targetDetail === LOD_WARMUP_DETAIL) {
+    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: Boolean(warmupComplete) };
+  }
+  if (warmupComplete) {
+    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: true };
+  }
+  return { requestedDetail: requested, activeDetail: LOD_WARMUP_DETAIL, warmupComplete: false };
+}
+
+export function resolveLodWarmupAdvance(profile) {
+  if (profile?.reduced || !lodWarmupSatisfiedByDetail(profile?.activeDetail)) return null;
+  return resolveLodDetailRequest(profile, true, profile?.requestedDetail);
 }
 
 export function configureLodRenderer(tilesRenderer, {
@@ -79,7 +134,8 @@ export function configureLodRenderer(tilesRenderer, {
 } = {}) {
   tilesRenderer.setCamera(camera);
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
-  tilesRenderer.errorTarget = detailToErrorTarget(detail);
+  const profile = lodRuntimeProfile(detail, deviceMemoryGiB);
+  tilesRenderer.errorTarget = detailToErrorTarget(profile.activeDetail);
   tilesRenderer.loadAncestors = false;
   tilesRenderer.loadSiblings = false;
   tilesRenderer.maxDepth = Infinity;
@@ -94,9 +150,8 @@ export function configureLodRenderer(tilesRenderer, {
     tilesRenderer.parseQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 2) : 2;
   }
 
-  const budget = lodCacheBudget(deviceMemoryGiB);
-  Object.assign(tilesRenderer.lruCache, budget);
-  return budget;
+  Object.assign(tilesRenderer.lruCache, profile.budget);
+  return profile;
 }
 
 export function refreshLodResolution(tilesRenderer, camera, renderer) {
@@ -111,91 +166,30 @@ export function lodQueuesSettled(tilesRenderer) {
     && !tilesRenderer?.processNodeQueue?.running;
 }
 
+export function visibleLodTargetSatisfied(root, errorTarget) {
+  const target = Number(errorTarget);
+  if (!root || !Number.isFinite(target)) return false;
+  let visibleCount = 0;
+  let satisfied = true;
+  const stack = [root];
+  while (stack.length) {
+    const tile = stack.pop();
+    if (tile?.traversal?.visible === true) {
+      visibleCount += 1;
+      const error = Number(tile.traversal.error);
+      if (!Number.isFinite(error) || error > target) satisfied = false;
+    }
+    if (Array.isArray(tile?.children)) stack.push(...tile.children);
+  }
+  return visibleCount > 0 && satisfied;
+}
+
 function contentUri(tile) {
   return tile?.content?.uri || tile?.content?.url || '';
 }
 
 function isExternalTileset(uri) {
   return /\.json(?:[?#].*)?$/i.test(uri);
-}
-
-export function enableTransientRootLodBackdrop(tilesRenderer) {
-  const root = tilesRenderer?.root;
-  const uri = contentUri(root);
-  if (!root || !uri || isExternalTileset(uri)) return false;
-  const materializeRefinement = (tile, inherited) => {
-    const effective = tile?.refine || inherited || 'REPLACE';
-    if (tile) tile.refine = effective;
-    for (const child of (Array.isArray(tile?.children) ? tile.children : [])) {
-      materializeRefinement(child, effective);
-    }
-  };
-  const inherited = root.refine || 'REPLACE';
-  for (const child of (Array.isArray(root.children) ? root.children : [])) {
-    materializeRefinement(child, inherited);
-  }
-  root.refine = 'ADD';
-  return true;
-}
-
-export function syncTransientRootLodBackdrop(tilesRenderer) {
-  const root = tilesRenderer?.root;
-  const groupChildren = tilesRenderer?.group?.children;
-  let requiredLeaves = 0;
-  let attachedLeaves = 0;
-  const visit = (tile) => {
-    const children = Array.isArray(tile?.children) ? tile.children : [];
-    for (const child of children) visit(child);
-    if (children.length || Number(tile?.geometricError) !== 0
-      || tile?.traversal?.used !== true || tile?.traversal?.inFrustum !== true) return;
-    requiredLeaves += 1;
-    if (tile?.engineData?.scene && groupChildren?.includes?.(tile.engineData.scene)) attachedLeaves += 1;
-  };
-  visit(root);
-  const complete = requiredLeaves > 0 && attachedLeaves === requiredLeaves;
-  const backdropVisible = !complete;
-  root?.engineData?.scene?.traverse?.((object) => {
-    if (!object?.isMesh || !object.material) return;
-    for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
-      material.visible = backdropVisible;
-    }
-  });
-  return { complete, requiredLeaves, attachedLeaves, backdropVisible };
-}
-
-export function releaseStaleLodDetails(tilesRenderer) {
-  const root = tilesRenderer?.root;
-  if (!root || root.refine !== 'ADD') return 0;
-  const groupChildren = tilesRenderer?.group?.children;
-  const errorTarget = Number(tilesRenderer?.errorTarget);
-  let released = 0;
-  const visit = (tile, parent = null) => {
-    const children = Array.isArray(tile?.children) ? tile.children : [];
-    for (const child of children) visit(child, tile);
-    if (children.length || Number(tile?.geometricError) !== 0 || !parent) return;
-    const scene = tile?.engineData?.scene;
-    const attached = Boolean(scene && groupChildren?.includes?.(scene));
-    if (!attached && tile?.traversal?.active !== true && tile?.traversal?.visible !== true) return;
-
-    const leafIsStale = tile?.traversal?.used === false || tile?.traversal?.inFrustum === false;
-    const parentMeetsTarget = parent?.traversal?.inFrustum === true
-      && Number.isFinite(parent?.traversal?.error)
-      && Number.isFinite(errorTarget)
-      && parent.traversal.error <= errorTarget;
-    if (!leafIsStale && !parentMeetsTarget) return;
-
-    tilesRenderer.setTileVisible?.(tile, false);
-    tilesRenderer.setTileActive?.(tile, false);
-    if (tile.traversal) {
-      tile.traversal.visible = false;
-      tile.traversal.active = false;
-    }
-    tilesRenderer.lruCache?.markUnused?.(tile);
-    released += 1;
-  };
-  visit(root);
-  if (released) tilesRenderer.lruCache?.scheduleUnload?.();
-  return released;
 }
 
 export function inspectLodProvenance(provenance, fullMeshUrl) {
@@ -346,6 +340,62 @@ export function inspectLodTileset(tileset) {
     maxDepth,
     errors,
     warnings,
+  };
+}
+
+export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) {
+  const root = tilesRenderer?.root;
+  const attachedScenes = tilesRenderer?.group?.children || [];
+  const visible = { root: 0, lod0: 0, lod1: 0, other: 0 };
+  let requiredLeaves = 0;
+  let attachedRequiredLeaves = 0;
+  let pendingRequiredLeaves = 0;
+  const safeLabel = (tile) => {
+    const raw = String(contentUri(tile) || '').split(/[?#]/, 1)[0].replace(/\\/g, '/');
+    const match = raw.match(/(?:^|\/)(LOD-\d+\/[A-Za-z0-9._-]+\.b3dm)$/i);
+    return match ? match[1] : 'tile';
+  };
+  const visit = (tile) => {
+    if (!tile) return;
+    const children = Array.isArray(tile.children) ? tile.children : [];
+    for (const child of children) visit(child);
+    const label = safeLabel(tile);
+    if (tile?.traversal?.visible === true) {
+      if (tile === root) visible.root += 1;
+      else if (/^LOD-0\//i.test(label)) visible.lod0 += 1;
+      else if (/^LOD-1\//i.test(label)) visible.lod1 += 1;
+      else visible.other += 1;
+    }
+    if (children.length || Number(tile.geometricError) !== 0
+      || tile?.traversal?.used !== true || tile?.traversal?.inFrustum !== true) return;
+    requiredLeaves += 1;
+    const attached = Boolean(tile?.engineData?.scene && attachedScenes.includes?.(tile.engineData.scene));
+    if (attached) attachedRequiredLeaves += 1;
+    else pendingRequiredLeaves += 1;
+  };
+  visit(root);
+
+  const toMiB = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) / (1024 * 1024)) : null;
+  return {
+    phase: runtimeProfile?.reduced ? 'reduced-memory' : warmupComplete ? 'requested-detail' : 'warmup',
+    requestedDetail: Number(runtimeProfile?.requestedDetail) || null,
+    activeDetail: Number(runtimeProfile?.activeDetail) || null,
+    maximumDetail: Number(runtimeProfile?.maximumDetail) || null,
+    errorTarget: Number.isFinite(Number(tilesRenderer?.errorTarget)) ? Number(tilesRenderer.errorTarget) : null,
+    visible,
+    requiredLeaves,
+    attachedRequiredLeaves,
+    pendingRequiredLeaves,
+    queues: {
+      download: Boolean(tilesRenderer?.downloadQueue?.running),
+      parse: Boolean(tilesRenderer?.parseQueue?.running),
+      process: Boolean(tilesRenderer?.processNodeQueue?.running),
+    },
+    cache: {
+      usedMiB: toMiB(tilesRenderer?.lruCache?.cachedBytes),
+      maxMiB: toMiB(tilesRenderer?.lruCache?.maxBytesSize),
+      full: Boolean(tilesRenderer?.lruCache?.isFull?.()),
+    },
   };
 }
 

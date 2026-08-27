@@ -61,11 +61,9 @@ test('single material conversion preserves the non-array API shape', () => {
   assert.equal(converted.map, original.map);
 });
 
-test('transient root underlay renders first without writing depth', () => {
+test('standard REPLACE root material writes depth without an underlay offset', () => {
   const original = new THREE.MeshStandardMaterial({ map: new THREE.Texture() });
-  const converted = preserveLodMaterials(original, { transientBackdrop: true });
-  assert.equal(converted.depthWrite, false);
-  assert.equal(converted.polygonOffset, true);
-  assert.equal(converted.polygonOffsetFactor, 1);
-  assert.equal(converted.polygonOffsetUnits, 1);
+  const converted = preserveLodMaterials(original);
+  assert.equal(converted.depthWrite, true);
+  assert.equal(converted.polygonOffset, false);
 });
