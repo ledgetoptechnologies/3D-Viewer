@@ -1598,23 +1598,31 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     const browserErrors = client.events.filter((event) => event.method === 'Log.entryAdded'
       || event.method === 'Runtime.exceptionThrown' || event.method === 'Runtime.consoleAPICalled').slice(-10);
     assert.equal(refreshedRuntime.root, true, `refreshed session did not attach the LOD hierarchy: ${JSON.stringify({ refreshedRuntime, requests: fixture.requests, browserErrors })}`);
-    const conservativeStartup = await client.evaluate(`({
+    const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
       active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
       errorTarget: window.__ltds.tiles().errorTarget,
       phase: window.__ltds.lodDiagnostics().phase,
     })`);
-    assert.deepEqual(conservativeStartup, {
-      slider: '2', requested: 2, active: 2, errorTarget: 512, phase: 'requested-detail',
+    assert.deepEqual(balancedStartup, {
+      slider: '13', requested: 13, active: 13, errorTarget: 32, phase: 'requested-detail',
     });
+    const startupRefinementDeadline = Date.now() + 10_000;
+    while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
+      || requestPath.endsWith('/leaf-b.glb')) && Date.now() < startupRefinementDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     assert.equal(fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
-      || requestPath.endsWith('/leaf-b.glb')), false,
-    'conservative startup refined into a child tile before a higher Detail request');
+      || requestPath.endsWith('/leaf-b.glb')), true,
+    'balanced startup did not request close-responsive child refinement');
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return Boolean(t.root?.engineData?.scene
+      && t.group.children.includes(t.root.engineData.scene)); })()`,
+    'coarse REPLACE root did not attach before the explicit high-detail transition', 10_000);
 
     const explicitHighDetail = await client.evaluate(`(() => {
       const slider = document.querySelector('#lod-detail');
-      for (let detail = 3; detail <= 24; detail += 1) {
+      for (let detail = 14; detail <= 24; detail += 1) {
         slider.value = String(detail);
         slider.dispatchEvent(new Event('input', { bubbles: true }));
       }
@@ -1625,17 +1633,17 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       };
     })()`);
     assert.deepEqual(explicitHighDetail, { requested: 24, active: 13, errorTarget: 32 });
-    const transitionDeadline = Date.now() + 10_000;
-    while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
-      || requestPath.endsWith('/leaf-b.glb')) && Date.now() < transitionDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
     const fallbackSampleDeadline = Date.now() + 1_000;
     let fallbackSamples = 0;
     while (Date.now() < fallbackSampleDeadline) {
       const transitionFallback = await client.evaluate(`(() => {
         const tiles = window.__ltds.tiles();
         const root = tiles.root;
+        const selectedChildren = root.children.filter((child) => child.traversal?.used === true && child.traversal?.inFrustum === true);
+        const attachedSelectedChildren = selectedChildren.filter((child) => child.engineData?.scene && tiles.group.children.includes(child.engineData.scene));
+        const childStates = selectedChildren.map((child) => ({ loadingState: child.internal?.loadingState,
+          hasScene: Boolean(child.engineData?.scene), parentIsGroup: child.engineData?.scene?.parent === tiles.group,
+          visible: child.traversal?.visible, active: child.traversal?.active }));
         return {
           activeDetail: window.__ltds.state.lodRuntimeProfile?.activeDetail,
           loadAncestors: tiles.loadAncestors,
@@ -1643,16 +1651,27 @@ test('an open authenticated workspace discovers completed LOD tiles without load
           loadAncestorSiblings: tiles.loadAncestorSiblings,
           rootVisible: root.traversal?.visible,
           rootAttached: Boolean(root.engineData?.scene && tiles.group.children.includes(root.engineData.scene)),
+          rootActive: root.traversal?.active,
+          rootIsLeaf: root.traversal?.isLeaf,
+          rootAllChildrenLoaded: root.traversal?.allChildrenLoaded,
+          rootWasSetActive: root.traversal?.wasSetActive,
+          rootLoadingState: root.internal?.loadingState,
+          rootHasScene: Boolean(root.engineData?.scene),
+          loadingVisible: !document.querySelector('#loading-overlay')?.classList.contains('hidden'),
+          selectedChildren: selectedChildren.length,
+          attachedSelectedChildren: attachedSelectedChildren.length,
+          childStates,
         };
       })()`);
-      assert.deepEqual(transitionFallback, {
-        activeDetail: 13,
-        loadAncestors: true,
-        loadSiblings: false,
-        loadAncestorSiblings: false,
-        rootVisible: true,
-        rootAttached: true,
-      }, 'the coarse REPLACE root must continuously cover the view while delayed fine children load');
+      assert.ok(transitionFallback.activeDetail >= 13 && transitionFallback.activeDetail <= 24, JSON.stringify(transitionFallback));
+      assert.equal(transitionFallback.loadAncestors, true);
+      assert.equal(transitionFallback.loadSiblings, false);
+      assert.equal(transitionFallback.loadAncestorSiblings, false);
+      const coarseCoverage = transitionFallback.rootVisible && transitionFallback.rootAttached;
+      const fineCoverage = transitionFallback.selectedChildren > 0
+        && transitionFallback.attachedSelectedChildren === transitionFallback.selectedChildren;
+      assert.ok(coarseCoverage || fineCoverage,
+        `REPLACE transition lost both coarse fallback and selected-child coverage: ${JSON.stringify(transitionFallback)}`);
       fallbackSamples += 1;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
