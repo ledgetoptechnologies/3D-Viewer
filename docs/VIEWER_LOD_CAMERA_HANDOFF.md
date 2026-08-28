@@ -12,8 +12,8 @@ through Detail 13. A cold default view consequently fetched the root and 240 of
 at 29 payloads (root, 12 LOD-2, and 16 LOD-1) with no LOD-0 requests in that
 measured pose. The runtime now starts with requested and active Detail 2. It
 does not raise either value until the user moves the slider, after which the
-existing Detail-13 staging and memory governor apply. Standard SSE traversal
-can still select a fine tile for an unusually close incoming camera.
+Detail-13 staging and memory governor apply. Standard SSE traversal can still
+select a fine tile for an unusually close incoming camera.
 
 The released runtime passed its original repository and B3DM fixture gates, but
 the user subsequently reported incomplete, transparent, or dark foreground
@@ -38,6 +38,48 @@ identically on the changed and unchanged trees with the current Linux host's
 snap Chromium. Treat the user's live report as authoritative: local evidence is
 not a production confirmation, and the issue must not be called resolved in
 the deployed Viewer until the user verifies it.
+
+### Gap-free staged refinement update
+
+The user's next production test exposed a separate transition failure: the
+Detail-2 overview was coherent, but a high-detail request could take a long
+time to replace the focused church facade, and zooming back out left large
+black holes. A live browser capture showed Detail 24 requesting a large LOD-0
+frontier, then dropping through memory-limited detail levels while required
+content remained absent. Returning to Detail 2 restored full coverage.
+
+The failure matches the hard cache-admission livelock documented upstream in
+[`3d-tiles-renderer` issue #1689](https://github.com/NASA-AMMOS/3DTilesRendererJS/issues/1689):
+when the demanded used set fills the cache, no unused entry can be evicted, new
+downloads are refused, and the queues can become idle with refinement
+unfinished. The previous application governor detected only terminal LOD-0
+leaves, waited three samples, and stepped down one Detail at a time. It could
+therefore react late and visibly discard an incomplete frontier.
+
+This update:
+
+- enables standard `REPLACE` ancestor fallback so a ready coarse branch remains
+  visible until its selected children are content-ready;
+- exact-pins `3d-tiles-renderer` 0.5.1 and applies a fail-closed postinstall
+  patch that separates ancestor fallback from off-frustum sibling preload;
+- stages high-detail requests as `13 → 16 → 19 → 22 → requested`, advancing
+  only after the current visible frontier and all queues settle;
+- treats any selected in-frustum renderable tile—not only a terminal LOD-0
+  leaf—as pending starvation work;
+- on the first full-cache/idle-queue sample, returns directly to the last fully
+  settled stage and records the failed stage as a non-oscillating ceiling; and
+- exposes both selected-tile and terminal-leaf aggregate counts in sanitized
+  LOD diagnostics.
+
+The stretched brick pattern in the supplied close facade screenshot is not yet
+proven to be a converter defect. A stalled intermediate tile can present the
+same visual symptom. The schema-v3 audit proves UV presence and bounded spatial
+equivalence, but it does not prove pixel-level equivalence after Obj2Tiles atlas
+repacking. Do not enable Obj2Tiles `--keeptextures` as a speculative fix: the
+documented representative run exceeded 157 GiB. First deploy this runtime fix
+and compare the same facade only after diagnostics show a settled Detail-24
+LOD-0 frontier. If distortion remains then, add a focused source-GLB versus
+LOD-0 texture/UV audit rather than weakening the current production proof.
 
 ## Released runtime baseline
 
@@ -124,8 +166,9 @@ longer mutates the root to `ADD`.
 
 Current renderer settings:
 
-- `loadAncestors = false`
+- `loadAncestors = true`
 - `loadSiblings = false`
+- `loadAncestorSiblings = false` (LTDS exact-version patch)
 - `maxDepth = Infinity`
 - download queue maximum: 6 jobs
 - parse queue maximum: 2 jobs
@@ -156,8 +199,8 @@ active Detail is set until the user moves the slider upward.
 
 ### Desktop warmup
 
-A desktop request above Detail 13 starts at Detail 13. The runtime advances to
-the requested Detail only when:
+A desktop request above Detail 13 starts at Detail 13. The runtime advances by
+three Detail units at a time, capped at the request, only when:
 
 1. the current visible frontier satisfies the active error target;
 2. the download queue is settled;
@@ -200,22 +243,24 @@ higher item ceilings prevent the renderer's count-based `isFull()` condition
 from refusing downloads merely because the visible frontier and retained
 `REPLACE` parents contain more than the old entry limits.
 
-### Sustained memory pressure
+### Memory pressure
 
-The runtime samples aggregate LOD state once per second. Three consecutive
-samples are classified as true starvation only when the cache is full, required
-visible leaves are still pending, and renderer work queues cannot make progress.
-The governor then steps active detail down and records the detail at which
-starvation occurred as a ceiling.
+The runtime samples aggregate LOD state once per second. A sample is classified
+as starvation when the cache is full, a selected in-frustum renderable tile is
+still pending, and renderer work queues cannot make progress. The governor then
+restores the last fully settled detail stage and records the failed detail as a
+ceiling.
 
 That ceiling prevents automatic recover/starve oscillation: later recovery may
 continue at or below the ceiling, but it cannot silently restore a detail level
 already shown to starve. `starvedAtDetail` is nullable and must be checked
 explicitly rather than passed through `Number()`. Moving the Detail slider is an
 explicit new request and clears the ceiling. Starvation counters and ceilings
-also reset during tile disposal and loading. Whenever the governor holds active
-detail below the user's request, the status bar reports `memory-limited` instead
-of `full-detail`.
+also reset during tile disposal and loading. The last-settled frontier resets
+with the tile lifecycle; a slider increase retains it and a decrease bounds it
+to the lower active request. Whenever the governor holds active detail below
+the user's request, the status bar reports `memory-limited` instead of
+`full-detail`.
 
 ## Current camera behavior
 
@@ -499,7 +544,7 @@ The snapshot contains only aggregate state:
 - requested, active, and maximum Detail
 - active error target
 - visible root, LOD-1, LOD-0, and other counts
-- required, attached, and pending leaf counts
+- required, attached, and pending selected-tile and terminal-leaf counts
 - download, parse, and process queue activity
 - cache used MiB, maximum MiB, and full state
 

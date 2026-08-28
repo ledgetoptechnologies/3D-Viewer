@@ -23,14 +23,15 @@ test('viewer 3D mode is streaming-only and keeps original mesh access outside la
   assert.match(main, /hideLoading\(\);\s*scheduleLodAvailabilityRefresh\(\);/);
 });
 
-test('viewer keeps standard REPLACE traversal and stages desktop detail after a visible warmup frontier', () => {
+test('viewer keeps gap-free REPLACE traversal and stages desktop detail through complete frontiers', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const materials = fs.readFileSync(path.join(__dirname, '..', 'lod-materials.mjs'), 'utf8');
   const lodPolicy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
   assert.doesNotMatch(main, /enableTransientRootLodBackdrop|syncTransientRootLodBackdrop|releaseStaleLodDetails|transientRootBackdropEnabled/);
   assert.doesNotMatch(lodPolicy, /root\.refine\s*=\s*['"]ADD['"]/);
-  assert.match(lodPolicy, /tilesRenderer\.loadAncestors = false/);
+  assert.match(lodPolicy, /tilesRenderer\.loadAncestors = true/);
   assert.match(lodPolicy, /tilesRenderer\.loadSiblings = false/);
+  assert.match(lodPolicy, /tilesRenderer\.loadAncestorSiblings = false/);
   const rootStart = main.indexOf("rendererInstance.addEventListener('load-root-tileset'");
   const tilesetStart = main.indexOf("rendererInstance.addEventListener('load-tileset'");
   const modelStart = main.indexOf("rendererInstance.addEventListener('load-model'");
@@ -55,6 +56,8 @@ test('viewer keeps standard REPLACE traversal and stages desktop detail after a 
   assert.match(main, /c\.material = preserveLodMaterials\(c\.material\)/);
   assert.match(main, /if \(ev\.tile === rendererInstance\.root\) hideLoading\(\)/);
   assert.match(main, /function maybeAdvanceLodWarmup\(\)/);
+  assert.match(main, /lodLastSettledDetail = lodRuntimeProfileState\.activeDetail/);
+  assert.match(main, /if \(!lodDetailRequestPending\(lodRuntimeProfileState\)\) return false;\s*const advance/);
   assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
   assert.match(main, /const advance = resolveLodWarmupAdvance\(lodRuntimeProfileState\)/);
   assert.match(main, /Object\.assign\(lodRuntimeProfileState, advance\)/);
@@ -170,7 +173,19 @@ test('LOD starts conservatively, stages explicit high-detail requests, and caps 
   assert.doesNotMatch(main, /releaseStaleLodDetails|transientRootBackdropEnabled|syncTransientRootLodBackdrop/);
 });
 
-test('LOD memory pressure steps down only after sustained starvation and resets on explicit lifecycle boundaries', () => {
+test('production installs the exact renderer and applies the scoped ancestor patch in both image stages', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
+  assert.equal(packageJson.dependencies['3d-tiles-renderer'], '0.5.1');
+  assert.equal(packageJson.scripts.postinstall, 'node scripts/patch-3d-tiles-renderer.mjs');
+  assert.equal(
+    [...dockerfile.matchAll(/COPY scripts\/patch-3d-tiles-renderer\.mjs \.\/scripts\/patch-3d-tiles-renderer\.mjs\s+RUN npm ci/g)].length,
+    2,
+    'build and runtime installs must both receive the postinstall patch before npm ci',
+  );
+});
+
+test('LOD memory pressure restores the last complete frontier and resets on explicit lifecycle boundaries', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const loadBlock = main.slice(main.indexOf('function loadTiles()'), main.indexOf('function disposeTiles()'));
   const disposeBlock = main.slice(main.indexOf('function disposeTiles()'), main.indexOf('let sessionRenewalTimer'));
@@ -179,13 +194,15 @@ test('LOD memory pressure steps down only after sustained starvation and resets 
   const statsBlock = main.slice(main.indexOf('function updateStats()'), main.indexOf('// expose for debugging/verification'));
 
   assert.match(main, /advanceLodMemoryPressure/);
-  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;/);
+  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;\s*let lodLastSettledDetail = 2;/);
   for (const [label, block] of [['load', loadBlock], ['dispose', disposeBlock], ['slider', sliderBlock]]) {
     assert.match(block, /lodStarvationSamples = 0;\s*lodStarvedAtDetail = null;/, `${label} must reset memory-pressure state`);
   }
+  assert.match(sliderBlock, /lodLastSettledDetail = Math\.min\(lodLastSettledDetail, next\.activeDetail\)/);
   assert.match(statsBlock, /advanceLodMemoryPressure\(pressureSnapshot, lodRuntimeProfileState/);
   assert.match(statsBlock, /consecutiveSamples: lodStarvationSamples/);
   assert.match(statsBlock, /starvedAtDetail: lodStarvedAtDetail/);
+  assert.match(statsBlock, /lastSettledDetail: lodLastSettledDetail/);
   assert.match(statsBlock, /lodStarvationSamples = pressure\.consecutiveSamples/);
   assert.match(statsBlock, /lodStarvedAtDetail = pressure\.starvedAtDetail/);
   assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);

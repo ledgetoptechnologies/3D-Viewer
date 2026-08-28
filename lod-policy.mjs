@@ -2,6 +2,7 @@ export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
 export const DEFAULT_LOD_DETAIL = MIN_LOD_DETAIL;
 export const LOD_WARMUP_DETAIL = 13;
+export const LOD_REFINEMENT_STEP = 3;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 
@@ -122,8 +123,19 @@ export function resolveLodDetailRequest(profile, warmupComplete, requestedDetail
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, Number(profile.maximumDetail)))
     : MAX_LOD_DETAIL;
   const targetDetail = Math.min(requested, maximumDetail);
+  const parsedActive = Number.parseInt(profile?.activeDetail, 10);
+  const activeDetail = Number.isFinite(parsedActive)
+    ? Math.min(maximumDetail, Math.max(MIN_LOD_DETAIL, parsedActive))
+    : MIN_LOD_DETAIL;
   if (profile?.reduced) {
     return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: true };
+  }
+  if (targetDetail <= activeDetail) {
+    return {
+      requestedDetail: requested,
+      activeDetail: targetDetail,
+      warmupComplete: targetDetail >= LOD_WARMUP_DETAIL && Boolean(warmupComplete),
+    };
   }
   if (targetDetail < LOD_WARMUP_DETAIL) {
     return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: false };
@@ -131,15 +143,33 @@ export function resolveLodDetailRequest(profile, warmupComplete, requestedDetail
   if (targetDetail === LOD_WARMUP_DETAIL) {
     return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: Boolean(warmupComplete) };
   }
-  if (warmupComplete) {
-    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: true };
+  if (activeDetail < LOD_WARMUP_DETAIL) {
+    return { requestedDetail: requested, activeDetail: LOD_WARMUP_DETAIL, warmupComplete: false };
   }
-  return { requestedDetail: requested, activeDetail: LOD_WARMUP_DETAIL, warmupComplete: false };
+  return {
+    requestedDetail: requested,
+    activeDetail,
+    warmupComplete: Boolean(warmupComplete),
+  };
 }
 
 export function resolveLodWarmupAdvance(profile) {
-  if (profile?.reduced || !lodWarmupSatisfiedByDetail(profile?.activeDetail)) return null;
-  return resolveLodDetailRequest(profile, true, profile?.requestedDetail);
+  if (profile?.reduced || !lodDetailRequestPending(profile)
+    || !lodWarmupSatisfiedByDetail(profile?.activeDetail)) return null;
+  const parsedRequested = Number.parseInt(profile?.requestedDetail, 10);
+  const parsedActive = Number.parseInt(profile?.activeDetail, 10);
+  const maximumDetail = Number.isFinite(Number(profile?.maximumDetail))
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, Number(profile.maximumDetail)))
+    : MAX_LOD_DETAIL;
+  const requestedDetail = Number.isFinite(parsedRequested)
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsedRequested))
+    : MAX_LOD_DETAIL;
+  const activeDetail = Math.min(maximumDetail, Math.max(MIN_LOD_DETAIL, parsedActive));
+  return {
+    requestedDetail,
+    activeDetail: Math.min(requestedDetail, maximumDetail, activeDetail + LOD_REFINEMENT_STEP),
+    warmupComplete: true,
+  };
 }
 
 export function configureLodRenderer(tilesRenderer, {
@@ -152,8 +182,14 @@ export function configureLodRenderer(tilesRenderer, {
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
   const profile = lodRuntimeProfile(detail, deviceMemoryGiB);
   tilesRenderer.errorTarget = detailToErrorTarget(profile.activeDetail);
-  tilesRenderer.loadAncestors = false;
+  // A REPLACE child must never make a ready coarse branch disappear while its
+  // requested content is still loading. The renderer uses ancestor content as
+  // that placeholder and releases it once the selected descendants are ready.
+  // Keep explicit sibling loading off. The pinned postinstall patch lets this
+  // app retain only the in-view ancestor paths instead of every sibling branch.
+  tilesRenderer.loadAncestors = true;
   tilesRenderer.loadSiblings = false;
+  tilesRenderer.loadAncestorSiblings = false;
   tilesRenderer.maxDepth = Infinity;
   if (tilesRenderer.downloadQueue) {
     tilesRenderer.downloadQueue.priorityCallback = screenSpaceErrorPriority;
@@ -182,17 +218,18 @@ export function lodQueuesSettled(tilesRenderer) {
     && !tilesRenderer?.processNodeQueue?.running;
 }
 
-export function detectLodStarvation(snapshot, consecutiveSamples = 0, threshold = 3) {
+export function detectLodStarvation(snapshot, consecutiveSamples = 0, threshold = 1) {
   const previousCount = Number.isInteger(consecutiveSamples) && consecutiveSamples > 0
     ? consecutiveSamples
     : 0;
   const parsedThreshold = Number.parseInt(threshold, 10);
   const requiredSamples = Number.isFinite(parsedThreshold) && parsedThreshold > 0
     ? parsedThreshold
-    : 3;
+    : 1;
   const queues = snapshot?.queues;
+  const pendingRequiredTiles = snapshot?.pendingRequiredTiles ?? snapshot?.pendingRequiredLeaves;
   const blocked = snapshot?.cache?.full === true
-    && Number(snapshot?.pendingRequiredLeaves) > 0
+    && Number(pendingRequiredTiles) > 0
     && queues?.download !== true
     && queues?.parse !== true
     && queues?.process !== true;
@@ -200,7 +237,7 @@ export function detectLodStarvation(snapshot, consecutiveSamples = 0, threshold 
   return { count, starved: blocked && count >= requiredSamples };
 }
 
-export function resolveLodMemoryPressure(profile, starvedAtDetail = null) {
+export function resolveLodMemoryPressure(profile, starvedAtDetail = null, lastSettledDetail = null) {
   const parsedActiveDetail = Number.parseInt(profile?.activeDetail, 10);
   if (!Number.isFinite(parsedActiveDetail)) return null;
   const activeDetail = Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsedActiveDetail));
@@ -214,7 +251,14 @@ export function resolveLodMemoryPressure(profile, starvedAtDetail = null) {
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsedCeiling))
     : activeDetail;
   const effectiveCeiling = Math.min(activeDetail, ceiling);
-  const nextActiveDetail = Math.max(MIN_LOD_DETAIL, effectiveCeiling - 1);
+  const parsedSettled = Number.parseInt(lastSettledDetail, 10);
+  const settledDetail = Number.isFinite(parsedSettled)
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsedSettled))
+    : null;
+  const stagedFallback = Math.max(MIN_LOD_DETAIL, effectiveCeiling - LOD_REFINEMENT_STEP);
+  const nextActiveDetail = settledDetail !== null && settledDetail < effectiveCeiling
+    ? settledDetail
+    : stagedFallback;
   if (nextActiveDetail >= activeDetail) return null;
 
   return {
@@ -227,6 +271,7 @@ export function resolveLodMemoryPressure(profile, starvedAtDetail = null) {
 export function advanceLodMemoryPressure(snapshot, profile, {
   consecutiveSamples = 0,
   starvedAtDetail = null,
+  lastSettledDetail = null,
 } = {}) {
   const starvation = detectLodStarvation(snapshot, consecutiveSamples);
   if (!starvation.starved) {
@@ -238,7 +283,7 @@ export function advanceLodMemoryPressure(snapshot, profile, {
     };
   }
 
-  const pressure = resolveLodMemoryPressure(profile, starvedAtDetail);
+  const pressure = resolveLodMemoryPressure(profile, starvedAtDetail, lastSettledDetail);
   if (!pressure) {
     return {
       changed: false,
@@ -443,6 +488,9 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   let requiredLeaves = 0;
   let attachedRequiredLeaves = 0;
   let pendingRequiredLeaves = 0;
+  let requiredTiles = 0;
+  let attachedRequiredTiles = 0;
+  let pendingRequiredTiles = 0;
   const safeLabel = (tile) => {
     const raw = String(contentUri(tile) || '').split(/[?#]/, 1)[0].replace(/\\/g, '/');
     const match = raw.match(/(?:^|\/)(LOD-\d+\/[A-Za-z0-9._-]+\.b3dm)$/i);
@@ -459,10 +507,20 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
       else if (/^LOD-1\//i.test(label)) visible.lod1 += 1;
       else visible.other += 1;
     }
+    const isRequiredTile = tile?.traversal?.used === true
+      && tile?.traversal?.inFrustum === true
+      && tile?.traversal?.isLeaf === true
+      && Boolean(contentUri(tile))
+      && tile?.internal?.hasUnrenderableContent !== true;
+    const attached = Boolean(tile?.engineData?.scene && attachedScenes.includes?.(tile.engineData.scene));
+    if (isRequiredTile) {
+      requiredTiles += 1;
+      if (attached) attachedRequiredTiles += 1;
+      else pendingRequiredTiles += 1;
+    }
     if (children.length || Number(tile.geometricError) !== 0
       || tile?.traversal?.used !== true || tile?.traversal?.inFrustum !== true) return;
     requiredLeaves += 1;
-    const attached = Boolean(tile?.engineData?.scene && attachedScenes.includes?.(tile.engineData.scene));
     if (attached) attachedRequiredLeaves += 1;
     else pendingRequiredLeaves += 1;
   };
@@ -485,6 +543,9 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
     requiredLeaves,
     attachedRequiredLeaves,
     pendingRequiredLeaves,
+    requiredTiles,
+    attachedRequiredTiles,
+    pendingRequiredTiles,
     queues: {
       download: Boolean(tilesRenderer?.downloadQueue?.running),
       parse: Boolean(tilesRenderer?.parseQueue?.running),

@@ -7,6 +7,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "postinstall": "node scripts/patch-3d-tiles-renderer.mjs",
     "test": "vite build && node --test --test-concurrency=1 \"test/*.test.js\" \"test/*.test.mjs\"",
     "dev": "vite --host 0.0.0.0 --port 8080",
     "build": "vite build",
@@ -26,7 +27,7 @@
   "dependencies": {
     "@loaders.gl/core": "^4.3.4",
     "@loaders.gl/las": "^4.3.4",
-    "3d-tiles-renderer": "^0.5.1",
+    "3d-tiles-renderer": "0.5.1",
     "cookie": "^0.7.1",
     "draco3d": "^1.5.7",
     "express": "^4.19.2",

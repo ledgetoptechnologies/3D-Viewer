@@ -610,15 +610,19 @@ WGS84 UTM 16N
   Detail. Standard screen-space-error traversal can still select a fine tile
   for an unusually close incoming view. Raising Detail is an explicit request
   for finer visible tiles. Desktop requests above
-  Detail 13 warm at Detail 13 before advancing;
+  Detail 13 warm at Detail 13, then advance through bounded three-detail stages
+  only after each visible frontier is complete;
   a visible terminal zero-error leaf satisfies that warmup target even when the
   camera is inside its bounding volume and the renderer reports infinite
   screen-space error. A non-terminal or non-zero-error tile at infinite error
   still blocks advancement. Clients reporting 4 GiB or less are capped at
   Detail 13. Desktop and reduced-memory caches allow up to 1,024 and 512 entries
   respectively, while their 3 GiB and 768 MiB decoded-byte limits remain the
-  actual memory guards. Sustained cache pressure steps active detail down and
-  establishes a non-oscillating ceiling until the user moves the Detail slider;
+  actual memory guards. Loaded coarse ancestors remain visible while selected
+  descendants load, without explicit or ancestor-triggered off-frustum sibling
+  preload. A full-cache idle sample with selected content pending restores the
+  last complete detail stage and establishes a non-oscillating ceiling until
+  the user moves the Detail slider;
   the status bar reports `LOD: memory-limited` while that ceiling holds the
   active request back. It says `LOD: full-detail` only when every visible tile
   is on the declared zero-error frontier. Invalid hierarchy or tile-load

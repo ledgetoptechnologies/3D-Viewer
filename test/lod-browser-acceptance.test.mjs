@@ -198,7 +198,7 @@ async function startStreamingOnlyFixture(assetOverrides = {}) {
   return { server, vite, requests, glbPath: config.assets.glb, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function startSessionRefreshFixture(tileRoot) {
+async function startSessionRefreshFixture(tileRoot, { fineTileDelayMs = 0 } = {}) {
   const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
   const requests = [];
   let currentRequests = 0;
@@ -237,8 +237,15 @@ async function startSessionRefreshFixture(tileRoot) {
         reply.end('not found');
         return;
       }
-      reply.writeHead(200, { 'Content-Type': contentType(file), 'Content-Length': statSync(file).size });
-      createReadStream(file).pipe(reply);
+      const sendAsset = () => {
+        reply.writeHead(200, { 'Content-Type': contentType(file), 'Content-Length': statSync(file).size });
+        createReadStream(file).pipe(reply);
+      };
+      if (fineTileDelayMs > 0 && /^leaf-(?:a\.b3dm|b\.glb)$/i.test(relative)) {
+        setTimeout(sendAsset, fineTileDelayMs);
+      } else {
+        sendAsset();
+      }
       return;
     }
     vite.middlewares(request, reply);
@@ -1380,7 +1387,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client, fixture;
   try {
-    fixture = await startSessionRefreshFixture(tileRoot);
+    fixture = await startSessionRefreshFixture(tileRoot, { fineTileDelayMs: 1_500 });
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
@@ -1443,8 +1450,10 @@ test('an open authenticated workspace discovers completed LOD tiles without load
 
     const explicitHighDetail = await client.evaluate(`(() => {
       const slider = document.querySelector('#lod-detail');
-      slider.value = '24';
-      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      for (let detail = 3; detail <= 24; detail += 1) {
+        slider.value = String(detail);
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       return {
         requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
         active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
@@ -1452,7 +1461,44 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       };
     })()`);
     assert.deepEqual(explicitHighDetail, { requested: 24, active: 13, errorTarget: 32 });
+    const transitionDeadline = Date.now() + 10_000;
+    while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
+      || requestPath.endsWith('/leaf-b.glb')) && Date.now() < transitionDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const fallbackSampleDeadline = Date.now() + 1_000;
+    let fallbackSamples = 0;
+    while (Date.now() < fallbackSampleDeadline) {
+      const transitionFallback = await client.evaluate(`(() => {
+        const tiles = window.__ltds.tiles();
+        const root = tiles.root;
+        return {
+          activeDetail: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+          loadAncestors: tiles.loadAncestors,
+          loadSiblings: tiles.loadSiblings,
+          loadAncestorSiblings: tiles.loadAncestorSiblings,
+          rootVisible: root.traversal?.visible,
+          rootAttached: Boolean(root.engineData?.scene && tiles.group.children.includes(root.engineData.scene)),
+        };
+      })()`);
+      assert.deepEqual(transitionFallback, {
+        activeDetail: 13,
+        loadAncestors: true,
+        loadSiblings: false,
+        loadAncestorSiblings: false,
+        rootVisible: true,
+        rootAttached: true,
+      }, 'the coarse REPLACE root must continuously cover the view while delayed fine children load');
+      fallbackSamples += 1;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(fallbackSamples >= 10, `expected continuous fallback samples, received ${fallbackSamples}`);
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 24`, 'explicit high-detail request did not complete its staged warmup');
+    await waitFor(client, `(() => {
+      const tiles = window.__ltds.tiles();
+      return tiles.root?.traversal?.visible === false
+        && tiles.root.children.some((child) => child.traversal?.visible === true);
+    })()`, 'settled fine frontier did not replace the coarse fallback');
     const fineTileDeadline = Date.now() + 10_000;
     while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-b.glb')) && Date.now() < fineTileDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));

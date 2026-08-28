@@ -29,10 +29,13 @@ still satisfies the target because it has no finer child to request. Infinite
 error on a non-terminal or non-zero-error tile remains unsatisfied and continues
 to block warmup advancement.
 
-The persisted and runtime hierarchy remain `REPLACE`. Ancestor and sibling
-preload stay disabled so only the active view branches remain pinned. The
-Viewer does not manually toggle cached scene visibility, tile active/visible
-state, or LRU usage.
+The persisted and runtime hierarchy remain `REPLACE`. Ancestor fallback is
+enabled so a loaded coarse branch remains visible until its selected children
+are content-ready. Explicit sibling preload stays disabled. The exact-pinned
+`3d-tiles-renderer` postinstall patch adds an app-only
+`loadAncestorSiblings = false` switch, preventing ancestor fallback from also
+pinning off-frustum sibling branches. The Viewer does not manually toggle
+cached scene visibility, tile active/visible state, or LRU usage.
 
 The Viewer starts with requested and active Detail 2 (`errorTarget = 512`). It
 does not automatically promote that startup request, so the initial overview
@@ -40,8 +43,9 @@ avoids the default-view LOD-0 fan-out measured in production. Standard SSE
 traversal can still select a fine tile when an incoming camera is unusually
 close to or inside its volume. Raising the slider is the explicit signal to
 request finer tiles for the current view. Desktop requests above Detail 13
-begin at Detail 13 and advance to the requested Detail only after the visible
-frontier meets the active target and all renderer queues settle. Clients
+begin at Detail 13 and advance in bounded three-detail stages
+(`13 → 16 → 19 → 22 → requested`) only after each visible frontier meets its
+active target and all renderer queues settle. Clients
 reporting 4 GiB or less are capped at
 Detail 13 and use a separate 768 MiB cache profile. The desktop cache keeps a
 0.4 GiB minimum and 3 GiB maximum with 24 minimum and 1,024 maximum entries.
@@ -53,14 +57,19 @@ blocking downloads solely on entry count. The 3 GiB desktop ceiling is based on
 a measured 2.784 GiB replacement-transition peak. Moving away allows standard
 renderer traversal and eviction to return to coarser parents.
 
-Three consecutive one-second samples of true cache starvation activate a
-memory-pressure governor. It steps active detail down, records the starved
-detail as a ceiling, and does not raise detail above that ceiling automatically.
-This prevents recover/starve oscillation. Moving the Detail slider explicitly
-clears the ceiling and starts a new user request. While the governor holds
-active detail below the requested detail, status is `memory-limited`; it must
-not claim full detail. Starvation counters and ceilings reset when tiles are
-loaded or disposed and when the user moves the slider.
+One full-cache, idle-queue sample with a selected in-frustum tile still pending
+activates the memory-pressure governor. Because admission is already blocked at
+that point, waiting for repeated samples only prolongs a visible transition.
+The governor restores the last fully settled detail stage, records the failed
+stage as a ceiling, and does not raise detail above that ceiling automatically.
+This prevents recover/starve oscillation and avoids stepping through several
+known-incomplete levels one second at a time. Moving the Detail slider
+explicitly clears the ceiling and starts a new user request. While the governor
+holds active detail below the requested detail, status is `memory-limited`; it
+must not claim full detail. Starvation counters and ceilings reset when tiles
+are loaded or disposed and when the user moves the slider. The last-settled
+frontier resets with the tile lifecycle; a slider increase retains it, while a
+slider decrease bounds it to the new lower active request.
 
 The ground-level failure and these runtime changes are reproduced and verified
 locally, but the live deployment is not considered confirmed until the user

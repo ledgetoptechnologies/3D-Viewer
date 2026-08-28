@@ -145,6 +145,7 @@ let lodRuntimeProfileState = null;
 let lodWarmupComplete = false;
 let lodStarvationSamples = 0;
 let lodStarvedAtDetail = null;
+let lodLastSettledDetail = 2;
 let lodDebugSignature = '';
 let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
@@ -794,6 +795,7 @@ function loadTiles() {
   if (tilesRenderer) return;
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
+  lodLastSettledDetail = 2;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
   tilesRenderer = rendererInstance;
@@ -883,6 +885,7 @@ function loadTiles() {
 function disposeTiles() {
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
+  lodLastSettledDetail = 2;
   if (!tilesRenderer) return;
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
@@ -3167,6 +3170,7 @@ function bindUI() {
     lodStarvedAtDetail = null;
     if (!tilesRenderer || !lodRuntimeProfileState) return;
     const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
+    lodLastSettledDetail = Math.min(lodLastSettledDetail, next.activeDetail);
     lodRuntimeProfileState.requestedDetail = next.requestedDetail;
     lodRuntimeProfileState.activeDetail = next.activeDetail;
     lodWarmupComplete = next.warmupComplete;
@@ -3403,11 +3407,12 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
 }
 
 function maybeAdvanceLodWarmup() {
-  if (!tilesRenderer || !lodRuntimeProfileState || lodWarmupComplete
-    || lodRuntimeProfileState.reduced || lodStarvedAtDetail !== null
-    || !lodDetailRequestPending(lodRuntimeProfileState)) return false;
+  if (!tilesRenderer || !lodRuntimeProfileState
+    || lodRuntimeProfileState.reduced || lodStarvedAtDetail !== null) return false;
   if (!lodQueuesSettled(tilesRenderer)
     || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
+  lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
+  if (!lodDetailRequestPending(lodRuntimeProfileState)) return false;
   const advance = resolveLodWarmupAdvance(lodRuntimeProfileState);
   if (!advance) return false;
   Object.assign(lodRuntimeProfileState, advance);
@@ -3415,8 +3420,8 @@ function maybeAdvanceLodWarmup() {
   tilesRenderer.errorTarget = detailToErrorTarget(targetDetail);
   lodWarmupComplete = advance.warmupComplete;
   state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState };
-  dom.lodStatus.textContent = `LOD: Detail ${targetDetail}`;
-  emitLodDebugSnapshot('warmup-complete', true);
+  dom.lodStatus.textContent = `LOD: warming Detail ${targetDetail} → ${advance.requestedDetail}`;
+  emitLodDebugSnapshot('refinement-stage', true);
   return true;
 }
 
@@ -3484,12 +3489,14 @@ function updateStats() {
     const pressure = advanceLodMemoryPressure(pressureSnapshot, lodRuntimeProfileState, {
       consecutiveSamples: lodStarvationSamples,
       starvedAtDetail: lodStarvedAtDetail,
+      lastSettledDetail: lodLastSettledDetail,
     });
     lodStarvationSamples = pressure.consecutiveSamples;
     lodStarvedAtDetail = pressure.starvedAtDetail;
     if (pressure.changed) {
       lodRuntimeProfileState.activeDetail = pressure.profile.activeDetail;
       tilesRenderer.errorTarget = detailToErrorTarget(pressure.profile.activeDetail);
+      lodWarmupComplete = pressure.profile.activeDetail >= 13;
       state.lodRuntimeProfile = {
         ...state.lodRuntimeProfile,
         ...lodRuntimeProfileState,
