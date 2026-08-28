@@ -23,6 +23,12 @@ Viewer instead streams 3D Tiles to the browser and renders them locally.
 
 The renderer calculates screen-space error every frame. Its configured error
 target decides when a tile refines; there is no fixed camera-distance switch.
+When the camera is inside a tile bounding volume, the renderer may report an
+infinite screen-space error. A visible terminal leaf with `geometricError: 0`
+still satisfies the target because it has no finer child to request. Infinite
+error on a non-terminal or non-zero-error tile remains unsatisfied and continues
+to block warmup advancement.
+
 The persisted and runtime hierarchy remain `REPLACE`. Ancestor and sibling
 preload stay disabled so only the active view branches remain pinned. The
 Viewer does not manually toggle cached scene visibility, tile active/visible
@@ -31,14 +37,30 @@ state, or LRU usage.
 Desktop clients begin high-detail requests at Detail 13 and advance to the
 requested Detail only after the visible frontier meets the active target and
 all renderer queues settle. Clients reporting 4 GiB or less are capped at
-Detail 13 and use a separate 768 MiB cache profile. The default desktop cache
-ceiling is 3 GiB, based on a measured 2.784 GiB replacement-transition peak.
-Moving away allows standard renderer traversal and eviction to return to
-coarser parents.
+Detail 13 and use a separate 768 MiB cache profile. The desktop cache keeps a
+0.4 GiB minimum and 3 GiB maximum with 24 minimum and 1,024 maximum entries.
+The reduced profile keeps 384 MiB minimum and 768 MiB maximum with 24 minimum
+and 512 maximum entries. Both unload 20 percent per eviction pass. The byte
+ceilings are unchanged and remain the actual memory guards; the higher item
+ceilings prevent a visible REPLACE frontier and its retained parents from
+blocking downloads solely on entry count. The 3 GiB desktop ceiling is based on
+a measured 2.784 GiB replacement-transition peak. Moving away allows standard
+renderer traversal and eviction to return to coarser parents.
 
-The post-release live visual issue remains under investigation. See
-[`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for measured
-evidence, superseded approaches, diagnostics, and open hypotheses.
+Three consecutive one-second samples of true cache starvation activate a
+memory-pressure governor. It steps active detail down, records the starved
+detail as a ceiling, and does not raise detail above that ceiling automatically.
+This prevents recover/starve oscillation. Moving the Detail slider explicitly
+clears the ceiling and starts a new user request. While the governor holds
+active detail below the requested detail, status is `memory-limited`; it must
+not claim full detail. Starvation counters and ceilings reset when tiles are
+loaded or disposed and when the user moves the slider.
+
+The ground-level failure and these runtime changes are reproduced and verified
+locally, but the live deployment is not considered confirmed until the user
+verifies it. See [`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md)
+for measured evidence, superseded approaches, diagnostics, and the remaining
+capable-host browser check.
 
 ## Full-quality attestation
 

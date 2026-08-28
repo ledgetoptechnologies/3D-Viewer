@@ -654,7 +654,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(visibleInitialMaterials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.root.materials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.attachedMaterials.every((item) => item.hasMap && item.imageReady), 'attached full-detail B3DM textures were not decoded and bound');
-    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 3 * GiB, minSize: 8, maxSize: 48, unloadPercent: 0.20 });
+    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 3 * GiB, minSize: 24, maxSize: 1024, unloadPercent: 0.20 });
 
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
@@ -954,7 +954,7 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     const lodDiagnostics = await client.evaluate(`window.__ltds.lodDiagnostics()`);
-    assert.ok(['warmup', 'requested-detail', 'reduced-memory'].includes(lodDiagnostics.phase), JSON.stringify(lodDiagnostics));
+    assert.ok(['warmup', 'requested-detail', 'reduced-memory', 'memory-limited'].includes(lodDiagnostics.phase), JSON.stringify(lodDiagnostics));
     assert.ok(Number.isInteger(lodDiagnostics.pendingRequiredLeaves) && lodDiagnostics.pendingRequiredLeaves >= 0, JSON.stringify(lodDiagnostics));
     assert.equal(lodDiagnostics.cache.maxMiB, 3072);
     assert.doesNotMatch(JSON.stringify(lodDiagnostics), /https?:|token|secret|storage|mnt/i);
@@ -1122,7 +1122,21 @@ test('browser hides the coarse root when every visible branch meets the active D
     }
     const sustainedAllLeaves = true;
     assert.equal(await client.evaluate(`window.__ltds.tiles().root.refine`), 'REPLACE');
+    await client.evaluate(`(() => { const slider=document.querySelector('#lod-detail');slider.value='2';slider.dispatchEvent(new Event('input',{bubbles:true}));return true; })()`);
+    await waitFor(client, 'window.__ltds.state.lodRuntimeProfile?.activeDetail===2', 'Detail 2 did not reset the warmup stage');
     await setView(client, [4.964815557187116, 124.12038892967789, 0], [0, 0, 0]);
+    await client.evaluate(`(() => {
+      Object.defineProperty(window.__ltds.tiles().processNodeQueue,'running',{configurable:true,get:()=>true});
+      const slider=document.querySelector('#lod-detail');slider.value='24';slider.dispatchEvent(new Event('input',{bubbles:true}));return true;
+    })()`);
+    const infiniteSse = await waitFor(client, `(() => {
+      const root=window.__ltds.tiles()?.root; let infiniteLeaves=0;
+      const visit=(tile)=>{(tile?.children||[]).forEach(visit);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile?.traversal?.visible===true&&tile?.traversal?.error===Infinity)infiniteLeaves++;};
+      visit(root); const activeDetail=window.__ltds.state.lodRuntimeProfile?.activeDetail;return infiniteLeaves>0&&activeDetail===13 ? {infiniteLeaves,activeDetail} : false;
+    })()`, 'ground camera pose did not enter a zero-error leaf bounding volume', 90_000);
+    assert.ok(infiniteSse.infiniteLeaves > 0, JSON.stringify(infiniteSse));
+    assert.equal(infiniteSse.activeDetail, 13, JSON.stringify(infiniteSse));
+    await client.evaluate(`delete window.__ltds.tiles().processNodeQueue.running`);
     await waitFor(client, `(() => {
       const t=window.__ltds.tiles(); let required=0,attached=0;
       const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile?.traversal?.used===true&&tile?.traversal?.inFrustum===true){required++;if(tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene))attached++;}};

@@ -167,6 +167,30 @@ test('LOD detail stages through a visible warmup and caps reduced-memory clients
   assert.doesNotMatch(main, /releaseStaleLodDetails|transientRootBackdropEnabled|syncTransientRootLodBackdrop/);
 });
 
+test('LOD memory pressure steps down only after sustained starvation and resets on explicit lifecycle boundaries', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const loadBlock = main.slice(main.indexOf('function loadTiles()'), main.indexOf('function disposeTiles()'));
+  const disposeBlock = main.slice(main.indexOf('function disposeTiles()'), main.indexOf('let sessionRenewalTimer'));
+  const sliderStart = main.indexOf("document.getElementById('lod-detail').addEventListener('input'");
+  const sliderBlock = main.slice(sliderStart, main.indexOf("document.querySelectorAll('#panel-measure", sliderStart));
+  const statsBlock = main.slice(main.indexOf('function updateStats()'), main.indexOf('// expose for debugging/verification'));
+
+  assert.match(main, /advanceLodMemoryPressure/);
+  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;/);
+  for (const [label, block] of [['load', loadBlock], ['dispose', disposeBlock], ['slider', sliderBlock]]) {
+    assert.match(block, /lodStarvationSamples = 0;\s*lodStarvedAtDetail = null;/, `${label} must reset memory-pressure state`);
+  }
+  assert.match(statsBlock, /advanceLodMemoryPressure\(pressureSnapshot, lodRuntimeProfileState/);
+  assert.match(statsBlock, /consecutiveSamples: lodStarvationSamples/);
+  assert.match(statsBlock, /starvedAtDetail: lodStarvedAtDetail/);
+  assert.match(statsBlock, /lodStarvationSamples = pressure\.consecutiveSamples/);
+  assert.match(statsBlock, /lodStarvedAtDetail = pressure\.starvedAtDetail/);
+  assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);
+  assert.match(statsBlock, /tilesRenderer\.errorTarget = detailToErrorTarget\(pressure\.profile\.activeDetail\)/);
+  assert.match(statsBlock, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
+  assert.match(main, /lodRuntimeProfileState\.reduced \|\| lodStarvedAtDetail !== null/);
+});
+
 test('LOD console telemetry is deduplicated sanitized and manually callable', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /lodDebugSnapshot/);

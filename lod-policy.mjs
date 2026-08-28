@@ -59,8 +59,8 @@ export function lodCacheBudget(deviceMemoryGiB) {
     return {
       minBytesSize: 384 * 1024 * 1024,
       maxBytesSize: 768 * 1024 * 1024,
-      minSize: 8,
-      maxSize: 24,
+      minSize: 24,
+      maxSize: 512,
       unloadPercent: 0.20,
     };
   }
@@ -68,8 +68,8 @@ export function lodCacheBudget(deviceMemoryGiB) {
   return {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
     maxBytesSize: 3 * 1024 * 1024 * 1024,
-    minSize: 8,
-    maxSize: 48,
+    minSize: 24,
+    maxSize: 1024,
     unloadPercent: 0.20,
   };
 }
@@ -166,6 +166,81 @@ export function lodQueuesSettled(tilesRenderer) {
     && !tilesRenderer?.processNodeQueue?.running;
 }
 
+export function detectLodStarvation(snapshot, consecutiveSamples = 0, threshold = 3) {
+  const previousCount = Number.isInteger(consecutiveSamples) && consecutiveSamples > 0
+    ? consecutiveSamples
+    : 0;
+  const parsedThreshold = Number.parseInt(threshold, 10);
+  const requiredSamples = Number.isFinite(parsedThreshold) && parsedThreshold > 0
+    ? parsedThreshold
+    : 3;
+  const queues = snapshot?.queues;
+  const blocked = snapshot?.cache?.full === true
+    && Number(snapshot?.pendingRequiredLeaves) > 0
+    && queues?.download !== true
+    && queues?.parse !== true
+    && queues?.process !== true;
+  const count = blocked ? previousCount + 1 : 0;
+  return { count, starved: blocked && count >= requiredSamples };
+}
+
+export function resolveLodMemoryPressure(profile, starvedAtDetail = null) {
+  const parsedActiveDetail = Number.parseInt(profile?.activeDetail, 10);
+  if (!Number.isFinite(parsedActiveDetail)) return null;
+  const activeDetail = Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsedActiveDetail));
+
+  // `Number(null)` is zero, so an unset ceiling must be handled before any
+  // numeric conversion. The lowest detail that has failed remains the ceiling
+  // until an explicit user action clears it.
+  const hasCeiling = starvedAtDetail !== null && starvedAtDetail !== undefined;
+  const parsedCeiling = hasCeiling ? Number.parseInt(starvedAtDetail, 10) : null;
+  const ceiling = Number.isFinite(parsedCeiling)
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsedCeiling))
+    : activeDetail;
+  const effectiveCeiling = Math.min(activeDetail, ceiling);
+  const nextActiveDetail = Math.max(MIN_LOD_DETAIL, effectiveCeiling - 1);
+  if (nextActiveDetail >= activeDetail) return null;
+
+  return {
+    ...profile,
+    activeDetail: nextActiveDetail,
+    starvedAtDetail: effectiveCeiling,
+  };
+}
+
+export function advanceLodMemoryPressure(snapshot, profile, {
+  consecutiveSamples = 0,
+  starvedAtDetail = null,
+} = {}) {
+  const starvation = detectLodStarvation(snapshot, consecutiveSamples);
+  if (!starvation.starved) {
+    return {
+      changed: false,
+      profile,
+      consecutiveSamples: starvation.count,
+      starvedAtDetail,
+    };
+  }
+
+  const pressure = resolveLodMemoryPressure(profile, starvedAtDetail);
+  if (!pressure) {
+    return {
+      changed: false,
+      profile,
+      consecutiveSamples: starvation.count,
+      starvedAtDetail,
+    };
+  }
+
+  const { starvedAtDetail: nextCeiling, ...nextProfile } = pressure;
+  return {
+    changed: true,
+    profile: nextProfile,
+    consecutiveSamples: 0,
+    starvedAtDetail: nextCeiling,
+  };
+}
+
 export function visibleLodTargetSatisfied(root, errorTarget) {
   const target = Number(errorTarget);
   if (!root || !Number.isFinite(target)) return false;
@@ -174,12 +249,14 @@ export function visibleLodTargetSatisfied(root, errorTarget) {
   const stack = [root];
   while (stack.length) {
     const tile = stack.pop();
+    const children = Array.isArray(tile?.children) ? tile.children : [];
     if (tile?.traversal?.visible === true) {
       visibleCount += 1;
       const error = Number(tile.traversal.error);
-      if (!Number.isFinite(error) || error > target) satisfied = false;
+      const terminalZeroErrorLeaf = children.length === 0 && tile?.geometricError === 0;
+      if (!terminalZeroErrorLeaf && (!Number.isFinite(error) || error > target)) satisfied = false;
     }
-    if (Array.isArray(tile?.children)) stack.push(...tile.children);
+    stack.push(...children);
   }
   return visibleCount > 0 && satisfied;
 }
@@ -376,8 +453,13 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   visit(root);
 
   const toMiB = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) / (1024 * 1024)) : null;
+  const memoryLimited = runtimeProfile?.starvedAtDetail !== null
+    && runtimeProfile?.starvedAtDetail !== undefined
+    && Number(runtimeProfile?.activeDetail) < Number(runtimeProfile?.requestedDetail);
   return {
-    phase: runtimeProfile?.reduced ? 'reduced-memory' : warmupComplete ? 'requested-detail' : 'warmup',
+    phase: memoryLimited
+      ? 'memory-limited'
+      : runtimeProfile?.reduced ? 'reduced-memory' : warmupComplete ? 'requested-detail' : 'warmup',
     requestedDetail: Number(runtimeProfile?.requestedDetail) || null,
     activeDetail: Number(runtimeProfile?.activeDetail) || null,
     maximumDetail: Number(runtimeProfile?.maximumDetail) || null,

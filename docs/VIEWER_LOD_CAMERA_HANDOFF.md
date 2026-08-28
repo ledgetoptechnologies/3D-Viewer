@@ -1,28 +1,39 @@
-# Viewer LOD and camera investigation handoff
+# Viewer LOD and camera fix handoff
 
 ## Status
 
-**Unresolved as of 2026-08-27.**
+**Root causes reproduced and fixed locally as of 2026-08-27; production remains
+unconfirmed.**
 
-The current release passed repository tests, real local B3DM fixture tests, image
-verification, and independent review. The user subsequently reported that the
-Viewer is still having issues. Earlier repeated reports described the LOD view
-as incomplete, transparent, ghost-like, or otherwise visually off near the
-camera. The exact post-release manifestation has not yet been captured against
-the current production build.
+The released runtime passed its original repository and B3DM fixture gates, but
+the user subsequently reported incomplete, transparent, or dark foreground
+geometry at ground-level and oblique camera poses. A real Chromium reproduction
+then showed the LOD phase stuck at `warmup`, with active Detail 13 of a requested
+24, while distant tiles continued to load.
 
-Treat the user's live report as authoritative. Do not conclude that the issue
-is fixed merely because the fixture tests below passed.
+Two independent blockers were reproduced. First, a camera inside a terminal
+leaf's bounding volume produces distance zero and infinite screen-space error;
+the warmup gate incorrectly treated that zero-error leaf as refinable and
+unsatisfied forever. Second, the renderer's LRU fullness check includes entry
+count as well as decoded bytes. The old 48-entry desktop limit and 24-entry
+reduced limit could fill with visible tiles and retained `REPLACE` parents, so
+new downloads were refused even while the byte budget still had room.
 
-This document is a handoff for a fresh investigation. It records the current
-implementation, evidence, rejected approaches, and open questions. It does not
-claim a root cause for the remaining live issue.
+The fix makes a visible terminal zero-error leaf satisfy warmup even at infinite
+screen-space error, raises item-count headroom without changing byte ceilings,
+and adds a non-oscillating memory-pressure governor. These changes have targeted
+policy/runtime tests and real-browser reproductions. One long-running browser
+acceptance case still needs a capable-host run before merge because it times out
+identically on the changed and unchanged trees with the current Linux host's
+snap Chromium. Treat the user's live report as authoritative: local evidence is
+not a production confirmation, and the issue must not be called resolved in
+the deployed Viewer until the user verifies it.
 
-## Runtime baseline under investigation
+## Released runtime baseline
 
-The behavior described here was introduced by the following runtime commit.
+The pre-fix released behavior was introduced by the following runtime commit.
 Documentation-only descendants may carry a later source revision and mutable
-`latest` digest without changing the Viewer runtime behavior.
+`latest` digest without changing that Viewer runtime behavior.
 
 - Source commit: `2d88c70511b01d63bb17e8841c066fb5cb6c6ca7`
 - Commit subject: `[verified] Fix camera markers and LOD streaming`
@@ -38,10 +49,13 @@ Documentation-only descendants may carry a later source revision and mutable
 - Potree runtime: `1.8.2`
 - Obj2Tiles runtime: `1.6.2`
 
-Before debugging rendering, verify the live browser is actually using this
-revision. The Viewer reads `x-ltds-viewer-revision` from `/api/v1/health` and
-stores it in `VIEWER_BUILD_REVISION`. A stale deployment, stale container, or
-cached frontend must be ruled out first.
+The fix is based on documentation commit
+`718d7c486b18df1bd2f5a025f02312256de99aaf`, whose runtime is unchanged from
+`2d88c70511b01d63bb17e8841c066fb5cb6c6ca7`. Before production verification,
+confirm the browser receives a revision containing the fix. The Viewer reads
+`x-ltds-viewer-revision` from `/api/v1/health` and stores it in
+`VIEWER_BUILD_REVISION`. A stale deployment, stale container, or cached frontend
+must still be ruled out.
 
 ## Relevant source map
 
@@ -52,11 +66,14 @@ cached frontend must be ruled out first.
   - desktop and low-memory cache profiles
   - queue priority
   - Detail 13 warmup policy
+  - terminal zero-error leaf convergence at infinite screen-space error
+  - sustained-starvation detection and memory-pressure resolution
   - slider transition policy
   - safe aggregate diagnostics
 - `main.js`
   - `loadTiles()` renderer setup and event wiring
   - `maybeAdvanceLodWarmup()` runtime transition
+  - one-hertz memory-pressure governor
   - Detail slider event handling
   - render loop
   - `[LTDS LOD]` console telemetry
@@ -132,6 +149,12 @@ the requested Detail only when:
 3. the parse queue is settled; and
 4. the process-node queue is settled.
 
+When the camera is inside a leaf bounding volume, `3d-tiles-renderer` can report
+distance zero and infinite screen-space error. A visible terminal tile with
+`geometricError: 0` now satisfies the first condition because it cannot refine
+further. Infinite error still blocks advancement for a non-terminal or
+non-zero-error tile.
+
 Lowering Detail below 13 clears warmup completion. A later increase must stage
 through Detail 13 again. This prevents the `24 -> 2 -> 24` slider sequence from
 bypassing the warmup.
@@ -142,8 +165,8 @@ Desktop/default profile:
 
 - minimum warm bytes: `0.4 GiB`
 - maximum decoded bytes: `3 GiB`
-- minimum entries: 8
-- maximum entries: 48
+- minimum entries: 24
+- maximum entries: 1,024
 - unload percentage: 20 percent
 
 Clients reporting `navigator.deviceMemory <= 4`:
@@ -151,12 +174,33 @@ Clients reporting `navigator.deviceMemory <= 4`:
 - maximum Detail: 13
 - minimum warm bytes: `384 MiB`
 - maximum decoded bytes: `768 MiB`
-- minimum entries: 8
-- maximum entries: 24
+- minimum entries: 24
+- maximum entries: 512
 - unload percentage: 20 percent
 
 The reduced profile is deliberately honest. It does not claim that Detail 24
 will eventually load inside a cache too small for the measured frontier.
+The decoded-byte limits are unchanged and remain the actual memory guards. The
+higher item ceilings prevent the renderer's count-based `isFull()` condition
+from refusing downloads merely because the visible frontier and retained
+`REPLACE` parents contain more than the old entry limits.
+
+### Sustained memory pressure
+
+The runtime samples aggregate LOD state once per second. Three consecutive
+samples are classified as true starvation only when the cache is full, required
+visible leaves are still pending, and renderer work queues cannot make progress.
+The governor then steps active detail down and records the detail at which
+starvation occurred as a ceiling.
+
+That ceiling prevents automatic recover/starve oscillation: later recovery may
+continue at or below the ceiling, but it cannot silently restore a detail level
+already shown to starve. `starvedAtDetail` is nullable and must be checked
+explicitly rather than passed through `Number()`. Moving the Detail slider is an
+explicit new request and clears the ceiling. Starvation counters and ceilings
+also reset during tile disposal and loading. Whenever the governor holds active
+detail below the user's request, the status bar reports `memory-limited` instead
+of `full-detail`.
 
 ## Current camera behavior
 
@@ -285,6 +329,36 @@ Outcome:
 - therefore the current release remains an investigation baseline, not a
   confirmed live fix.
 
+### Current ground-warmup and starvation fix
+
+The new real-browser reproductions established both causes rather than inferring
+them from screenshots:
+
+1. At a ground-level camera pose inside a terminal leaf bounding volume,
+   `3d-tiles-renderer` reported distance zero and infinite screen-space error.
+   `visibleLodTargetSatisfied()` rejected every non-finite error, so the visible
+   zero-error leaf held desktop warmup at Detail 13 of 24 forever.
+2. The live model used 38 to 46 visible entries before retained `REPLACE`
+   parents were counted. `lruCache.isFull()` therefore tripped the 48-item
+   desktop cap or 24-item reduced cap independently of decoded bytes, and used
+   tiles could not be evicted to admit the pending downloads.
+
+The fix:
+
+- treats only a visible terminal `geometricError: 0` tile as satisfied at
+  infinite screen-space error; coarse or refinable infinite-error tiles still
+  block;
+- raises item-count capacity to 1,024 desktop and 512 reduced, with a minimum of
+  24 for both profiles, while preserving the existing decoded-byte limits and
+  20-percent eviction setting;
+- detects sustained cache starvation at one hertz and steps active detail down;
+- records `starvedAtDetail` as a ceiling so automatic recovery cannot oscillate
+  back into the same starving request;
+- clears that ceiling only for an explicit Detail-slider request or tile
+  lifecycle reset; and
+- reports `memory-limited` whenever the ceiling holds active detail below the
+  request.
+
 ## Measurements and test evidence
 
 The real local test fixture contains 33 B3DM tiles.
@@ -299,7 +373,7 @@ The 1.75 GiB cache reproducibly became full and prevented three required leaves
 from entering the download queue. The 2.75 GiB and 3 GiB profiles could complete
 the measured fixture frontier.
 
-The final sustained test pose is encoded in
+The released baseline's sustained test pose is encoded in
 `test/lod-browser-acceptance.test.mjs`. The final real fixture regression:
 
 - loaded all required foreground branches;
@@ -310,7 +384,7 @@ The final sustained test pose is encoded in
 
 That test completed successfully in about 490 seconds.
 
-Final release evidence:
+Released baseline evidence:
 
 - Node 24 suite: 459 passed, 0 failed, 0 cancelled, 9 expected skips
 - real camera/diagnostics browser test: passed
@@ -323,12 +397,36 @@ Final release evidence:
 - Potree 1.8.2 EPT/COPC patch verified
 - immutable image and release attestation verified
 
+Current fix evidence:
+
+- before the warmup fix, the ground-camera Chromium reproduction remained at
+  Detail 13 of 24 with dark or transparent near-field geometry;
+- after the fix, the same pose reached Detail 24 of 24 with all 16 zero-error
+  leaves attached;
+- forced byte-cap and item-cap reproductions now make the governor step detail
+  down and report the result honestly instead of wedging or oscillating;
+- the final targeted policy, runtime-wiring, and material suites passed 37 of
+  37 tests; and
+- the post-final-change Node 24 build and complete suite executed 484 tests:
+  478 passed, none failed or were cancelled, and 6 environment-dependent tests
+  skipped on Windows. The skipped set includes the three real-tile LOD cases
+  because this worktree does not have the verified tile fixture.
+
+The long-running acceptance test named `hides the coarse root after complete
+top-down foreground coverage` still needs one run on a capable host. On the
+current Linux host, snap Chromium stalls in a CDP `Runtime.evaluate` call and
+the test times out after roughly 135 seconds. The unchanged baseline fails in
+the same way, while the case historically completed on the Windows host in
+about 490 seconds. Do not classify the Linux result as a regression, but do not
+waive the capable-host check before merge.
+
 ### Limits of that evidence
 
-The browser tests use a local verified fixture and local HTTP transport. They do
-not reproduce every production model, proxy path, GPU, browser, viewport,
-network condition, decoded texture footprint, or cache history. A passing local
-fixture cannot disprove a live failure on a different hierarchy or client.
+The browser reproductions use a local verified fixture and local HTTP transport.
+They establish the warmup and item-count failures and exercise the governor, but
+do not reproduce every production model, proxy path, GPU, browser, viewport,
+network condition, decoded texture footprint, or cache history. Passing local
+fixtures cannot confirm a live deployment on a different hierarchy or client.
 
 The final release test also proves eventual convergence, not necessarily that
 every intermediate frame looks acceptable to a user. A branch can legally show
@@ -351,9 +449,10 @@ Do not restore these without new, direct evidence:
    - It bypasses renderer lifecycle assumptions and previously created hard to
      reason about revisit behavior.
 
-4. **Another cache increase without measuring the live model**
-   - Cache capacity was one proven defect, but the user still reported trouble
-     after the measured increase.
+4. **Another decoded-byte increase without measuring the live model**
+   - The current item-cap increase addresses a separately reproduced count
+     failure and leaves the measured byte ceilings unchanged. Do not increase
+     decoded-byte limits again without new working-set evidence.
 
 5. **Copying WebODM's camera asset**
    - WebODM is AGPL-3.0 and the Viewer uses an independently drawn marker.
@@ -381,7 +480,7 @@ window.__ltds.lodDiagnostics()
 
 The snapshot contains only aggregate state:
 
-- phase: `warmup`, `requested-detail`, or `reduced-memory`
+- phase: `warmup`, `requested-detail`, `reduced-memory`, or `memory-limited`
 - requested, active, and maximum Detail
 - active error target
 - visible root, LOD-1, LOD-0, and other counts
@@ -399,8 +498,8 @@ At the moment the defect appears, collect:
 2. one `lodDiagnostics()` snapshot immediately;
 3. another snapshot 15 to 30 seconds later without moving the camera;
 4. the selected Detail value;
-5. whether the status remains `warming`, `streaming`, `full-detail`, or
-   `reduced-memory`;
+5. whether the status remains `warming`, `streaming`, `full-detail`,
+   `reduced-memory`, or `memory-limited`;
 6. browser name/version, viewport, device pixel ratio, and reported
    `navigator.deviceMemory`; and
 7. the current Viewer revision from the health response.
@@ -408,55 +507,30 @@ At the moment the defect appears, collect:
 Do not paste capability URLs, session URLs, cookies, authorization headers, or
 asset request URLs into documentation or agent prompts.
 
-## Fresh-investigation order
+## Remaining verification order
 
-A fresh agent should avoid assuming the previous diagnosis is still correct.
-Use this order:
+The local diagnosis is complete. Finish verification without reopening rejected
+renderer-state approaches:
 
-1. **Verify deployment revision**
-   - Confirm the browser receives revision
-     `2d88c70511b01d63bb17e8841c066fb5cb6c6ca7` or a later intended commit.
-   - Rule out a stale container or cached frontend.
+1. Review the complete fix diff against `718d7c4`, including tests and these
+   documentation updates.
+2. Run the targeted policy, runtime-wiring, and material tests.
+3. Run the complete suite under Node 24 after the final non-oscillation and
+   status-label changes; reconcile environment-dependent skips with the host.
+4. Run `hides the coarse root after complete top-down foreground coverage` once
+   on a capable host, without running the full suite concurrently.
+5. Optionally rerun the ground-camera and forced-starvation Chromium harnesses
+   from their temporary directory. Do not commit harness files, screenshots, or
+   other temporary artifacts.
+6. After merge and deployment, verify the health revision, repeat the affected
+   ground/oblique view, and obtain user confirmation before calling the live
+   issue resolved.
 
-2. **Capture the exact live symptom**
-   - Determine whether the defect is missing geometry, coarse/fine overlap,
-     transparent materials, texture delay, clipping, black surfaces, or slow
-     but eventually correct replacement.
+## Remaining production risks
 
-3. **Capture aggregate runtime state twice**
-   - Compare required versus attached leaves, queue state, cache fullness, and
-     active versus requested Detail.
-
-4. **Inspect the live hierarchy, not only the 33-tile fixture**
-   - Count root, intermediate, and zero-error leaves.
-   - Measure decoded bytes for the actual visible replacement frontier.
-   - Check bounding volumes, transforms, inherited refinement, and external
-     tilesets.
-
-5. **Separate renderer traversal from material defects**
-   - If geometry is attached but looks transparent, inspect material opacity,
-     alpha map, alpha test, depth write, side, and texture decode state.
-   - `preserveLodMaterials()` intentionally retains source transparency and
-     alpha behavior. A source material issue can resemble missing LOD.
-
-6. **Check main-thread parse behavior**
-   - Very large B3DM/GLB leaves can block input and renderer updates while
-     parsing. Queue state can look settled between long tasks.
-   - If this is the cause, a deeper conversion hierarchy or smaller leaves may
-     be more effective than runtime policy changes.
-
-7. **Check production transport**
-   - Look for failed, cancelled, delayed, or incorrectly cached tile and
-     embedded texture requests.
-   - Compare localhost behavior with the production proxy path.
-
-8. **Change one hypothesis at a time**
-   - Add a failing real-browser regression before changing runtime behavior.
-   - Re-run close, far, pan, return, and low-memory cases.
-
-## Open hypotheses
-
-These are investigation candidates, not established causes:
+The reproduced root causes are established locally. If the corrected build
+still differs in production, investigate these separately rather than undoing
+the fixes:
 
 - the live model's decoded replacement frontier exceeds the measured fixture;
 - production leaves are too large, causing long main-thread parse stalls;
@@ -466,7 +540,7 @@ These are investigation candidates, not established causes:
 - actual GPU texture memory exceeds the renderer's decoded-byte accounting;
 - a proxy/cache/network problem delays or fails child content or embedded
   textures;
-- the live deployment is not running the expected image digest;
+- the live deployment is not running the intended fixed image digest;
 - current branch-level parent-to-leaf replacement is correct but visually too
   slow, requiring a deeper tiling hierarchy rather than another renderer hack.
 
@@ -487,6 +561,12 @@ These are investigation candidates, not established causes:
 
 ## Verification commands
 
+Targeted policy/runtime suites:
+
+```bash
+node --test test/lod-policy.test.mjs test/viewer-runtime-wiring.test.js test/lod-materials.test.mjs
+```
+
 Full repository suite with the CI Node version:
 
 ```bash
@@ -502,14 +582,20 @@ npx -y -p node@24 -c \
   'node --test --test-concurrency=1 test/lod-browser-acceptance.test.mjs'
 ```
 
-Focused all-branch replacement regression:
+Focused top-down foreground-coverage regression:
 
 ```bash
 CHROME_PATH=/path/to/chrome \
 LTDS_LOD_TEST_TILE_ROOT=/path/to/verified/3d-tiles \
 npx -y -p node@24 -c \
-  'node --test --test-concurrency=1 --test-name-pattern="hides the coarse root when every visible branch" test/lod-browser-acceptance.test.mjs'
+  'node --test --test-concurrency=1 --test-name-pattern="hides the coarse root after complete top-down foreground coverage" test/lod-browser-acceptance.test.mjs'
 ```
+
+Run this browser case on the capable Windows host before merge. Do not run it
+concurrently with the full suite: both are memory-intensive and contention can
+produce false CDP timeouts. The known snap-Chromium timeout on the current Linux
+host occurs unchanged on the baseline and is not sufficient to pass or fail the
+fix.
 
 Dependency audit:
 
@@ -517,17 +603,25 @@ Dependency audit:
 npm audit --omit=dev --audit-level=high
 ```
 
-## Acceptance criteria for the next proposed fix
+## Acceptance criteria for this fix
 
-A fresh fix is not complete until:
+The fix is not complete until:
 
-- the exact current live symptom has a reproducible capture;
-- a regression fails before the code change and passes afterward;
+- the ground-level warmup stall is reproduced before the code change and clears
+  afterward;
+- zero-error terminal leaves satisfy warmup at infinite screen-space error while
+  coarse infinite-error tiles still block;
+- item caps and byte budgets match the documented desktop and reduced profiles;
+- forced starvation steps detail down, remains below its starvation ceiling
+  without oscillation, reports `memory-limited`, and resets only on the defined
+  lifecycle or manual-slider paths;
 - root and refined descendants do not improperly overlap;
 - the visible requested frontier eventually settles;
 - close, far, pan, and return behavior is verified;
 - reduced-memory behavior remains honest and stable;
 - Model and Point Cloud camera behavior remains intact;
-- the full Node 24 suite and image checks pass;
+- targeted tests and the post-final-change Node 24 suite pass;
+- the top-down foreground-coverage regression passes on a capable host;
+- image checks pass;
 - an independent reviewer approves the diff; and
 - the user confirms the live Viewer is corrected.

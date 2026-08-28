@@ -606,12 +606,21 @@ WGS84 UTM 16N
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to `tilesRenderer.errorTarget` from 512
   down to 2. Desktop high-detail requests warm at Detail 13 before advancing;
-  clients reporting 4 GiB or less are capped at Detail 13. The status bar says
-  `LOD: full-detail` only when every visible tile is on the declared zero-error
-  frontier. Invalid hierarchy or tile-load failures remain unavailable until a
-  verified streaming derivative exists; original GLB/OBJ files are download-only
-  and are never decoded automatically in the browser. Resize/orientation changes
-  also refresh the render resolution used by the screen-space-error calculation.
+  a visible terminal zero-error leaf satisfies that warmup target even when the
+  camera is inside its bounding volume and the renderer reports infinite
+  screen-space error. A non-terminal or non-zero-error tile at infinite error
+  still blocks advancement. Clients reporting 4 GiB or less are capped at
+  Detail 13. Desktop and reduced-memory caches allow up to 1,024 and 512 entries
+  respectively, while their 3 GiB and 768 MiB decoded-byte limits remain the
+  actual memory guards. Sustained cache pressure steps active detail down and
+  establishes a non-oscillating ceiling until the user moves the Detail slider;
+  the status bar reports `LOD: memory-limited` while that ceiling holds the
+  active request back. It says `LOD: full-detail` only when every visible tile
+  is on the declared zero-error frontier. Invalid hierarchy or tile-load
+  failures remain unavailable until a verified streaming derivative exists;
+  original GLB/OBJ files are download-only and are never decoded automatically
+  in the browser. Resize/orientation changes also refresh the render resolution
+  used by the screen-space-error calculation.
 
   Zero geometric error verifies renderer convergence, not conversion provenance:
   the tiles match the full mesh only if the derivative pipeline generated every
@@ -662,8 +671,9 @@ WGS84 UTM 16N
   [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
   for the intentionally fail-closed supported subset and why a tiler that clips
   or retriangulates partition boundaries cannot receive an exact v2 proof. The
-  current unresolved runtime investigation, measured working sets, attempted
-  fixes, and safe diagnostic procedure are recorded in
+  locally reproduced runtime diagnosis, measured working sets, fix
+  verification, remaining capable-host browser check, and safe diagnostic
+  procedure are recorded in
   [docs/VIEWER_LOD_CAMERA_HANDOFF.md](docs/VIEWER_LOD_CAMERA_HANDOFF.md).
 - **Camera positions**: three synchronized instanced meshes form an independently
   drawn orange, white, and yellow camera/frustum. Markers use fixed world-space

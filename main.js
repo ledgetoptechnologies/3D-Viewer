@@ -9,6 +9,7 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
 import { TilesRenderer } from '3d-tiles-renderer';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import {
+  advanceLodMemoryPressure,
   configureLodRenderer,
   decideLodStartup,
   detailToErrorTarget,
@@ -141,6 +142,8 @@ let lodFailureHandled = false;
 let tilesRenderer = null;
 let lodRuntimeProfileState = null;
 let lodWarmupComplete = false;
+let lodStarvationSamples = 0;
+let lodStarvedAtDetail = null;
 let lodDebugSignature = '';
 let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
@@ -788,6 +791,8 @@ function drainBVH() {
 // ───────────────────────────────────────────────────────────────
 function loadTiles() {
   if (tilesRenderer) return;
+  lodStarvationSamples = 0;
+  lodStarvedAtDetail = null;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
   tilesRenderer = rendererInstance;
@@ -800,7 +805,7 @@ function loadTiles() {
     detail: detailSlider?.value,
     deviceMemoryGiB,
   });
-  state.lodRuntimeProfile = { ...lodRuntimeProfileState, deviceMemoryGiB };
+  state.lodRuntimeProfile = { ...lodRuntimeProfileState, deviceMemoryGiB, starvedAtDetail: null };
   lodWarmupComplete = lodRuntimeProfileState.reduced;
   state.lodRootBackdrop = null;
   if (lodRuntimeProfileState.reduced) {
@@ -873,6 +878,8 @@ function loadTiles() {
 // Free ~2.5GB of decoded tile textures/geometry. Needed before the 898MB GLB
 // Draco decode: cache + decode together OOM'd the renderer (heap hit 2.7GB).
 function disposeTiles() {
+  lodStarvationSamples = 0;
+  lodStarvedAtDetail = null;
   if (!tilesRenderer) return;
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
@@ -3153,13 +3160,15 @@ function bindUI() {
 
   // LOD detail slider
   document.getElementById('lod-detail').addEventListener('input', (e) => {
+    lodStarvationSamples = 0;
+    lodStarvedAtDetail = null;
     if (!tilesRenderer || !lodRuntimeProfileState) return;
     const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
     lodRuntimeProfileState.requestedDetail = next.requestedDetail;
     lodRuntimeProfileState.activeDetail = next.activeDetail;
     lodWarmupComplete = next.warmupComplete;
     tilesRenderer.errorTarget = detailToErrorTarget(next.activeDetail);
-    state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState };
+    state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState, starvedAtDetail: null };
     dom.lodStatus.textContent = lodRuntimeProfileState.reduced
       ? `LOD: reduced-memory (Detail ${next.activeDetail}; ${lodRuntimeProfileState.maximumDetail} max)`
       : lodWarmupComplete ? `LOD: Detail ${next.activeDetail}` : `LOD: warming (Detail 13 → ${next.requestedDetail})`;
@@ -3378,7 +3387,10 @@ function toggleFullscreen() {
 // ───────────────────────────────────────────────────────────────
 let statTimer = 0;
 function emitLodDebugSnapshot(reason = 'status', force = false) {
-  const snapshot = lodDebugSnapshot(tilesRenderer, lodRuntimeProfileState, lodWarmupComplete);
+  const runtimeProfile = lodRuntimeProfileState
+    ? { ...lodRuntimeProfileState, starvedAtDetail: lodStarvedAtDetail }
+    : null;
+  const snapshot = lodDebugSnapshot(tilesRenderer, runtimeProfile, lodWarmupComplete);
   const signature = JSON.stringify(snapshot);
   if (!force && signature === lodDebugSignature) return snapshot;
   lodDebugSignature = signature;
@@ -3387,7 +3399,8 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
 }
 
 function maybeAdvanceLodWarmup() {
-  if (!tilesRenderer || !lodRuntimeProfileState || lodWarmupComplete || lodRuntimeProfileState.reduced) return false;
+  if (!tilesRenderer || !lodRuntimeProfileState || lodWarmupComplete
+    || lodRuntimeProfileState.reduced || lodStarvedAtDetail !== null) return false;
   if (!lodQueuesSettled(tilesRenderer)
     || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
   const advance = resolveLodWarmupAdvance(lodRuntimeProfileState);
@@ -3459,7 +3472,31 @@ function updateStats() {
     const frontier = visibleLodFrontier(tilesRenderer.root);
     const vis = frontier.visibleCount || (tilesRenderer.stats ? tilesRenderer.stats.visible : 0);
     const queuesSettled = lodQueuesSettled(tilesRenderer);
-    const quality = lodRuntimeProfileState?.reduced
+    const pressureSnapshot = lodDebugSnapshot(tilesRenderer, {
+      ...lodRuntimeProfileState,
+      starvedAtDetail: lodStarvedAtDetail,
+    }, lodWarmupComplete);
+    const pressure = advanceLodMemoryPressure(pressureSnapshot, lodRuntimeProfileState, {
+      consecutiveSamples: lodStarvationSamples,
+      starvedAtDetail: lodStarvedAtDetail,
+    });
+    lodStarvationSamples = pressure.consecutiveSamples;
+    lodStarvedAtDetail = pressure.starvedAtDetail;
+    if (pressure.changed) {
+      lodRuntimeProfileState.activeDetail = pressure.profile.activeDetail;
+      tilesRenderer.errorTarget = detailToErrorTarget(pressure.profile.activeDetail);
+      state.lodRuntimeProfile = {
+        ...state.lodRuntimeProfile,
+        ...lodRuntimeProfileState,
+        starvedAtDetail: lodStarvedAtDetail,
+      };
+      emitLodDebugSnapshot('memory-pressure', true);
+    }
+    const memoryLimited = lodStarvedAtDetail !== null
+      && lodRuntimeProfileState?.activeDetail < lodRuntimeProfileState?.requestedDetail;
+    const quality = memoryLimited
+      ? `memory-limited Detail ${lodRuntimeProfileState.activeDetail}`
+      : lodRuntimeProfileState?.reduced
       ? `reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`
       : !lodWarmupComplete
         ? `warming Detail ${lodRuntimeProfileState?.activeDetail ?? 13}`
