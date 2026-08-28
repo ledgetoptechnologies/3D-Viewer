@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { TilesRenderer } from '3d-tiles-renderer';
 import {
+  advanceLodMemoryPressure,
   configureLodRenderer,
   decideLodStartup,
+  detectLodStarvation,
   detailToErrorTarget,
   inspectLodProvenance,
   inspectLodTileset,
@@ -15,6 +17,7 @@ import {
   lodWarmupSatisfiedByDetail,
   refreshLodResolution,
   resolveLodDetailRequest,
+  resolveLodMemoryPressure,
   resolveLodWarmupAdvance,
   screenSpaceErrorPriority,
   visibleLodFrontier,
@@ -57,8 +60,8 @@ test('renderer configuration uses REPLACE transitions without ancestor or siblin
     budget: {
       minBytesSize: 384 * 1024 * 1024,
       maxBytesSize: 768 * 1024 * 1024,
-      minSize: 8,
-      maxSize: 24,
+      minSize: 24,
+      maxSize: 512,
       unloadPercent: 0.20,
     },
     requestedDetail: 24,
@@ -77,8 +80,8 @@ test('renderer configuration uses REPLACE transitions without ancestor or siblin
   assert.deepEqual(lodCacheBudget(8), {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
     maxBytesSize: 3 * 1024 * 1024 * 1024,
-    minSize: 8,
-    maxSize: 48,
+    minSize: 24,
+    maxSize: 1024,
     unloadPercent: 0.20,
   });
 
@@ -99,7 +102,7 @@ test('full-detail queue settlement includes lazy hierarchy preprocessing', () =>
 });
 
 test('LOD warmup advances only after the visible REPLACE frontier satisfies its target', () => {
-  const root = { traversal: { visible: true, error: 140 }, children: [] };
+  const root = { geometricError: 64, traversal: { visible: true, error: 140 }, children: [] };
   assert.equal(visibleLodTargetSatisfied(root, 32), false);
   root.traversal.visible = false;
   root.children = [
@@ -112,6 +115,168 @@ test('LOD warmup advances only after the visible REPLACE frontier satisfies its 
   root.children[1].traversal.visible = false;
   assert.equal(visibleLodTargetSatisfied(root, 32), true, 'only the rendered frontier gates warmup');
   assert.equal(visibleLodTargetSatisfied(null, 32), false);
+});
+
+test('zero-error terminal leaves satisfy warmup at infinite SSE while refinable tiles do not', () => {
+  const zeroErrorLeaf = {
+    geometricError: 0,
+    traversal: { visible: true, error: Infinity },
+    children: [],
+  };
+  assert.equal(visibleLodTargetSatisfied(zeroErrorLeaf, 32), true);
+
+  const coarseLeaf = {
+    geometricError: 8,
+    traversal: { visible: true, error: Infinity },
+    children: [],
+  };
+  assert.equal(visibleLodTargetSatisfied(coarseLeaf, 32), false);
+  assert.equal(visibleLodTargetSatisfied({
+    traversal: { visible: true, error: Infinity }, children: [],
+  }, 32), false, 'a missing geometric error must not be coerced into a zero-error leaf');
+  assert.equal(visibleLodTargetSatisfied({
+    geometricError: '0', traversal: { visible: true, error: Infinity }, children: [],
+  }, 32), false, 'only a numeric zero-error leaf is terminal full detail');
+
+  const zeroErrorParent = {
+    geometricError: 0,
+    traversal: { visible: true, error: Infinity },
+    children: [{
+      geometricError: 0,
+      traversal: { visible: false, error: 0 },
+      children: [],
+    }],
+  };
+  assert.equal(
+    visibleLodTargetSatisfied(zeroErrorParent, 32),
+    false,
+    'a visible internal tile at infinite SSE can still refine and must block warmup',
+  );
+
+  zeroErrorLeaf.traversal.error = 100;
+  assert.equal(
+    visibleLodTargetSatisfied(zeroErrorLeaf, 32),
+    true,
+    'terminal zero-error content always represents a satisfied frontier',
+  );
+});
+
+test('LOD starvation requires three consecutive full-cache idle samples with pending leaves', () => {
+  const snapshot = {
+    pendingRequiredLeaves: 2,
+    queues: { download: false, parse: false, process: false },
+    cache: { full: true },
+  };
+  assert.deepEqual(detectLodStarvation(snapshot), { count: 1, starved: false });
+  assert.deepEqual(detectLodStarvation(snapshot, 1), { count: 2, starved: false });
+  assert.deepEqual(detectLodStarvation(snapshot, 2), { count: 3, starved: true });
+  assert.deepEqual(detectLodStarvation(snapshot, 9), { count: 10, starved: true });
+
+  assert.deepEqual(detectLodStarvation({ ...snapshot, cache: { full: false } }, 2), {
+    count: 0, starved: false,
+  });
+  assert.deepEqual(detectLodStarvation({ ...snapshot, pendingRequiredLeaves: 0 }, 2), {
+    count: 0, starved: false,
+  });
+  for (const queue of ['download', 'parse', 'process']) {
+    assert.deepEqual(detectLodStarvation({
+      ...snapshot,
+      queues: { ...snapshot.queues, [queue]: true },
+    }, 2), { count: 0, starved: false });
+  }
+  assert.deepEqual(detectLodStarvation(snapshot, 0, 1), { count: 1, starved: true });
+});
+
+test('memory pressure steps down without changing the request and remembers the lowest failure', () => {
+  const profile = {
+    requestedDetail: 24,
+    activeDetail: 24,
+    maximumDetail: 24,
+    reduced: false,
+  };
+  assert.deepEqual(resolveLodMemoryPressure(profile), {
+    ...profile,
+    activeDetail: 23,
+    starvedAtDetail: 24,
+  });
+  assert.deepEqual(profile, {
+    requestedDetail: 24,
+    activeDetail: 24,
+    maximumDetail: 24,
+    reduced: false,
+  }, 'the pure helper must not mutate its input');
+
+  assert.deepEqual(resolveLodMemoryPressure({ ...profile, activeDetail: 23 }, 24), {
+    ...profile,
+    activeDetail: 22,
+    starvedAtDetail: 23,
+  });
+  assert.deepEqual(resolveLodMemoryPressure(profile, 20), {
+    ...profile,
+    activeDetail: 19,
+    starvedAtDetail: 20,
+  }, 'a recovered detail cannot rise back through the lowest known failing ceiling');
+});
+
+test('memory-pressure ceiling treats null as unset and stops honestly at the detail floor', () => {
+  const profile = { requestedDetail: 24, activeDetail: 13, maximumDetail: 24, reduced: false };
+  assert.deepEqual(resolveLodMemoryPressure(profile, null), {
+    ...profile,
+    activeDetail: 12,
+    starvedAtDetail: 13,
+  });
+  assert.deepEqual(resolveLodMemoryPressure(profile, undefined), {
+    ...profile,
+    activeDetail: 12,
+    starvedAtDetail: 13,
+  });
+  assert.deepEqual(resolveLodMemoryPressure({ ...profile, activeDetail: 3 }, null), {
+    ...profile,
+    activeDetail: 2,
+    starvedAtDetail: 3,
+  });
+  assert.equal(resolveLodMemoryPressure({ ...profile, activeDetail: 2 }, null), null);
+  assert.equal(resolveLodMemoryPressure({ ...profile, activeDetail: 2 }, 2), null);
+  assert.equal(resolveLodMemoryPressure({ ...profile, activeDetail: 'invalid' }, null), null);
+});
+
+test('memory-pressure coordinator requires fresh sustained samples and never recovers automatically', () => {
+  const blocked = {
+    pendingRequiredLeaves: 2,
+    queues: { download: false, parse: false, process: false },
+    cache: { full: true },
+  };
+  let profile = { requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false };
+  let state = { consecutiveSamples: 0, starvedAtDetail: null };
+
+  for (let index = 0; index < 2; index += 1) {
+    const result = advanceLodMemoryPressure(blocked, profile, state);
+    assert.equal(result.changed, false);
+    assert.equal(result.profile.activeDetail, 24);
+    state = result;
+  }
+  let result = advanceLodMemoryPressure(blocked, profile, state);
+  assert.equal(result.changed, true);
+  assert.equal(result.profile.activeDetail, 23);
+  assert.equal(result.starvedAtDetail, 24);
+  assert.equal(result.consecutiveSamples, 0);
+
+  profile = result.profile;
+  state = result;
+  result = advanceLodMemoryPressure({ ...blocked, cache: { full: false } }, profile, state);
+  assert.equal(result.changed, false);
+  assert.equal(result.profile.activeDetail, 23, 'cleared pressure must not restore the failed detail');
+  assert.equal(result.starvedAtDetail, 24);
+
+  state = result;
+  for (let index = 0; index < 3; index += 1) {
+    result = advanceLodMemoryPressure(blocked, profile, state);
+    state = result;
+  }
+  assert.equal(result.changed, true);
+  assert.equal(result.profile.activeDetail, 22);
+  assert.equal(result.starvedAtDetail, 23);
+  assert.equal(result.consecutiveSamples, 0);
 });
 
 test('Detail changes cannot bypass an unfinished desktop warmup', () => {
@@ -161,11 +326,14 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
     geometricError: 496, refine: 'REPLACE', children: [attached, pending], content: { uri: 'LOD-2/root.b3dm' },
     traversal: { visible: false }, engineData: { scene: {} },
   };
-  const value = lodDebugSnapshot({
+  const renderer = {
     root, group: { children: [attachedScene] }, errorTarget: 2,
     downloadQueue: { running: false }, parseQueue: { running: true }, processNodeQueue: { running: false },
     lruCache: { cachedBytes: 1536 * 1024 * 1024, maxBytesSize: 3 * 1024 * 1024 * 1024, isFull: () => false },
-  }, { requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false }, true);
+  };
+  const value = lodDebugSnapshot(renderer, {
+    requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false,
+  }, true);
   assert.deepEqual(value, {
     phase: 'requested-detail', requestedDetail: 24, activeDetail: 24, maximumDetail: 24,
     errorTarget: 2, visible: { root: 0, lod0: 1, lod1: 0, other: 0 },
@@ -173,6 +341,9 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
     queues: { download: false, parse: true, process: false },
     cache: { usedMiB: 1536, maxMiB: 3072, full: false },
   });
+  assert.equal(lodDebugSnapshot(renderer, {
+    requestedDetail: 24, activeDetail: 23, maximumDetail: 24, reduced: false, starvedAtDetail: 24,
+  }, true).phase, 'memory-limited');
   assert.doesNotMatch(JSON.stringify(value), /private\.example|customer-42|Mesh-B\.b3dm|token|secret/);
 });
 
