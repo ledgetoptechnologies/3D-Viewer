@@ -17,6 +17,7 @@ import {
   inspectLodTileset,
   lodDebugSnapshot,
   lodDetailRequestPending,
+  lodCacheRetentionMinBytes,
   lodQueuesSettled,
   refreshLodResolution,
   resolveLodDetailRequest,
@@ -145,6 +146,7 @@ let lodRuntimeProfileState = null;
 let lodWarmupComplete = false;
 let lodStarvationSamples = 0;
 let lodStarvedAtDetail = null;
+let lodCacheRecoveryActive = false;
 let lodLastSettledDetail = 2;
 let lodDebugSignature = '';
 let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
@@ -795,6 +797,7 @@ function loadTiles() {
   if (tilesRenderer) return;
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
+  lodCacheRecoveryActive = false;
   lodLastSettledDetail = 2;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
@@ -885,6 +888,7 @@ function loadTiles() {
 function disposeTiles() {
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
+  lodCacheRecoveryActive = false;
   lodLastSettledDetail = 2;
   if (!tilesRenderer) return;
   tilesParent.remove(tilesRenderer.group);
@@ -3168,7 +3172,9 @@ function bindUI() {
   document.getElementById('lod-detail').addEventListener('input', (e) => {
     lodStarvationSamples = 0;
     lodStarvedAtDetail = null;
+    lodCacheRecoveryActive = false;
     if (!tilesRenderer || !lodRuntimeProfileState) return;
+    tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, false);
     const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
     lodLastSettledDetail = Math.min(lodLastSettledDetail, next.activeDetail);
     lodRuntimeProfileState.requestedDetail = next.requestedDetail;
@@ -3486,6 +3492,14 @@ function updateStats() {
       ...lodRuntimeProfileState,
       starvedAtDetail: lodStarvedAtDetail,
     }, lodWarmupComplete);
+    const cacheRecoverySettled = lodCacheRecoveryActive
+      && pressureSnapshot.cache.full === false
+      && pressureSnapshot.pendingRequiredTiles === 0
+      && queuesSettled;
+    if (cacheRecoverySettled) {
+      lodCacheRecoveryActive = false;
+      tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, false);
+    }
     const pressure = advanceLodMemoryPressure(pressureSnapshot, lodRuntimeProfileState, {
       consecutiveSamples: lodStarvationSamples,
       starvedAtDetail: lodStarvedAtDetail,
@@ -3493,6 +3507,10 @@ function updateStats() {
     });
     lodStarvationSamples = pressure.consecutiveSamples;
     lodStarvedAtDetail = pressure.starvedAtDetail;
+    if (pressure.recoveryRequired) {
+      lodCacheRecoveryActive = true;
+      tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, true);
+    }
     if (pressure.changed) {
       lodRuntimeProfileState.activeDetail = pressure.profile.activeDetail;
       tilesRenderer.errorTarget = detailToErrorTarget(pressure.profile.activeDetail);

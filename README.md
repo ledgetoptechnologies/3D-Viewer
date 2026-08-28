@@ -605,24 +605,29 @@ WGS84 UTM 16N
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to `tilesRenderer.errorTarget` from 512
-  down to 2. The Viewer starts at actual requested Detail 2, so initial load is
-  a lightweight overview and does not silently raise the requested or active
-  Detail. Standard screen-space-error traversal can still select a fine tile
-  for an unusually close incoming view. Raising Detail is an explicit request
-  for finer visible tiles. Desktop requests above
+  down to 2. The Viewer starts at balanced Detail 13, which allows ordinary
+  screen-space-error traversal to select zero-error leaves at close range
+  without the cold global Detail-24 fanout. Raising Detail is an explicit
+  request for finer visible coverage. Desktop requests above
   Detail 13 warm at Detail 13, then advance through bounded three-detail stages
   only after each visible frontier is complete;
   a visible terminal zero-error leaf satisfies that warmup target even when the
   camera is inside its bounding volume and the renderer reports infinite
   screen-space error. A non-terminal or non-zero-error tile at infinite error
   still blocks advancement. Clients reporting 4 GiB or less are capped at
-  Detail 13. Desktop and reduced-memory caches allow up to 1,024 and 512 entries
-  respectively, while their 3 GiB and 768 MiB decoded-byte limits remain the
-  actual memory guards. Loaded coarse ancestors remain visible while selected
-  descendants load, without explicit or ancestor-triggered off-frustum sibling
-  preload. A full-cache idle sample with selected content pending restores the
-  last complete detail stage and establishes a non-oscillating ceiling until
-  the user moves the Detail slider;
+  Detail 13. Desktop retains up to a 3.25 GiB recent frontier below a measured
+  3.5 GiB cap; reduced-memory clients retain 640 MiB below an unchanged 768 MiB
+  cap. The corresponding soft item floors are 512 and 256, below hard limits of
+  1,024 and 512. This prevents small camera motions from immediately discarding
+  just-viewed decoded tiles while preserving hard admission limits. Loaded
+  coarse ancestors remain visible while selected descendants load, without
+  explicit or ancestor-triggered off-frustum sibling preload. Two consecutive
+  one-second full-cache/idle-queue samples with selected content pending restore
+  the last complete detail stage, temporarily relax the soft byte floor so
+  standard LRU eviction can restore admission, and establish a non-oscillating
+  ceiling until the user moves the Detail slider. The measured soft floor is
+  restored after the lower active frontier is attached, queues are idle, and
+  the cache is below its hard cap;
   the status bar reports `LOD: memory-limited` while that ceiling holds the
   active request back. It says `LOD: full-detail` only when every visible tile
   is on the declared zero-error frontier. Invalid hierarchy or tile-load
@@ -680,9 +685,8 @@ WGS84 UTM 16N
   [docs/LOD_PIPELINE.md](docs/LOD_PIPELINE.md)
   for the intentionally fail-closed supported subset and why a tiler that clips
   or retriangulates partition boundaries cannot receive an exact v2 proof. The
-  locally reproduced runtime diagnosis, measured working sets, fix
-  verification, remaining capable-host browser check, and safe diagnostic
-  procedure are recorded in
+  locally reproduced runtime diagnosis, measured working sets, real-browser
+  verification, and safe diagnostic procedure are recorded in
   [docs/VIEWER_LOD_CAMERA_HANDOFF.md](docs/VIEWER_LOD_CAMERA_HANDOFF.md).
 - **Camera positions**: three synchronized instanced meshes form an independently
   drawn orange, white, and yellow camera/frustum. Markers use fixed world-space

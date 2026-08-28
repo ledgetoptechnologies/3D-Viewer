@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { TilesRenderer } from '3d-tiles-renderer';
+import { LRUCache, TilesRenderer } from '3d-tiles-renderer';
 import {
   advanceLodMemoryPressure,
   configureLodRenderer,
@@ -16,6 +16,7 @@ import {
   LOD_WARMUP_DETAIL,
   lodQueuesSettled,
   lodCacheBudget,
+  lodCacheRetentionMinBytes,
   lodDebugSnapshot,
   lodDetailRequestPending,
   lodRuntimeProfile,
@@ -36,7 +37,7 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.ok(detailToErrorTarget(12) < 512);
   assert.equal(detailToErrorTarget(-100), 512);
   assert.equal(detailToErrorTarget(100), 2);
-  assert.equal(detailToErrorTarget(undefined), 512, 'missing detail fails bandwidth-conservatively');
+  assert.equal(detailToErrorTarget(undefined), 32, 'missing detail defaults to close-responsive view-local refinement');
 });
 
 test('renderer configuration keeps ancestor fallback without enabling explicit sibling preload', () => {
@@ -64,9 +65,9 @@ test('renderer configuration keeps ancestor fallback without enabling explicit s
   assert.equal(tiles.maxDepth, Infinity);
   assert.deepEqual(profile, {
     budget: {
-      minBytesSize: 384 * 1024 * 1024,
+      minBytesSize: 640 * 1024 * 1024,
       maxBytesSize: 768 * 1024 * 1024,
-      minSize: 24,
+      minSize: 256,
       maxSize: 512,
       unloadPercent: 0.20,
     },
@@ -84,29 +85,37 @@ test('renderer configuration keeps ancestor fallback without enabling explicit s
     reduced: false,
   });
   assert.deepEqual(lodCacheBudget(8), {
-    minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 3 * 1024 * 1024 * 1024,
-    minSize: 24,
+    minBytesSize: 3.25 * 1024 * 1024 * 1024,
+    maxBytesSize: 3.5 * 1024 * 1024 * 1024,
+    minSize: 512,
     maxSize: 1024,
     unloadPercent: 0.20,
   });
+  assert.ok(
+    lodCacheBudget(8).minBytesSize > 3_325_605_911,
+    'the warm floor must retain the measured 15-leaf frontier plus ancestor fallback across small camera motion',
+  );
+  assert.ok(
+    lodCacheBudget(8).minBytesSize < lodCacheBudget(8).maxBytesSize,
+    'the hard cap must retain admission headroom for a newly visible branch',
+  );
 
-  const conservative = {
+  const defaultRenderer = {
     lruCache: {}, downloadQueue: { maxJobs: 25 }, parseQueue: { maxJobs: 5 },
     setCamera() {}, setResolutionFromRenderer() {},
   };
-  const conservativeProfile = configureLodRenderer(conservative, { camera, renderer, deviceMemoryGiB: 8 });
-  assert.equal(DEFAULT_LOD_DETAIL, 2);
-  assert.equal(conservative.errorTarget, 512);
-  assert.deepEqual(conservativeProfile, {
+  const defaultProfile = configureLodRenderer(defaultRenderer, { camera, renderer, deviceMemoryGiB: 8 });
+  assert.equal(DEFAULT_LOD_DETAIL, 13);
+  assert.equal(defaultRenderer.errorTarget, 32);
+  assert.deepEqual(defaultProfile, {
     budget: lodCacheBudget(8),
-    requestedDetail: 2,
-    activeDetail: 2,
+    requestedDetail: 13,
+    activeDetail: 13,
     maximumDetail: 24,
     reduced: false,
   });
-  assert.deepEqual(lodRuntimeProfile(undefined, 8), conservativeProfile);
-  assert.equal(lodDetailRequestPending(conservativeProfile), false);
+  assert.deepEqual(lodRuntimeProfile(undefined, 8), defaultProfile);
+  assert.equal(lodDetailRequestPending(defaultProfile), false);
 
   const alreadyBounded = {
     lruCache: {}, downloadQueue: { maxJobs: 4 }, parseQueue: { maxJobs: 1 },
@@ -196,13 +205,13 @@ test('zero-error terminal leaves satisfy warmup at infinite SSE while refinable 
   );
 });
 
-test('LOD starvation reacts to the first full-cache idle sample with pending leaves', () => {
+test('LOD starvation waits one sample for scheduled eviction before confirming a pinned cache', () => {
   const snapshot = {
     pendingRequiredLeaves: 2,
     queues: { download: false, parse: false, process: false },
     cache: { full: true },
   };
-  assert.deepEqual(detectLodStarvation(snapshot), { count: 1, starved: true });
+  assert.deepEqual(detectLodStarvation(snapshot), { count: 1, starved: false });
   assert.deepEqual(detectLodStarvation(snapshot, 1), { count: 2, starved: true });
   assert.deepEqual(detectLodStarvation(snapshot, 2), { count: 3, starved: true });
   assert.deepEqual(detectLodStarvation(snapshot, 9), { count: 10, starved: true });
@@ -213,6 +222,7 @@ test('LOD starvation reacts to the first full-cache idle sample with pending lea
   assert.deepEqual(detectLodStarvation({ ...snapshot, pendingRequiredLeaves: 0 }, 2), {
     count: 0, starved: false,
   });
+
   for (const queue of ['download', 'parse', 'process']) {
     assert.deepEqual(detectLodStarvation({
       ...snapshot,
@@ -224,7 +234,56 @@ test('LOD starvation reacts to the first full-cache idle sample with pending lea
     ...snapshot,
     pendingRequiredLeaves: 0,
     pendingRequiredTiles: 1,
-  }), { count: 1, starved: true }, 'a refinable selected tile can starve before the terminal LOD-0 leaves are reached');
+  }), { count: 1, starved: false }, 'a refinable selected tile begins the bounded starvation confirmation window');
+});
+
+test('pinned LRU eviction either clears the second starvation sample or confirms rollback', () => {
+  const makeCache = (minBytesSize) => {
+    const cache = new LRUCache();
+    cache.minBytesSize = minBytesSize;
+    cache.maxBytesSize = 3.5 * 1024 ** 3;
+    cache.minSize = 512;
+    cache.maxSize = 1024;
+    cache.unloadPercent = 0.20;
+    const items = Array.from({ length: 7 }, (_, index) => ({ index }));
+    for (const item of items) {
+      cache.add(item, () => {});
+      cache.setLoaded(item, true);
+      cache.setMemoryUsage(item, 0.5 * 1024 ** 3);
+    }
+    cache.markUnused(items[0]);
+    return cache;
+  };
+  const snapshot = (cache) => ({
+    pendingRequiredTiles: 1,
+    queues: { download: false, parse: false, process: false },
+    cache: { full: cache.isFull() },
+  });
+
+  const evictable = makeCache(3 * 1024 ** 3);
+  assert.deepEqual(detectLodStarvation(snapshot(evictable)), { count: 1, starved: false });
+  evictable.unloadUnusedContent();
+  assert.equal(evictable.isFull(), false, 'the scheduled unload should free admission room');
+  assert.deepEqual(detectLodStarvation(snapshot(evictable), 1), { count: 0, starved: false });
+
+  const pinned = makeCache(3.25 * 1024 ** 3);
+  assert.deepEqual(detectLodStarvation(snapshot(pinned)), { count: 1, starved: false });
+  pinned.unloadUnusedContent();
+  assert.equal(pinned.isFull(), true, 'the unused tile is larger than the soft-floor gap and cannot be evicted');
+  const confirmedPressure = advanceLodMemoryPressure(snapshot(pinned), {
+    requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false,
+  }, {
+    consecutiveSamples: 1, starvedAtDetail: null, lastSettledDetail: 13,
+  });
+  assert.equal(confirmedPressure.recoveryRequired, true);
+  assert.equal(confirmedPressure.changed, true);
+  const desktopBudget = lodCacheBudget(8);
+  assert.equal(lodCacheRetentionMinBytes(desktopBudget, false), 3.25 * 1024 ** 3);
+  pinned.minBytesSize = lodCacheRetentionMinBytes(desktopBudget, confirmedPressure.recoveryRequired);
+  pinned.unloadUnusedContent();
+  assert.equal(pinned.isFull(), false, 'confirmed starvation must temporarily restore LRU admission headroom');
+  pinned.minBytesSize = lodCacheRetentionMinBytes(desktopBudget, false);
+  assert.equal(pinned.minBytesSize, desktopBudget.minBytesSize, 'settled recovery restores normal retention');
 });
 
 test('memory pressure returns to the last complete frontier and remembers the failed ceiling', () => {
@@ -286,7 +345,7 @@ test('memory-pressure ceiling treats null as unset and stops honestly at the det
   assert.equal(resolveLodMemoryPressure({ ...profile, activeDetail: 'invalid' }, null), null);
 });
 
-test('memory-pressure coordinator immediately restores the last complete frontier and never recovers automatically', () => {
+test('memory-pressure coordinator restores the last complete frontier after confirmed starvation', () => {
   const blocked = {
     pendingRequiredLeaves: 2,
     queues: { download: false, parse: false, process: false },
@@ -296,7 +355,15 @@ test('memory-pressure coordinator immediately restores the last complete frontie
   let state = { consecutiveSamples: 0, starvedAtDetail: null, lastSettledDetail: 13 };
 
   let result = advanceLodMemoryPressure(blocked, profile, state);
+  assert.equal(result.changed, false);
+  assert.equal(result.recoveryRequired, false);
+  assert.equal(result.consecutiveSamples, 1);
+  result = advanceLodMemoryPressure(blocked, profile, {
+    ...state,
+    consecutiveSamples: result.consecutiveSamples,
+  });
   assert.equal(result.changed, true);
+  assert.equal(result.recoveryRequired, true);
   assert.equal(result.profile.activeDetail, 13);
   assert.equal(result.starvedAtDetail, 24);
   assert.equal(result.consecutiveSamples, 0);
@@ -305,8 +372,17 @@ test('memory-pressure coordinator immediately restores the last complete frontie
   state = result;
   result = advanceLodMemoryPressure({ ...blocked, cache: { full: false } }, profile, state);
   assert.equal(result.changed, false);
+  assert.equal(result.recoveryRequired, false);
   assert.equal(result.profile.activeDetail, 13, 'cleared pressure must not restore the failed detail');
   assert.equal(result.starvedAtDetail, 24);
+
+  const floorPressure = advanceLodMemoryPressure(blocked, {
+    requestedDetail: 24, activeDetail: 2, maximumDetail: 24, reduced: false,
+  }, {
+    consecutiveSamples: 1, starvedAtDetail: 2, lastSettledDetail: 2,
+  });
+  assert.equal(floorPressure.changed, false);
+  assert.equal(floorPressure.recoveryRequired, true, 'confirmed floor-detail starvation still needs admission recovery');
 });
 
 test('Detail changes cannot bypass an unfinished desktop warmup', () => {
@@ -387,7 +463,16 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   const renderer = {
     root, group: { children: [attachedScene] }, errorTarget: 2,
     downloadQueue: { running: false }, parseQueue: { running: true }, processNodeQueue: { running: false },
-    lruCache: { cachedBytes: 1536 * 1024 * 1024, maxBytesSize: 3 * 1024 * 1024 * 1024, isFull: () => false },
+    lruCache: {
+      cachedBytes: 1536 * 1024 * 1024,
+      maxBytesSize: 3 * 1024 * 1024 * 1024,
+      maxSize: 4,
+      itemSet: new Map([[attached, 1], [pending, 2], [root, 3]]),
+      usedSet: new Set([attached, pending]),
+      loadedSet: new Set([attached, pending, root]),
+      bytesMap: new Map([[attached, 512 * 1024 * 1024], [pending, 512 * 1024 * 1024], [root, 512 * 1024 * 1024]]),
+      isFull: () => false,
+    },
   };
   const value = lodDebugSnapshot(renderer, {
     requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false,
@@ -398,7 +483,10 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
     requiredLeaves: 2, attachedRequiredLeaves: 1, pendingRequiredLeaves: 1,
     requiredTiles: 2, attachedRequiredTiles: 1, pendingRequiredTiles: 1,
     queues: { download: false, parse: true, process: false },
-    cache: { usedMiB: 1536, maxMiB: 3072, full: false },
+    cache: {
+      usedMiB: 1536, maxMiB: 3072, full: false,
+      fullByBytes: false, fullByItems: false,
+    },
   });
   assert.equal(lodDebugSnapshot(renderer, {
     requestedDetail: 24, activeDetail: 23, maximumDetail: 24, reduced: false, starvedAtDetail: 24,
@@ -412,6 +500,7 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   assert.equal(lodDebugSnapshot(renderer, {
     requestedDetail: 24, activeDetail: 13, maximumDetail: 13, reduced: true,
   }, true).phase, 'reduced-memory');
+
   assert.doesNotMatch(JSON.stringify(value), /private\.example|customer-42|Mesh-B\.b3dm|token|secret/);
 });
 
@@ -424,10 +513,17 @@ test('LOD queue priority favors visible high-error foreground tiles', () => {
   const foreground = tile({ error: 18, distanceFromCamera: 30 });
   const background = tile({ error: 4, distanceFromCamera: 10 });
   const outside = tile({ inFrustum: false, error: 100, distanceFromCamera: 1 });
+  const containingCamera = tile({ error: Infinity, distanceFromCamera: 0 });
+  const malformed = tile({ error: Number.NaN, distanceFromCamera: 0 });
   assert.equal(screenSpaceErrorPriority(foreground, background), 1);
   assert.equal(screenSpaceErrorPriority(background, foreground), -1);
   assert.equal(screenSpaceErrorPriority(foreground, outside), 1);
   assert.equal(screenSpaceErrorPriority(outside, foreground), -1);
+  assert.equal(screenSpaceErrorPriority(containingCamera, foreground), 1,
+    'a refinable tile containing the camera has infinite SSE and must load first');
+  assert.equal(screenSpaceErrorPriority(foreground, containingCamera), -1);
+  assert.equal(screenSpaceErrorPriority(foreground, malformed), 1,
+    'malformed non-finite SSE remains lowest priority');
 });
 
 test('standard root REPLACE refinement is inherited by lazy descendants without runtime mutation', () => {

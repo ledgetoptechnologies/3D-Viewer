@@ -10,10 +10,10 @@ working, but the startup policy requested Detail 24 and immediately staged
 through Detail 13. A cold default view consequently fetched the root and 240 of
 241 LOD-0 payloads within 20 seconds; forcing Detail 2 before startup stabilized
 at 29 payloads (root, 12 LOD-2, and 16 LOD-1) with no LOD-0 requests in that
-measured pose. The runtime now starts with requested and active Detail 2. It
-does not raise either value until the user moves the slider, after which the
-Detail-13 staging and memory governor apply. Standard SSE traversal can still
-select a fine tile for an unusually close incoming camera.
+measured pose. That conservative startup was released by Codex but was later
+shown to suppress expected close-range refinement. The current candidate starts
+at requested and active Detail 13; requests above 13 still use staged refinement
+and the memory governor.
 
 The released runtime passed its original repository and B3DM fixture gates, but
 the user subsequently reported incomplete, transparent, or dark foreground
@@ -21,23 +21,26 @@ geometry at ground-level and oblique camera poses. A real Chromium reproduction
 then showed the LOD phase stuck at `warmup`, with active Detail 13 of a requested
 24, while distant tiles continued to load.
 
-Two independent blockers were reproduced. First, a camera inside a terminal
-leaf's bounding volume produces distance zero and infinite screen-space error;
+Earlier Codex work reproduced two independent blockers. First, a camera inside
+a terminal leaf's bounding volume produces distance zero and infinite
+screen-space error;
 the warmup gate incorrectly treated that zero-error leaf as refinable and
 unsatisfied forever. Second, the renderer's LRU fullness check includes entry
 count as well as decoded bytes. The old 48-entry desktop limit and 24-entry
 reduced limit could fill with visible tiles and retained `REPLACE` parents, so
 new downloads were refused even while the byte budget still had room.
 
-The fix makes a visible terminal zero-error leaf satisfy warmup even at infinite
-screen-space error, raises item-count headroom without changing byte ceilings,
-and adds a non-oscillating memory-pressure governor. These changes have targeted
-policy/runtime tests and real-browser reproductions. One long-running browser
-acceptance case still needs a capable-host run before merge because it times out
-identically on the changed and unchanged trees with the current Linux host's
-snap Chromium. Treat the user's live report as authoritative: local evidence is
-not a production confirmation, and the issue must not be called resolved in
-the deployed Viewer until the user verifies it.
+That work made a visible terminal zero-error leaf satisfy warmup at infinite
+screen-space error, raised item-count headroom, and added a memory-pressure
+governor. The current candidate additionally changes the default to Detail 13,
+raises the measured desktop byte profile to 3.25/3.5 GiB, retains recently
+decoded LOD scenes across small motion, prioritizes positive-infinite SSE, and
+temporarily relaxes only the LRU soft byte floor after confirmed starvation so
+standard eviction can restore admission. All real-browser cases listed in the
+candidate evidence below now pass on this Linux host. Treat the user's live
+report as authoritative: local evidence is not a production confirmation, and
+the issue must not be called resolved in the deployed Viewer until the user
+verifies it.
 
 ### Gap-free staged refinement update
 
@@ -66,8 +69,9 @@ This update:
   only after the current visible frontier and all queues settle;
 - treats any selected in-frustum renderable tile—not only a terminal LOD-0
   leaf—as pending starvation work;
-- on the first full-cache/idle-queue sample, returns directly to the last fully
-  settled stage and records the failed stage as a non-oscillating ceiling; and
+- on the second consecutive full-cache/idle-queue sample, returns directly to
+  the last fully settled stage and records the failed stage as a
+  non-oscillating ceiling; and
 - exposes both selected-tile and terminal-leaf aggregate counts in sanitized
   LOD diagnostics.
 
@@ -80,6 +84,67 @@ documented representative run exceeded 157 GiB. First deploy this runtime fix
 and compare the same facade only after diagnostics show a settled Detail-24
 LOD-0 frontier. If distortion remains then, add a focused source-GLB versus
 LOD-0 texture/UV audit rather than weakening the current production proof.
+
+### Close-detail and small-motion retention update
+
+After the gap-free staged-refinement merge, the user reported two remaining
+symptoms: approaching the model did not load high resolution, and very small
+orbit/pan/move inputs appeared to reset the cache.
+
+The two user-reported behaviors were reproduced against the verified 33-tile
+B3DM fixture. Source inspection also found a separate close-range priority
+defect:
+
+1. The released default was Detail 2 (`errorTarget = 512`). At the same close
+   view, Detail 13 (`errorTarget = 32`) selected and attached six zero-error
+   LOD-0 leaves without requesting global Detail 24.
+2. That close frontier used `2,098,361,111` decoded bytes, but the desktop soft
+   floor was only 0.4 GiB and 24 entries. `LRUCache.scheduleUnload()` runs every
+   frame and unloads newly unused content toward those floors even when the hard
+   cap is not full. A four-meter pan plus roughly one degree of orbit made one
+   baseline leaf unused; its scene was immediately disposed even though the
+   cache used only about 2.10 GB of its 3 GiB cap. Returning required a new scene
+   and another request.
+3. `screenSpaceErrorPriority()` treated every non-finite SSE as negative
+   infinity. A refinable tile containing the camera has positive-infinite SSE,
+   so the exact foreground branch could be sorted behind ordinary finite-error
+   tiles. Positive infinity now receives highest error priority; malformed
+   `NaN`, missing values, and negative infinity remain lowest.
+
+The candidate fix:
+
+- changes only the default request from Detail 2 to Detail 13;
+- prioritizes a positive-infinite foreground SSE ahead of finite-error tiles;
+- retains the existing staged path for explicit requests above 13;
+- raises the desktop soft byte floor to 3.25 GiB and soft item floor to 512;
+- raises the reduced-memory soft byte floor to 640 MiB and soft item floor to
+  256;
+- raises the desktop hard byte cap to 3.5 GiB because retained ancestor paths
+  pushed the measured active working set above 3 GiB;
+- leaves the reduced 768 MiB hard cap, 1,024/512 hard item caps, and 20-percent
+  unload setting unchanged; and
+- confirms memory starvation only after two consecutive one-second blocked
+  samples, so the renderer's scheduled eviction gets one bounded chance to run.
+
+The focused real-browser regression now reaches zero-error leaves by default,
+crosses a nearby branch boundary with the same small movement, returns, and
+observes identical scene UUIDs with no duplicate requests for the baseline
+tiles. The final staged Detail-24 fixture run loaded all 16 LOD-0 leaves,
+detached the coarse root, moved far, retained the decoded leaf scenes, and
+returned without re-requesting them in about 83.2 seconds. Candidate evidence:
+
+- focused LOD policy/material/runtime suite: 40 passed, 0 failed;
+- full Node 24 suite: 468 passed, 0 failed/cancelled, 10 expected skips;
+- close/small-motion real B3DM regression: passed in about 53.8 seconds;
+- staged all-16-leaf close/far/return real B3DM regression: passed in about
+  83.2 seconds;
+- broader top-down/root-replacement/camera/diagnostics/tab-lifecycle real B3DM
+  acceptance: passed in about 165.4 seconds;
+- Docker production image build and rootless `568:568` runtime policy check:
+  passed; and
+- `npm audit --omit=dev --audit-level=high`: zero vulnerabilities.
+
+Production remains unconfirmed until the user tests the published image.
 
 ## Released runtime baseline
 
@@ -192,10 +257,10 @@ Examples:
 - Detail 13: error target 32
 - Detail 2: error target 512
 
-Desktop/default startup uses Detail 2 as both the requested and active detail.
+Desktop/default startup uses Detail 13 as both the requested and active detail.
 It is a settled requested-detail phase, not an unfinished warmup. Low-memory
-clients report the separate `reduced-memory` phase. No higher requested or
-active Detail is set until the user moves the slider upward.
+clients also remain capped at Detail 13. No higher requested or active Detail is
+set until the user moves the slider upward.
 
 ### Desktop warmup
 
@@ -221,35 +286,48 @@ bypassing the warmup.
 
 Desktop/default profile:
 
-- minimum warm bytes: `0.4 GiB`
-- maximum decoded bytes: `3 GiB`
-- minimum entries: 24
+- minimum retained bytes: `3.25 GiB`
+- maximum decoded bytes: `3.5 GiB`
+- minimum retained entries: 512
 - maximum entries: 1,024
 - unload percentage: 20 percent
 
 Clients reporting `navigator.deviceMemory <= 4`:
 
 - maximum Detail: 13
-- minimum warm bytes: `384 MiB`
+- minimum retained bytes: `640 MiB`
 - maximum decoded bytes: `768 MiB`
-- minimum entries: 24
+- minimum retained entries: 256
 - maximum entries: 512
 - unload percentage: 20 percent
 
 The reduced profile is deliberately honest. It does not claim that Detail 24
 will eventually load inside a cache too small for the measured frontier.
-The decoded-byte limits are unchanged and remain the actual memory guards. The
-higher item ceilings prevent the renderer's count-based `isFull()` condition
+Its 768 MiB hard cap is unchanged. The desktop hard cap is intentionally raised
+from 3 GiB to the measured 3.5 GiB profile described above. These byte limits
+remain the actual memory guards. The higher item ceilings prevent the
+renderer's count-based `isFull()` condition
 from refusing downloads merely because the visible frontier and retained
 `REPLACE` parents contain more than the old entry limits.
 
 ### Memory pressure
 
-The runtime samples aggregate LOD state once per second. A sample is classified
-as starvation when the cache is full, a selected in-frustum renderable tile is
-still pending, and renderer work queues cannot make progress. The governor then
-restores the last fully settled detail stage and records the failed detail as a
-ceiling.
+The runtime samples aggregate LOD state once per second. Starvation is confirmed
+only after two consecutive samples where the cache is full, a selected
+in-frustum renderable tile is still pending, and renderer work queues cannot
+make progress. The first sample gives the renderer's scheduled eviction
+microtask a bounded chance to run. Any later one-second sample that is not
+simultaneously blocked resets the counter. The second blocked sample makes the
+governor restore the last fully settled detail stage
+and record the failed detail as a ceiling.
+
+Confirmed starvation also activates a bounded cache-recovery phase. The runtime
+temporarily sets only `lruCache.minBytesSize` to zero, allowing the pinned
+renderer's normal scheduled eviction to restore admission even when the first
+unused tile is larger than the normal floor/cap gap. It restores the configured
+floor after the lower active frontier has no pending selected tiles, queues are
+idle, and the cache is below its hard cap. The Viewer does not change tile
+visibility, active state, cached scene visibility, or LRU membership.
 
 That ceiling prevents automatic recover/starve oscillation: later recovery may
 continue at or below the ceiling, but it cannot silently restore a detail level
@@ -408,10 +486,14 @@ The fix:
 - treats only a visible terminal `geometricError: 0` tile as satisfied at
   infinite screen-space error; coarse or refinable infinite-error tiles still
   block;
-- raises item-count capacity to 1,024 desktop and 512 reduced, with a minimum of
-  24 for both profiles, while preserving the existing decoded-byte limits and
-  20-percent eviction setting;
-- detects sustained cache starvation at one hertz and steps active detail down;
+- raises item-count floors/caps to 512/1,024 desktop and 256/512 reduced;
+- uses the measured 3.25/3.5 GiB desktop byte profile while retaining the
+  reduced 640/768 MiB profile and 20-percent eviction setting;
+- confirms cache starvation after two consecutive one-hertz blocked samples and
+  steps active detail down when possible;
+- temporarily relaxes only the soft byte floor so standard LRU eviction can
+  restore admission, including at Detail 2, then restores the configured floor
+  after the lower frontier settles;
 - records `starvedAtDetail` as a ceiling so automatic recovery cannot oscillate
   back into the same starving request;
 - clears that ceiling only for an explicit Detail-slider request or tile
@@ -428,10 +510,13 @@ Measured decoded working sets:
 - root plus 12 close LOD-0 leaves: `2,482,109,023` bytes, about 2.31 GiB
 - sustained all-16-leaf frontier: about `2,713,539,801` bytes, about 2.53 GiB
 - measured branch-replacement transition peak: about 2.784 GiB
+- current patched-ancestor traversal with 15 LOD-0 leaves and retained parent
+  paths: `3,325,605,911` bytes, about 3.10 GiB
 
 The 1.75 GiB cache reproducibly became full and prevented three required leaves
 from entering the download queue. The 2.75 GiB and 3 GiB profiles could complete
-the measured fixture frontier.
+the older non-ancestor working set. They are not sufficient for the current
+patched ancestor-fallback traversal at the sustained all-leaf pose.
 
 The released baseline's sustained test pose is encoded in
 `test/lod-browser-acceptance.test.mjs`. The final real fixture regression:
@@ -457,28 +542,11 @@ Released baseline evidence:
 - Potree 1.8.2 EPT/COPC patch verified
 - immutable image and release attestation verified
 
-Current fix evidence:
-
-- before the warmup fix, the ground-camera Chromium reproduction remained at
-  Detail 13 of 24 with dark or transparent near-field geometry;
-- after the fix, the same pose reached Detail 24 of 24 with all 16 zero-error
-  leaves attached;
-- forced byte-cap and item-cap reproductions now make the governor step detail
-  down and report the result honestly instead of wedging or oscillating;
-- the final targeted policy, runtime-wiring, and material suites passed 37 of
-  37 tests; and
-- the post-final-change Node 24 build and complete suite executed 484 tests:
-  478 passed, none failed or were cancelled, and 6 environment-dependent tests
-  skipped on Windows. The skipped set includes the three real-tile LOD cases
-  because this worktree does not have the verified tile fixture.
-
-The long-running acceptance test named `hides the coarse root after complete
-top-down foreground coverage` still needs one run on a capable host. On the
-current Linux host, snap Chromium stalls in a CDP `Runtime.evaluate` call and
-the test times out after roughly 135 seconds. The unchanged baseline fails in
-the same way, while the case historically completed on the Windows host in
-about 490 seconds. Do not classify the Linux result as a regression, but do not
-waive the capable-host check before merge.
+Current candidate evidence is listed near the top of this handoff. It supersedes
+the older 37-test/484-test interim counts and the earlier capable-host blocker.
+The final Linux Chrome-for-Testing runs include the strengthened small-motion
+LRU-retention case, the staged all-16-leaf close/far/return case, and the broader
+top-down/root-replacement/camera/diagnostics/tab-lifecycle case.
 
 ### Limits of that evidence
 
@@ -509,10 +577,10 @@ Do not restore these without new, direct evidence:
    - It bypasses renderer lifecycle assumptions and previously created hard to
      reason about revisit behavior.
 
-4. **Another decoded-byte increase without measuring the live model**
-   - The current item-cap increase addresses a separately reproduced count
-     failure and leaves the measured byte ceilings unchanged. Do not increase
-     decoded-byte limits again without new working-set evidence.
+4. **Another decoded-byte increase without new working-set evidence**
+   - The candidate's 3.5 GiB desktop cap is justified by the measured
+     `3,325,605,911`-byte ancestor-retaining frontier. Do not increase it again
+     without new live-model measurements.
 
 5. **Copying WebODM's camera asset**
    - WebODM is AGPL-3.0 and the Viewer uses an independently drawn marker.
@@ -546,7 +614,7 @@ The snapshot contains only aggregate state:
 - visible root, LOD-1, LOD-0, and other counts
 - required, attached, and pending selected-tile and terminal-leaf counts
 - download, parse, and process queue activity
-- cache used MiB, maximum MiB, and full state
+- cache used/maximum MiB and byte/item fullness
 
 It intentionally excludes asset URLs, filenames, customer paths, query strings,
 credentials, and raw exception objects. It is safe to copy into an issue or an
@@ -569,22 +637,15 @@ asset request URLs into documentation or agent prompts.
 
 ## Remaining verification order
 
-The local diagnosis is complete. Finish verification without reopening rejected
-renderer-state approaches:
+The local diagnosis, Node 24 suite, real B3DM browser cases, dependency audit,
+and Docker runtime smoke are complete. Remaining release gates are:
 
-1. Review the complete fix diff against `718d7c4`, including tests and these
-   documentation updates.
-2. Run the targeted policy, runtime-wiring, and material tests.
-3. Run the complete suite under Node 24 after the final non-oscillation and
-   status-label changes; reconcile environment-dependent skips with the host.
-4. Run `hides the coarse root after complete top-down foreground coverage` once
-   on a capable host, without running the full suite concurrently.
-5. Optionally rerun the ground-camera and forced-starvation Chromium harnesses
-   from their temporary directory. Do not commit harness files, screenshots, or
-   other temporary artifacts.
-6. After merge and deployment, verify the health revision, repeat the affected
-   ground/oblique view, and obtain user confirmation before calling the live
-   issue resolved.
+1. obtain an independent approval of the exact final diff;
+2. commit and push without overwriting newer `main` work;
+3. verify GitHub Actions, the immutable image, `latest`, and release attestation;
+4. after deployment, verify the health revision and repeat the affected
+   ground/oblique movement sequence; and
+5. obtain user confirmation before calling the live issue resolved.
 
 ## Remaining production risks
 

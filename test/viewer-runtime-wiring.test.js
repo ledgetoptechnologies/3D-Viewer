@@ -154,11 +154,11 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
   assert.doesNotMatch(main, /showError\(`Failed to load point cloud from \$\{POINT_CLOUD_URL\}/);
 });
 
-test('LOD starts conservatively, stages explicit high-detail requests, and caps reduced-memory clients honestly', () => {
+test('LOD starts close-responsive, stages explicit high-detail requests, and caps reduced-memory clients honestly', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="2"/);
-  assert.match(html, /Starts with a lightweight overview\. Raise Detail to stream finer tiles for the current view\./);
+  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="13"/);
+  assert.match(html, /Starts with balanced view-local refinement\. Raise Detail only when you need finer coverage\./);
   assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
   assert.match(main, /lodRuntimeProfileState\.requestedDetail = next\.requestedDetail/);
@@ -194,9 +194,9 @@ test('LOD memory pressure restores the last complete frontier and resets on expl
   const statsBlock = main.slice(main.indexOf('function updateStats()'), main.indexOf('// expose for debugging/verification'));
 
   assert.match(main, /advanceLodMemoryPressure/);
-  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;\s*let lodLastSettledDetail = 2;/);
+  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;\s*let lodCacheRecoveryActive = false;\s*let lodLastSettledDetail = 2;/);
   for (const [label, block] of [['load', loadBlock], ['dispose', disposeBlock], ['slider', sliderBlock]]) {
-    assert.match(block, /lodStarvationSamples = 0;\s*lodStarvedAtDetail = null;/, `${label} must reset memory-pressure state`);
+    assert.match(block, /lodStarvationSamples = 0;\s*lodStarvedAtDetail = null;\s*lodCacheRecoveryActive = false;/, `${label} must reset memory-pressure state`);
   }
   assert.match(sliderBlock, /lodLastSettledDetail = Math\.min\(lodLastSettledDetail, next\.activeDetail\)/);
   assert.match(statsBlock, /advanceLodMemoryPressure\(pressureSnapshot, lodRuntimeProfileState/);
@@ -205,6 +205,13 @@ test('LOD memory pressure restores the last complete frontier and resets on expl
   assert.match(statsBlock, /lastSettledDetail: lodLastSettledDetail/);
   assert.match(statsBlock, /lodStarvationSamples = pressure\.consecutiveSamples/);
   assert.match(statsBlock, /lodStarvedAtDetail = pressure\.starvedAtDetail/);
+  assert.match(statsBlock, /if \(pressure\.recoveryRequired\)/);
+  assert.match(statsBlock, /lodCacheRecoveryActive = true/);
+  assert.match(statsBlock, /tilesRenderer\.lruCache\.minBytesSize = lodCacheRetentionMinBytes\(lodRuntimeProfileState\.budget, true\)/);
+  assert.match(statsBlock, /const cacheRecoverySettled = lodCacheRecoveryActive/);
+  assert.match(statsBlock, /pressureSnapshot\.pendingRequiredTiles === 0/);
+  assert.match(statsBlock, /lodCacheRecoveryActive = false/);
+  assert.match(statsBlock, /tilesRenderer\.lruCache\.minBytesSize = lodCacheRetentionMinBytes\(lodRuntimeProfileState\.budget, false\)/);
   assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);
   assert.match(statsBlock, /tilesRenderer\.errorTarget = detailToErrorTarget\(pressure\.profile\.activeDetail\)/);
   assert.match(statsBlock, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);

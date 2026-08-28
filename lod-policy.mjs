@@ -1,10 +1,15 @@
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
-export const DEFAULT_LOD_DETAIL = MIN_LOD_DETAIL;
 export const LOD_WARMUP_DETAIL = 13;
+export const DEFAULT_LOD_DETAIL = LOD_WARMUP_DETAIL;
 export const LOD_REFINEMENT_STEP = 3;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
+
+function screenSpaceErrorSortValue(value) {
+  if (value === Infinity) return Infinity;
+  return Number.isFinite(value) ? value : -Infinity;
+}
 
 export function detailToErrorTarget(value) {
   const parsed = Number.parseInt(value, 10);
@@ -29,8 +34,8 @@ export function screenSpaceErrorPriority(a, b) {
   if (at.used !== bt.used) return at.used ? 1 : -1;
   if (at.inFrustum !== bt.inFrustum) return at.inFrustum ? 1 : -1;
 
-  const aError = Number.isFinite(at.error) ? at.error : -Infinity;
-  const bError = Number.isFinite(bt.error) ? bt.error : -Infinity;
+  const aError = screenSpaceErrorSortValue(at.error);
+  const bError = screenSpaceErrorSortValue(bt.error);
   if (aError !== bError) return aError > bError ? 1 : -1;
 
   const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
@@ -44,14 +49,18 @@ export function screenSpaceErrorPriority(a, b) {
 }
 
 // The active close-up REPLACE frontier needs room to finish loading before an
-// eviction pass begins. Once it is no longer in the view, keep only a bounded
-// warm cache so a pan can refine a new area instead of pinning the whole model.
+// eviction pass begins. LRUCache unloads unused content toward minBytesSize and
+// minSize every frame, even when the hard cap is nowhere near full. Keep the
+// measured recent frontier below those soft floors so a tiny orbit or pan does
+// not immediately dispose and re-decode what the user just saw. Confirmed
+// starvation temporarily relaxes the soft byte floor so the renderer can free
+// admission headroom without manual LRU membership changes.
 // The renderer registers decoded bytes only after concurrent downloads/parses
 // complete, so several in-flight tiles can make cachedBytes overshoot the hard
-// ceiling before isFull() blocks the next request. The desktop cap therefore
-// needs bounded headroom above both the 2.53 GiB complete active frontier and
-// the measured 2.784 GiB branch-replacement transition peak. minBytesSize
-// still drives unused content back to a small warm cache.
+// ceiling before isFull() blocks the next request. After ancestor fallback was
+// enabled, a real 15-leaf frontier plus retained parent paths measured
+// 3,325,605,911 bytes and pinned the old 3 GiB cap. Keep bounded headroom above
+// that measured working set without changing the low-memory profile.
 export function lodCacheBudget(deviceMemoryGiB) {
   const memory = Number(deviceMemoryGiB);
   if (Number.isFinite(memory) && memory <= 4) {
@@ -59,21 +68,27 @@ export function lodCacheBudget(deviceMemoryGiB) {
     // measured full-detail frontier for the large Rome Dam fixture is over
     // 2.3 GiB, which is not safe to promise inside a 4 GiB browser process.
     return {
-      minBytesSize: 384 * 1024 * 1024,
+      minBytesSize: 640 * 1024 * 1024,
       maxBytesSize: 768 * 1024 * 1024,
-      minSize: 24,
+      minSize: 256,
       maxSize: 512,
       unloadPercent: 0.20,
     };
   }
 
   return {
-    minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 3 * 1024 * 1024 * 1024,
-    minSize: 24,
+    minBytesSize: 3.25 * 1024 * 1024 * 1024,
+    maxBytesSize: 3.5 * 1024 * 1024 * 1024,
+    minSize: 512,
     maxSize: 1024,
     unloadPercent: 0.20,
   };
+}
+
+export function lodCacheRetentionMinBytes(budget, recoveryActive = false) {
+  if (recoveryActive) return 0;
+  const configured = Number(budget?.minBytesSize);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 0;
 }
 
 export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
@@ -218,7 +233,7 @@ export function lodQueuesSettled(tilesRenderer) {
     && !tilesRenderer?.processNodeQueue?.running;
 }
 
-export function detectLodStarvation(snapshot, consecutiveSamples = 0, threshold = 1) {
+export function detectLodStarvation(snapshot, consecutiveSamples = 0, threshold = 2) {
   const previousCount = Number.isInteger(consecutiveSamples) && consecutiveSamples > 0
     ? consecutiveSamples
     : 0;
@@ -277,6 +292,7 @@ export function advanceLodMemoryPressure(snapshot, profile, {
   if (!starvation.starved) {
     return {
       changed: false,
+      recoveryRequired: false,
       profile,
       consecutiveSamples: starvation.count,
       starvedAtDetail,
@@ -287,6 +303,7 @@ export function advanceLodMemoryPressure(snapshot, profile, {
   if (!pressure) {
     return {
       changed: false,
+      recoveryRequired: true,
       profile,
       consecutiveSamples: starvation.count,
       starvedAtDetail,
@@ -296,6 +313,7 @@ export function advanceLodMemoryPressure(snapshot, profile, {
   const { starvedAtDetail: nextCeiling, ...nextProfile } = pressure;
   return {
     changed: true,
+    recoveryRequired: true,
     profile: nextProfile,
     consecutiveSamples: 0,
     starvedAtDetail: nextCeiling,
@@ -527,6 +545,13 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   visit(root);
 
   const toMiB = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) / (1024 * 1024)) : null;
+  const cache = tilesRenderer?.lruCache;
+  const cachedBytes = Number(cache?.cachedBytes);
+  const maxBytesSize = Number(cache?.maxBytesSize);
+  const maxSize = Number(cache?.maxSize);
+  const itemSet = cache?.itemSet;
+  const itemCount = Number(itemSet?.size);
+
   const memoryLimited = runtimeProfile?.starvedAtDetail !== null
     && runtimeProfile?.starvedAtDetail !== undefined
     && Number(runtimeProfile?.activeDetail) < Number(runtimeProfile?.requestedDetail);
@@ -552,9 +577,11 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
       process: Boolean(tilesRenderer?.processNodeQueue?.running),
     },
     cache: {
-      usedMiB: toMiB(tilesRenderer?.lruCache?.cachedBytes),
-      maxMiB: toMiB(tilesRenderer?.lruCache?.maxBytesSize),
-      full: Boolean(tilesRenderer?.lruCache?.isFull?.()),
+      usedMiB: toMiB(cachedBytes),
+      maxMiB: toMiB(maxBytesSize),
+      full: Boolean(cache?.isFull?.()),
+      fullByBytes: Number.isFinite(cachedBytes) && Number.isFinite(maxBytesSize) && cachedBytes >= maxBytesSize,
+      fullByItems: Number.isFinite(itemCount) && Number.isFinite(maxSize) && itemCount >= maxSize,
     },
   };
 }

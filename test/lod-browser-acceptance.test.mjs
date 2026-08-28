@@ -528,10 +528,10 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'verified LOD was not selected over the available orthophoto');
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
-    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'conservative startup queues did not settle');
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not settle');
     await new Promise((resolve) => setTimeout(resolve, 5_000));
-    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'conservative startup queues did not remain settled');
-    const conservativeStartup = await client.evaluate(`({
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not remain settled');
+    const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
       active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
@@ -539,15 +539,15 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       phase: window.__ltds.lodDiagnostics().phase,
       status: document.querySelector('#lod-status').textContent,
     })`);
-    assert.deepEqual({ ...conservativeStartup, status: undefined }, {
-      slider: '2', requested: 2, active: 2, errorTarget: 512,
+    assert.deepEqual({ ...balancedStartup, status: undefined }, {
+      slider: '13', requested: 13, active: 13, errorTarget: 32,
       phase: 'requested-detail', status: undefined,
     });
-    assert.match(conservativeStartup.status, /^LOD: Detail 2 \(\d+ tiles?\)$/);
-    assert.doesNotMatch(conservativeStartup.status, /warming|streaming|full-detail/i);
+    assert.match(balancedStartup.status, /^LOD: (?:Detail 13|full-detail) \(\d+ tiles?\)$/);
+    assert.doesNotMatch(balancedStartup.status, /warming|streaming/i);
     const startupLod0Requests = client.events.filter((event) => event.method === 'Network.requestWillBeSent'
       && /\/LOD-0\/[^/?#]+\.b3dm(?:[?#]|$)/i.test(event.params.request.url));
-    assert.equal(startupLod0Requests.length, 0, 'conservative startup requested a full-resolution LOD-0 tile');
+    assert.ok(startupLod0Requests.length < 16, `balanced startup fanned out to the complete LOD-0 frontier: ${startupLod0Requests.length}`);
 
     const home = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();
@@ -697,7 +697,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(visibleInitialMaterials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.root.materials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.attachedMaterials.every((item) => item.hasMap && item.imageReady), 'attached full-detail B3DM textures were not decoded and bound');
-    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 3 * GiB, minSize: 24, maxSize: 1024, unloadPercent: 0.20 });
+    assert.deepEqual(initial.cache, { minBytesSize: 3.25 * GiB, maxBytesSize: 3.5 * GiB, minSize: 512, maxSize: 1024, unloadPercent: 0.20 });
 
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
@@ -968,6 +968,142 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
   }
 });
 
+test('browser close view refines at the default Detail and small motion retains decoded tiles', { timeout: 300_000 }, async (t) => {
+  const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
+  const executable = browserPath();
+  if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
+    t.skip('Set LTDS_LOD_TEST_TILE_ROOT and CHROME_PATH/EDGE_PATH to run real LOD retention acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const fixture = await startFixture(path.resolve(tileRoot));
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-retention-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Network.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', {
+      width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+      screenWidth: 1440, screenHeight: 900,
+    });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
+
+    const defaultState = await client.evaluate(`({
+      slider: document.querySelector('#lod-detail').value,
+      requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+      active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+      errorTarget: window.__ltds.tiles().errorTarget,
+    })`);
+    assert.deepEqual(defaultState, {
+      slider: '13', requested: 13, active: 13, errorTarget: 32,
+    }, 'the default view must be close-responsive without requesting global Detail 24');
+
+    const basePosition = [0, 44, 52];
+    const baseTarget = [0, 18, 0];
+    await setView(client, basePosition, baseTarget);
+    await waitFor(client, `(() => {
+      const t=window.__ltds.tiles(); let attached=0;
+      const visit=(tile)=>{(tile?.children||[]).forEach(visit);if(!(tile?.children||[]).length
+        && Number(tile?.geometricError)===0 && tile.engineData?.scene
+        && t.group.children.includes(tile.engineData.scene))attached++;};
+      visit(t.root); return attached>0 && !t.downloadQueue?.running
+        && !t.parseQueue?.running && !t.processNodeQueue?.running;
+    })()`, 'default Detail did not refine the close view to any zero-error leaf', 180_000);
+
+    const requestStart = client.events.length;
+    const baseline = await client.evaluate(`(() => {
+      const t=window.__ltds.tiles(); const scenes={};
+      const visit=(tile)=>{(tile?.children||[]).forEach(visit);const uri=tile?.content?.uri||tile?.content?.url||'';
+        if(!(tile?.children||[]).length && Number(tile?.geometricError)===0 && tile.engineData?.scene
+          && t.group.children.includes(tile.engineData.scene)) scenes[uri]=tile.engineData.scene.uuid;};
+      visit(t.root); window.__ltdsRetentionBaseline=scenes;
+      return { scenes, cachedBytes:t.lruCache.cachedBytes, minBytesSize:t.lruCache.minBytesSize,
+        maxBytesSize:t.lruCache.maxBytesSize, minSize:t.lruCache.minSize, maxSize:t.lruCache.maxSize };
+    })()`);
+    assert.ok(Object.keys(baseline.scenes).length > 0, JSON.stringify(baseline));
+
+    let boundary = null;
+    for (const offset of [1, 2, 4, 8]) {
+      await setView(client,
+        [basePosition[0] + offset, basePosition[1], basePosition[2]],
+        [baseTarget[0] + offset, baseTarget[1], baseTarget[2]],
+      );
+      await client.evaluate(`(() => {
+        const V=window.__ltds.camera().position.constructor;
+        window.__ltds.controls()._applyOrbit(new V(${baseTarget.join(',')}), 0.018, 0.006);
+        return true;
+      })()`);
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      const sample = await client.evaluate(`(() => {
+        const t=window.__ltds.tiles(); const baseline=window.__ltdsRetentionBaseline||{};
+        const rows=[]; const visit=(tile)=>{(tile?.children||[]).forEach(visit);const uri=tile?.content?.uri||tile?.content?.url||'';
+          if(Object.hasOwn(baseline,uri))rows.push({uri,used:tile?.traversal?.used===true,cacheUsed:t.lruCache.isUsed(tile),
+            inFrustum:tile?.traversal?.inFrustum===true,scene:tile?.engineData?.scene?.uuid||null,
+            attached:Boolean(tile?.engineData?.scene&&t.group.children.includes(tile.engineData.scene))});};
+        visit(t.root); return {rows,cachedBytes:t.lruCache.cachedBytes,phase:window.__ltds.lodDiagnostics().phase};
+      })()`);
+      if (sample.rows.some((row) => row.scene && row.cacheUsed === false && row.attached === false)) {
+        boundary = { offset, sample };
+        break;
+      }
+    }
+    assert.ok(boundary, 'an 8-meter pan plus one-degree orbit did not make a decoded baseline tile LRU-unused and detached');
+    assert.notEqual(boundary.sample.phase, 'memory-limited', JSON.stringify(boundary));
+
+    await setView(client, basePosition, baseTarget);
+    await waitFor(client, `(() => {
+      const t=window.__ltds.tiles(); const baseline=window.__ltdsRetentionBaseline||{};
+      let expected=0,attached=0; const visit=(tile)=>{(tile?.children||[]).forEach(visit);
+        const uri=tile?.content?.uri||tile?.content?.url||''; if(!Object.hasOwn(baseline,uri))return;
+        expected++; if(tile?.engineData?.scene&&t.group.children.includes(tile.engineData.scene))attached++;};
+      visit(t.root); return expected===Object.keys(baseline).length && attached===expected
+        && !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running;
+    })()`, 'returned close view did not restore and settle its previous frontier', 180_000);
+    const returned = await client.evaluate(`(() => {
+      const t=window.__ltds.tiles(); const baseline=window.__ltdsRetentionBaseline||{}; const rows=[];
+      const visit=(tile)=>{(tile?.children||[]).forEach(visit);const uri=tile?.content?.uri||tile?.content?.url||'';
+        if(Object.hasOwn(baseline,uri))rows.push({uri,before:baseline[uri],after:tile?.engineData?.scene?.uuid||null,
+          attached:Boolean(tile?.engineData?.scene&&t.group.children.includes(tile.engineData.scene))});};
+      visit(t.root); return {rows,cachedBytes:t.lruCache.cachedBytes,phase:window.__ltds.lodDiagnostics().phase};
+    })()`);
+    const changedScenes = returned.rows.filter((row) => row.before !== row.after);
+    const baselineUris = Object.keys(baseline.scenes);
+    const repeatedRequests = client.events.slice(requestStart)
+      .filter((event) => event.method === 'Network.requestWillBeSent'
+        && baselineUris.some((uri) => new URL(event.params.request.url).pathname.endsWith(`/${uri}`)))
+      .map((event) => new URL(event.params.request.url).pathname);
+    assert.deepEqual(changedScenes, [], `small camera motion discarded just-viewed decoded tiles: ${JSON.stringify({ baseline, boundary, returned })}`);
+    assert.deepEqual(repeatedRequests, [], `small camera motion re-requested just-viewed tiles: ${JSON.stringify(repeatedRequests)}`);
+    assert.notEqual(returned.phase, 'memory-limited', JSON.stringify(returned));
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock();
+    removeBrowserProfile(profile);
+  }
+});
+
 test('browser camera layer activates a bounded representative draw set', { timeout: 90_000 }, async (t) => {
   const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
   const executable = browserPath();
@@ -999,7 +1135,7 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     const lodDiagnostics = await client.evaluate(`window.__ltds.lodDiagnostics()`);
     assert.ok(['warmup', 'requested-detail', 'reduced-memory', 'memory-limited'].includes(lodDiagnostics.phase), JSON.stringify(lodDiagnostics));
     assert.ok(Number.isInteger(lodDiagnostics.pendingRequiredLeaves) && lodDiagnostics.pendingRequiredLeaves >= 0, JSON.stringify(lodDiagnostics));
-    assert.equal(lodDiagnostics.cache.maxMiB, 3072);
+    assert.equal(lodDiagnostics.cache.maxMiB, 3584);
     assert.doesNotMatch(JSON.stringify(lodDiagnostics), /https?:|token|secret|storage|mnt/i);
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     try {
@@ -1168,26 +1304,34 @@ test('browser hides the coarse root when every visible branch meets the active D
     await client.evaluate(`(() => { const slider=document.querySelector('#lod-detail');slider.value='2';slider.dispatchEvent(new Event('input',{bubbles:true}));return true; })()`);
     await waitFor(client, 'window.__ltds.state.lodRuntimeProfile?.activeDetail===2', 'Detail 2 did not reset the warmup stage');
     await setView(client, [4.964815557187116, 124.12038892967789, 0], [0, 0, 0]);
-    await client.evaluate(`(() => {
-      Object.defineProperty(window.__ltds.tiles().processNodeQueue,'running',{configurable:true,get:()=>true});
-      const slider=document.querySelector('#lod-detail');slider.value='24';slider.dispatchEvent(new Event('input',{bubbles:true}));return true;
+    const stagedRequest = await client.evaluate(`(() => {
+      const slider=document.querySelector('#lod-detail');slider.value='24';slider.dispatchEvent(new Event('input',{bubbles:true}));
+      return {requested:window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+        active:window.__ltds.state.lodRuntimeProfile?.activeDetail,errorTarget:window.__ltds.tiles().errorTarget};
     })()`);
-    const infiniteSse = await waitFor(client, `(() => {
-      const root=window.__ltds.tiles()?.root; let infiniteLeaves=0;
-      const visit=(tile)=>{(tile?.children||[]).forEach(visit);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile?.traversal?.visible===true&&tile?.traversal?.error===Infinity)infiniteLeaves++;};
-      visit(root); const activeDetail=window.__ltds.state.lodRuntimeProfile?.activeDetail;return infiniteLeaves>0&&activeDetail===13 ? {infiniteLeaves,activeDetail} : false;
-    })()`, 'ground camera pose did not enter a zero-error leaf bounding volume', 90_000);
-    assert.ok(infiniteSse.infiniteLeaves > 0, JSON.stringify(infiniteSse));
-    assert.equal(infiniteSse.activeDetail, 13, JSON.stringify(infiniteSse));
-    await client.evaluate(`delete window.__ltds.tiles().processNodeQueue.running`);
-    await waitFor(client, `(() => {
-      const t=window.__ltds.tiles(); let required=0,attached=0;
-      const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile?.traversal?.used===true&&tile?.traversal?.inFrustum===true){required++;if(tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene))attached++;}};
-      f(t.root);
-      const idle=!t.downloadQueue?.running&&!t.parseQueue?.running&&!t.processNodeQueue?.running;
-      const rootAttached=Boolean(t.root?.engineData?.scene&&t.group.children.includes(t.root.engineData.scene));
-      return required===16&&attached===required&&!rootAttached&&idle&&window.__ltds.state.lodRuntimeProfile?.activeDetail===24;
-    })()`, 'sustained 16-leaf REPLACE frontier did not converge cleanly', 300_000);
+    assert.deepEqual(stagedRequest, { requested: 24, active: 13, errorTarget: 32 });
+    try {
+      await waitFor(client, `(() => {
+        const t=window.__ltds.tiles(); let required=0,attached=0;
+        const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile?.traversal?.used===true&&tile?.traversal?.inFrustum===true){required++;if(tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene))attached++;}};
+        f(t.root);
+        const idle=!t.downloadQueue?.running&&!t.parseQueue?.running&&!t.processNodeQueue?.running;
+        const rootAttached=Boolean(t.root?.engineData?.scene&&t.group.children.includes(t.root.engineData.scene));
+        return required===16&&attached===required&&!rootAttached&&idle&&window.__ltds.state.lodRuntimeProfile?.activeDetail===24;
+      })()`, 'sustained 16-leaf REPLACE frontier did not converge cleanly', 300_000);
+    } catch (error) {
+      const convergenceDiagnostics = await client.evaluate(`(() => {
+        const t=window.__ltds.tiles();const rows=[];const visit=(tile,parent=null)=>{(tile?.children||[]).forEach(child=>visit(child,tile));
+          if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0)rows.push({uri:tile.content?.uri||'',error:tile.traversal?.error,
+            used:tile.traversal?.used,inFrustum:tile.traversal?.inFrustum,visible:tile.traversal?.visible,active:tile.traversal?.active,
+            attached:Boolean(tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)),loadingState:tile.internal?.loadingState,
+            parentError:parent?.traversal?.error,parentVisible:parent?.traversal?.visible,parentActive:parent?.traversal?.active});};
+        visit(t.root);return {profile:window.__ltds.state.lodRuntimeProfile,errorTarget:t.errorTarget,diagnostics:window.__ltds.lodDiagnostics(),rows,
+          queues:{download:t.downloadQueue?.running,parse:t.parseQueue?.running,process:t.processNodeQueue?.running},
+          cache:{bytes:t.lruCache.cachedBytes,maxBytes:t.lruCache.maxBytesSize,full:t.lruCache.isFull(),items:t.lruCache.itemSet?.size,maxItems:t.lruCache.maxSize}};
+      })()`);
+      throw new Error(`${error.message}; diagnostics=${JSON.stringify(convergenceDiagnostics)}`);
+    }
 
     const diagnostic = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();
@@ -1204,6 +1348,7 @@ test('browser hides the coarse root when every visible branch meets the active D
           || tile?.traversal?.used !== true || tile?.traversal?.inFrustum !== true) return;
         strictLeaves.push({
           uri: tile.content?.uri || tile.content?.url || '', attached: isAttached(tile),
+          sceneUuid: tile.engineData?.scene?.uuid || null,
           loadingState: tile.internal?.loadingState ?? null,
           parentError: parent?.traversal?.error ?? null,
           parentAttached: isAttached(parent),
@@ -1269,13 +1414,25 @@ test('browser hides the coarse root when every visible branch meets the active D
       writeFileSync(process.env.LTDS_LOD_SCREENSHOT_PATH, Buffer.from(capture.data, 'base64'));
     }
 
-    const closeUris = diagnostic.strictLeaves.map((leaf) => leaf.uri).sort();
+    const closeScenes = Object.fromEntries(diagnostic.strictLeaves.map((leaf) => [leaf.uri, leaf.sceneUuid]));
+    const closeUris = Object.keys(closeScenes).sort();
+    const returnRequestIndex = client.events.length;
     await setView(client, [0, 1300, 1300], [0, 18, 0]);
     await waitFor(client, `(() => {
       const t=window.__ltds.tiles(); let attached=0;
       const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene))attached++;};
-      f(t.root); return attached===0 && t.lruCache.cachedBytes < 1024 ** 3;
-    })()`, 'far view did not detach close leaves and drain the warm cache', 180_000);
+      f(t.root); return attached===0 && !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running;
+    })()`, 'far view did not detach the close leaves', 180_000);
+    const farRetention = await client.evaluate(`(() => {
+      const t=window.__ltds.tiles(); const expected=${JSON.stringify(closeScenes)}; const rows=[];
+      const f=(tile)=>{(tile?.children||[]).forEach(f);const uri=tile.content?.uri||tile.content?.url||'';
+        if(Object.hasOwn(expected,uri))rows.push({uri,before:expected[uri],after:tile.engineData?.scene?.uuid||null,cacheUsed:t.lruCache.isUsed(tile),
+          attached:Boolean(tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene))});};
+      f(t.root); return {rows,cachedBytes:t.lruCache.cachedBytes,minBytesSize:t.lruCache.minBytesSize,maxBytesSize:t.lruCache.maxBytesSize};
+    })()`);
+    assert.deepEqual(farRetention.rows.filter((row) => row.before !== row.after), [], `far view discarded the recent decoded frontier below the hard cap: ${JSON.stringify(farRetention)}`);
+    assert.ok(farRetention.rows.every((row) => row.attached === false), JSON.stringify(farRetention));
+    assert.ok(farRetention.rows.every((row) => row.cacheUsed === false), JSON.stringify(farRetention));
     await setView(client, sustainedAllLeaves ? [4.964815557187116, 124.12038892967789, 0] : [0, 44, 52], sustainedAllLeaves ? [0, 0, 0] : [0, 18, 0]);
     await waitFor(client, `(() => {
       const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify(closeUris)});
@@ -1287,9 +1444,16 @@ test('browser hides the coarse root when every visible branch meets the active D
       const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify(closeUris)}); const attached=[];
       const f=(tile)=>{(tile?.children||[]).forEach(f);const uri=tile.content?.uri||tile.content?.url;if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&t.group.children.includes(tile.engineData.scene)&&expected.has(uri))attached.push(uri);};
       f(t.root); let rootRendered=Boolean(t.root.engineData.scene&&t.group.children.includes(t.root.engineData.scene));
-      return {attached:attached.sort(),rootRendered,cacheBytes:t.lruCache.cachedBytes};
+      const scenes={};const collect=(tile)=>{(tile?.children||[]).forEach(collect);const uri=tile.content?.uri||tile.content?.url||'';if(expected.has(uri))scenes[uri]=tile.engineData?.scene?.uuid||null;};collect(t.root);
+      return {attached:attached.sort(),scenes,rootRendered,cacheBytes:t.lruCache.cachedBytes};
     })()`);
     assert.deepEqual(returned.attached, closeUris);
+    assert.deepEqual(returned.scenes, closeScenes, `returning to the close view re-decoded retained scenes: ${JSON.stringify(returned)}`);
+    const duplicateCloseRequests = client.events.slice(returnRequestIndex)
+      .filter((event) => event.method === 'Network.requestWillBeSent'
+        && closeUris.some((uri) => new URL(event.params.request.url).pathname.endsWith(`/${uri}`)))
+      .map((event) => new URL(event.params.request.url).pathname);
+    assert.deepEqual(duplicateCloseRequests, [], `far/return re-requested retained close leaves: ${JSON.stringify(duplicateCloseRequests)}`);
     assert.equal(returned.rootRendered, false, `returned view retained coarse root: ${JSON.stringify(returned)}`);
   } finally {
     if (client) {
