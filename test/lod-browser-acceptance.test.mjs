@@ -521,6 +521,26 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'verified LOD was not selected over the available orthophoto');
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'conservative startup queues did not settle');
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'conservative startup queues did not remain settled');
+    const conservativeStartup = await client.evaluate(`({
+      slider: document.querySelector('#lod-detail').value,
+      requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+      active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+      errorTarget: window.__ltds.tiles().errorTarget,
+      phase: window.__ltds.lodDiagnostics().phase,
+      status: document.querySelector('#lod-status').textContent,
+    })`);
+    assert.deepEqual({ ...conservativeStartup, status: undefined }, {
+      slider: '2', requested: 2, active: 2, errorTarget: 512,
+      phase: 'requested-detail', status: undefined,
+    });
+    assert.match(conservativeStartup.status, /^LOD: Detail 2 \(\d+ tiles?\)$/);
+    assert.doesNotMatch(conservativeStartup.status, /warming|streaming|full-detail/i);
+    const startupLod0Requests = client.events.filter((event) => event.method === 'Network.requestWillBeSent'
+      && /\/LOD-0\/[^/?#]+\.b3dm(?:[?#]|$)/i.test(event.params.request.url));
+    assert.equal(startupLod0Requests.length, 0, 'conservative startup requested a full-resolution LOD-0 tile');
 
     const home = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();
@@ -564,6 +584,20 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     })()`);
     assert.ok(reset < 1e-5, `Reset View did not restore world-bounds home: ${reset}`);
 
+    const requestEventIndex = client.events.length;
+    const explicitHighDetail = await client.evaluate(`(() => {
+      const slider = document.querySelector('#lod-detail');
+      slider.value = '24';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      return {
+        slider: slider.value,
+        requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+        active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+        errorTarget: window.__ltds.tiles().errorTarget,
+      };
+    })()`);
+    assert.deepEqual(explicitHighDetail, { slider: '24', requested: 24, active: 13, errorTarget: 32 });
+
     const topRadius = Math.max(25, home.diameter * 0.15);
     const topPolar = 0.04;
     await setView(client, [
@@ -597,6 +631,8 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(topCoverage.fineScenes > 0, `top-down view exposed no full-detail scenes: ${JSON.stringify(topCoverage)}`);
     assert.equal(topCoverage.rootRendered, false, `settled top-down view still rendered the coarse root: ${JSON.stringify(topCoverage)}`);
     assert.equal(topCoverage.queueRunning, false);
+    assert.ok(client.events.slice(requestEventIndex).some((event) => event.method === 'Network.requestWillBeSent'
+      && /\/LOD-0\/[^/?#]+\.b3dm(?:[?#]|$)/i.test(event.params.request.url)), 'explicit Detail 24 requested no LOD-0 content');
     await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
 
     const pole = await client.evaluate(`(() => {
@@ -1330,16 +1366,16 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     return;
   }
 
-  const { makeB3dm, makeGlb, TRIANGLE_A, writeAuditableFixture } = await import('./helpers/lod-fixture.mjs');
+  const { makeGlb, TRIANGLE_A, writeAuditableFixture } = await import('./helpers/lod-fixture.mjs');
   const tileRoot = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-fixture-'));
   const validPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   writeAuditableFixture(tileRoot, {
-    leafABytes: makeB3dm(makeGlb([TRIANGLE_A], validPng)),
     leafBTexture: validPng,
   });
+  writeFileSync(path.join(tileRoot, 'coarse.glb'), makeGlb([TRIANGLE_A], validPng));
   const sessionTilesetPath = path.join(tileRoot, 'tileset.json');
   const sessionTileset = JSON.parse(readFileSync(sessionTilesetPath, 'utf8'));
-  sessionTileset.root.content = { uri: 'leaf-a.b3dm' };
+  sessionTileset.root.content = { uri: 'coarse.glb' };
   writeFileSync(sessionTilesetPath, JSON.stringify(sessionTileset));
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client, fixture;
@@ -1373,6 +1409,56 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     assert.ok(fixture.currentRequests() >= 2);
     assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'session refresh fetched the original GLB');
     assert.equal(await client.evaluate(`document.querySelector('#layer-tiles')?.textContent`), 'Streamed LOD Mesh');
+    await client.evaluate(`document.querySelector('#tab-model').click()`);
+    await waitFor(client, `location.search.includes('view=model')`, 'refreshed session could not enter model view');
+    const hierarchyDeadline = Date.now() + 10_000;
+    while (!await client.evaluate(`Boolean(window.__ltds?.tiles()?.root)`) && Date.now() < hierarchyDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const refreshedRuntime = await client.evaluate(`({
+      activeMode: window.__ltds?.state?.activeMode,
+      meshSource: window.__ltds?.state?.meshSource,
+      tiles: Boolean(window.__ltds?.tiles()),
+      root: Boolean(window.__ltds?.tiles()?.root),
+      manifest: window.__ltds?.state?.lodManifestReport,
+      modeStatus: document.querySelector('#mode-status')?.textContent,
+      lodStatus: document.querySelector('#lod-status')?.textContent,
+    })`);
+    const browserErrors = client.events.filter((event) => event.method === 'Log.entryAdded'
+      || event.method === 'Runtime.exceptionThrown' || event.method === 'Runtime.consoleAPICalled').slice(-10);
+    assert.equal(refreshedRuntime.root, true, `refreshed session did not attach the LOD hierarchy: ${JSON.stringify({ refreshedRuntime, requests: fixture.requests, browserErrors })}`);
+    const conservativeStartup = await client.evaluate(`({
+      slider: document.querySelector('#lod-detail').value,
+      requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+      active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+      errorTarget: window.__ltds.tiles().errorTarget,
+      phase: window.__ltds.lodDiagnostics().phase,
+    })`);
+    assert.deepEqual(conservativeStartup, {
+      slider: '2', requested: 2, active: 2, errorTarget: 512, phase: 'requested-detail',
+    });
+    assert.equal(fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
+      || requestPath.endsWith('/leaf-b.glb')), false,
+    'conservative startup refined into a child tile before a higher Detail request');
+
+    const explicitHighDetail = await client.evaluate(`(() => {
+      const slider = document.querySelector('#lod-detail');
+      slider.value = '24';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      return {
+        requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+        active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+        errorTarget: window.__ltds.tiles().errorTarget,
+      };
+    })()`);
+    assert.deepEqual(explicitHighDetail, { requested: 24, active: 13, errorTarget: 32 });
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 24`, 'explicit high-detail request did not complete its staged warmup');
+    const fineTileDeadline = Date.now() + 10_000;
+    while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-b.glb')) && Date.now() < fineTileDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-b.glb')), true,
+      'explicit Detail 24 did not refine into the fine child tile');
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});

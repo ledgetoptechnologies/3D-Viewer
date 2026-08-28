@@ -1,5 +1,6 @@
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
+export const DEFAULT_LOD_DETAIL = MIN_LOD_DETAIL;
 export const LOD_WARMUP_DETAIL = 13;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
@@ -8,7 +9,7 @@ export function detailToErrorTarget(value) {
   const parsed = Number.parseInt(value, 10);
   const detail = Number.isFinite(parsed)
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsed))
-    : MAX_LOD_DETAIL;
+    : DEFAULT_LOD_DETAIL;
   const coarseFraction = (MAX_LOD_DETAIL - detail) / (MAX_LOD_DETAIL - MIN_LOD_DETAIL);
   return Number((2 * Math.pow(256, coarseFraction)).toFixed(3));
 }
@@ -78,7 +79,7 @@ export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
   const parsed = Number.parseInt(requestedDetail, 10);
   const requested = Number.isFinite(parsed)
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsed))
-    : MAX_LOD_DETAIL;
+    : DEFAULT_LOD_DETAIL;
   const memory = Number(deviceMemoryGiB);
   const reduced = Number.isFinite(memory) && memory <= 4;
   const maximumDetail = reduced ? LOW_MEMORY_MAX_LOD_DETAIL : MAX_LOD_DETAIL;
@@ -90,6 +91,21 @@ export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
     maximumDetail,
     reduced,
   };
+}
+
+export function lodDetailRequestPending(profile) {
+  const requested = Number.parseInt(profile?.requestedDetail, 10);
+  const active = Number.parseInt(profile?.activeDetail, 10);
+  const maximum = Number.parseInt(profile?.maximumDetail, 10);
+  if (!Number.isFinite(requested) || !Number.isFinite(active)) return false;
+  const cappedMaximum = Number.isFinite(maximum)
+    ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, maximum))
+    : MAX_LOD_DETAIL;
+  const effectiveRequest = Math.min(
+    cappedMaximum,
+    Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, requested)),
+  );
+  return active < effectiveRequest;
 }
 
 export function lodWarmupSatisfiedByDetail(activeDetail) {
@@ -129,7 +145,7 @@ export function resolveLodWarmupAdvance(profile) {
 export function configureLodRenderer(tilesRenderer, {
   camera,
   renderer,
-  detail = MAX_LOD_DETAIL,
+  detail = DEFAULT_LOD_DETAIL,
   deviceMemoryGiB,
 } = {}) {
   tilesRenderer.setCamera(camera);
@@ -456,10 +472,11 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   const memoryLimited = runtimeProfile?.starvedAtDetail !== null
     && runtimeProfile?.starvedAtDetail !== undefined
     && Number(runtimeProfile?.activeDetail) < Number(runtimeProfile?.requestedDetail);
+  const detailPending = lodDetailRequestPending(runtimeProfile);
   return {
     phase: memoryLimited
       ? 'memory-limited'
-      : runtimeProfile?.reduced ? 'reduced-memory' : warmupComplete ? 'requested-detail' : 'warmup',
+      : runtimeProfile?.reduced ? 'reduced-memory' : detailPending ? 'warmup' : 'requested-detail',
     requestedDetail: Number(runtimeProfile?.requestedDetail) || null,
     activeDetail: Number(runtimeProfile?.activeDetail) || null,
     maximumDetail: Number(runtimeProfile?.maximumDetail) || null,

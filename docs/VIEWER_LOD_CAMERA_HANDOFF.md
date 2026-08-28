@@ -2,8 +2,18 @@
 
 ## Status
 
-**Root causes reproduced and fixed locally as of 2026-08-27; production remains
-unconfirmed.**
+**Root causes reproduced and fixed locally as of 2026-08-28; production remains
+unconfirmed until the user tests the merged deployment.**
+
+Production inspection on 2026-08-28 found that the hierarchy itself was
+working, but the startup policy requested Detail 24 and immediately staged
+through Detail 13. A cold default view consequently fetched the root and 240 of
+241 LOD-0 payloads within 20 seconds; forcing Detail 2 before startup stabilized
+at 29 payloads (root, 12 LOD-2, and 16 LOD-1) with no LOD-0 requests in that
+measured pose. The runtime now starts with requested and active Detail 2. It
+does not raise either value until the user moves the slider, after which the
+existing Detail-13 staging and memory governor apply. Standard SSE traversal
+can still select a fine tile for an unusually close incoming camera.
 
 The released runtime passed its original repository and B3DM fixture gates, but
 the user subsequently reported incomplete, transparent, or dark foreground
@@ -138,6 +148,11 @@ Examples:
 - Detail 24: error target 2
 - Detail 13: error target 32
 - Detail 2: error target 512
+
+Desktop/default startup uses Detail 2 as both the requested and active detail.
+It is a settled requested-detail phase, not an unfinished warmup. Low-memory
+clients report the separate `reduced-memory` phase. No higher requested or
+active Detail is set until the user moves the slider upward.
 
 ### Desktop warmup
 

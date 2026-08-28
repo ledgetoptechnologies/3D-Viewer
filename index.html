@@ -403,9 +403,9 @@
           </div>
           <div class="slider-row">
             <span>Detail</span>
-            <input type="range" id="lod-detail" min="2" max="24" step="1" value="24">
+            <input type="range" id="lod-detail" min="2" max="24" step="1" value="2">
           </div>
-          <div class="hint" style="margin-top:10px;">LOD mesh streams low detail far away and full detail up close.</div>
+          <div class="hint" style="margin-top:10px;">Starts with a lightweight overview. Raise Detail to stream finer tiles for the current view.</div>
         </div>
 
         <div class="panel" id="panel-camera-positions">
@@ -441,6 +441,7 @@
             <button class="tool-btn full" id="tool-clear">Clear Measurements</button>
           </div>
           <div id="measure-output"></div>
+          <div class="hint" style="margin-top:10px;">In 3D Model, raise Detail before precision measurements; overview geometry may be simplified.</div>
           <div id="map-volume-options" style="display:none;margin-top:10px;">
             <label class="slider-row"><span>Surface</span><select id="map-volume-surface"><option value="auto">Auto (prefer DSM)</option><option value="dsm" disabled>DSM</option><option value="dtm" disabled>DTM</option></select></label>
             <label class="slider-row"><span>Reference</span><select id="map-volume-reference"><option value="lowest">Lowest sampled point</option><option value="average">Average surface</option><option value="custom">Custom elevation</option></select></label>
