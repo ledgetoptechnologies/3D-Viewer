@@ -605,7 +605,12 @@ WGS84 UTM 16N
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to `tilesRenderer.errorTarget` from 512
-  down to 2. Desktop high-detail requests warm at Detail 13 before advancing;
+  down to 2. The Viewer starts at actual requested Detail 2, so initial load is
+  a lightweight overview and does not silently raise the requested or active
+  Detail. Standard screen-space-error traversal can still select a fine tile
+  for an unusually close incoming view. Raising Detail is an explicit request
+  for finer visible tiles. Desktop requests above
+  Detail 13 warm at Detail 13 before advancing;
   a visible terminal zero-error leaf satisfies that warmup target even when the
   camera is inside its bounding volume and the renderer reports infinite
   screen-space error. A non-terminal or non-zero-error tile at infinite error

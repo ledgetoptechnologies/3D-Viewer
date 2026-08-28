@@ -151,19 +151,22 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
   assert.doesNotMatch(main, /showError\(`Failed to load point cloud from \$\{POINT_CLOUD_URL\}/);
 });
 
-test('LOD detail stages through a visible warmup and caps reduced-memory clients honestly', () => {
+test('LOD starts conservatively, stages explicit high-detail requests, and caps reduced-memory clients honestly', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /id="lod-detail"[^>]*max="24"[^>]*value="24"/);
+  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="2"/);
+  assert.match(html, /Starts with a lightweight overview\. Raise Detail to stream finer tiles for the current view\./);
   assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
   assert.match(main, /lodRuntimeProfileState\.requestedDetail = next\.requestedDetail/);
   assert.match(main, /lodRuntimeProfileState\.activeDetail = next\.activeDetail/);
+  assert.match(main, /const detailPending = lodDetailRequestPending\(lodRuntimeProfileState\)/);
   assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(next\.activeDetail\)/);
   assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
+  assert.match(main, /!lodDetailRequestPending\(lodRuntimeProfileState\)\) return false/);
   assert.match(main, /const queuesSettled = lodQueuesSettled\(tilesRenderer\)/);
   assert.match(main, /reduced-memory Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
-  assert.match(main, /frontier\.fullDetail && queuesSettled \? 'full-detail' : 'streaming'/);
+  assert.match(main, /queuesSettled \? `Detail \$\{lodRuntimeProfileState\?\.activeDetail \?\? 2\}` : `streaming Detail/);
   assert.doesNotMatch(main, /releaseStaleLodDetails|transientRootBackdropEnabled|syncTransientRootLodBackdrop/);
 });
 

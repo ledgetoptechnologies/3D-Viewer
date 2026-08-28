@@ -34,9 +34,15 @@ preload stay disabled so only the active view branches remain pinned. The
 Viewer does not manually toggle cached scene visibility, tile active/visible
 state, or LRU usage.
 
-Desktop clients begin high-detail requests at Detail 13 and advance to the
-requested Detail only after the visible frontier meets the active target and
-all renderer queues settle. Clients reporting 4 GiB or less are capped at
+The Viewer starts with requested and active Detail 2 (`errorTarget = 512`). It
+does not automatically promote that startup request, so the initial overview
+avoids the default-view LOD-0 fan-out measured in production. Standard SSE
+traversal can still select a fine tile when an incoming camera is unusually
+close to or inside its volume. Raising the slider is the explicit signal to
+request finer tiles for the current view. Desktop requests above Detail 13
+begin at Detail 13 and advance to the requested Detail only after the visible
+frontier meets the active target and all renderer queues settle. Clients
+reporting 4 GiB or less are capped at
 Detail 13 and use a separate 768 MiB cache profile. The desktop cache keeps a
 0.4 GiB minimum and 3 GiB maximum with 24 minimum and 1,024 maximum entries.
 The reduced profile keeps 384 MiB minimum and 768 MiB maximum with 24 minimum

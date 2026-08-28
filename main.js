@@ -16,6 +16,7 @@ import {
   inspectLodProvenance,
   inspectLodTileset,
   lodDebugSnapshot,
+  lodDetailRequestPending,
   lodQueuesSettled,
   refreshLodResolution,
   resolveLodDetailRequest,
@@ -809,9 +810,11 @@ function loadTiles() {
   lodWarmupComplete = lodRuntimeProfileState.reduced;
   state.lodRootBackdrop = null;
   if (lodRuntimeProfileState.reduced) {
-    dom.lodStatus.textContent = `LOD: reduced-memory (Detail ${lodRuntimeProfileState.maximumDetail} max)`;
-  } else if (lodRuntimeProfileState.activeDetail < lodRuntimeProfileState.requestedDetail) {
+    dom.lodStatus.textContent = `LOD: reduced-memory (Detail ${lodRuntimeProfileState.activeDetail}; ${lodRuntimeProfileState.maximumDetail} max)`;
+  } else if (lodDetailRequestPending(lodRuntimeProfileState)) {
     dom.lodStatus.textContent = `LOD: warming (Detail ${lodRuntimeProfileState.activeDetail} → ${lodRuntimeProfileState.requestedDetail})`;
+  } else {
+    dom.lodStatus.textContent = `LOD: Detail ${lodRuntimeProfileState.activeDetail}`;
   }
   emitLodDebugSnapshot('startup', true);
   lodFailureHandled = false;
@@ -3169,9 +3172,10 @@ function bindUI() {
     lodWarmupComplete = next.warmupComplete;
     tilesRenderer.errorTarget = detailToErrorTarget(next.activeDetail);
     state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState, starvedAtDetail: null };
+    const detailPending = lodDetailRequestPending(lodRuntimeProfileState);
     dom.lodStatus.textContent = lodRuntimeProfileState.reduced
       ? `LOD: reduced-memory (Detail ${next.activeDetail}; ${lodRuntimeProfileState.maximumDetail} max)`
-      : lodWarmupComplete ? `LOD: Detail ${next.activeDetail}` : `LOD: warming (Detail 13 → ${next.requestedDetail})`;
+      : detailPending ? `LOD: warming (Detail ${next.activeDetail} → ${next.requestedDetail})` : `LOD: Detail ${next.activeDetail}`;
     emitLodDebugSnapshot('detail-change', true);
   });
 
@@ -3400,7 +3404,8 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
 
 function maybeAdvanceLodWarmup() {
   if (!tilesRenderer || !lodRuntimeProfileState || lodWarmupComplete
-    || lodRuntimeProfileState.reduced || lodStarvedAtDetail !== null) return false;
+    || lodRuntimeProfileState.reduced || lodStarvedAtDetail !== null
+    || !lodDetailRequestPending(lodRuntimeProfileState)) return false;
   if (!lodQueuesSettled(tilesRenderer)
     || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
   const advance = resolveLodWarmupAdvance(lodRuntimeProfileState);
@@ -3494,13 +3499,16 @@ function updateStats() {
     }
     const memoryLimited = lodStarvedAtDetail !== null
       && lodRuntimeProfileState?.activeDetail < lodRuntimeProfileState?.requestedDetail;
+    const detailPending = lodDetailRequestPending(lodRuntimeProfileState);
     const quality = memoryLimited
       ? `memory-limited Detail ${lodRuntimeProfileState.activeDetail}`
       : lodRuntimeProfileState?.reduced
       ? `reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`
-      : !lodWarmupComplete
+      : detailPending
         ? `warming Detail ${lodRuntimeProfileState?.activeDetail ?? 13}`
-        : frontier.fullDetail && queuesSettled ? 'full-detail' : 'streaming';
+        : frontier.fullDetail && queuesSettled
+          ? 'full-detail'
+          : queuesSettled ? `Detail ${lodRuntimeProfileState?.activeDetail ?? 2}` : `streaming Detail ${lodRuntimeProfileState?.activeDetail ?? 2}`;
     dom.lodStatus.textContent = `LOD: ${quality} (${vis} tile${vis === 1 ? '' : 's'})`;
     emitLodDebugSnapshot('status');
   } else if (glbParent.visible) {

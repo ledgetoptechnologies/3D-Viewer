@@ -11,7 +11,7 @@ function append(parts, bytes) {
   const padded = Buffer.alloc(align4(bytes.length));
   bytes.copy(padded);
   parts.push(padded);
-  return { byteOffset: offset, byteLength: bytes.length };
+  return { buffer: 0, byteOffset: offset, byteLength: bytes.length };
 }
 
 function floatBytes(values) {

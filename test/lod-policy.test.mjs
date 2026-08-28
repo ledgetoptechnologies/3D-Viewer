@@ -4,6 +4,7 @@ import { TilesRenderer } from '3d-tiles-renderer';
 import {
   advanceLodMemoryPressure,
   configureLodRenderer,
+  DEFAULT_LOD_DETAIL,
   decideLodStartup,
   detectLodStarvation,
   detailToErrorTarget,
@@ -13,6 +14,7 @@ import {
   lodQueuesSettled,
   lodCacheBudget,
   lodDebugSnapshot,
+  lodDetailRequestPending,
   lodRuntimeProfile,
   lodWarmupSatisfiedByDetail,
   refreshLodResolution,
@@ -31,7 +33,7 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.ok(detailToErrorTarget(12) < 512);
   assert.equal(detailToErrorTarget(-100), 512);
   assert.equal(detailToErrorTarget(100), 2);
-  assert.equal(detailToErrorTarget(undefined), 2, 'missing detail defaults to maximum quality');
+  assert.equal(detailToErrorTarget(undefined), 512, 'missing detail fails bandwidth-conservatively');
 });
 
 test('renderer configuration uses REPLACE transitions without ancestor or sibling overfetch', () => {
@@ -84,6 +86,23 @@ test('renderer configuration uses REPLACE transitions without ancestor or siblin
     maxSize: 1024,
     unloadPercent: 0.20,
   });
+
+  const conservative = {
+    lruCache: {}, downloadQueue: { maxJobs: 25 }, parseQueue: { maxJobs: 5 },
+    setCamera() {}, setResolutionFromRenderer() {},
+  };
+  const conservativeProfile = configureLodRenderer(conservative, { camera, renderer, deviceMemoryGiB: 8 });
+  assert.equal(DEFAULT_LOD_DETAIL, 2);
+  assert.equal(conservative.errorTarget, 512);
+  assert.deepEqual(conservativeProfile, {
+    budget: lodCacheBudget(8),
+    requestedDetail: 2,
+    activeDetail: 2,
+    maximumDetail: 24,
+    reduced: false,
+  });
+  assert.deepEqual(lodRuntimeProfile(undefined, 8), conservativeProfile);
+  assert.equal(lodDetailRequestPending(conservativeProfile), false);
 
   const alreadyBounded = {
     lruCache: {}, downloadQueue: { maxJobs: 4 }, parseQueue: { maxJobs: 1 },
@@ -280,13 +299,15 @@ test('memory-pressure coordinator requires fresh sustained samples and never rec
 });
 
 test('Detail changes cannot bypass an unfinished desktop warmup', () => {
-  const desktop = { maximumDetail: 24, reduced: false };
+  const desktop = { requestedDetail: 2, activeDetail: 2, maximumDetail: 24, reduced: false };
+  assert.equal(lodDetailRequestPending(desktop), false);
   assert.deepEqual(resolveLodDetailRequest(desktop, false, 2), {
     requestedDetail: 2, activeDetail: 2, warmupComplete: false,
   });
   assert.deepEqual(resolveLodDetailRequest(desktop, false, 24), {
     requestedDetail: 24, activeDetail: 13, warmupComplete: false,
   });
+  assert.equal(lodDetailRequestPending({ ...desktop, ...resolveLodDetailRequest(desktop, false, 24) }), true);
   assert.deepEqual(resolveLodDetailRequest(desktop, true, 24), {
     requestedDetail: 24, activeDetail: 24, warmupComplete: true,
   });
@@ -302,6 +323,7 @@ test('Detail changes cannot bypass an unfinished desktop warmup', () => {
   assert.deepEqual(resolveLodWarmupAdvance({ ...desktop, ...restaged }), {
     requestedDetail: 24, activeDetail: 24, warmupComplete: true,
   });
+  assert.equal(lodDetailRequestPending({ ...desktop, requestedDetail: 24, activeDetail: 24 }), false);
   assert.deepEqual(resolveLodDetailRequest({ maximumDetail: 13, reduced: true }, false, 24), {
     requestedDetail: 24, activeDetail: 13, warmupComplete: true,
   });
@@ -309,6 +331,7 @@ test('Detail changes cannot bypass an unfinished desktop warmup', () => {
   assert.equal(lodWarmupSatisfiedByDetail(12), false);
   assert.equal(lodWarmupSatisfiedByDetail(13), true);
   assert.equal(lodWarmupSatisfiedByDetail(24), true);
+  assert.equal(lodDetailRequestPending({ requestedDetail: 24, activeDetail: 13, maximumDetail: 13 }), false);
 });
 
 test('LOD console diagnostics are bounded and strip origins query strings and credentials', () => {
@@ -344,6 +367,15 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   assert.equal(lodDebugSnapshot(renderer, {
     requestedDetail: 24, activeDetail: 23, maximumDetail: 24, reduced: false, starvedAtDetail: 24,
   }, true).phase, 'memory-limited');
+  assert.equal(lodDebugSnapshot(renderer, {
+    requestedDetail: 2, activeDetail: 2, maximumDetail: 24, reduced: false,
+  }, false).phase, 'requested-detail', 'a settled conservative request is not a warmup');
+  assert.equal(lodDebugSnapshot(renderer, {
+    requestedDetail: 24, activeDetail: 13, maximumDetail: 24, reduced: false,
+  }, false).phase, 'warmup');
+  assert.equal(lodDebugSnapshot(renderer, {
+    requestedDetail: 24, activeDetail: 13, maximumDetail: 13, reduced: true,
+  }, true).phase, 'reduced-memory');
   assert.doesNotMatch(JSON.stringify(value), /private\.example|customer-42|Mesh-B\.b3dm|token|secret/);
 });
 
