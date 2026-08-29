@@ -19,7 +19,9 @@ import {
   lodDetailRequestPending,
   lodCacheRetentionMinBytes,
   lodQueuesSettled,
+  lodViewChangeRequiresRetry,
   refreshLodResolution,
+  recoverLodCacheAdmission,
   resolveLodDetailRequest,
   resolveLodWarmupAdvance,
   visibleLodFrontier,
@@ -147,7 +149,8 @@ let lodWarmupComplete = false;
 let lodStarvationSamples = 0;
 let lodStarvedAtDetail = null;
 let lodCacheRecoveryActive = false;
-let lodLastSettledDetail = 2;
+let lodLastSettledDetail = null;
+let lodPressureView = null;
 let lodDebugSignature = '';
 let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
@@ -798,7 +801,8 @@ function loadTiles() {
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
   lodCacheRecoveryActive = false;
-  lodLastSettledDetail = 2;
+  lodLastSettledDetail = null;
+  lodPressureView = null;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
   tilesRenderer = rendererInstance;
@@ -855,6 +859,12 @@ function loadTiles() {
   });
   rendererInstance.addEventListener('load-model', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
+    // 3d-tiles-renderer 0.5.1 otherwise discards a completed parse when a
+    // concurrent tile filled the byte cache first. Free one stale LRU tile
+    // synchronously so the expensive selected foreground parse can be kept.
+    if (recoverLodCacheAdmission(rendererInstance.lruCache, lodRuntimeProfileState.budget)) {
+      lodCacheRecoveryActive = true;
+    }
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -889,7 +899,8 @@ function disposeTiles() {
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
   lodCacheRecoveryActive = false;
-  lodLastSettledDetail = 2;
+  lodLastSettledDetail = null;
+  lodPressureView = null;
   if (!tilesRenderer) return;
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
@@ -3173,10 +3184,13 @@ function bindUI() {
     lodStarvationSamples = 0;
     lodStarvedAtDetail = null;
     lodCacheRecoveryActive = false;
+    lodPressureView = null;
     if (!tilesRenderer || !lodRuntimeProfileState) return;
     tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, false);
     const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
-    lodLastSettledDetail = Math.min(lodLastSettledDetail, next.activeDetail);
+    if (Number.isFinite(lodLastSettledDetail)) {
+      lodLastSettledDetail = Math.min(lodLastSettledDetail, next.activeDetail);
+    }
     lodRuntimeProfileState.requestedDetail = next.requestedDetail;
     lodRuntimeProfileState.activeDetail = next.activeDetail;
     lodWarmupComplete = next.warmupComplete;
@@ -3414,10 +3428,11 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
 
 function maybeAdvanceLodWarmup() {
   if (!tilesRenderer || !lodRuntimeProfileState
-    || lodRuntimeProfileState.reduced || lodStarvedAtDetail !== null) return false;
+    || lodRuntimeProfileState.reduced) return false;
   if (!lodQueuesSettled(tilesRenderer)
     || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
   lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
+  if (lodStarvedAtDetail !== null) return false;
   if (!lodDetailRequestPending(lodRuntimeProfileState)) return false;
   const advance = resolveLodWarmupAdvance(lodRuntimeProfileState);
   if (!advance) return false;
@@ -3428,6 +3443,44 @@ function maybeAdvanceLodWarmup() {
   state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState };
   dom.lodStatus.textContent = `LOD: warming Detail ${targetDetail} → ${advance.requestedDetail}`;
   emitLodDebugSnapshot('refinement-stage', true);
+  return true;
+}
+
+function captureLodPressureView() {
+  if (!camera) return null;
+  camera.updateMatrixWorld(true);
+  const target = getViewTargetWorld();
+  return {
+    position: camera.position.toArray(),
+    quaternion: camera.quaternion.toArray(),
+    focusDistance: target?.distanceTo?.(camera.position) ?? 0,
+  };
+}
+
+function retryLodForChangedView() {
+  if (!tilesRenderer || !lodRuntimeProfileState || lodStarvedAtDetail === null
+    || !lodPressureView || lodCacheRecoveryActive) return false;
+  const currentView = captureLodPressureView();
+  if (!lodViewChangeRequiresRetry(lodPressureView, currentView)) return false;
+
+  lodStarvationSamples = 0;
+  lodStarvedAtDetail = null;
+  lodPressureView = null;
+  const next = resolveLodDetailRequest(
+    lodRuntimeProfileState,
+    lodWarmupComplete,
+    lodRuntimeProfileState.requestedDetail,
+  );
+  Object.assign(lodRuntimeProfileState, next);
+  lodWarmupComplete = next.warmupComplete;
+  tilesRenderer.errorTarget = detailToErrorTarget(next.activeDetail);
+  state.lodRuntimeProfile = {
+    ...state.lodRuntimeProfile,
+    ...lodRuntimeProfileState,
+    starvedAtDetail: null,
+  };
+  dom.lodStatus.textContent = `LOD: retrying Detail ${next.activeDetail} → ${next.requestedDetail}`;
+  emitLodDebugSnapshot('view-change-retry', true);
   return true;
 }
 
@@ -3499,6 +3552,7 @@ function updateStats() {
     if (cacheRecoverySettled) {
       lodCacheRecoveryActive = false;
       tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, false);
+      retryLodForChangedView();
     }
     const pressure = advanceLodMemoryPressure(pressureSnapshot, lodRuntimeProfileState, {
       consecutiveSamples: lodStarvationSamples,
@@ -3509,12 +3563,17 @@ function updateStats() {
     lodStarvedAtDetail = pressure.starvedAtDetail;
     if (pressure.recoveryRequired) {
       lodCacheRecoveryActive = true;
-      tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, true);
+      tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(
+        lodRuntimeProfileState.budget,
+        true,
+        tilesRenderer.lruCache,
+      );
     }
     if (pressure.changed) {
       lodRuntimeProfileState.activeDetail = pressure.profile.activeDetail;
       tilesRenderer.errorTarget = detailToErrorTarget(pressure.profile.activeDetail);
       lodWarmupComplete = pressure.profile.activeDetail >= 13;
+      lodPressureView = captureLodPressureView();
       state.lodRuntimeProfile = {
         ...state.lodRuntimeProfile,
         ...lodRuntimeProfileState,

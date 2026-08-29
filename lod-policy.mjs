@@ -1,9 +1,11 @@
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
 export const LOD_WARMUP_DETAIL = 13;
-export const DEFAULT_LOD_DETAIL = LOD_WARMUP_DETAIL;
+export const DEFAULT_LOD_DETAIL = 16;
 export const LOD_REFINEMENT_STEP = 3;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
+export const LOD_ADMISSION_RECOVERY_SAMPLES = 2;
+export const LOD_PRESSURE_FALLBACK_SAMPLES = 4;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 
 function screenSpaceErrorSortValue(value) {
@@ -85,10 +87,92 @@ export function lodCacheBudget(deviceMemoryGiB) {
   };
 }
 
-export function lodCacheRetentionMinBytes(budget, recoveryActive = false) {
-  if (recoveryActive) return 0;
+export function lodCacheRetentionMinBytes(budget, recoveryActive = false, cache = null) {
   const configured = Number(budget?.minBytesSize);
-  return Number.isFinite(configured) && configured >= 0 ? configured : 0;
+  const retainedFloor = Number.isFinite(configured) && configured >= 0 ? configured : 0;
+  if (!recoveryActive) return retainedFloor;
+
+  // 3d-tiles-renderer refuses to cross minBytesSize when the oldest unused
+  // tile is larger than the remaining admission gap. Lower the floor only far
+  // enough to release one recent LRU tile (or a bounded 20% reserve when cache
+  // details are unavailable). This makes room for the selected foreground
+  // branch without the old recovery behavior purging unused content toward 0.
+  const maxBytesSize = Number(budget?.maxBytesSize);
+  const cachedBytes = Number(cache?.cachedBytes);
+  let largestUnusedBytes = 0;
+  const itemSet = cache?.itemSet;
+  const bytesMap = cache?.bytesMap;
+  const usedSet = cache?.usedSet;
+  if (itemSet && bytesMap && usedSet && typeof itemSet[Symbol.iterator] === 'function') {
+    for (const [item] of itemSet) {
+      if (usedSet.has(item)) continue;
+      largestUnusedBytes = Math.max(largestUnusedBytes, Number(bytesMap.get(item)) || 0);
+    }
+  }
+
+  const fallbackReserve = Number.isFinite(maxBytesSize) && maxBytesSize > 0
+    ? Math.max(128 * 1024 * 1024, maxBytesSize * 0.20)
+    : 128 * 1024 * 1024;
+  const reserve = largestUnusedBytes > 0 ? largestUnusedBytes : fallbackReserve;
+  const referenceBytes = Number.isFinite(maxBytesSize) && maxBytesSize > 0
+    ? maxBytesSize
+    : cachedBytes;
+  const recoveryFloor = Number.isFinite(referenceBytes) && referenceBytes > 0
+    ? Math.max(0, referenceBytes - reserve)
+    : 0;
+  return Math.min(retainedFloor, recoveryFloor);
+}
+
+export function recoverLodCacheAdmission(cache, budget) {
+  if (!cache?.isFull?.() || typeof cache?.unloadUnusedContent !== 'function') return false;
+  const recoveryFloor = lodCacheRetentionMinBytes(budget, true, cache);
+  const currentFloor = Number(cache.minBytesSize);
+  if (!Number.isFinite(recoveryFloor) || recoveryFloor < 0) return false;
+  if (!Number.isFinite(currentFloor) || recoveryFloor < currentFloor) {
+    cache.minBytesSize = recoveryFloor;
+  }
+  // Run synchronously even when the existing floor is already low enough.
+  // A parse completes before the renderer's next scheduled unload, and 0.5.1
+  // otherwise discards that completed foreground tile immediately.
+  cache.unloadUnusedContent();
+  return true;
+}
+
+export function lodViewChangeRequiresRetry(previous, current, {
+  translationFraction = 0.10,
+  rotationRadians = Math.PI / 18,
+  zoomLogRatio = Math.log(1.20),
+} = {}) {
+  const aPosition = previous?.position;
+  const bPosition = current?.position;
+  const aQuaternion = previous?.quaternion;
+  const bQuaternion = current?.quaternion;
+  if (!Array.isArray(aPosition) || aPosition.length !== 3
+    || !Array.isArray(bPosition) || bPosition.length !== 3
+    || !Array.isArray(aQuaternion) || aQuaternion.length !== 4
+    || !Array.isArray(bQuaternion) || bQuaternion.length !== 4) return false;
+  const numbers = [...aPosition, ...bPosition, ...aQuaternion, ...bQuaternion];
+  if (!numbers.every(Number.isFinite)) return false;
+
+  const translation = Math.hypot(
+    bPosition[0] - aPosition[0],
+    bPosition[1] - aPosition[1],
+    bPosition[2] - aPosition[2],
+  );
+  const aDistance = Math.max(1e-6, Number(previous?.focusDistance) || 0);
+  const bDistance = Math.max(1e-6, Number(current?.focusDistance) || 0);
+  const translationScale = Math.max(1, aDistance, bDistance);
+  const quaternionDot = Math.min(1, Math.abs(
+    aQuaternion[0] * bQuaternion[0]
+    + aQuaternion[1] * bQuaternion[1]
+    + aQuaternion[2] * bQuaternion[2]
+    + aQuaternion[3] * bQuaternion[3]
+  ));
+  const rotation = 2 * Math.acos(quaternionDot);
+  const zoom = Math.abs(Math.log(bDistance / aDistance));
+  return translation / translationScale >= translationFraction
+    || rotation >= rotationRadians
+    || zoom >= zoomLogRatio;
 }
 
 export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
@@ -288,11 +372,29 @@ export function advanceLodMemoryPressure(snapshot, profile, {
   starvedAtDetail = null,
   lastSettledDetail = null,
 } = {}) {
-  const starvation = detectLodStarvation(snapshot, consecutiveSamples);
+  const starvation = detectLodStarvation(
+    snapshot,
+    consecutiveSamples,
+    LOD_ADMISSION_RECOVERY_SAMPLES,
+  );
   if (!starvation.starved) {
     return {
       changed: false,
       recoveryRequired: false,
+      profile,
+      consecutiveSamples: starvation.count,
+      starvedAtDetail,
+    };
+  }
+
+  // First make bounded LRU admission room without changing quality. Most
+  // near-cap transitions recover here on the next renderer update. Only a
+  // demanded working set that remains blocked for two more idle samples is
+  // allowed to roll back detail.
+  if (starvation.count < LOD_PRESSURE_FALLBACK_SAMPLES) {
+    return {
+      changed: false,
+      recoveryRequired: true,
       profile,
       consecutiveSamples: starvation.count,
       starvedAtDetail,

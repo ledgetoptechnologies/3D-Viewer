@@ -20,8 +20,10 @@ import {
   lodDebugSnapshot,
   lodDetailRequestPending,
   lodRuntimeProfile,
+  lodViewChangeRequiresRetry,
   lodWarmupSatisfiedByDetail,
   refreshLodResolution,
+  recoverLodCacheAdmission,
   resolveLodDetailRequest,
   resolveLodMemoryPressure,
   resolveLodWarmupAdvance,
@@ -37,7 +39,7 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.ok(detailToErrorTarget(12) < 512);
   assert.equal(detailToErrorTarget(-100), 512);
   assert.equal(detailToErrorTarget(100), 2);
-  assert.equal(detailToErrorTarget(undefined), 32, 'missing detail defaults to close-responsive view-local refinement');
+  assert.equal(detailToErrorTarget(undefined), 15.023, 'missing detail defaults to balanced staged view-local refinement');
 });
 
 test('renderer configuration keeps ancestor fallback without enabling explicit sibling preload', () => {
@@ -105,17 +107,17 @@ test('renderer configuration keeps ancestor fallback without enabling explicit s
     setCamera() {}, setResolutionFromRenderer() {},
   };
   const defaultProfile = configureLodRenderer(defaultRenderer, { camera, renderer, deviceMemoryGiB: 8 });
-  assert.equal(DEFAULT_LOD_DETAIL, 13);
-  assert.equal(defaultRenderer.errorTarget, 32);
+  assert.equal(DEFAULT_LOD_DETAIL, 16);
+  assert.equal(defaultRenderer.errorTarget, 32, 'desktop starts on the bounded Detail 13 frontier');
   assert.deepEqual(defaultProfile, {
     budget: lodCacheBudget(8),
-    requestedDetail: 13,
+    requestedDetail: 16,
     activeDetail: 13,
     maximumDetail: 24,
     reduced: false,
   });
   assert.deepEqual(lodRuntimeProfile(undefined, 8), defaultProfile);
-  assert.equal(lodDetailRequestPending(defaultProfile), false);
+  assert.equal(lodDetailRequestPending(defaultProfile), true);
 
   const alreadyBounded = {
     lruCache: {}, downloadQueue: { maxJobs: 4 }, parseQueue: { maxJobs: 1 },
@@ -237,18 +239,20 @@ test('LOD starvation waits one sample for scheduled eviction before confirming a
   }), { count: 1, starved: false }, 'a refinable selected tile begins the bounded starvation confirmation window');
 });
 
-test('pinned LRU eviction either clears the second starvation sample or confirms rollback', () => {
-  const makeCache = (minBytesSize) => {
+test('bounded LRU admission recovery frees one stale tile without purging the recent cache', () => {
+  const makeCache = (minBytesSize, itemCount = 7) => {
     const cache = new LRUCache();
     cache.minBytesSize = minBytesSize;
     cache.maxBytesSize = 3.5 * 1024 ** 3;
     cache.minSize = 512;
     cache.maxSize = 1024;
     cache.unloadPercent = 0.20;
-    const items = Array.from({ length: 7 }, (_, index) => ({ index }));
+    const items = Array.from({ length: itemCount }, (_, index) => ({ index }));
     for (const item of items) {
       cache.add(item, () => {});
       cache.setLoaded(item, true);
+    }
+    for (const item of items) {
       cache.setMemoryUsage(item, 0.5 * 1024 ** 3);
     }
     cache.markUnused(items[0]);
@@ -276,14 +280,31 @@ test('pinned LRU eviction either clears the second starvation sample or confirms
     consecutiveSamples: 1, starvedAtDetail: null, lastSettledDetail: 13,
   });
   assert.equal(confirmedPressure.recoveryRequired, true);
-  assert.equal(confirmedPressure.changed, true);
+  assert.equal(confirmedPressure.changed, false, 'admission recovery must run before quality rollback');
   const desktopBudget = lodCacheBudget(8);
   assert.equal(lodCacheRetentionMinBytes(desktopBudget, false), 3.25 * 1024 ** 3);
-  pinned.minBytesSize = lodCacheRetentionMinBytes(desktopBudget, confirmedPressure.recoveryRequired);
-  pinned.unloadUnusedContent();
+  assert.equal(recoverLodCacheAdmission(pinned, desktopBudget), true,
+    'a completed foreground parse can synchronously displace one stale LRU tile');
+  assert.ok(pinned.minBytesSize > 0, 'recovery must never reset the byte floor to zero');
+  assert.ok(pinned.minBytesSize <= 3 * 1024 ** 3, 'recovery must make room for the largest unused tile');
   assert.equal(pinned.isFull(), false, 'confirmed starvation must temporarily restore LRU admission headroom');
+  assert.equal(pinned.itemSet.size, 6, 'bounded recovery evicts only the one stale tile needed for admission');
   pinned.minBytesSize = lodCacheRetentionMinBytes(desktopBudget, false);
   assert.equal(pinned.minBytesSize, desktopBudget.minBytesSize, 'settled recovery restores normal retention');
+
+  const overshot = makeCache(3.25 * 1024 ** 3, 8);
+  overshot.markUnused(overshot.itemList[1]);
+  overshot.unloadPercent = 1;
+  assert.equal(overshot.cachedBytes, 4 * 1024 ** 3);
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 0;
+  try {
+    assert.equal(recoverLodCacheAdmission(overshot, desktopBudget), true);
+  } finally {
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+  }
+  assert.equal(overshot.isFull(), false,
+    'synchronous recovery also runs when the existing floor already permits eviction');
 });
 
 test('memory pressure returns to the last complete frontier and remembers the failed ceiling', () => {
@@ -362,8 +383,25 @@ test('memory-pressure coordinator restores the last complete frontier after conf
     ...state,
     consecutiveSamples: result.consecutiveSamples,
   });
-  assert.equal(result.changed, true);
+  assert.equal(result.changed, false);
   assert.equal(result.recoveryRequired, true);
+  assert.equal(result.profile.activeDetail, 24);
+  assert.equal(result.starvedAtDetail, null);
+  assert.equal(result.consecutiveSamples, 2);
+
+  result = advanceLodMemoryPressure(blocked, profile, {
+    ...state,
+    consecutiveSamples: result.consecutiveSamples,
+  });
+  assert.equal(result.changed, false);
+  assert.equal(result.recoveryRequired, true);
+  assert.equal(result.consecutiveSamples, 3);
+
+  result = advanceLodMemoryPressure(blocked, profile, {
+    ...state,
+    consecutiveSamples: result.consecutiveSamples,
+  });
+  assert.equal(result.changed, true, 'quality rolls back only after bounded admission recovery remains blocked');
   assert.equal(result.profile.activeDetail, 13);
   assert.equal(result.starvedAtDetail, 24);
   assert.equal(result.consecutiveSamples, 0);
@@ -379,10 +417,25 @@ test('memory-pressure coordinator restores the last complete frontier after conf
   const floorPressure = advanceLodMemoryPressure(blocked, {
     requestedDetail: 24, activeDetail: 2, maximumDetail: 24, reduced: false,
   }, {
-    consecutiveSamples: 1, starvedAtDetail: 2, lastSettledDetail: 2,
+    consecutiveSamples: 3, starvedAtDetail: 2, lastSettledDetail: 2,
   });
   assert.equal(floorPressure.changed, false);
   assert.equal(floorPressure.recoveryRequired, true, 'confirmed floor-detail starvation still needs admission recovery');
+});
+
+test('memory-pressure ceiling retries only after a materially different camera view', () => {
+  const base = {
+    position: [0, 40, 50], quaternion: [0, 0, 0, 1], focusDistance: 60,
+  };
+  assert.equal(lodViewChangeRequiresRetry(base, {
+    position: [0.5, 40, 50], quaternion: [0, 0.0087, 0, 0.99996], focusDistance: 59,
+  }), false, 'tiny motion retains the stable coarsened frontier and recent cache');
+  assert.equal(lodViewChangeRequiresRetry(base, {
+    position: [0, 40, 35], quaternion: [0, 0, 0, 1], focusDistance: 45,
+  }), true, 'a cumulative close zoom retries requested refinement');
+  assert.equal(lodViewChangeRequiresRetry(base, {
+    position: [0, 40, 50], quaternion: [0, Math.sin(Math.PI / 18), 0, Math.cos(Math.PI / 18)], focusDistance: 60,
+  }), true, 'a materially different orbit retries requested refinement');
 });
 
 test('Detail changes cannot bypass an unfinished desktop warmup', () => {

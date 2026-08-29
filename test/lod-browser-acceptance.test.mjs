@@ -531,6 +531,8 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not settle');
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not remain settled');
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 16`,
+      'default view did not complete the 13 to 16 refinement stage', 20_000);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -540,10 +542,10 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       status: document.querySelector('#lod-status').textContent,
     })`);
     assert.deepEqual({ ...balancedStartup, status: undefined }, {
-      slider: '13', requested: 13, active: 13, errorTarget: 32,
+      slider: '16', requested: 16, active: 16, errorTarget: 15.023,
       phase: 'requested-detail', status: undefined,
     });
-    assert.match(balancedStartup.status, /^LOD: (?:Detail 13|full-detail) \(\d+ tiles?\)$/);
+    assert.match(balancedStartup.status, /^LOD: (?:Detail 16|full-detail) \(\d+ tiles?\)$/);
     assert.doesNotMatch(balancedStartup.status, /warming|streaming/i);
     const startupLod0Requests = client.events.filter((event) => event.method === 'Network.requestWillBeSent'
       && /\/LOD-0\/[^/?#]+\.b3dm(?:[?#]|$)/i.test(event.params.request.url));
@@ -1000,6 +1002,8 @@ test('browser close view refines at the default Detail and small motion retains 
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
 
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 16`,
+      'default Detail did not finish its bounded 13 to 16 stage', 180_000);
     const defaultState = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1007,7 +1011,7 @@ test('browser close view refines at the default Detail and small motion retains 
       errorTarget: window.__ltds.tiles().errorTarget,
     })`);
     assert.deepEqual(defaultState, {
-      slider: '13', requested: 13, active: 13, errorTarget: 32,
+      slider: '16', requested: 16, active: 16, errorTarget: 15.023,
     }, 'the default view must be close-responsive without requesting global Detail 24');
 
     const basePosition = [0, 44, 52];
@@ -1598,6 +1602,8 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     const browserErrors = client.events.filter((event) => event.method === 'Log.entryAdded'
       || event.method === 'Runtime.exceptionThrown' || event.method === 'Runtime.consoleAPICalled').slice(-10);
     assert.equal(refreshedRuntime.root, true, `refreshed session did not attach the LOD hierarchy: ${JSON.stringify({ refreshedRuntime, requests: fixture.requests, browserErrors })}`);
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 16`,
+      'refreshed session did not complete the default 13 to 16 refinement stage', 20_000);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1606,7 +1612,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       phase: window.__ltds.lodDiagnostics().phase,
     })`);
     assert.deepEqual(balancedStartup, {
-      slider: '13', requested: 13, active: 13, errorTarget: 32, phase: 'requested-detail',
+      slider: '16', requested: 16, active: 16, errorTarget: 15.023, phase: 'requested-detail',
     });
     const startupRefinementDeadline = Date.now() + 10_000;
     while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
@@ -1616,23 +1622,23 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     assert.equal(fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
       || requestPath.endsWith('/leaf-b.glb')), true,
     'balanced startup did not request close-responsive child refinement');
-    await waitFor(client, `(() => { const t=window.__ltds.tiles(); return Boolean(t.root?.engineData?.scene
-      && t.group.children.includes(t.root.engineData.scene)); })()`,
-    'coarse REPLACE root did not attach before the explicit high-detail transition', 10_000);
+    await waitFor(client, `(() => { const t=window.__ltds.tiles(); const root=t.root;
+      const rootAttached=Boolean(root?.engineData?.scene&&t.group.children.includes(root.engineData.scene));
+      const childAttached=root?.children?.some(child=>child.engineData?.scene&&t.group.children.includes(child.engineData.scene));
+      return rootAttached||childAttached; })()`,
+    'default refinement left no attached REPLACE coverage', 10_000);
 
     const explicitHighDetail = await client.evaluate(`(() => {
       const slider = document.querySelector('#lod-detail');
-      for (let detail = 14; detail <= 24; detail += 1) {
-        slider.value = String(detail);
-        slider.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+      slider.value = '24';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
       return {
         requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
         active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
         errorTarget: window.__ltds.tiles().errorTarget,
       };
     })()`);
-    assert.deepEqual(explicitHighDetail, { requested: 24, active: 13, errorTarget: 32 });
+    assert.deepEqual(explicitHighDetail, { requested: 24, active: 16, errorTarget: 15.023 });
     const fallbackSampleDeadline = Date.now() + 1_000;
     let fallbackSamples = 0;
     while (Date.now() < fallbackSampleDeadline) {

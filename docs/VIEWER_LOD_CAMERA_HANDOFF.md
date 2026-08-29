@@ -2,8 +2,41 @@
 
 ## Status
 
-**Root causes reproduced and fixed locally as of 2026-08-28; production remains
+**Root causes reproduced and fixed locally as of 2026-08-29; production remains
 unconfirmed until the user tests the merged deployment.**
+
+### 2026-08-29 near-cap recovery follow-up
+
+The live signed-in church session reproduced `LOD: memory-limited Detail 2`
+after Hermes's Detail-13/cache-retention release. That was not a bandwidth
+limit: a first near-cap pose permanently latched `lodStarvedAtDetail`, the
+startup code treated unverified Detail 2 as the last settled frontier, and
+recovery set `minBytesSize = 0`. Because the renderer marks prior-view tiles
+LRU-unused every frame, small camera motion during recovery then purged recent
+decoded scenes and returning re-requested them.
+
+The follow-up keeps the correct positive-infinite SSE priority and ancestor
+fallback, but changes the governor as follows:
+
+- the default request is Detail 16, staged through a complete Detail-13
+  frontier instead of stopping at Detail 13;
+- the last-settled frontier starts unknown and is recorded only after actual
+  visible-target settlement, preventing an initial `13 → 2` collapse;
+- the second blocked sample starts bounded admission recovery without changing
+  quality; rollback is reserved for the fourth consecutive blocked sample;
+- recovery frees only enough space for one stale LRU tile and never sets the
+  byte floor to zero;
+- completed foreground parses get the same synchronous stale-entry eviction
+  chance before renderer 0.5.1's known full-cache discard path; and
+- a stable fallback ceiling survives tiny movement, but a cumulative 20%
+  zoom, 10% focus-relative translation, or 10-degree orbit clears it and
+  restarts staged refinement for the new view.
+
+Deterministic unit coverage now includes the exact 3.6 GiB/0.5 GiB pinned-tile
+case, bounded eviction, delayed rollback, and pose thresholds. The
+self-contained authenticated browser fixture proves automatic `13 → 16`
+refinement without a slider event. The user's production verification remains
+the release gate.
 
 Production inspection on 2026-08-28 found that the hierarchy itself was
 working, but the startup policy requested Detail 24 and immediately staged
@@ -11,7 +44,7 @@ through Detail 13. A cold default view consequently fetched the root and 240 of
 241 LOD-0 payloads within 20 seconds; forcing Detail 2 before startup stabilized
 at 29 payloads (root, 12 LOD-2, and 16 LOD-1) with no LOD-0 requests in that
 measured pose. That conservative startup was released by Codex but was later
-shown to suppress expected close-range refinement. The current candidate starts
+shown to suppress expected close-range refinement. That historical candidate started
 at requested and active Detail 13; requests above 13 still use staged refinement
 and the memory governor.
 
@@ -32,7 +65,7 @@ new downloads were refused even while the byte budget still had room.
 
 That work made a visible terminal zero-error leaf satisfy warmup at infinite
 screen-space error, raised item-count headroom, and added a memory-pressure
-governor. The current candidate additionally changes the default to Detail 13,
+governor. The 2026-08-28 candidate additionally changed the default to Detail 13,
 raises the measured desktop byte profile to 3.25/3.5 GiB, retains recently
 decoded LOD scenes across small motion, prioritizes positive-infinite SSE, and
 temporarily relaxes only the LRU soft byte floor after confirmed starvation so

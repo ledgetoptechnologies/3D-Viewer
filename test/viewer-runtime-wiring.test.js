@@ -157,7 +157,7 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
 test('LOD starts close-responsive, stages explicit high-detail requests, and caps reduced-memory clients honestly', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="13"/);
+  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="16"/);
   assert.match(html, /Starts with balanced view-local refinement\. Raise Detail only when you need finer coverage\./);
   assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
@@ -194,11 +194,11 @@ test('LOD memory pressure restores the last complete frontier and resets on expl
   const statsBlock = main.slice(main.indexOf('function updateStats()'), main.indexOf('// expose for debugging/verification'));
 
   assert.match(main, /advanceLodMemoryPressure/);
-  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;\s*let lodCacheRecoveryActive = false;\s*let lodLastSettledDetail = 2;/);
+  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;\s*let lodCacheRecoveryActive = false;\s*let lodLastSettledDetail = null;\s*let lodPressureView = null;/);
   for (const [label, block] of [['load', loadBlock], ['dispose', disposeBlock], ['slider', sliderBlock]]) {
     assert.match(block, /lodStarvationSamples = 0;\s*lodStarvedAtDetail = null;\s*lodCacheRecoveryActive = false;/, `${label} must reset memory-pressure state`);
   }
-  assert.match(sliderBlock, /lodLastSettledDetail = Math\.min\(lodLastSettledDetail, next\.activeDetail\)/);
+  assert.match(sliderBlock, /if \(Number\.isFinite\(lodLastSettledDetail\)\) \{\s*lodLastSettledDetail = Math\.min\(lodLastSettledDetail, next\.activeDetail\)/);
   assert.match(statsBlock, /advanceLodMemoryPressure\(pressureSnapshot, lodRuntimeProfileState/);
   assert.match(statsBlock, /consecutiveSamples: lodStarvationSamples/);
   assert.match(statsBlock, /starvedAtDetail: lodStarvedAtDetail/);
@@ -207,7 +207,7 @@ test('LOD memory pressure restores the last complete frontier and resets on expl
   assert.match(statsBlock, /lodStarvedAtDetail = pressure\.starvedAtDetail/);
   assert.match(statsBlock, /if \(pressure\.recoveryRequired\)/);
   assert.match(statsBlock, /lodCacheRecoveryActive = true/);
-  assert.match(statsBlock, /tilesRenderer\.lruCache\.minBytesSize = lodCacheRetentionMinBytes\(lodRuntimeProfileState\.budget, true\)/);
+  assert.match(statsBlock, /lodCacheRetentionMinBytes\(\s*lodRuntimeProfileState\.budget,\s*true,\s*tilesRenderer\.lruCache/);
   assert.match(statsBlock, /const cacheRecoverySettled = lodCacheRecoveryActive/);
   assert.match(statsBlock, /pressureSnapshot\.pendingRequiredTiles === 0/);
   assert.match(statsBlock, /lodCacheRecoveryActive = false/);
@@ -215,7 +215,11 @@ test('LOD memory pressure restores the last complete frontier and resets on expl
   assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);
   assert.match(statsBlock, /tilesRenderer\.errorTarget = detailToErrorTarget\(pressure\.profile\.activeDetail\)/);
   assert.match(statsBlock, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
-  assert.match(main, /lodRuntimeProfileState\.reduced \|\| lodStarvedAtDetail !== null/);
+  assert.match(main, /function retryLodForChangedView\(\)/);
+  assert.match(main, /lodViewChangeRequiresRetry\(lodPressureView, currentView\)/);
+  assert.match(loadBlock, /recoverLodCacheAdmission\(rendererInstance\.lruCache, lodRuntimeProfileState\.budget\)/);
+  assert.match(main, /emitLodDebugSnapshot\('view-change-retry', true\)/);
+  assert.doesNotMatch(main, /lodCacheRetentionMinBytes\([^)]*, true\)\s*;\/\/.*zero/i);
 });
 
 test('LOD console telemetry is deduplicated sanitized and manually callable', () => {

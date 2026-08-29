@@ -605,11 +605,12 @@ WGS84 UTM 16N
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to `tilesRenderer.errorTarget` from 512
-  down to 2. The Viewer starts at balanced Detail 13, which allows ordinary
-  screen-space-error traversal to select zero-error leaves at close range
-  without the cold global Detail-24 fanout. Raising Detail is an explicit
-  request for finer visible coverage. Desktop requests above
-  Detail 13 warm at Detail 13, then advance through bounded three-detail stages
+  down to 2. The Viewer requests balanced Detail 16 and first attaches a
+  complete Detail-13 frontier, then advances once to 16. This restores finer
+  close-range screen-space-error refinement without the cold global Detail-24
+  fanout. Raising Detail remains an explicit request for finer visible
+  coverage. Desktop requests above Detail 13 warm at Detail 13, then advance
+  through bounded three-detail stages
   only after each visible frontier is complete;
   a visible terminal zero-error leaf satisfies that warmup target even when the
   camera is inside its bounding volume and the renderer reports infinite
@@ -622,14 +623,20 @@ WGS84 UTM 16N
   just-viewed decoded tiles while preserving hard admission limits. Loaded
   coarse ancestors remain visible while selected descendants load, without
   explicit or ancestor-triggered off-frustum sibling preload. Two consecutive
-  one-second full-cache/idle-queue samples with selected content pending restore
-  the last complete detail stage, temporarily relax the soft byte floor so
-  standard LRU eviction can restore admission, and establish a non-oscillating
-  ceiling until the user moves the Detail slider. The measured soft floor is
+  one-second full-cache/idle-queue samples with selected content pending start
+  bounded admission recovery without changing quality. Recovery lowers the
+  soft floor only far enough to evict one stale LRU tile; it never purges toward
+  zero. A completed foreground parse also gets this synchronous eviction chance
+  before renderer 0.5.1 can discard it. Only two further blocked samples restore
+  the last complete detail stage and establish a stable camera-pose ceiling.
+  The measured soft floor is
   restored after the lower active frontier is attached, queues are idle, and
   the cache is below its hard cap;
   the status bar reports `LOD: memory-limited` while that ceiling holds the
-  active request back. It says `LOD: full-detail` only when every visible tile
+  active request back. Tiny camera motions retain the ceiling and cache; a
+  cumulative 20% zoom, 10% focus-relative translation, or 10-degree orbit
+  clears it and retries staged refinement for the new view. It says
+  `LOD: full-detail` only when every visible tile
   is on the declared zero-error frontier. Invalid hierarchy or tile-load
   failures remain unavailable until a verified streaming derivative exists;
   original GLB/OBJ files are download-only and are never decoded automatically

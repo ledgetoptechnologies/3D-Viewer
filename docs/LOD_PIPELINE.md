@@ -40,11 +40,12 @@ are content-ready. Explicit sibling preload stays disabled. The exact-pinned
 pinning off-frustum sibling branches. The Viewer does not manually toggle
 cached scene visibility, tile active/visible state, or LRU usage.
 
-The Viewer starts with requested and active Detail 13 (`errorTarget = 32`).
-This is a balanced view-local request: ordinary SSE traversal reaches zero-error
-leaves at close range without the cold global Detail-24 fan-out measured in
-production. Raising the slider is the explicit signal to request finer visible
-coverage. Desktop requests above Detail 13
+The Viewer starts with requested Detail 16 and active Detail 13
+(`errorTarget = 32`). After that complete visible frontier settles it advances
+once to Detail 16 (`errorTarget = 15.023`). This balanced view-local request
+reaches finer close-range coverage without the cold global Detail-24 fan-out
+measured in production. Raising the slider is the explicit signal to request
+still finer visible coverage. Desktop requests above Detail 13
 begin at Detail 13 and advance in bounded three-detail stages
 (`13 → 16 → 19 → 22 → requested`) only after each visible frontier meets its
 active target and all renderer queues settle. Clients
@@ -65,27 +66,28 @@ new region can push retained content above the soft floor, where standard LRU
 eviction frees unused content before the configured hard cap blocks admission.
 
 Two consecutive one-second full-cache, idle-queue samples with a selected
-in-frustum tile still pending activate the memory-pressure governor. The first
-sample gives the renderer's already-scheduled eviction microtask a bounded
-chance to free admission room. Any later one-second sample that is not
-simultaneously blocked resets the counter; a second blocked sample confirms a
-pinned cache rather than a transitional race.
-The governor restores the last fully settled detail stage, records the failed
-stage as a ceiling, and does not raise detail above that ceiling automatically.
-It also temporarily sets the soft byte floor to zero so the pinned renderer's
-normal LRU pass can free admission even when the first unused tile is larger
-than the usual floor/cap gap. The configured floor is restored only after the
-lower active frontier has no pending selected tiles, queues are idle, and the
-cache is below its hard cap. Tile visibility, active state, and LRU membership
-remain entirely renderer-controlled.
-This prevents recover/starve oscillation and avoids stepping through several
-known-incomplete levels one second at a time. Moving the Detail slider
-explicitly clears the ceiling and starts a new user request. While the governor
+in-frustum tile still pending activate bounded cache-admission recovery. The
+soft floor is lowered only far enough to release the largest stale LRU tile (or
+a 20-percent bounded reserve when entry sizes are unavailable); it is never set
+to zero. The same synchronous recovery runs when renderer 0.5.1 finishes a
+foreground parse while another concurrent parse has filled the cache, avoiding
+the upstream discard/reparse path when stale content can make room. If the view
+is still blocked for two additional samples, the governor restores the last
+fully settled detail stage and records the failed stage as a ceiling.
+
+The configured floor is restored only after the lower active frontier has no
+pending selected tiles, queues are idle, and the cache is below its hard cap.
+The ceiling is scoped to that camera pose: sub-threshold motion does not trigger
+an oscillating retry or discard the recent cache, while a cumulative 20-percent
+zoom, 10-percent focus-relative translation, or 10-degree orbit restarts staged
+refinement for the materially different view. Moving the Detail slider also
+clears the ceiling and starts a new user request. While the governor
 holds active detail below the requested detail, status is `memory-limited`; it
 must not claim full detail. Starvation counters and ceilings reset when tiles
-are loaded or disposed and when the user moves the slider. The last-settled
-frontier resets with the tile lifecycle; a slider increase retains it, while a
-slider decrease bounds it to the new lower active request.
+are loaded or disposed, when the user moves the slider, or after the pose-scoped
+retry threshold. The last-settled frontier starts unknown (not an assumed
+Detail 2), resets with the tile lifecycle, and is recorded only after a visible
+target actually settles.
 
 The ground-level failure and these runtime changes are reproduced and verified
 locally, but the live deployment is not considered confirmed until the user
