@@ -90,9 +90,13 @@ test('renderer configuration streams without pinning ancestors or siblings', () 
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
     maxBytesSize: 1.75 * 1024 * 1024 * 1024,
     minSize: 8,
-    maxSize: 48,
+    maxSize: 1024,
     unloadPercent: 0.20,
   });
+  assert.ok(
+    lodCacheBudget(8).maxSize >= 1024,
+    'item admission must not block a valid multi-branch frontier before the byte ceiling',
+  );
   assert.ok(
     lodCacheBudget(8).maxBytesSize > 1.61 * 1024 * 1024 * 1024,
     'the hard cap must fit the measured camera-selected close-up frontier',

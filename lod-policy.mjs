@@ -75,7 +75,12 @@ export function lodCacheBudget(deviceMemoryGiB) {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
     maxBytesSize: 1.75 * 1024 * 1024 * 1024,
     minSize: 8,
-    maxSize: 48,
+    // Item count is not a memory budget. A valid camera-selected frontier can
+    // contain dozens of fine leaves plus their branch parents while remaining
+    // far below the byte ceiling. A 48-item cap wedged that frontier with idle
+    // queues and unused byte headroom, so keep bytes as the real admission
+    // guard and reserve the item cap only as a runaway-hierarchy failsafe.
+    maxSize: 1024,
     unloadPercent: 0.20,
   };
 }

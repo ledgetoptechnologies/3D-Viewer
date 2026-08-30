@@ -32,68 +32,48 @@ as the highest screen-space error, so a refinable branch containing the camera
 is not sorted behind distant finite-error work. Malformed non-finite values
 remain lowest priority.
 
-The persisted and runtime hierarchy remain `REPLACE`. Ancestor fallback is
-enabled so a loaded coarse branch remains visible until its selected children
-are content-ready. Explicit sibling preload stays disabled. The exact-pinned
-`3d-tiles-renderer` postinstall patch adds an app-only
-`loadAncestorSiblings = false` switch, preventing ancestor fallback from also
-pinning off-frustum sibling branches. The Viewer does not manually toggle
-cached scene visibility, tile active/visible state, or LRU usage.
+The persisted and runtime hierarchy remain `REPLACE`. The renderer keeps the
+currently displayed parent until its selected children are content-ready, but
+`loadAncestors`, sibling preload, and ancestor-sibling preload are disabled so
+replaced off-view paths can become unused and leave the cache. The Viewer does
+not manually toggle cached scene visibility, tile active/visible state, or LRU
+usage.
 
 The Viewer starts with requested Detail 16 and active Detail 13
 (`errorTarget = 32`). After that complete visible frontier settles it advances
-once to Detail 16 (`errorTarget = 15.023`). This balanced view-local request
-reaches finer close-range coverage without the cold global Detail-24 fan-out
-measured in production. Raising the slider is the explicit signal to request
-still finer visible coverage. Desktop requests above Detail 13
-begin at Detail 13 and advance in bounded three-detail stages
-(`13 → 16 → 19 → 22 → requested`) only after each visible frontier meets its
-active target and all renderer queues settle. Clients
-reporting 4 GiB or less are capped at
-Detail 13 and use a separate 768 MiB cache profile. The desktop cache retains a
-3.25 GiB recent frontier below a 3.5 GiB maximum, with 512 soft and
-1,024 hard entries. The reduced profile retains 640 MiB below its unchanged
-768 MiB maximum, with 256 soft and 512 hard entries. Both unload 20 percent per
-eviction pass once their soft floors are exceeded. These floors matter because
-the renderer schedules unused-content cleanup every frame, not only when full;
-the previous 0.4 GiB/24-entry desktop floors discarded a just-viewed leaf after
-a four-meter pan plus roughly one degree of orbit while only 2.10 GB was in use.
-After ancestor fallback was enabled, 15 LOD-0 leaves plus retained parent paths
-measured `3,325,605,911` bytes and pinned the old 3 GiB cap before the 16th leaf
-could load. The 3.5 GiB ceiling adds bounded admission headroom above that
-current traversal working set. Moving farther or entering a materially
-new region can push retained content above the soft floor, where standard LRU
-eviction frees unused content before the configured hard cap blocks admission.
+once to Detail 16 (`errorTarget = 15.023`). Raising the slider explicitly
+requests finer visible coverage. Desktop requests above Detail 13 advance in
+bounded three-detail stages (`13 → 16 → 19 → 22 → requested`) only after each
+visible frontier meets its active target and all renderer queues settle.
+Clients reporting 4 GiB or less are capped at Detail 13 and use a separate
+768 MiB cache profile.
+
+The desktop cache retains 0.4 GiB below a 1.75 GiB maximum, with 8 warm entries
+and a 1,024-item failsafe. The byte ceiling is the real memory guard. A low
+48-item ceiling is invalid because a camera-selected frontier can contain more
+than 48 small leaves and branch parents while using almost none of the byte
+budget. The reduced profile retains 640 MiB below 768 MiB, with 256 warm and
+512 maximum entries. Both profiles unload 20 percent per eviction pass once
+unused content exceeds their warm floors.
 
 Two consecutive one-second full-cache, idle-queue samples with a selected
-in-frustum tile still pending activate bounded cache-admission recovery. The
-soft floor is lowered only far enough to release the largest stale LRU tile (or
-a 20-percent bounded reserve when entry sizes are unavailable); it is never set
-to zero. The same synchronous recovery runs when renderer 0.5.1 finishes a
-foreground parse while another concurrent parse has filled the cache, avoiding
-the upstream discard/reparse path when stale content can make room. If the view
-is still blocked for two additional samples, the governor restores the last
-fully settled detail stage and records the failed stage as a ceiling.
+in-frustum tile still pending request bounded cache-admission recovery. The soft
+byte floor is lowered only far enough to release one stale LRU tile and is never
+set to zero. Cache pressure never lowers `activeDetail`, changes the requested
+screen-space-error target, or latches a global quality ceiling.
 
-The configured floor is restored only after the lower active frontier has no
-pending selected tiles, queues are idle, and the cache is below its hard cap.
-The ceiling is scoped to that camera pose: sub-threshold motion does not trigger
-an oscillating retry or discard the recent cache, while a cumulative 20-percent
-zoom, 10-percent focus-relative translation, or 10-degree orbit restarts staged
-refinement for the materially different view. Moving the Detail slider also
-clears the ceiling and starts a new user request. While the governor
-holds active detail below the requested detail, status is `memory-limited`; it
-must not claim full detail. Starvation counters and ceilings reset when tiles
-are loaded or disposed, when the user moves the slider, or after the pose-scoped
-retry threshold. The last-settled frontier starts unknown (not an assumed
-Detail 2), resets with the tile lifecycle, and is recorded only after a visible
-target actually settles.
+A local 64-leaf, eight-branch browser stress fixture reproduced the production
+symptom with the former 48-item cap. At Detail 16 the cache stopped at 48 items
+while using about 9 KiB against the 1.75 GiB ceiling, all queues were idle, 16
+selected leaves remained pending, and only five of seven selected rows had
+fine coverage. Raising only the failsafe item cap to 1,024 allowed the same pose
+to settle with all 56 selected leaves attached, zero pending tiles, and no
+cache pressure. A wide zoom-out returned to eight coarse branch tiles and the
+close return restored all selected detail.
 
-The ground-level failure and these runtime changes are reproduced and verified
-locally, but the live deployment is not considered confirmed until the user
-verifies it. See [`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md)
-for measured evidence, completed local browser cases, superseded approaches,
-and diagnostics.
+The exact authenticated production dataset remains the final release gate. See
+[`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for historical
+measurements, superseded approaches, and diagnostic commands.
 
 ## Full-quality attestation
 

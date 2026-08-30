@@ -699,7 +699,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(visibleInitialMaterials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.root.materials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.attachedMaterials.every((item) => item.hasMap && item.imageReady), 'attached full-detail B3DM textures were not decoded and bound');
-    assert.deepEqual(initial.cache, { minBytesSize: 3.25 * GiB, maxBytesSize: 3.5 * GiB, minSize: 512, maxSize: 1024, unloadPercent: 0.20 });
+    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 1.75 * GiB, minSize: 8, maxSize: 1024, unloadPercent: 0.20 });
 
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');

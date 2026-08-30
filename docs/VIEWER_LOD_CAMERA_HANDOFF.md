@@ -1,4 +1,30 @@
-# Viewer LOD and camera fix handoff
+# Viewer LOD and camera investigation handoff
+
+## 2026-08-30 local item-admission reproduction
+
+Commit `7c0639c` was reproduced in a real headless browser with a generated
+64-leaf, eight-branch B3DM hierarchy served through the authenticated-session
+URL shape. At a close Detail 16 pose, the 48-item cache ceiling stopped
+admission even though decoded content used only about 9 KiB against the
+1.75 GiB byte ceiling. All queues were idle, the cache contained 48 used items,
+16 selected leaves remained pending, and only 40 of 56 selected leaves were
+attached. A tiny camera move did not recover the missing branches. This matches
+the production report that high detail appears nearby while only part of the
+model completes.
+
+The local fix raises only the desktop item-count failsafe from 48 to 1,024.
+The 0.4 GiB warm byte floor, 1.75 GiB hard byte ceiling, eight-item warm floor,
+20-percent unload pass, `loadAncestors = false`, strict `REPLACE` traversal,
+and camera-driven screen-space-error target remain unchanged. With that one
+change, the same close Detail 16 pose settled with all 56 selected leaves
+attached and zero pending tiles. A wide zoom-out evicted back to nine cache
+items and eight coarse visible branches; returning close restored all 56
+selected leaves without a global quality reset.
+
+This proves item-count admission was independently capable of producing the
+partial model. The authenticated production church dataset remains the final
+release gate because its real tile byte sizes and bounding volumes are not part
+of the generated fixture.
 
 ## Status
 
