@@ -166,13 +166,20 @@
     installPotreeMeasurementPrecision(Potree, { displayUnits: DISPLAY_UNITS });
     const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
     window.viewer = viewer;
+    // Potree's EDL renderer composites the point cloud after scene.scene and
+    // does not share that pass's depth. Draw cameras in the supported overlay
+    // pass so roof markers are not overwritten by the fullscreen EDL result.
+    const cameraOverlayScene = new THREE.Scene();
     const pointCloudCameraLayer = window.LtdsPointCloudCameras.createPointCloudCameraLayer({
       THREE,
-      scene: viewer.scene.scene,
+      scene: cameraOverlayScene,
       dom: viewer.renderer.domElement,
       getCamera: () => viewer.scene.getActiveCamera(),
     });
     viewer.addEventListener('update', () => pointCloudCameraLayer.updateView());
+    viewer.addEventListener('render.pass.perspective_overlay', () => {
+      viewer.renderer.render(cameraOverlayScene, viewer.scene.getActiveCamera());
+    });
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
     // Start at a useful high-detail desktop baseline. Auto-LOD can still lower

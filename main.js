@@ -40,6 +40,7 @@ import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUr
 import { preserveLodMaterials } from './lod-materials.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
+import { classifyTileLoadFailure } from './lod-load-recovery.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -152,6 +153,10 @@ let lodCacheRecoveryActive = false;
 let lodLastSettledDetail = null;
 let lodPressureView = null;
 let lodDebugSignature = '';
+let lodTileRecoveryPending = false;
+let lodTileRetryAttempt = 0;
+let lodTileRetryTimer = null;
+let lodTileLastFailureAt = 0;
 let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
@@ -803,6 +808,11 @@ function loadTiles() {
   lodCacheRecoveryActive = false;
   lodLastSettledDetail = null;
   lodPressureView = null;
+  lodTileRecoveryPending = false;
+  lodTileRetryAttempt = 0;
+  lodTileLastFailureAt = 0;
+  if (lodTileRetryTimer) clearTimeout(lodTileRetryTimer);
+  lodTileRetryTimer = null;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
   tilesRenderer = rendererInstance;
@@ -857,14 +867,17 @@ function loadTiles() {
       failLod(`LOD child manifest cannot reach a valid full-detail frontier: ${report.errors[0]}`);
     }
   });
-  rendererInstance.addEventListener('load-model', (ev) => {
-    if (tilesRenderer !== rendererInstance) return;
-    // 3d-tiles-renderer 0.5.1 otherwise discards a completed parse when a
-    // concurrent tile filled the byte cache first. Free one stale LRU tile
-    // synchronously so the expensive selected foreground parse can be kept.
+  rendererInstance.addEventListener('tile-memory-pressure', () => {
+    // The exact-pinned renderer emits this synchronously before it discards a
+    // completed foreground parse. Evict one stale, non-active ancestor while
+    // the newly parsed tile can still be admitted.
+    if (tilesRenderer !== rendererInstance || !lodRuntimeProfileState) return;
     if (recoverLodCacheAdmission(rendererInstance.lruCache, lodRuntimeProfileState.budget)) {
       lodCacheRecoveryActive = true;
     }
+  });
+  rendererInstance.addEventListener('load-model', (ev) => {
+    if (tilesRenderer !== rendererInstance) return;
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -883,11 +896,28 @@ function loadTiles() {
   });
   rendererInstance.addEventListener('load-error', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
-    const status = Number(ev?.status);
+    const failure = classifyTileLoadFailure(ev);
+    const failureAt = Date.now();
+    if (failureAt - lodTileLastFailureAt > 60_000) lodTileRetryAttempt = 0;
+    lodTileLastFailureAt = failureAt;
     console.error('[LTDS LOD] tile load failed; run window.__ltds.lodDiagnostics()', {
-      status: Number.isFinite(status) ? status : null,
+      status: failure.status,
+      kind: failure.kind,
     });
     emitLodDebugSnapshot('load-error', true);
+    if (failure.kind === 'authorization' && VIEW_MODE === 'session') {
+      lodTileRecoveryPending = true;
+      dom.lodStatus.textContent = 'LOD: renewing access';
+      // Expired capability URLs fail concurrently. Once one failure has
+      // started renewal, every other 401/403 must keep the fallback renderer
+      // alive instead of interpreting the coalesced request as a failure.
+      if (sessionRenewalPending || requestSessionRenewal('tile-authorization')) return;
+    }
+    if (failure.kind === 'transient') {
+      lodTileRecoveryPending = true;
+      scheduleLodTileRetry(rendererInstance);
+      return;
+    }
     failLod('A required LOD tile failed to load.');
   });
   tilesParent.add(rendererInstance.group);
@@ -901,6 +931,11 @@ function disposeTiles() {
   lodCacheRecoveryActive = false;
   lodLastSettledDetail = null;
   lodPressureView = null;
+  lodTileRecoveryPending = false;
+  lodTileRetryAttempt = 0;
+  lodTileLastFailureAt = 0;
+  if (lodTileRetryTimer) clearTimeout(lodTileRetryTimer);
+  lodTileRetryTimer = null;
   if (!tilesRenderer) return;
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
@@ -913,7 +948,40 @@ function disposeTiles() {
   bvhQueue.length = 0;
 }
 
+function scheduleLodTileRetry(rendererInstance) {
+  if (tilesRenderer !== rendererInstance || lodTileRetryTimer) return;
+  if (lodTileRetryAttempt >= 4) {
+    failLod('A required LOD tile repeatedly failed to load.');
+    return;
+  }
+  const delay = [500, 1_500, 4_000, 10_000][lodTileRetryAttempt++];
+  dom.lodStatus.textContent = `LOD: retrying tile (${lodTileRetryAttempt}/4)`;
+  lodTileRetryTimer = setTimeout(() => {
+    lodTileRetryTimer = null;
+    if (tilesRenderer !== rendererInstance) return;
+    lodTileRecoveryPending = false;
+    rendererInstance.resetFailedTiles();
+  }, delay);
+}
+
+function recoverFailedLodTiles() {
+  if (!lodTileRecoveryPending || !tilesRenderer) return;
+  lodTileRecoveryPending = false;
+  lodTileRetryAttempt = 0;
+  if (lodTileRetryTimer) clearTimeout(lodTileRetryTimer);
+  lodTileRetryTimer = null;
+  tilesRenderer.resetFailedTiles();
+  dom.lodStatus.textContent = 'LOD: access renewed';
+}
+
 let sessionRenewalTimer = null;
+let sessionRenewalResponseTimer = null;
+let activeViewerSession = null;
+let sessionRenewalPending = false;
+let sessionRenewalAttempt = null;
+let sessionRenewalBackoffIndex = 0;
+let sessionRenewalMinimumDelayMs = 1_000;
+const SESSION_RENEWAL_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 300_000];
 let sessionAllowedOrigins = [];
 const reviewControllerCandidate = new URLSearchParams(location.hash.replace(/^#/, '')).get('reviewController');
 const REVIEW_CONTROLLER_ID = window.parent === window && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reviewControllerCandidate || '')
@@ -925,7 +993,7 @@ const LOD_AVAILABILITY_REFRESH_MS = 5000;
 let lodAvailabilityTimer = null;
 let lodAvailabilityRefreshInFlight = false;
 
-async function redeemViewerGrant(grant) {
+async function redeemViewerGrant(grant, { signal } = {}) {
   const accessToken = sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null;
   const res = await fetch('/api/v1/sessions/redeem', {
     method: 'POST',
@@ -934,9 +1002,10 @@ async function redeemViewerGrant(grant) {
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify({ grant }),
+    signal,
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(body.error || `HTTP ${res.status}`), { status: res.status });
   return body;
 }
 
@@ -1004,36 +1073,98 @@ function sessionControllerOrigins() {
 function postToAllowedController(message) {
   if (reviewSessionChannel) {
     reviewSessionChannel.postMessage(message);
-    return;
+    return true;
   }
   const controller = sessionControlWindow();
-  if (!controller) return;
-  for (const origin of sessionControllerOrigins()) controller.postMessage(message, origin);
+  if (!controller) return false;
+  const origins = sessionControllerOrigins();
+  for (const origin of origins) controller.postMessage(message, origin);
+  return origins.length > 0;
+}
+
+function requestSessionRenewal(_reason = 'timer') {
+  if (VIEW_MODE !== 'session' || !activeViewerSession || sessionRenewalPending) return false;
+  const requestId = reviewSessionChannel ? crypto.randomUUID() : null;
+  const sent = postToAllowedController({
+    version: 1,
+    type: 'ltds-viewer:session-expiring',
+    ...(requestId ? { requestId } : {}),
+    modelId: activeViewerSession.model.id,
+    expiresAt: activeViewerSession.expiresAt,
+  });
+  if (!sent) return false;
+  const attempt = { requestId, abortController: null };
+  sessionRenewalAttempt = attempt;
+  pendingReviewRenewalRequestId = requestId;
+  sessionRenewalPending = true;
+  if (sessionRenewalResponseTimer) clearTimeout(sessionRenewalResponseTimer);
+  sessionRenewalResponseTimer = setTimeout(() => {
+    if (sessionRenewalAttempt !== attempt) return;
+    attempt.abortController?.abort();
+    postSessionRenewalFailure(requestId, true);
+    clearSessionRenewalPending(attempt);
+    sessionRenewalResponseTimer = null;
+    scheduleSessionRenewalRetry('response-timeout');
+  }, 30_000);
+  return true;
+}
+
+function clearSessionRenewalPending(attempt = sessionRenewalAttempt) {
+  if (attempt && sessionRenewalAttempt !== attempt) return false;
+  if (sessionRenewalResponseTimer) clearTimeout(sessionRenewalResponseTimer);
+  sessionRenewalResponseTimer = null;
+  sessionRenewalPending = false;
+  sessionRenewalAttempt = null;
+  pendingReviewRenewalRequestId = null;
+  return true;
+}
+
+function nextSessionRenewalBackoff() {
+  const delay = SESSION_RENEWAL_BACKOFF_MS[Math.min(sessionRenewalBackoffIndex, SESSION_RENEWAL_BACKOFF_MS.length - 1)];
+  sessionRenewalBackoffIndex = Math.min(sessionRenewalBackoffIndex + 1, SESSION_RENEWAL_BACKOFF_MS.length - 1);
+  sessionRenewalMinimumDelayMs = delay;
+  return delay;
+}
+
+function scheduleSessionRenewalRetry(reason) {
+  if (sessionRenewalTimer) clearTimeout(sessionRenewalTimer);
+  const delay = nextSessionRenewalBackoff();
+  sessionRenewalTimer = setTimeout(() => requestSessionRenewal(reason), delay);
+}
+
+function postSessionRenewalFailure(requestId, retryable, error = '') {
+  postToAllowedController({
+    version: 1,
+    type: 'ltds-viewer:session-renewal-failed',
+    ...(requestId ? { requestId } : {}),
+    modelId: PROJECT && PROJECT.id,
+    retryable,
+    ...(!requestId ? { error } : {}),
+  });
+}
+
+function requestSessionRenewalIfDue(reason) {
+  if (!activeViewerSession) return;
+  if (Date.parse(activeViewerSession.expiresAt) - Date.now() <= 5 * 60 * 1000) requestSessionRenewal(reason);
 }
 
 function scheduleSessionRenewal(session) {
+  activeViewerSession = session;
   if (sessionRenewalTimer) clearTimeout(sessionRenewalTimer);
-  const expiresAtMs = Date.parse(session.expiresAt);
-  const delay = Math.max(1000, expiresAtMs - Date.now() - 5 * 60 * 1000);
-  sessionRenewalTimer = setTimeout(() => {
-    pendingReviewRenewalRequestId = reviewSessionChannel ? crypto.randomUUID() : null;
-    postToAllowedController({
-      version: 1,
-      type: 'ltds-viewer:session-expiring',
-      ...(pendingReviewRenewalRequestId ? { requestId: pendingReviewRenewalRequestId } : {}),
-      modelId: session.model.id,
-      expiresAt: session.expiresAt,
-    });
-  }, delay);
+  const delay = Math.max(sessionRenewalMinimumDelayMs, Date.parse(session.expiresAt) - Date.now() - 5 * 60 * 1000);
+  sessionRenewalTimer = setTimeout(() => requestSessionRenewal('timer'), delay);
 }
 
 function applyViewerSession(session, { initialize = false } = {}) {
+  const previousTilesUrl = TILES_URL;
   setDisplayUnits(session.displayUnits);
   if (session.sessionId) sessionStorageKey = `${SESSION_STORAGE_PREFIX}${session.sessionId}`;
   if (session.accessToken && sessionStorageKey) sessionStorage.setItem(sessionStorageKey, session.accessToken);
   sessionAllowedOrigins = Array.isArray(session.allowedEmbedOrigins) ? session.allowedEmbedOrigins : [];
   SHARE_PERMISSIONS = session.permissions || { measure: true, cameras: true };
   if (initialize) {
+    sessionRenewalBackoffIndex = 0;
+    sessionRenewalMinimumDelayMs = 1_000;
     PROJECT = session.model;
     applyProjectConfig(PROJECT);
     init();
@@ -1048,10 +1179,16 @@ function applyViewerSession(session, { initialize = false } = {}) {
     // visibility, measurements, or already-loaded render resources.
     PROJECT = session.model;
     applyProjectConfig(PROJECT);
+    if (tilesRenderer && previousTilesUrl && TILES_URL !== previousTilesUrl) {
+      preserveIncomingModelView = true;
+      disposeTiles();
+      loadTiles();
+    }
   }
   if (state.meshSource === 'lod-required') scheduleLodAvailabilityRefresh();
   else stopLodAvailabilityRefresh();
   scheduleSessionRenewal(session);
+  recoverFailedLodTiles();
 }
 
 async function bootstrapSession() {
@@ -1079,9 +1216,21 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
   const grant = data.grant;
   if (typeof grant !== 'string' || !/^[0-9a-f-]{36}$/i.test(grant)) return;
   const requestId = reviewChannel ? pendingReviewRenewalRequestId : null;
+  const attempt = sessionRenewalAttempt;
   try {
-    const session = await redeemViewerGrant(grant);
+    const abortController = new AbortController();
+    if (attempt) attempt.abortController = abortController;
+    const session = await redeemViewerGrant(grant, { signal: abortController.signal });
+    if (sessionRenewalAttempt !== attempt) return;
     if (!PROJECT || session.model.id !== PROJECT.id) throw new Error('renewal grant is scoped to a different model');
+    const advanced = Date.parse(session.expiresAt) > Date.parse(activeViewerSession?.expiresAt || '');
+    clearSessionRenewalPending(attempt);
+    if (advanced) {
+      sessionRenewalBackoffIndex = 0;
+      sessionRenewalMinimumDelayMs = 1_000;
+    } else {
+      nextSessionRenewalBackoff();
+    }
     applyViewerSession(session);
     postToAllowedController({
       version: 1,
@@ -1090,23 +1239,26 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
       modelId: session.model.id,
       expiresAt: session.expiresAt,
     });
-    if (requestId) pendingReviewRenewalRequestId = null;
   } catch (error) {
+    if (sessionRenewalAttempt !== attempt) return;
+    const status = Number(error?.status);
+    const retryable = error?.name === 'AbortError' || !Number.isFinite(status)
+      || status === 408 || status === 410 || status === 425 || status === 429 || status >= 500;
     // Keep the still-live capability and credential-bearing loader URLs.
     // The parent can issue another one-time grant and retry in place.
-    postToAllowedController({
-      version: 1,
-      type: 'ltds-viewer:session-renewal-failed',
-      ...(requestId ? { requestId } : {}),
-      modelId: PROJECT && PROJECT.id,
-      ...(!requestId ? { error: String(error.message || error), retryable: true } : {}),
-    });
-    if (requestId) pendingReviewRenewalRequestId = null;
+    postSessionRenewalFailure(requestId, retryable, String(error.message || error));
+    clearSessionRenewalPending(attempt);
+    if (retryable) scheduleSessionRenewalRetry('redemption-failed');
   }
 }
 
 if (reviewSessionChannel) reviewSessionChannel.onmessage = event => { void handleSessionRenewalMessage(event.data, { reviewChannel: true }); };
 window.addEventListener('pagehide', () => reviewSessionChannel?.close(), { once: true });
+window.addEventListener('focus', () => requestSessionRenewalIfDue('focus'));
+window.addEventListener('pageshow', () => requestSessionRenewalIfDue('pageshow'));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestSessionRenewalIfDue('visibility');
+});
 window.addEventListener('message', event => {
   const controller = sessionControlWindow();
   if (!controller || event.source !== controller || !sessionControllerOrigins().includes(event.origin)) return;
@@ -3431,8 +3583,8 @@ function maybeAdvanceLodWarmup() {
     || lodRuntimeProfileState.reduced) return false;
   if (!lodQueuesSettled(tilesRenderer)
     || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
-  lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
   if (lodStarvedAtDetail !== null) return false;
+  lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
   if (!lodDetailRequestPending(lodRuntimeProfileState)) return false;
   const advance = resolveLodWarmupAdvance(lodRuntimeProfileState);
   if (!advance) return false;

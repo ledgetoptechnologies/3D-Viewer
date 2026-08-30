@@ -23,6 +23,20 @@ test('new-tab session contract is versioned, removes grants, and isolates its ex
 
 test('retryable renewal failure preserves the current stable capability', () => {
   const renewalHandler = source.slice(source.indexOf('async function handleSessionRenewalMessage'));
-  assert.match(renewalHandler, /retryable: true/);
+  assert.match(renewalHandler, /const retryable =/);
+  assert.match(renewalHandler, /if \(retryable\) scheduleSessionRenewalRetry\('redemption-failed'\)/);
   assert.doesNotMatch(renewalHandler, /sessionStorage\.removeItem/);
+});
+
+test('Viewer catches up after tab suspension and recovers failed authenticated tiles in place', () => {
+  assert.match(source, /requestSessionRenewalIfDue\('focus'\)/);
+  assert.match(source, /requestSessionRenewalIfDue\('pageshow'\)/);
+  assert.match(source, /document\.visibilityState === 'visible'/);
+  assert.match(source, /scheduleSessionRenewalRetry\('response-timeout'\)/);
+  assert.match(source, /sessionRenewalPending \|\| requestSessionRenewal\('tile-authorization'\)/);
+  assert.match(source, /SESSION_RENEWAL_BACKOFF_MS = \[10_000, 30_000, 60_000, 120_000, 300_000\]/);
+  assert.match(source, /sessionRenewalAttempt !== attempt/);
+  assert.match(source, /failure\.kind === 'authorization'[\s\S]*requestSessionRenewal\('tile-authorization'\)/);
+  assert.match(source, /function recoverFailedLodTiles\(\)[\s\S]*tilesRenderer\.resetFailedTiles\(\)/);
+  assert.match(source, /failure\.kind === 'transient'[\s\S]*scheduleLodTileRetry\(rendererInstance\)/);
 });

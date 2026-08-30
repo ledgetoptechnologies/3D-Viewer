@@ -47,6 +47,16 @@ test('admin grant renewal reuses the same bearer and session and exposes only th
   assert.equal(renewed.session.id, first.session.id);
   assert.equal(renewed.controllerOrigin, first.controllerOrigin);
 
+  database.prepare('UPDATE admin_sessions SET expires_at=? WHERE id=?').run(
+    new Date(Date.now() - 60_000).toISOString(), first.session.id,
+  );
+  assert.equal((await fetch(`${base}/api/v1/admin-sessions/current`, { headers: { authorization: `Bearer ${first.accessToken}` } })).status, 401);
+  const revivedResponse = await redeem(issue(90_000), first.accessToken);
+  assert.equal(revivedResponse.status, 200);
+  const revived = await revivedResponse.json();
+  assert.equal(revived.accessToken, first.accessToken);
+  assert.equal(revived.session.id, first.session.id);
+
   const currentResponse = await fetch(`${base}/api/v1/admin-sessions/current`, { headers: { authorization: `Bearer ${first.accessToken}` } });
   assert.equal(currentResponse.status, 200);
   const current = await currentResponse.json();

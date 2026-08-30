@@ -81,11 +81,13 @@ export class WorkspaceSessionRenewal {
     this.boundMessage = (event) => this.handleMessage(event);
     this.boundFocus = () => this.requestIfDue('focus');
     this.boundVisibility = () => { if (this.documentRef.visibilityState === 'visible') this.requestIfDue('visibility'); };
+    this.boundPageShow = () => this.requestIfDue('pageshow');
   }
 
   start() {
     this.windowRef.addEventListener('message', this.boundMessage);
     this.windowRef.addEventListener('focus', this.boundFocus);
+    this.windowRef.addEventListener('pageshow', this.boundPageShow);
     this.documentRef.addEventListener('visibilitychange', this.boundVisibility);
     this.schedule();
     this.post({ type: 'ltds-viewer:workspace-ready', sessionId: this.session.id, subject: this.session.subject, expiresAt: this.session.expiresAt });
@@ -100,20 +102,30 @@ export class WorkspaceSessionRenewal {
   schedule() {
     for (const timer of [this.renewalTimer, this.expiryTimer]) if (timer) this.clearTimer(timer);
     const remaining = this.expiresAtMs - this.now();
-    if (remaining <= 0) return this.expire('expired');
-    this.expiryTimer = this.setTimer(() => this.expire('expired'), remaining);
+    if (remaining <= 0) {
+      if (this.controllerWindow) return this.requestRenewal('late-schedule');
+      return this.expire('expired');
+    }
+    this.expiryTimer = this.setTimer(() => {
+      if (this.controllerWindow) this.requestRenewal('expiry');
+      else this.expire('expired');
+    }, remaining);
     if (this.controllerWindow) {
       this.renewalTimer = this.setTimer(() => this.requestRenewal('timer'), Math.max(1_000, remaining - WORKSPACE_RENEWAL_LEAD_MS));
     }
   }
 
   requestIfDue(reason) {
-    if (this.expiresAtMs - this.now() <= WORKSPACE_RENEWAL_LEAD_MS) this.requestRenewal(reason);
+    if (this.expiresAtMs - this.now() <= WORKSPACE_RENEWAL_LEAD_MS) {
+      // A later focus/visibility/pageshow is a new recovery opportunity after
+      // a bounded transient retry run was exhausted while the tab slept.
+      if (!this.pendingRequestId && this.retryAttempt >= RETRY_DELAYS_MS.length) this.retryAttempt = 0;
+      this.requestRenewal(reason);
+    }
   }
 
   requestRenewal(reason) {
     if (this.disposed || this.pendingRequestId || !this.controllerWindow) return false;
-    if (this.expiresAtMs <= this.now()) return this.expire('expired');
     if (this.retryAttempt >= RETRY_DELAYS_MS.length) return false;
     if (this.retryTimer) this.clearTimer(this.retryTimer);
     this.retryTimer = null;
@@ -141,9 +153,9 @@ export class WorkspaceSessionRenewal {
   }
 
   scheduleRetry() {
-    if (this.disposed || this.expiresAtMs <= this.now() || this.retryAttempt >= RETRY_DELAYS_MS.length) return;
+    if (this.disposed || this.retryAttempt >= RETRY_DELAYS_MS.length) return;
     if (this.retryTimer) this.clearTimer(this.retryTimer);
-    const delay = Math.min(RETRY_DELAYS_MS[this.retryAttempt - 1], Math.max(0, this.expiresAtMs - this.now()));
+    const delay = RETRY_DELAYS_MS[this.retryAttempt - 1];
     this.retryTimer = this.setTimer(() => this.requestRenewal('retry'), delay);
   }
 
@@ -216,6 +228,7 @@ export class WorkspaceSessionRenewal {
     for (const timer of [this.renewalTimer, this.expiryTimer, this.responseTimer, this.retryTimer]) if (timer) this.clearTimer(timer);
     this.windowRef.removeEventListener('message', this.boundMessage);
     this.windowRef.removeEventListener('focus', this.boundFocus);
+    this.windowRef.removeEventListener('pageshow', this.boundPageShow);
     this.documentRef.removeEventListener('visibilitychange', this.boundVisibility);
     this.pendingRequestId = null;
   }

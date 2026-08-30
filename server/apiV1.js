@@ -140,10 +140,20 @@ function createApiV1(repository) {
   }
 
   function currentViewer(req) {
+    const presented = presentedViewer(req);
+    if (!presented || !repository.viewerSessionLive(presented.session)) return null;
+    return presented;
+  }
+
+  // A fresh one-time grant is the authority for renewal. During that exact
+  // redemption only, retain an expired (but never revoked) bearer so a tab
+  // that was suspended can extend the same capability and keep every tile URL
+  // valid. All ordinary Viewer endpoints continue to require a live session.
+  function presentedViewer(req) {
     const token = viewerToken(req);
     if (!token) return null;
     const session = repository.getViewerSessionByHash(auth.hashToken(token));
-    if (!repository.viewerSessionLive(session) || session.permissions?.view === false) return null;
+    if (!session || session.revokedAt || session.permissions?.view === false) return null;
     return { token, session };
   }
 
@@ -189,7 +199,7 @@ function createApiV1(repository) {
     const grantId = req.body && req.body.grant;
     if (typeof grantId !== 'string' || !/^[0-9a-f-]{36}$/i.test(grantId))
       return res.status(400).json({ error: 'invalid session grant' });
-    const existing = currentViewer(req);
+    const existing = presentedViewer(req);
     const grant = repository.redeemSessionGrant(grantId);
     if (!grant) return res.status(410).json({ error: 'session grant expired or already redeemed' });
     const authorizedUntilMs = Date.parse(grant.permissions.__authorizedUntil || '');

@@ -75,6 +75,7 @@ export class ReviewSessionController {
       usedRequestIds: new Set(),
       retryIndex: 0,
       retryTimer: null,
+      renewedTimer: null,
     };
     channel.onmessage = event => this.handleMessage(channelId, event?.data);
     this.records.set(channelId, record);
@@ -100,6 +101,7 @@ export class ReviewSessionController {
     const record = this.records.get(channelId);
     if (!record) return false;
     if (record.retryTimer) this.clearTimer(record.retryTimer);
+    if (record.renewedTimer) this.clearTimer(record.renewedTimer);
     record.channel.onmessage = null;
     record.channel.close();
     this.records.delete(channelId);
@@ -120,19 +122,35 @@ export class ReviewSessionController {
     if (exactKeys(data, ['version', 'type', 'requestId', 'modelId', 'expiresAt'])
       && data.version === 1 && data.type === 'ltds-viewer:session-renewed'
       && data.modelId === record.context.modelId && data.requestId === record.activeRequestId
-      && record.awaitingRenewed && validSessionExpiry(data.expiresAt, record, now, { afterCurrent: true })) {
-      record.expiresAt = data.expiresAt;
-      record.expiresAtMs = Date.parse(data.expiresAt);
+      && record.awaitingRenewed && validSessionExpiry(data.expiresAt, record, now)) {
+      const renewedExpiryMs = Date.parse(data.expiresAt);
+      if (renewedExpiryMs > record.expiresAtMs) {
+        record.expiresAt = data.expiresAt;
+        record.expiresAtMs = renewedExpiryMs;
+      }
+      // The workspace and Viewer renew on the same lead time. A grant can be
+      // capped to the unchanged workspace expiry during that race. Treat the
+      // authenticated response as complete so the Viewer may retry after the
+      // workspace session advances instead of wedging this channel forever.
       record.awaitingRenewed = false;
       record.activeRequestId = null;
       record.retryIndex = 0;
+      if (record.renewedTimer) this.clearTimer(record.renewedTimer);
+      record.renewedTimer = null;
       return true;
     }
-    if (exactKeys(data, ['version', 'type', 'requestId', 'modelId'])
+    if (exactKeys(data, ['version', 'type', 'requestId', 'modelId', 'retryable'])
       && data.version === 1 && data.type === 'ltds-viewer:session-renewal-failed'
       && data.modelId === record.context.modelId && data.requestId === record.activeRequestId
-      && record.awaitingRenewed) {
-      this.untrack(channelId);
+      && record.awaitingRenewed && typeof data.retryable === 'boolean') {
+      if (!data.retryable) {
+        this.untrack(channelId);
+        return true;
+      }
+      if (record.renewedTimer) this.clearTimer(record.renewedTimer);
+      record.renewedTimer = null;
+      record.awaitingRenewed = false;
+      record.activeRequestId = null;
       return true;
     }
     if (!exactKeys(data, ['version', 'type', 'requestId', 'modelId', 'expiresAt'])
@@ -140,7 +158,7 @@ export class ReviewSessionController {
       || data.modelId !== record.context.modelId || data.expiresAt !== record.expiresAt
       || !CHANNEL_ID_PATTERN.test(data.requestId || '') || record.usedRequestIds.has(data.requestId)
       || record.pending || record.retryTimer || record.awaitingRenewed || !record.expiresAtMs
-      || record.expiresAtMs <= now || record.expiresAtMs - now > RENEWAL_LEAD_MS) return false;
+      || record.expiresAtMs - now > RENEWAL_LEAD_MS) return false;
     if (record.usedRequestIds.size >= 32) record.usedRequestIds.delete(record.usedRequestIds.values().next().value);
     record.usedRequestIds.add(data.requestId);
     record.activeRequestId = data.requestId;
@@ -163,6 +181,13 @@ export class ReviewSessionController {
       record.retryIndex = 0;
       record.awaitingRenewed = true;
       record.channel.postMessage({ version: 1, type: 'ltds-viewer:renew-session', requestId: record.activeRequestId, grant: result.grant });
+      const requestId = record.activeRequestId;
+      record.renewedTimer = this.setTimer(() => {
+        if (this.records.get(record.channelId) !== record || record.activeRequestId !== requestId) return;
+        record.awaitingRenewed = false;
+        record.activeRequestId = null;
+        record.renewedTimer = null;
+      }, 35_000);
       return true;
     } catch (error) {
       if (error?.status === 401 || error?.status === 403 || error?.status === 410) {

@@ -330,8 +330,12 @@ requests. The production Compose profile disables the legacy password admin.
   hash is stored. Capability asset paths work when third-party cookies are
 blocked and do not collide across simultaneous embeds. Renewal extends the
   same database session in place, so active 3D Tiles/EPT loaders retain stable
-  URLs. Iframe renewal messages are accepted only from exact configured embed
-origins.
+  URLs. A suspended tab may recover the same expired-but-unrevoked session only
+  by presenting a fresh, exactly matching one-time grant; the expired bearer
+  alone remains unusable. Iframe renewal messages are accepted only from exact
+  configured embed origins. The Viewer catches up on focus, visibility, and
+  pageshow, and retries authenticated tile failures after renewal without
+  discarding its camera or decoded LOD cache.
   Capability paths must be excluded/redacted from reverse-proxy and Cloudflare
   URL logs; `deploy/nginx-viewer.conf.example` disables Nginx access logging
   for those routes.
@@ -362,10 +366,12 @@ origins.
   separate version-1 workspace protocol. Viewer trusts only the exact
   `controllerOrigin` returned by its own admin-session response and the exact
   captured opener window. It requests a replacement grant five minutes before
-  expiry and again when a due tab becomes visible or focused, redeems with the
+  expiry and again when a due tab becomes visible, focused, or returns through
+  pageshow, redeems with the
   existing bearer, and requires the same session ID and subject. Retryable
-  failures retain the current token and workspace state; only an authoritative
-  `401` or the recorded expiry locks the workspace. This does not affect client
+  failures retain the current token and workspace state even when a browser
+  timer wakes after the recorded expiry; only an authoritative `401` locks the
+  attached workspace. This does not affect client
   portal or public-share sessions.
 - **Cross-origin session control requires HTTPS.** Session/asset authorization
   does not depend on third-party cookies. Put this app behind TLS in production.
@@ -713,7 +719,8 @@ WGS84 UTM 16N
 - **Point cloud**: Potree in an iframe when an EPT dataset exists (its bundled
   Three r124 can't share the page with npm Three); otherwise a direct
   LAZ/LAS (via `@loaders.gl/las`) or PLY point cloud in the main three.js
-  scene.
+  scene. Potree camera markers render from a dedicated perspective-overlay
+  scene after the EDL composite so dense points cannot overwrite or hide them.
 
 ## Operations workspace
 

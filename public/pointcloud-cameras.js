@@ -205,7 +205,13 @@
       sourceToDraw = new Int32Array(markers.length);
       sourceToDraw.fill(-1);
       const data = cameraMarkerGeometryData();
-      const material = () => new THREE.MeshBasicMaterial({ transparent: true, opacity: CAMERA_MARKER_OPACITY.normal, side: THREE.FrontSide, depthWrite: false });
+      const material = () => new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: CAMERA_MARKER_OPACITY.normal,
+        side: THREE.FrontSide,
+        depthTest: false,
+        depthWrite: false,
+      });
       orangeMesh = new THREE.InstancedMesh(geometry(data.orange), material(), markers.length);
       whiteMesh = new THREE.InstancedMesh(geometry(data.white), material(), markers.length);
       yellowMesh = new THREE.InstancedMesh(geometry(data.yellow), material(), markers.length);

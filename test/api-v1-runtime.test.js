@@ -297,6 +297,15 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
     method: 'POST', body: renewalRequest, headers: { 'Idempotency-Key': 'session-client-user-7-renewal' },
   });
   const renewalGrant = await renewalGrantResponse.json();
+  const expiredViewerDatabase = openDatabase(path.join(dataDir, 'viewer.sqlite'));
+  expiredViewerDatabase.prepare('UPDATE viewer_sessions SET expires_at=? WHERE id=?').run(
+    new Date(Date.now() - 60_000).toISOString(), browserSession.sessionId,
+  );
+  expiredViewerDatabase.close();
+  assert.equal((await fetch(`${baseUrl}/api/v1/sessions/current`, {
+    headers: { Authorization: `Bearer ${browserSession.accessToken}` },
+  })).status, 401);
+  assert.equal((await fetch(`${baseUrl}${browserSession.model.assets.glb}`)).status, 403);
   const renewal = await fetch(`${baseUrl}/api/v1/sessions/redeem`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${browserSession.accessToken}` },
@@ -305,7 +314,9 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.equal(renewal.status, 200);
   const renewed = await renewal.json();
   assert.equal(renewed.accessToken, browserSession.accessToken);
+  assert.equal(renewed.sessionId, browserSession.sessionId);
   assert.equal(renewed.model.assets.glb, browserSession.model.assets.glb);
+  assert.equal((await fetch(`${baseUrl}${renewed.model.assets.glb}`)).status, 200);
 
   const pinnedBody = JSON.stringify({ versionPolicy: 'pinned' });
   const pinned = await signedFetch(baseUrl, `/api/v1/models/${model.id}/shares`, {

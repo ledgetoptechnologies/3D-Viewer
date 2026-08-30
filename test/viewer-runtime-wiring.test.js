@@ -217,7 +217,14 @@ test('LOD memory pressure restores the last complete frontier and resets on expl
   assert.match(statsBlock, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
   assert.match(main, /function retryLodForChangedView\(\)/);
   assert.match(main, /lodViewChangeRequiresRetry\(lodPressureView, currentView\)/);
-  assert.match(loadBlock, /recoverLodCacheAdmission\(rendererInstance\.lruCache, lodRuntimeProfileState\.budget\)/);
+  const loadModelStart = loadBlock.indexOf("addEventListener('load-model'");
+  const loadModelBlock = loadBlock.slice(loadModelStart, loadBlock.indexOf("addEventListener('load-error'", loadModelStart));
+  assert.doesNotMatch(loadModelBlock, /recoverLodCacheAdmission\(/,
+    'load-model fires after renderer 0.5.1 has already discarded an unadmitted parse');
+  assert.match(loadBlock, /addEventListener\('tile-memory-pressure',[\s\S]*?recoverLodCacheAdmission\(rendererInstance\.lruCache, lodRuntimeProfileState\.budget\)/,
+    'pre-discard recovery must run from the exact-pinned synchronous renderer event');
+  assert.match(main, /if \(lodStarvedAtDetail !== null\) return false;\s*lodLastSettledDetail = lodRuntimeProfileState\.activeDetail/,
+    'a memory-limited fallback must never overwrite the last genuinely settled detail');
   assert.match(main, /emitLodDebugSnapshot\('view-change-retry', true\)/);
   assert.doesNotMatch(main, /lodCacheRetentionMinBytes\([^)]*, true\)\s*;\/\/.*zero/i);
 });

@@ -121,11 +121,13 @@ test('only authoritative 401 or actual expiry clears the workspace session', asy
   assert.equal(unauthorized.expired(), 'unauthorized');
   assert.equal(unauthorized.posted.findLast((entry) => entry.message.type === 'ltds-viewer:workspace-session-renewal-failed').message.retryable, false);
 
-  const expired = harness();
-  expired.renewal.start();
-  const expiryTimer = expired.timers.find((timer) => timer.delay > 60_000 && timer.delay < 3 * 60_000);
+  const late = harness();
+  late.renewal.start();
+  const expiryTimer = late.timers.find((timer) => timer.delay > 60_000 && timer.delay < 3 * 60_000);
   expiryTimer.handler();
-  assert.equal(expired.expired(), 'expired');
+  assert.equal(late.expired(), null, 'an attached controller remains able to issue a fresh recovery grant');
+  assert.equal(late.posted.at(-1).message.type, 'ltds-viewer:workspace-session-expiring');
+  assert.equal(late.windowListeners.has('pageshow'), true);
 });
 
 test('malformed controller configuration fails closed before registering a message channel', () => {

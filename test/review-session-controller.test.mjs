@@ -71,6 +71,48 @@ test('isolated review channel navigates and issues one expiry-bound renewal gran
   assert.equal(channel.closed, true);
 });
 
+test('a suspended Viewer may request an exact renewal after its recorded expiry', async () => {
+  let clock = NOW;
+  const { controller, channels, calls } = harness({ now: () => clock });
+  controller.track(CHANNEL_ID, CONTEXT);
+  const channel = channels[0];
+  await ready(channel);
+  clock = Date.parse(CURRENT_EXPIRY) + 60_000;
+  assert.equal(await expiring(channel), true);
+  assert.equal(calls.length, 1);
+  assert.equal(channel.posts.at(-1).type, 'ltds-viewer:renew-session');
+});
+
+test('same-expiry response clears the renewal race and permits a later retry', async () => {
+  const { controller, channels, calls } = harness();
+  controller.track(CHANNEL_ID, CONTEXT);
+  const channel = channels[0];
+  await ready(channel);
+  assert.equal(await expiring(channel), true);
+  assert.equal(await channel.emit({
+    version: 1, type: 'ltds-viewer:session-renewed', requestId: REQUEST_ID,
+    modelId: CONTEXT.modelId, expiresAt: CURRENT_EXPIRY,
+  }), true);
+  const retryId = 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa';
+  assert.equal(await expiring(channel, { requestId: retryId }), true);
+  assert.equal(calls.length, 2);
+  assert.equal(channel.posts.at(-1).requestId, retryId);
+});
+
+test('a delivered grant cannot leave the controller permanently awaiting a sleeping Viewer', async () => {
+  const { controller, channels, calls, timers } = harness();
+  controller.track(CHANNEL_ID, CONTEXT);
+  const channel = channels[0];
+  await ready(channel);
+  await expiring(channel);
+  const responseTimer = timers.find(timer => timer.delay === 35_000 && !timer.cleared);
+  assert.ok(responseTimer);
+  responseTimer.handler();
+  const retryId = 'dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb';
+  assert.equal(await expiring(channel, { requestId: retryId }), true);
+  assert.equal(calls.length, 2);
+});
+
 test('wrong shape, model, expiry, early request, and unknown channel mint nothing', async () => {
   const { controller, channels, calls } = harness();
   controller.track(CHANNEL_ID, CONTEXT);
@@ -97,7 +139,7 @@ test('mismatched issuance response is never delivered', async () => {
   assert.equal(channel.posts.some(post => post.type === 'ltds-viewer:renew-session'), false);
 });
 
-test('a failed grant redemption closes the bounded renewal channel instead of minting repeatedly', async () => {
+test('an authoritative failed grant redemption closes the bounded renewal channel', async () => {
   const { controller, channels } = harness();
   controller.track(CHANNEL_ID, CONTEXT);
   const channel = channels[0];
@@ -105,10 +147,26 @@ test('a failed grant redemption closes the bounded renewal channel instead of mi
   assert.equal(await expiring(channel), true);
   assert.equal(await channel.emit({
     version: 1, type: 'ltds-viewer:session-renewal-failed', requestId: REQUEST_ID,
-    modelId: CONTEXT.modelId,
+    modelId: CONTEXT.modelId, retryable: false,
   }), true);
   assert.equal(controller.has(CHANNEL_ID), false);
   assert.equal(channel.closed, true);
+});
+
+test('a transient grant redemption failure keeps the channel available for a new request', async () => {
+  const { controller, channels, calls } = harness();
+  controller.track(CHANNEL_ID, CONTEXT);
+  const channel = channels[0];
+  await ready(channel);
+  await expiring(channel);
+  assert.equal(await channel.emit({
+    version: 1, type: 'ltds-viewer:session-renewal-failed', requestId: REQUEST_ID,
+    modelId: CONTEXT.modelId, retryable: true,
+  }), true);
+  assert.equal(controller.has(CHANNEL_ID), true);
+  const retryId = 'eeeeeeee-ffff-4aaa-8bbb-cccccccccccc';
+  assert.equal(await expiring(channel, { requestId: retryId }), true);
+  assert.equal(calls.length, 2);
 });
 
 test('transient issuance retries are bounded and workspace authorization failure closes the channel', async () => {

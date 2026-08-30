@@ -26,6 +26,7 @@ test('isolated launcher and Viewer communicate only through the random review Br
   assert.match(launcher, /type !== 'ltds-viewer:navigate'/);
   assert.match(launcher, /parsed\.origin !== location\.origin/);
   assert.match(viewer, /new BroadcastChannel\(`ltds-viewer-review:\$\{REVIEW_CONTROLLER_ID\}`\)/);
-  assert.match(viewer, /pendingReviewRenewalRequestId = reviewSessionChannel \? crypto\.randomUUID\(\) : null/);
+  assert.match(viewer, /const requestId = reviewSessionChannel \? crypto\.randomUUID\(\) : null/);
+  assert.match(viewer, /pendingReviewRenewalRequestId = requestId/);
   assert.doesNotMatch(viewer, /window\.opener/);
 });

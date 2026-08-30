@@ -84,6 +84,10 @@ test('point-cloud hover follows source indices when representative draw slots ch
   ]);
   layer.setVisible(true);
   const [orange] = layer.group.children;
+  for (const mesh of layer.group.children) {
+    assert.equal(mesh.material.depthTest, false, 'Potree overlay markers must not be hidden by point-cloud depth');
+    assert.equal(mesh.material.depthWrite, false);
+  }
   const normal = orange.getColorAt(0, new THREE.Color()).toArray();
   assert.equal(layer.setHovered(1), true);
   const highlighted = orange.getColorAt(0, new THREE.Color()).toArray();

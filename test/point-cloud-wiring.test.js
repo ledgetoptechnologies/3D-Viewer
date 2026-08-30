@@ -105,7 +105,10 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(viewerShell, /id="panel-camera-positions"[\s\S]*id="layer-cameras"[\s\S]*id="cam-size"[^>]*value="0\.5"/);
   assert.doesNotMatch(viewerShell, /yellow spear/i);
   assert.match(pointCloudShell, /<script src="\/pointcloud-cameras\.js"><\/script>/);
-  assert.match(pointCloudShell, /createPointCloudCameraLayer\(\{[\s\S]*scene: viewer\.scene\.scene/);
+  assert.match(pointCloudShell, /const cameraOverlayScene = new THREE\.Scene\(\)/);
+  assert.match(pointCloudShell, /createPointCloudCameraLayer\(\{[\s\S]*scene: cameraOverlayScene/);
+  assert.doesNotMatch(pointCloudShell, /createPointCloudCameraLayer\(\{[\s\S]*scene: viewer\.scene\.scene/);
+  assert.match(pointCloudShell, /addEventListener\('render\.pass\.perspective_overlay',[\s\S]*viewer\.renderer\.render\(cameraOverlayScene, viewer\.scene\.getActiveCamera\(\)\)/);
   assert.match(pointCloudShell, /setCameras\(markers\)[\s\S]*pointCloudCameraLayer\.setMarkers\(markers\)/);
   assert.match(pointCloudShell, /setCameraVisibility\(visible\)[\s\S]*pointCloudCameraLayer\.setVisible\(visible\)/);
   assert.match(pointCloudShell, /viewer\.addEventListener\('update', \(\) => pointCloudCameraLayer\.updateView\(\)\)/);
@@ -115,7 +118,7 @@ test('camera positions persist across model and point-cloud modes and remain cli
     assert.match(cameraRuntime, new RegExp(`${mesh}\\.count = visibleSources\\.length`));
   }
   assert.match(cameraRuntime, /for \(const mesh of \[orangeMesh, whiteMesh, yellowMesh\]\)[\s\S]*if \(mesh\.instanceColor\) mesh\.instanceColor\.needsUpdate = true/);
-  assert.match(cameraRuntime, /new THREE\.MeshBasicMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
+  assert.match(cameraRuntime, /new THREE\.MeshBasicMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide[^}]*depthTest: false[^}]*depthWrite: false/);
   assert.match(mainSource, /new THREE\.MeshStandardMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
   assert.match(cameraRuntime, /return drawToSource\[hit\.instanceId\]/);
   assert.match(cameraRuntime, /let hoveredSource = -1/);

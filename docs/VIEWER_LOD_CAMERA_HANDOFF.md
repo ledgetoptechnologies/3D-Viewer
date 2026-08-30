@@ -2,8 +2,40 @@
 
 ## Status
 
-**Root causes reproduced and fixed locally as of 2026-08-29; production remains
+**Root causes reproduced and fixed locally as of 2026-08-30; production remains
 unconfirmed until the user tests the merged deployment.**
+
+### 2026-08-30 angle, point-cloud overlay, and idle-session follow-up
+
+The production church session proved the remaining angle failure was cache
+admission, not bandwidth: a broken oblique pose showed 31 coarse visible tiles
+at Detail 2, while a nearby good pose showed one Detail-16 tile. Renderer 0.5.1
+was marking every loaded content-bearing ancestor on selected paths as LRU-used.
+Wide views therefore pinned inactive coarse ancestors until a newly parsed
+foreground tile hit the hard cache limit and was discarded before the
+application's later `load-model` callback could make room.
+
+The exact-version postinstall patch now releases loaded, non-active ancestors;
+active REPLACE fallback parents remain pinned until their selected descendants
+are ready. It also emits a synchronous `tile-memory-pressure` hook before the
+discard and rechecks the hard cap afterward. The Viewer evicts one stale entry
+at that hook. A memory-limited fallback can no longer overwrite the last truly
+settled detail stage.
+
+Potree camera coordinates were already correct. Markers disappeared over dense
+points because Potree's EDL fullscreen composite ran after the ordinary scene
+and overwrote them without sharing that scene's depth. Point-cloud markers now
+live in a dedicated scene rendered from `render.pass.perspective_overlay`,
+after Potree clears depth, with depth testing and writing disabled. Model-view
+marker rendering is unchanged.
+
+Long-idle failures were a renewal race plus an unrecoverable error path. Viewer
+and workspace renewal now catch up on focus, visibility, pageshow, or an
+authenticated tile failure. A fresh, exact one-time grant may extend the same
+expired-but-unrevoked session and bearer in place; an expired bearer alone is
+still rejected everywhere. Auth and transient tile failures retain the current
+renderer and call `resetFailedTiles()` after recovery, while permanent decode,
+manifest, and 4xx content failures still fail closed.
 
 ### 2026-08-29 near-cap recovery follow-up
 
