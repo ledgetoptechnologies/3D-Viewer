@@ -1670,7 +1670,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
         };
       })()`);
       assert.ok(transitionFallback.activeDetail >= 13 && transitionFallback.activeDetail <= 24, JSON.stringify(transitionFallback));
-      assert.equal(transitionFallback.loadAncestors, true);
+      assert.equal(transitionFallback.loadAncestors, false);
       assert.equal(transitionFallback.loadSiblings, false);
       assert.equal(transitionFallback.loadAncestorSiblings, false);
       const coarseCoverage = transitionFallback.rootVisible && transitionFallback.rootAttached;

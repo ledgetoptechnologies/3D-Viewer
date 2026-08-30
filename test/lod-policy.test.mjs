@@ -42,7 +42,7 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.equal(detailToErrorTarget(undefined), 15.023, 'missing detail defaults to balanced staged view-local refinement');
 });
 
-test('renderer configuration keeps ancestor fallback without enabling explicit sibling preload', () => {
+test('renderer configuration streams without pinning ancestors or siblings', () => {
   const calls = [];
   const tiles = {
     lruCache: {},
@@ -57,7 +57,7 @@ test('renderer configuration keeps ancestor fallback without enabling explicit s
   assert.deepEqual(calls, [['camera', camera], ['resolution', camera, renderer]]);
   assert.equal(LOD_WARMUP_DETAIL, 13);
   assert.equal(tiles.errorTarget, 32, 'low-memory clients start and remain on the LOD-1 warmup target');
-  assert.equal(tiles.loadAncestors, true);
+  assert.equal(tiles.loadAncestors, false);
   assert.equal(tiles.loadSiblings, false);
   assert.equal(tiles.loadAncestorSiblings, false);
   assert.equal(tiles.downloadQueue.priorityCallback, screenSpaceErrorPriority);
@@ -87,19 +87,19 @@ test('renderer configuration keeps ancestor fallback without enabling explicit s
     reduced: false,
   });
   assert.deepEqual(lodCacheBudget(8), {
-    minBytesSize: 3.25 * 1024 * 1024 * 1024,
-    maxBytesSize: 3.5 * 1024 * 1024 * 1024,
-    minSize: 512,
-    maxSize: 1024,
+    minBytesSize: 0.4 * 1024 * 1024 * 1024,
+    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    minSize: 8,
+    maxSize: 48,
     unloadPercent: 0.20,
   });
   assert.ok(
-    lodCacheBudget(8).minBytesSize > 3_325_605_911,
-    'the warm floor must retain the measured 15-leaf frontier plus ancestor fallback across small camera motion',
+    lodCacheBudget(8).maxBytesSize > 1.61 * 1024 * 1024 * 1024,
+    'the hard cap must fit the measured camera-selected close-up frontier',
   );
   assert.ok(
-    lodCacheBudget(8).minBytesSize < lodCacheBudget(8).maxBytesSize,
-    'the hard cap must retain admission headroom for a newly visible branch',
+    lodCacheBudget(8).minBytesSize < lodCacheBudget(8).maxBytesSize / 2,
+    'the warm floor must leave room to replace stale off-view content',
   );
 
   const defaultRenderer = {
@@ -320,7 +320,7 @@ test('bounded LRU admission recovery frees one stale tile without purging the re
   assert.equal(confirmedPressure.recoveryRequired, true);
   assert.equal(confirmedPressure.changed, false, 'admission recovery must run before quality rollback');
   const desktopBudget = lodCacheBudget(8);
-  assert.equal(lodCacheRetentionMinBytes(desktopBudget, false), 3.25 * 1024 ** 3);
+  assert.equal(lodCacheRetentionMinBytes(desktopBudget, false), 0.4 * 1024 ** 3);
   assert.equal(recoverLodCacheAdmission(pinned, desktopBudget), true,
     'a completed foreground parse can synchronously displace one stale LRU tile');
   assert.ok(pinned.minBytesSize > 0, 'recovery must never reset the byte floor to zero');
@@ -404,61 +404,36 @@ test('memory-pressure ceiling treats null as unset and stops honestly at the det
   assert.equal(resolveLodMemoryPressure({ ...profile, activeDetail: 'invalid' }, null), null);
 });
 
-test('memory-pressure coordinator restores the last complete frontier after confirmed starvation', () => {
+test('memory-pressure coordinator preserves camera-driven quality while requesting eviction', () => {
   const blocked = {
     pendingRequiredLeaves: 2,
     queues: { download: false, parse: false, process: false },
     cache: { full: true },
   };
-  let profile = { requestedDetail: 24, activeDetail: 24, maximumDetail: 24, reduced: false };
-  let state = { consecutiveSamples: 0, starvedAtDetail: null, lastSettledDetail: 13 };
+  const profile = { requestedDetail: 16, activeDetail: 13, maximumDetail: 24, reduced: false };
+  let samples = 0;
 
-  let result = advanceLodMemoryPressure(blocked, profile, state);
-  assert.equal(result.changed, false);
-  assert.equal(result.recoveryRequired, false);
-  assert.equal(result.consecutiveSamples, 1);
-  result = advanceLodMemoryPressure(blocked, profile, {
-    ...state,
-    consecutiveSamples: result.consecutiveSamples,
-  });
-  assert.equal(result.changed, false);
-  assert.equal(result.recoveryRequired, true);
-  assert.equal(result.profile.activeDetail, 24);
-  assert.equal(result.starvedAtDetail, null);
-  assert.equal(result.consecutiveSamples, 2);
+  for (let index = 0; index < 8; index += 1) {
+    const result = advanceLodMemoryPressure(blocked, profile, {
+      consecutiveSamples: samples,
+      starvedAtDetail: null,
+      lastSettledDetail: 13,
+    });
+    samples = result.consecutiveSamples;
+    assert.equal(result.changed, false, 'cache pressure must never lower the global LOD target');
+    assert.equal(result.profile.activeDetail, 13);
+    assert.equal(result.starvedAtDetail, null, 'transient cache admission cannot latch a quality ceiling');
+    assert.equal(result.recoveryRequired, index > 0);
+  }
 
-  result = advanceLodMemoryPressure(blocked, profile, {
-    ...state,
-    consecutiveSamples: result.consecutiveSamples,
-  });
-  assert.equal(result.changed, false);
-  assert.equal(result.recoveryRequired, true);
-  assert.equal(result.consecutiveSamples, 3);
-
-  result = advanceLodMemoryPressure(blocked, profile, {
-    ...state,
-    consecutiveSamples: result.consecutiveSamples,
-  });
-  assert.equal(result.changed, true, 'quality rolls back only after bounded admission recovery remains blocked');
-  assert.equal(result.profile.activeDetail, 13);
-  assert.equal(result.starvedAtDetail, 24);
-  assert.equal(result.consecutiveSamples, 0);
-
-  profile = result.profile;
-  state = result;
-  result = advanceLodMemoryPressure({ ...blocked, cache: { full: false } }, profile, state);
-  assert.equal(result.changed, false);
-  assert.equal(result.recoveryRequired, false);
-  assert.equal(result.profile.activeDetail, 13, 'cleared pressure must not restore the failed detail');
-  assert.equal(result.starvedAtDetail, 24);
-
-  const floorPressure = advanceLodMemoryPressure(blocked, {
-    requestedDetail: 24, activeDetail: 2, maximumDetail: 24, reduced: false,
-  }, {
-    consecutiveSamples: 3, starvedAtDetail: 2, lastSettledDetail: 2,
-  });
-  assert.equal(floorPressure.changed, false);
-  assert.equal(floorPressure.recoveryRequired, true, 'confirmed floor-detail starvation still needs admission recovery');
+  const cleared = advanceLodMemoryPressure(
+    { ...blocked, cache: { full: false } },
+    profile,
+    { consecutiveSamples: samples, starvedAtDetail: null, lastSettledDetail: 13 },
+  );
+  assert.equal(cleared.consecutiveSamples, 0);
+  assert.equal(cleared.recoveryRequired, false);
+  assert.equal(cleared.profile.activeDetail, 13);
 });
 
 test('memory-pressure ceiling retries only after a materially different camera view', () => {

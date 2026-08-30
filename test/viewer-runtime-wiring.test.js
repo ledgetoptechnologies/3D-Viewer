@@ -29,7 +29,7 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   const lodPolicy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
   assert.doesNotMatch(main, /enableTransientRootLodBackdrop|syncTransientRootLodBackdrop|releaseStaleLodDetails|transientRootBackdropEnabled/);
   assert.doesNotMatch(lodPolicy, /root\.refine\s*=\s*['"]ADD['"]/);
-  assert.match(lodPolicy, /tilesRenderer\.loadAncestors = true/);
+  assert.match(lodPolicy, /tilesRenderer\.loadAncestors = false/);
   assert.match(lodPolicy, /tilesRenderer\.loadSiblings = false/);
   assert.match(lodPolicy, /tilesRenderer\.loadAncestorSiblings = false/);
   const rootStart = main.indexOf("rendererInstance.addEventListener('load-root-tileset'");
@@ -186,7 +186,7 @@ test('production installs the exact renderer and applies the scoped ancestor pat
   );
 });
 
-test('LOD memory pressure restores the last complete frontier and resets on explicit lifecycle boundaries', () => {
+test('LOD memory pressure preserves camera-driven quality and resets on explicit lifecycle boundaries', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const loadBlock = main.slice(main.indexOf('function loadTiles()'), main.indexOf('function disposeTiles()'));
   const disposeBlock = main.slice(main.indexOf('function disposeTiles()'), main.indexOf('let sessionRenewalTimer'));

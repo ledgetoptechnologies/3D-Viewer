@@ -50,19 +50,12 @@ export function screenSpaceErrorPriority(a, b) {
   return 0;
 }
 
-// The active close-up REPLACE frontier needs room to finish loading before an
-// eviction pass begins. LRUCache unloads unused content toward minBytesSize and
-// minSize every frame, even when the hard cap is nowhere near full. Keep the
-// measured recent frontier below those soft floors so a tiny orbit or pan does
-// not immediately dispose and re-decode what the user just saw. Confirmed
-// starvation temporarily relaxes the soft byte floor so the renderer can free
-// admission headroom without manual LRU membership changes.
-// The renderer registers decoded bytes only after concurrent downloads/parses
-// complete, so several in-flight tiles can make cachedBytes overshoot the hard
-// ceiling before isFull() blocks the next request. After ancestor fallback was
-// enabled, a real 15-leaf frontier plus retained parent paths measured
-// 3,325,605,911 bytes and pinned the old 3 GiB cap. Keep bounded headroom above
-// that measured working set without changing the low-memory profile.
+// Keep a bounded warm cache, but leave most of the budget available for the
+// camera-selected frontier. The previous 3.25 GiB soft floor combined with
+// loadAncestors pinned obsolete replacement paths and made an ordinary camera
+// move look like unrecoverable memory pressure. This restores the cache shape
+// from the known-good streaming implementation: recently viewed content stays
+// warm, while stale off-view tiles can actually be evicted for the next view.
 export function lodCacheBudget(deviceMemoryGiB) {
   const memory = Number(deviceMemoryGiB);
   if (Number.isFinite(memory) && memory <= 4) {
@@ -79,10 +72,10 @@ export function lodCacheBudget(deviceMemoryGiB) {
   }
 
   return {
-    minBytesSize: 3.25 * 1024 * 1024 * 1024,
-    maxBytesSize: 3.5 * 1024 * 1024 * 1024,
-    minSize: 512,
-    maxSize: 1024,
+    minBytesSize: 0.4 * 1024 * 1024 * 1024,
+    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    minSize: 8,
+    maxSize: 48,
     unloadPercent: 0.20,
   };
 }
@@ -281,12 +274,11 @@ export function configureLodRenderer(tilesRenderer, {
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
   const profile = lodRuntimeProfile(detail, deviceMemoryGiB);
   tilesRenderer.errorTarget = detailToErrorTarget(profile.activeDetail);
-  // A REPLACE child must never make a ready coarse branch disappear while its
-  // requested content is still loading. The renderer uses ancestor content as
-  // that placeholder and releases it once the selected descendants are ready.
-  // Keep explicit sibling loading off. The pinned postinstall patch lets this
-  // app retain only the in-view ancestor paths instead of every sibling branch.
-  tilesRenderer.loadAncestors = true;
+  // Let normal REPLACE traversal keep the currently displayed parent until its
+  // selected children are ready, but do not pin every traversed ancestor in the
+  // cache. Ancestor pinning made a small camera move retain the old frontier
+  // while downloading the new one and exhausted even a multi-gigabyte budget.
+  tilesRenderer.loadAncestors = false;
   tilesRenderer.loadSiblings = false;
   tilesRenderer.loadAncestorSiblings = false;
   tilesRenderer.maxDepth = Infinity;
@@ -387,38 +379,17 @@ export function advanceLodMemoryPressure(snapshot, profile, {
     };
   }
 
-  // First make bounded LRU admission room without changing quality. Most
-  // near-cap transitions recover here on the next renderer update. Only a
-  // demanded working set that remains blocked for two more idle samples is
-  // allowed to roll back detail.
-  if (starvation.count < LOD_PRESSURE_FALLBACK_SAMPLES) {
-    return {
-      changed: false,
-      recoveryRequired: true,
-      profile,
-      consecutiveSamples: starvation.count,
-      starvedAtDetail,
-    };
-  }
-
-  const pressure = resolveLodMemoryPressure(profile, starvedAtDetail, lastSettledDetail);
-  if (!pressure) {
-    return {
-      changed: false,
-      recoveryRequired: true,
-      profile,
-      consecutiveSamples: starvation.count,
-      starvedAtDetail,
-    };
-  }
-
-  const { starvedAtDetail: nextCeiling, ...nextProfile } = pressure;
+  // A full cache is an eviction signal, not a global quality decision. The old
+  // coordinator repeatedly lowered Detail 13 to 10, 7, ... 2 while keeping the
+  // cache full, producing angle-dependent one-tile/35-tile coarse frontiers.
+  // Preserve the requested camera-driven SSE target and keep relaxing the LRU
+  // floor until stale content is admitted out of the way.
   return {
-    changed: true,
+    changed: false,
     recoveryRequired: true,
-    profile: nextProfile,
-    consecutiveSamples: 0,
-    starvedAtDetail: nextCeiling,
+    profile,
+    consecutiveSamples: starvation.count,
+    starvedAtDetail: null,
   };
 }
 
