@@ -163,13 +163,25 @@ test('pinned renderer patch keeps ancestor fallback scoped to visible branches',
   assert.equal(builtMatches.length, 1, 'the runtime renderer chunk must carry the same scoped fallback patch');
 });
 
-test('pinned renderer releases loaded non-active ancestors and recovers before parse discard', () => {
+test('pinned renderer retains loaded replacement branches and recovers before parse discard', () => {
   const packageRoot = path.resolve('node_modules/3d-tiles-renderer');
   const traversal = fs.readFileSync(path.join(packageRoot, 'src/core/renderer/tiles/traverseFunctions.js'), 'utf8');
   const renderer = fs.readFileSync(path.join(packageRoot, 'src/core/renderer/tiles/TilesRendererBase.js'), 'utf8');
   assert.match(traversal,
+    /renderer\.loadAncestors && tile\.internal\.hasContent \)/,
+    'loaded replacement branches must remain retained until their parent can finish refining');
+  assert.doesNotMatch(traversal,
     /renderer\.loadAncestors && tile\.internal\.hasContent && ! isDownloadFinished\( tile\.internal\.loadingState \)/,
-    'only pending non-active ancestors stay pinned; active fallback parents are pinned by the active branch');
+    'loaded non-active descendants must not be evicted behind an ancestor readiness barrier');
+  assert.match(traversal,
+    /renderer\.loadAncestors && ! tile\.traversal\.allChildrenLoaded[\s\S]*?tile\.traversal\.isLeaf = true/,
+    'each incomplete branch must stop at its own loaded parent fallback');
+  assert.match(traversal,
+    /tile\.traversal\.active = true;\s*kickActiveChildren\( tile, renderer \)/,
+    'strict REPLACE traversal must never render a parent and its descendants simultaneously');
+  assert.match(traversal,
+    /const childIsReady = c\.internal\.hasRenderableContent\s*\? c\.internal\.loadingState === LOADED\s*: c\.traversal\.allChildrenLoaded/,
+    'only LOADED renderable children retire a parent; contentless branches recurse');
   assert.match(renderer,
     /dispatchEvent\( \{ type: 'tile-memory-pressure', tile, bytesUsed \} \);\s*if \( lruCache\.isFull\(\) \)/,
     'the app gets one synchronous eviction opportunity before the second hard-cap check');
@@ -178,9 +190,12 @@ test('pinned renderer releases loaded non-active ancestors and recovers before p
   const built = fs.readdirSync(path.join(packageRoot, 'build'))
     .filter(name => /^renderer-.*\.js$/.test(name))
     .map(name => fs.readFileSync(path.join(packageRoot, 'build', name), 'utf8'));
-  const builtAncestor = /([A-Za-z_$][\w$]*)\.loadAncestors && ([A-Za-z_$][\w$]*)\.internal\.hasContent && ![A-Za-z_$][\w$]*\(\2\.internal\.loadingState\) && \(\1\.markTileUsed\(\2\), \1\.queueTileForDownload\(\2\)\)/;
+  const builtAncestor = /([A-Za-z_$][\w$]*)\.loadAncestors && ([A-Za-z_$][\w$]*)\.internal\.hasContent && \(\1\.markTileUsed\(\2\), \1\.queueTileForDownload\(\2\)\)/;
   assert.equal(built.filter(source => builtAncestor.test(source)).length, 1,
-    'the browser-consumed build releases loaded non-active ancestors too');
+    'the browser-consumed build retains loaded replacement branches too');
+  const builtReadiness = /let ([A-Za-z_$][\w$]*) = ([A-Za-z_$][\w$]*)\.internal\.hasRenderableContent \? \2\.internal\.loadingState === 4 : \2\.traversal\.allChildrenLoaded;\s*\1 \|\|/;
+  assert.equal(built.filter(source => builtReadiness.test(source)).length, 1,
+    'the browser-consumed build uses the same branch-local readiness rule');
   const builtRecovery = /if \(([A-Za-z_$][\w$]*)\.getMemoryUsage\(([A-Za-z_$][\w$]*)\) === 0 && ([A-Za-z_$][\w$]*) > 0 && \1\.isFull\(\)\) \{\s*this\.dispatchEvent\(\{ type: "tile-memory-pressure", tile: \2, bytesUsed: \3 \}\);\s*if \(\1\.isFull\(\)\) \{\s*\1\.remove\(\2\);\s*return;\s*\}\s*\}/;
   assert.equal(built.filter(source => builtRecovery.test(source)).length, 1,
     'the browser-consumed build rechecks the hard cap after the synchronous recovery hook');

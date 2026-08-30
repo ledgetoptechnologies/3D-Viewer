@@ -161,7 +161,17 @@
     if (!window.LtdsPointCloudMeasurements?.installPotreeMeasurementPrecision) {
       throw new Error('point-cloud measurement runtime unavailable');
     }
-    const { POINT_PICK_WINDOW, isPlausibleAnchorDistance } = window.LtdsPointCloudNavigation;
+    const {
+      POINT_PICK_WINDOW,
+      NAVIGATION_POLICY,
+      orbitRadiansForPixels,
+      wheelZoomScale,
+      worldUnitsPerPixel,
+      maxPanStep,
+      clampZoomDistance,
+      isPlausibleAnchorDistance,
+      canUseOverviewAnchor,
+    } = window.LtdsPointCloudNavigation;
     const { installPotreeMeasurementPrecision } = window.LtdsPointCloudMeasurements;
     installPotreeMeasurementPrecision(Potree, { displayUnits: DISPLAY_UNITS });
     const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
@@ -468,10 +478,10 @@
         const dt = Math.min(0.1, Math.max(0, (now - this._lastTick) / 1000));
         this._lastTick = now;
         if (this._inertia.active && this._mode === 'none') {
-          const decay = Math.exp(-dt * 5.5);
+          const decay = Math.exp(-dt * NAVIGATION_POLICY.inertiaDecay);
           this._inertia.yaw *= decay;
           this._inertia.pitch *= decay;
-          if (Math.abs(this._inertia.yaw) + Math.abs(this._inertia.pitch) < 0.02) {
+          if (Math.abs(this._inertia.yaw) + Math.abs(this._inertia.pitch) < NAVIGATION_POLICY.inertiaStopSpeed) {
             this._inertia.active = false;
           } else {
             this._applyOrbit(this.pivot, this._inertia.yaw * dt, this._inertia.pitch * dt);
@@ -540,6 +550,18 @@
         }
         return closest;
       }
+      _cloudBounds() {
+        const pointclouds = this.viewer.scene.pointclouds.filter(pointcloud => pointcloud.visible !== false);
+        if (!pointclouds.length) return null;
+        try {
+          const bounds = this.viewer.scene.getBoundingBox(pointclouds);
+          if (!bounds || bounds.isEmpty?.()
+            || ![bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z].every(Number.isFinite)) return null;
+          return bounds;
+        } catch {
+          return null;
+        }
+      }
       _depthAnchor(px) {
         const pivot = this.view.getPivot();
         if (!pivot || ![pivot.x, pivot.y, pivot.z].every(Number.isFinite)) return null;
@@ -550,16 +572,29 @@
         const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, pivot);
         return this._planeHit(px, plane, 0.1) || pivot.clone();
       }
-      // A left-drag may orbit only from an actual plausible cloud point. The
-      // focal plane is a depth check, not permission to orbit empty background.
+      // Prefer the exact point hit. At overview distance coarse EPT nodes can
+      // leave gaps wider than the deliberately narrow pick window, so admit a
+      // focal-plane pivot only when it remains inside the visible cloud bounds.
       _surfaceAnchor(px, depthAnchor = this._depthAnchor(px)) {
         const hit = this._pointPick(px);
-        if (!hit) return null;
-        if (!depthAnchor) return hit;
+        if (hit && !depthAnchor) return hit;
+        if (!depthAnchor) return null;
         const camera = this._cam();
-        const hitDistance = camera.position.distanceTo(hit);
         const referenceDistance = camera.position.distanceTo(depthAnchor);
-        return isPlausibleAnchorDistance(hitDistance, referenceDistance) ? hit : null;
+        if (hit && isPlausibleAnchorDistance(camera.position.distanceTo(hit), referenceDistance)) return hit;
+        const bounds = this._cloudBounds();
+        if (!bounds) return null;
+        const cloudDiameter = bounds.getSize(new THREE.Vector3()).length();
+        const paddedBounds = bounds.clone().expandByScalar(
+          cloudDiameter * NAVIGATION_POLICY.overviewBoundsPaddingRatio,
+        );
+        const boundsHit = this._ray(px).intersectBox(paddedBounds, new THREE.Vector3());
+        // The ray-box hit proves the cursor crosses the visible cloud volume,
+        // but the focal-plane point is the pivot we actually return. Validate
+        // that exact pivot as well so an edge ray cannot orbit empty space.
+        return boundsHit && canUseOverviewAnchor({ point: depthAnchor, bounds, referenceDistance, cloudDiameter })
+          ? depthAnchor.clone()
+          : null;
       }
       // Pan and wheel zoom retain a focal-plane fallback. Potree's default
       // 65px point window is never used, so sparse gaps cannot grab far points.
@@ -652,15 +687,13 @@
             const cur = this._planeHit(mid, this._touch.pinchPlane, 0.1);
             if (cur) {
               const delta = this._touch.pinchStart.clone().sub(cur);
-              if (delta.length() < 1000) {
-                this.view.position.add(delta);
-                this.pivot.add(delta);
-                // Store the post-translation hit. Keeping the pre-move hit
-                // makes the next touch event undo the last one and oscillate.
-                this._touch.pinchStart.copy(cur).add(delta);
-              } else {
-                this._touch.pinchStart.copy(cur);
-              }
+              const limit = maxPanStep(this.view.position.distanceTo(cur));
+              if (delta.length() > limit) delta.setLength(limit);
+              this.view.position.add(delta);
+              this.pivot.add(delta);
+              // Store the post-translation hit. Keeping the pre-move hit
+              // makes the next touch event undo the last one and oscillate.
+              this._touch.pinchStart.copy(cur).add(delta);
             }
             this._touch.pinchDist = dist;
             this._touch.pinchMidPx = mid;
@@ -682,7 +715,7 @@
           const cur = this._planeHit(this._px(e), this._panPlane, 0.1);
           if (!cur) return;
           const delta = this._panStart.clone().sub(cur);
-          const maxStep = Math.max(50, this.view.position.distanceTo(cur) * 2);
+          const maxStep = maxPanStep(this.view.position.distanceTo(cur));
           if (delta.length() > maxStep) delta.setLength(maxStep);
           // Apply only the latest ray-plane correction. Resetting to the
           // pointer-down camera while intersections came from the already
@@ -692,7 +725,7 @@
         } else if (this._mode === 'screenpan') {
           const h = this.dom.clientHeight || 800;
           const fov = this._cam().fov || 60;
-          const wpp = 2 * this._screenRef * Math.tan(THREE.MathUtils.degToRad(fov / 2)) / h;
+          const wpp = worldUnitsPerPixel(this._screenRef, fov, h);
           const right = new THREE.Vector3().setFromMatrixColumn(this._cam().matrixWorld, 0);
           const up = new THREE.Vector3().setFromMatrixColumn(this._cam().matrixWorld, 1);
           const delta = right.multiplyScalar(-dx * wpp).add(up.multiplyScalar(dy * wpp));
@@ -713,9 +746,8 @@
         // left around the pivot, i.e. the scene appears to rotate WITH the
         // cursor, matching the mesh tab exactly.
         const h = this.dom.clientHeight || 800;
-        const G = (Math.PI * 2 * 0.55 / h) * gainScale;
-        const yaw = -dx * G;
-        const pitch = -dy * G;
+        const yaw = orbitRadiansForPixels(dx, h, gainScale);
+        const pitch = orbitRadiansForPixels(dy, h, gainScale);
         this._applyOrbit(this.pivot, yaw, pitch);
         const timestamp = performance.now();
         const dt = Math.max(8, timestamp - this._lastMoveTime) / 1000;
@@ -814,7 +846,7 @@
         const view = this.view;
         const offset = new THREE.Vector3().subVectors(view.position, target);
         let d = offset.length() * s;
-        d = THREE.MathUtils.clamp(d, 0.1, 100000);
+        d = clampZoomDistance(d);
         // no-op guard: a pure "away" zoom on a degenerate offset is useless
         if (offset.lengthSq() < 1e-9 && s > 1) return;
         offset.setLength(d);
@@ -832,7 +864,7 @@
         e.preventDefault();
         const px = this._px(e);
         const hit = this._anchor(px);
-        const s = Math.pow(0.9, -e.deltaY / 100);   // 3 x 100 notches => ~0.73x
+        const s = wheelZoomScale(e.deltaY);   // 3 x 100 notches => ~0.73x
         this._zoomTowards(hit, s);
         // Keep the canonical view target. Using the cursor hit itself as the
         // next orbit pivot made a wheel action behave like click-to-center.

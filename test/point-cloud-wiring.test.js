@@ -46,7 +46,7 @@ test('Potree controls preserve panel state and match mesh navigation feedback', 
   assert.match(pointCloudShell, /PointSizeType\.FIXED/);
   assert.match(pointCloudShell, /ctx\.strokeStyle = '#EE5007'/);
   assert.match(pointCloudShell, /ctx\.fillStyle = '#ffffff'/);
-  assert.match(pointCloudShell, /Math\.PI \* 2 \* 0\.55 \/ h/);
+  assert.match(pointCloudShell, /orbitRadiansForPixels\(dx, h, gainScale\)/);
   assert.match(pointCloudShell, /viewer\.earthControls\?\.pivotIndicator/);
   assert.match(pointCloudShell, /viewer\.setPointBudget\(10_000_000\)/);
   assert.match(pointCloudShell, /target:\s*10_000_000/);
@@ -74,14 +74,24 @@ test('pre-metadata mesh view remains exact when the cloud finishes loading', () 
 
 test('sparse cloud navigation rejects broad or distant background picks', () => {
   assert.match(pointCloudShell, /<script src="\/pointcloud-navigation\.js"><\/script>/);
-  assert.match(pointCloudShell, /const \{ POINT_PICK_WINDOW, isPlausibleAnchorDistance \} = window\.LtdsPointCloudNavigation/);
+  assert.match(pointCloudShell, /POINT_PICK_WINDOW,[\s\S]*NAVIGATION_POLICY,[\s\S]*orbitRadiansForPixels,[\s\S]*wheelZoomScale,[\s\S]*worldUnitsPerPixel,[\s\S]*maxPanStep,[\s\S]*canUseOverviewAnchor/);
   assert.match(pointCloudShell, /pointcloud\.pick\(this\.viewer, camera, ray, \{[\s\S]*pickWindowSize: POINT_PICK_WINDOW/);
   assert.match(pointCloudShell, /_depthAnchor\(px\)[\s\S]*camera\.getWorldDirection\(normal\)[\s\S]*setFromNormalAndCoplanarPoint\(normal, pivot\)/);
-  assert.match(pointCloudShell, /isPlausibleAnchorDistance\(hitDistance, referenceDistance\)/);
+  assert.match(pointCloudShell, /isPlausibleAnchorDistance\(camera\.position\.distanceTo\(hit\), referenceDistance\)/);
+  assert.match(pointCloudShell, /_cloudBounds\(\)[\s\S]*this\.viewer\.scene\.getBoundingBox\(pointclouds\)/);
+  assert.match(pointCloudShell, /paddedBounds = bounds\.clone\(\)\.expandByScalar\([\s\S]*this\._ray\(px\)\.intersectBox\(paddedBounds/);
+  assert.match(pointCloudShell, /boundsHit && canUseOverviewAnchor\(\{ point: depthAnchor, bounds, referenceDistance, cloudDiameter \}\)/,
+    'the exact returned focal-plane pivot must remain inside the cloud footprint');
+  assert.doesNotMatch(pointCloudShell, /canUseOverviewAnchor\(\{ point: boundsHit/,
+    'validating a different ray-box point must not authorize an out-of-bounds pivot');
+  assert.match(pointCloudShell, /orbitRadiansForPixels\(dx, h, gainScale\)/);
+  assert.match(pointCloudShell, /worldUnitsPerPixel\(this\._screenRef, fov, h\)/);
+  assert.match(pointCloudShell, /maxPanStep\(this\.view\.position\.distanceTo\(cur\)\)/);
+  assert.match(pointCloudShell, /wheelZoomScale\(e\.deltaY\)/);
   assert.doesNotMatch(pointCloudShell, /_anchor\(px\)[\s\S]{0,900}this\._bboxMidZ\(\)/);
 });
 
-test('point-cloud orbit ignores left drags that begin without a plausible point hit', () => {
+test('point-cloud orbit accepts only a plausible point or bounded overview fallback', () => {
   assert.match(pointCloudShell, /_surfaceAnchor\(px, depthAnchor = this\._depthAnchor\(px\)\)/);
   assert.match(pointCloudShell, /const pivot = this\._surfaceAnchor\(this\._px\(e\)\);\s*if \(!pivot\) \{ this\._mode = 'none'; return; \}/);
   assert.match(pointCloudShell, /this\.pivot\.copy\(pivot\);\s*this\._showPivot\(\);\s*this\._mode = 'orbit'/);

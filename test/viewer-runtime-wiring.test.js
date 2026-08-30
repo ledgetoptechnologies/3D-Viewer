@@ -54,7 +54,8 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.match(materials, /map,\s*lightMap: source\?\.lightMap/);
   assert.match(materials, /vertexColors: Boolean\(source\?\.vertexColors\)/);
   assert.match(main, /c\.material = preserveLodMaterials\(c\.material\)/);
-  assert.match(main, /if \(ev\.tile === rendererInstance\.root\) hideLoading\(\)/);
+  assert.doesNotMatch(main, /updateLodReplacementFallbacks/);
+  assert.match(main, /addEventListener\('load-model',[\s\S]*?hideLoading\(\)/);
   assert.match(main, /function maybeAdvanceLodWarmup\(\)/);
   assert.match(main, /lodLastSettledDetail = lodRuntimeProfileState\.activeDetail/);
   assert.match(main, /if \(!lodDetailRequestPending\(lodRuntimeProfileState\)\) return false;\s*const advance/);

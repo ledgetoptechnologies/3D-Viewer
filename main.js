@@ -891,8 +891,9 @@ function loadTiles() {
         queueBVH(c);
       }
     });
-    if (ev.tile === rendererInstance.root) hideLoading();
-    else if (!rendererInstance.root?.internal?.hasRenderableContent) hideLoading();
+    // External tilesets often produce a usable child before their wrapper root.
+    // Enter the viewer as soon as any streamed model can be displayed.
+    hideLoading();
   });
   rendererInstance.addEventListener('load-error', (ev) => {
     if (tilesRenderer !== rendererInstance) return;

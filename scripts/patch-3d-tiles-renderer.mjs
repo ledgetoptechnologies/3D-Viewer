@@ -31,6 +31,22 @@ function patchExact(file, upstream, patched, label) {
   return true;
 }
 
+function restoreExact(file, desired, legacy, label) {
+  const source = fs.readFileSync(file, 'utf8');
+  const desiredOccurrences = source.split(desired).length - 1;
+  const legacyOccurrences = source.split(legacy).length - 1;
+  if (desiredOccurrences === 1 && legacyOccurrences === 0) return false;
+  if (desiredOccurrences !== 0 || legacyOccurrences !== 1) {
+    throw new Error(`${label}: expected desired=1/legacy=0 or desired=0/legacy=1; found desired=${desiredOccurrences}/legacy=${legacyOccurrences}`);
+  }
+  const result = source.replace(legacy, desired);
+  if ((result.split(desired).length - 1) !== 1 || (result.split(legacy).length - 1) !== 0) {
+    throw new Error(`${label}: restoration did not produce one exact desired block`);
+  }
+  fs.writeFileSync(file, result);
+  return true;
+}
+
 const sourceFile = path.join(packageRoot, 'src', 'core', 'renderer', 'tiles', 'traverseFunctions.js');
 patchExact(
   sourceFile,
@@ -39,7 +55,7 @@ patchExact(
   '3d-tiles-renderer source',
 );
 
-patchExact(
+restoreExact(
   sourceFile,
   `\t\tif ( renderer.loadAncestors && tile.internal.hasContent ) {
 
@@ -53,7 +69,18 @@ patchExact(
 \t\t\trenderer.queueTileForDownload( tile );
 
 \t\t}`,
-  '3d-tiles-renderer source ancestor retention',
+  '3d-tiles-renderer source loaded replacement retention',
+);
+
+patchExact(
+  sourceFile,
+  `\t\t\t\tconst childCanDisplay = ! canUnconditionallyRefine( c );
+\t\t\t\tconst childContentReady = ! c.internal.hasContent || isDownloadFinished( c.internal.loadingState );
+\t\t\t\tconst childIsReady = ( childCanDisplay && childContentReady ) || c.traversal.allChildrenLoaded;`,
+  `\t\t\t\tconst childIsReady = c.internal.hasRenderableContent
+\t\t\t\t\t? c.internal.loadingState === LOADED
+\t\t\t\t\t: c.traversal.allChildrenLoaded;`,
+  '3d-tiles-renderer source branch-local readiness',
 );
 
 const rendererSourceFile = path.join(packageRoot, 'src', 'core', 'renderer', 'tiles', 'TilesRendererBase.js');
@@ -89,6 +116,7 @@ const chunks = fs.readdirSync(buildDirectory)
   .filter((name) => /^renderer-[A-Za-z0-9_-]+\.js$/.test(name));
 let matchingChunks = 0;
 let ancestorRetentionChunks = 0;
+let branchLocalReadinessChunks = 0;
 let preDiscardRecoveryChunks = 0;
 for (const name of chunks) {
   const file = path.join(buildDirectory, name);
@@ -117,17 +145,30 @@ for (const name of chunks) {
   const ancestorPatched = /([A-Za-z_$][\w$]*)\.loadAncestors && ([A-Za-z_$][\w$]*)\.internal\.hasContent && ![A-Za-z_$][\w$]*\(\2\.internal\.loadingState\) && \(\1\.markTileUsed\(\2\), \1\.queueTileForDownload\(\2\)\)/g;
   const ancestorUpstreamMatches = [...source.matchAll(ancestorUpstream)];
   const ancestorPatchedMatches = [...source.matchAll(ancestorPatched)];
-  if (ancestorPatchedMatches.length === 1 && ancestorUpstreamMatches.length === 0) {
+  if (ancestorUpstreamMatches.length === 1 && ancestorPatchedMatches.length === 0) {
     ancestorRetentionChunks += 1;
-  } else if (ancestorUpstreamMatches.length === 1 && ancestorPatchedMatches.length === 0) {
-    const [match, rendererVariable, tileVariable] = ancestorUpstreamMatches[0];
-    const finishedFunction = source.match(/function ([A-Za-z_$][\w$]*)\([^)]*\)\s*\{\s*return [^;]*=== 4 \|\| [^;]*=== -1;/)?.[1];
-    if (!finishedFunction) throw new Error(`${name}: could not identify isDownloadFinished build helper`);
+  } else if (ancestorPatchedMatches.length === 1 && ancestorUpstreamMatches.length === 0) {
+    const [match, rendererVariable, tileVariable] = ancestorPatchedMatches[0];
     source = source.replace(match,
-      `${rendererVariable}.loadAncestors && ${tileVariable}.internal.hasContent && !${finishedFunction}(${tileVariable}.internal.loadingState) && (${rendererVariable}.markTileUsed(${tileVariable}), ${rendererVariable}.queueTileForDownload(${tileVariable}))`);
+      `${rendererVariable}.loadAncestors && ${tileVariable}.internal.hasContent && (${rendererVariable}.markTileUsed(${tileVariable}), ${rendererVariable}.queueTileForDownload(${tileVariable}))`);
     ancestorRetentionChunks += 1;
   } else if (ancestorUpstreamMatches.length || ancestorPatchedMatches.length) {
     throw new Error(`${name}: ambiguous built ancestor-retention block`);
+  }
+
+  const readinessUpstream = /let ([A-Za-z_$][\w$]*) = !([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\), ([A-Za-z_$][\w$]*) = !\3\.internal\.hasContent \|\| ([A-Za-z_$][\w$]*)\(\3\.internal\.loadingState\);\s*\1 && \4 \|\| \3\.traversal\.allChildrenLoaded \|\| \(([A-Za-z_$][\w$]*) = !1\);/g;
+  const readinessPatched = /let ([A-Za-z_$][\w$]*) = ([A-Za-z_$][\w$]*)\.internal\.hasRenderableContent \? \2\.internal\.loadingState === 4 : \2\.traversal\.allChildrenLoaded;\s*\1 \|\| \(([A-Za-z_$][\w$]*) = !1\);/g;
+  const readinessUpstreamMatches = [...source.matchAll(readinessUpstream)];
+  const readinessPatchedMatches = [...source.matchAll(readinessPatched)];
+  if (readinessPatchedMatches.length === 1 && readinessUpstreamMatches.length === 0) {
+    branchLocalReadinessChunks += 1;
+  } else if (readinessUpstreamMatches.length === 1 && readinessPatchedMatches.length === 0) {
+    const [match, readyVariable, , tileVariable, , , readyAccumulator] = readinessUpstreamMatches[0];
+    source = source.replace(match,
+      `let ${readyVariable} = ${tileVariable}.internal.hasRenderableContent ? ${tileVariable}.internal.loadingState === 4 : ${tileVariable}.traversal.allChildrenLoaded;\n\t\t\t\t${readyVariable} || (${readyAccumulator} = !1);`);
+    branchLocalReadinessChunks += 1;
+  } else if (readinessUpstreamMatches.length || readinessPatchedMatches.length) {
+    throw new Error(`${name}: ambiguous built branch-local readiness block`);
   }
 
   const discardUpstream = /if \(([A-Za-z_$][\w$]*)\.getMemoryUsage\(([A-Za-z_$][\w$]*)\) === 0 && ([A-Za-z_$][\w$]*) > 0 && \1\.isFull\(\)\) \{\s*\1\.remove\(\2\);\s*return;\s*\}/g;
@@ -153,6 +194,9 @@ if (matchingChunks !== 1) {
 }
 if (ancestorRetentionChunks !== 1) {
   throw new Error(`expected one built renderer ancestor-retention chunk, patched ${ancestorRetentionChunks}`);
+}
+if (branchLocalReadinessChunks !== 1) {
+  throw new Error(`expected one built renderer branch-local readiness chunk, patched ${branchLocalReadinessChunks}`);
 }
 if (preDiscardRecoveryChunks !== 1) {
   throw new Error(`expected one built renderer pre-discard recovery chunk, patched ${preDiscardRecoveryChunks}`);
