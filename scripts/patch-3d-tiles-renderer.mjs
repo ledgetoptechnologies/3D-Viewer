@@ -83,6 +83,13 @@ patchExact(
   '3d-tiles-renderer source branch-local readiness',
 );
 
+patchExact(
+  sourceFile,
+  `\tif ( tile.refine === 'REPLACE' && ! allChildrenReady && tile.traversal.wasSetActive && isChildReady( tile ) ) {`,
+  `\tif ( tile.refine === 'REPLACE' && ! allChildrenReady && ( tile.traversal.wasSetActive || renderer.lodFallbackTiles?.has( tile ) ) && isChildReady( tile ) ) {`,
+  '3d-tiles-renderer source scoped overview fallback',
+);
+
 const rendererSourceFile = path.join(packageRoot, 'src', 'core', 'renderer', 'tiles', 'TilesRendererBase.js');
 patchExact(
   rendererSourceFile,
@@ -117,6 +124,7 @@ const chunks = fs.readdirSync(buildDirectory)
 let matchingChunks = 0;
 let ancestorRetentionChunks = 0;
 let branchLocalReadinessChunks = 0;
+let scopedOverviewFallbackChunks = 0;
 let preDiscardRecoveryChunks = 0;
 for (const name of chunks) {
   const file = path.join(buildDirectory, name);
@@ -171,6 +179,21 @@ for (const name of chunks) {
     throw new Error(`${name}: ambiguous built branch-local readiness block`);
   }
 
+  const fallbackUpstream = /([A-Za-z_$][\w$]*)\.refine === "REPLACE" && !([A-Za-z_$][\w$]*) && \1\.traversal\.wasSetActive && ([A-Za-z_$][\w$]*)\(\1\) && \(\1\.traversal\.active = !0, ([A-Za-z_$][\w$]*)\(\1, ([A-Za-z_$][\w$]*)\)\)/g;
+  const fallbackPatched = /([A-Za-z_$][\w$]*)\.refine === "REPLACE" && !([A-Za-z_$][\w$]*) && \(\1\.traversal\.wasSetActive \|\| ([A-Za-z_$][\w$]*)\.lodFallbackTiles\?\.has\(\1\)\) && ([A-Za-z_$][\w$]*)\(\1\) && \(\1\.traversal\.active = !0, ([A-Za-z_$][\w$]*)\(\1, \3\)\)/g;
+  const fallbackUpstreamMatches = [...source.matchAll(fallbackUpstream)];
+  const fallbackPatchedMatches = [...source.matchAll(fallbackPatched)];
+  if (fallbackPatchedMatches.length === 1 && fallbackUpstreamMatches.length === 0) {
+    scopedOverviewFallbackChunks += 1;
+  } else if (fallbackUpstreamMatches.length === 1 && fallbackPatchedMatches.length === 0) {
+    const [match, tileVariable, readyVariable, readyFunction, kickFunction, rendererVariable] = fallbackUpstreamMatches[0];
+    source = source.replace(match,
+      `${tileVariable}.refine === "REPLACE" && !${readyVariable} && (${tileVariable}.traversal.wasSetActive || ${rendererVariable}.lodFallbackTiles?.has(${tileVariable})) && ${readyFunction}(${tileVariable}) && (${tileVariable}.traversal.active = !0, ${kickFunction}(${tileVariable}, ${rendererVariable}))`);
+    scopedOverviewFallbackChunks += 1;
+  } else if (fallbackUpstreamMatches.length || fallbackPatchedMatches.length) {
+    throw new Error(`${name}: ambiguous built scoped overview fallback block`);
+  }
+
   const discardUpstream = /if \(([A-Za-z_$][\w$]*)\.getMemoryUsage\(([A-Za-z_$][\w$]*)\) === 0 && ([A-Za-z_$][\w$]*) > 0 && \1\.isFull\(\)\) \{\s*\1\.remove\(\2\);\s*return;\s*\}/g;
   const discardPatched = /if \(([A-Za-z_$][\w$]*)\.getMemoryUsage\(([A-Za-z_$][\w$]*)\) === 0 && ([A-Za-z_$][\w$]*) > 0 && \1\.isFull\(\)\) \{\s*this\.dispatchEvent\(\{ type: "tile-memory-pressure", tile: \2, bytesUsed: \3 \}\);\s*if \(\1\.isFull\(\)\) \{\s*\1\.remove\(\2\);\s*return;\s*\}\s*\}/g;
   const discardUpstreamMatches = [...source.matchAll(discardUpstream)];
@@ -197,6 +220,9 @@ if (ancestorRetentionChunks !== 1) {
 }
 if (branchLocalReadinessChunks !== 1) {
   throw new Error(`expected one built renderer branch-local readiness chunk, patched ${branchLocalReadinessChunks}`);
+}
+if (scopedOverviewFallbackChunks !== 1) {
+  throw new Error(`expected one built renderer scoped overview fallback chunk, patched ${scopedOverviewFallbackChunks}`);
 }
 if (preDiscardRecoveryChunks !== 1) {
   throw new Error(`expected one built renderer pre-discard recovery chunk, patched ${preDiscardRecoveryChunks}`);

@@ -55,6 +55,19 @@ export function scaledDetailToErrorTarget(detail, scale = 1) {
   return Number((detailToErrorTarget(detail) * multiplier).toFixed(3));
 }
 
+// Start steady refinement one hierarchy step beyond the completed overview.
+// Using the raw Detail target here selects the full church tree at Home and
+// exhausts branch-completion headroom; keeping the full coverage scale never
+// leaves coarse mode. Half the measured scale preserves the captured fallback
+// while allowing nearby descendants to complete as the camera approaches.
+export function steadyStateLodErrorTarget(detail, coverageScale = 1) {
+  const parsedScale = Number(coverageScale);
+  const refinementScale = Number.isFinite(parsedScale) && parsedScale > 2
+    ? parsedScale / 2
+    : 1;
+  return scaledDetailToErrorTarget(detail, refinementScale);
+}
+
 // With loadAncestors disabled, selected zero-error leaves are the actual
 // replacement work. Sorting by SSE first starves those leaves behind farther
 // positive-error parents, so distant regions sharpen while the foreground

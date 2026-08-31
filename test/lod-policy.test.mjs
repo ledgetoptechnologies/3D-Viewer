@@ -37,6 +37,7 @@ import {
   resolveLodWarmupAdvance,
   scaledDetailToErrorTarget,
   screenSpaceErrorPriority,
+  steadyStateLodErrorTarget,
   visibleLodFrontier,
   visibleLodTargetSatisfied,
 } from '../lod-policy.mjs';
@@ -63,6 +64,17 @@ test('overview bootstrap selects one complete coarse frontier before camera-scal
   assert.ok(scaledDetailToErrorTarget(24, scale) < 140);
   assert.ok(scaledDetailToErrorTarget(2, scale) > 34000);
   assert.equal(scaledDetailToErrorTarget(16, 0), detailToErrorTarget(16));
+});
+
+test('steady-state detail target advances one bounded step beyond completed coverage', () => {
+  const coverageTarget = lodBootstrapCoverageErrorTarget(1983.5, [418, 524, 729]);
+  const coverageScale = lodErrorScaleForCoverage(coverageTarget);
+  assert.equal(coverageTarget, 1024);
+  assert.ok(Math.abs(steadyStateLodErrorTarget(16, coverageScale) - 512) < 0.01);
+  assert.ok(steadyStateLodErrorTarget(16, coverageScale) < coverageTarget);
+  assert.ok(steadyStateLodErrorTarget(16, coverageScale) > detailToErrorTarget(16));
+  assert.ok(steadyStateLodErrorTarget(24, coverageScale) < steadyStateLodErrorTarget(16, coverageScale));
+  assert.equal(steadyStateLodErrorTarget(16), detailToErrorTarget(16));
 });
 
 test('renderer configuration streams without pinning ancestors or siblings', () => {

@@ -46,16 +46,22 @@ A renderable-root hierarchy bootstraps complete coverage before normal detail:
 2. Select a coarse frontier whose target is above every direct-child SSE but
    below the root SSE. Keep the root visible until the frontier is attached and
    all queues settle.
-3. Capture that complete coarse frontier, calibrate Detail 16 to its measured
-   SSE target, and only then enable camera-driven refinement.
+3. Capture that complete coarse frontier and only then enable camera-driven
+   refinement. Detail 16 starts one bounded refinement step beyond the completed
+   frontier instead of staying equal to the bootstrap target or immediately
+   selecting the entire zero-error hierarchy. On the church hierarchy the
+   temporary target is 1,024 and the steady Detail 16 target is 512.
 
-The captured coarse frontier alone is retained in the LRU so returning to Home
-can reattach it immediately. This does not enable ancestor loading, retain
-intermediate/fine paths, or render an overlapping root backdrop. The renderer
-uses a shared LRU, so the narrow retention wrapper is restored on every tile
-renderer disposal before another model can load. Clients reporting 4 GiB or
-less settle on the complete renderable root, remain capped at Detail 13, and
-keep the separate 768 MiB reduced-memory profile.
+The captured coarse frontier alone is retained in the LRU and registered as a
+scoped `REPLACE` fallback. Returning to Home can therefore display a captured
+coarse branch that was not active in the previous close frame while its newly
+selected descendants continue loading. This does not enable ancestor loading,
+retain unrelated intermediate/fine paths, or render an overlapping root
+backdrop. The renderer uses a shared LRU, so the narrow retention wrapper is
+restored on every tile renderer disposal before another model can load. Clients
+reporting 4 GiB or less settle on the complete renderable root, remain capped at
+Detail 13, and keep the separate 768 MiB reduced-memory profile; the church's
+roughly 1.27 GiB coarse frontier cannot safely replace that root on this budget.
 
 The ordinary desktop cache retains 0.4 GiB below a 1.75 GiB maximum, with 8
 warm entries and a 1,024-item failsafe. The byte ceiling is the real memory
@@ -73,14 +79,17 @@ idle-queue samples with a selected in-frustum tile still pending request bounded
 cache-admission recovery. Cache pressure never lowers `activeDetail`, changes
 the requested screen-space-error target, or latches a global quality ceiling.
 
-A local 64-leaf, eight-branch browser fixture verifies complete coarse startup,
-nearby refinement, stable tiny movement, wide zoom-out, and close return. The
-authenticated church hierarchy verifies the large-model path: 16/16 coarse
-tiles attached before refinement, all 40 sampled bootstrap/close/orbit/return
-frames retained structural coverage, 12 nearby fine leaves became visible, and
-return restored 16/16 coarse tiles without a blank interval. Loaded fine leaves
-had median camera distance about 6.9 versus 23.5 for pending leaves, and no
-runtime exceptions occurred.
+The generated browser fixtures verify complete coarse startup, descendant
+refinement, scoped fallback on camera return, stable tiny movement, and shared
+LRU lifecycle cleanup. The authenticated church hierarchy verifies the
+large-model path: 16/16 coarse tiles attached before refinement; all 48 sampled
+bootstrap, close, orbit, and return frames retained structural coverage; steady
+Detail 16 moved from target 1,024 to 512; and 12 fine leaves rendered in the
+unchanged close view within 30 seconds. Return immediately recovered complete
+coverage with captured coarse fallbacks while selected intermediate work kept
+streaming. No runtime exceptions occurred. A forced 4 GiB run kept complete root
+coverage across all sampled frames and honestly remained root-only because the
+required church replacement frontier exceeded its 768 MiB cache.
 
 See [`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for historical
 measurements, superseded approaches, and diagnostic commands.

@@ -14,23 +14,30 @@ startup order, foreground priority, and replacement-branch headroom:
   branch before its parent could be replaced.
 
 The Viewer now loads one renderable root overview, replaces it only after a
-complete coarse frontier is attached and queues settle, captures that frontier
-for narrow LRU retention, and calibrates Detail 16 to the measured coverage
-SSE. Queue priority follows optimized traversal: used/in-frustum, then nearest
-camera distance. Large measured overview frontiers receive bounded
+complete coarse frontier is attached and queues settle, and captures that
+frontier for narrow LRU retention. Steady Detail 16 advances one bounded LOD
+step beyond the measured coarse target instead of staying equal to it or
+selecting the entire zero-error hierarchy. On the church this changes the
+steady target from 1,024 to 512. Captured overview tiles are also registered as
+scoped `REPLACE` fallbacks, allowing a previously inactive coarse branch to
+cover a camera return while its descendants continue loading. This does not set
+`loadAncestors` or pin unrelated paths. Queue priority remains used/in-frustum,
+then nearest camera distance. Large measured overview frontiers receive bounded
 branch-completion headroom up to 3 GiB; small models remain at 1.75 GiB and
 reduced-memory clients settle on the complete root under the existing 768 MiB
-cap. `loadAncestors`, sibling preloads, automatic global detail rollback, root
-`ADD`, and overlapping coarse rendering remain disabled.
+cap. Sibling preloads, automatic global detail rollback, root `ADD`, and
+overlapping coarse rendering remain disabled.
 
 The final local bundle was run against the protected production church assets.
-All 40 sampled bootstrap, close, orbit, and return frames retained structural
-coverage. Startup attached 16/16 coarse tiles, close/orbit attached 12 nearby
-fine leaves, return immediately exposed all 16 coarse tiles, loaded fine leaves
-had median camera distance 6.9 versus 23.5 for pending leaves, and no runtime
-exceptions occurred. A 64-leaf local fixture also passed initial, close, tiny
-move, wide, and return, while a forced 4 GiB browser stayed on one complete root
-with no pending work.
+All 48 sampled bootstrap, unchanged-close, orbit, and return frames retained
+structural coverage. Startup attached 16/16 coarse tiles. An unchanged close
+view rendered 12 depth-3 fine leaves within 30 seconds at Detail 16. Return
+maintained immediate complete coverage using captured coarse fallbacks while
+intermediate replacements kept streaming, and no runtime exceptions occurred.
+A forced 4 GiB run retained complete root coverage in every frame. It remained
+root-only because the church's required replacement frontier is larger than the
+768 MiB reduced cache; the affected desktop browser followed the normal
+`coarse-coverage-ready` path rather than this reduced path.
 
 ## 2026-08-30 local item-admission reproduction
 

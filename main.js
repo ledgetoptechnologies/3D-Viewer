@@ -30,7 +30,7 @@ import {
   retainLodOverviewTiles,
   resolveLodDetailRequest,
   resolveLodWarmupAdvance,
-  scaledDetailToErrorTarget,
+  steadyStateLodErrorTarget,
   visibleLodFrontier,
   visibleLodTargetSatisfied,
 } from './lod-policy.mjs';
@@ -880,9 +880,8 @@ function loadTiles() {
       // root scene that can never exist.
       lodBootstrapPhase = 'complete';
       lodWarmupComplete = lodRuntimeProfileState.reduced;
-      rendererInstance.errorTarget = scaledDetailToErrorTarget(
+      rendererInstance.errorTarget = steadyStateLodErrorTarget(
         lodRuntimeProfileState.activeDetail,
-        lodErrorScale,
       );
       state.lodRuntimeProfile = {
         ...state.lodRuntimeProfile,
@@ -3650,7 +3649,7 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
 }
 
 function lodTargetForDetail(detail) {
-  return scaledDetailToErrorTarget(detail, lodErrorScale);
+  return steadyStateLodErrorTarget(detail, lodErrorScale);
 }
 
 function lodTileSceneAttached(tile) {
@@ -3688,8 +3687,9 @@ function maybeAdvanceLodBootstrap() {
       // cache. Settle on the complete renderable root instead of waiting
       // forever for a frontier the client cannot safely retain.
       lodBootstrapCoverageTarget = lodBootstrapRootTarget;
-      lodErrorScale = lodErrorScaleForCoverage(lodBootstrapRootTarget);
+      lodErrorScale = lodErrorScaleForCoverage(root?.traversal?.error);
       lodOverviewTiles = [root];
+      tilesRenderer.lodFallbackTiles = new Set(lodOverviewTiles);
       retainLodOverviewTiles(tilesRenderer, lodOverviewTiles);
       lodRuntimeProfileState.activeDetail = Math.min(
         lodRuntimeProfileState.maximumDetail,
@@ -3734,6 +3734,7 @@ function maybeAdvanceLodBootstrap() {
     || !visibleLodTargetSatisfied(root, lodBootstrapCoverageTarget)) return true;
 
   lodOverviewTiles = captureLodOverviewTiles(root);
+  tilesRenderer.lodFallbackTiles = new Set(lodOverviewTiles);
   const measuredOverviewBytes = tilesRenderer.lruCache.cachedBytes;
   const expandedMaxBytes = lodCacheMaxBytesForOverview(
     tilesRenderer.lruCache.maxBytesSize,

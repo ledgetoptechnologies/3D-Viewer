@@ -64,15 +64,19 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.match(main, /Object\.assign\(lodRuntimeProfileState, advance\)/);
   assert.match(main, /tilesRenderer\.errorTarget = lodTargetForDetail\(targetDetail\)/);
   assert.match(main, /function maybeAdvanceLodBootstrap\(\)/);
+  assert.match(main, /function lodTargetForDetail\(detail\) \{\s*return steadyStateLodErrorTarget\(detail, lodErrorScale\);\s*\}/);
+  assert.doesNotMatch(main, /function lodTargetForDetail\(detail\) \{\s*return scaledDetailToErrorTarget/);
   assert.match(main, /lodBootstrapRootTarget = lodBootstrapRootErrorTarget\(root\?\.traversal\?\.error\)/);
   assert.match(main, /lodBootstrapCoverageTarget = lodBootstrapCoverageErrorTarget\(/);
   assert.match(main, /if \(lodRuntimeProfileState\.reduced\) \{/);
   assert.match(main, /lodOverviewTiles = \[root\]/);
+  assert.match(main, /lodErrorScale = lodErrorScaleForCoverage\(root\?\.traversal\?\.error\)/);
   assert.match(main, /emitLodDebugSnapshot\('reduced-overview-ready', true\)/);
   assert.match(main, /root\?\.traversal\?\.visible === true && lodTileSceneAttached\(root\)/);
   assert.match(main, /visibleLodTargetSatisfied\(root, lodBootstrapCoverageTarget\)/);
   assert.match(main, /lodErrorScale = lodErrorScaleForCoverage\(lodBootstrapCoverageTarget\)/);
   assert.match(main, /lodOverviewTiles = captureLodOverviewTiles\(root\)/);
+  assert.match(main, /tilesRenderer\.lodFallbackTiles = new Set\(lodOverviewTiles\)/);
   assert.match(main, /lodCacheMaxBytesForOverview\(/);
   assert.match(main, /tilesRenderer\.lruCache\.maxBytesSize = expandedMaxBytes/);
   assert.match(main, /restoreLodOverviewRetention = installLodOverviewRetention\(/);
@@ -193,6 +197,7 @@ test('LOD starts close-responsive, stages explicit high-detail requests, and cap
 test('production installs the exact renderer and applies the scoped ancestor patch in both image stages', () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
+  const rendererPatch = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'patch-3d-tiles-renderer.mjs'), 'utf8');
   assert.equal(packageJson.dependencies['3d-tiles-renderer'], '0.5.1');
   assert.equal(packageJson.scripts.postinstall, 'node scripts/patch-3d-tiles-renderer.mjs');
   assert.equal(
@@ -200,6 +205,8 @@ test('production installs the exact renderer and applies the scoped ancestor pat
     2,
     'build and runtime installs must both receive the postinstall patch before npm ci',
   );
+  assert.match(rendererPatch, /lodFallbackTiles\?\.has/,
+    'the pinned renderer patch must preserve only captured overview fallbacks without loadAncestors');
 });
 
 test('LOD memory pressure preserves camera-driven quality and resets on explicit lifecycle boundaries', () => {

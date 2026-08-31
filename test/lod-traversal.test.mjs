@@ -137,3 +137,28 @@ test('REPLACE traversal refines ready branches while a pending branch retains it
   assert.equal(visibleLodTargetSatisfied(root, renderer.errorTarget), true,
     'the completed replacement frontier allows staged warmup to converge');
 });
+
+test('scoped overview fallback survives camera return without enabling all ancestors', () => {
+  const detailA = makeTile({ name: 'detail-a', error: 20, loadingState: LOADED, depth: 2 });
+  const detailB = makeTile({ name: 'detail-b', error: 20, loadingState: UNLOADED, depth: 2 });
+  const overview = makeTile({
+    name: 'overview', error: 80, loadingState: LOADED, depth: 1, children: [detailA, detailB],
+  });
+  const root = makeTile({
+    name: 'root', error: 100, loadingState: LOADED, depth: 0, children: [overview],
+  });
+  const errors = new Map([[root, 100], [overview, 80], [detailA, 20], [detailB, 20]]);
+  const renderer = makeRenderer(errors);
+  renderer.loadAncestors = false;
+  renderer.lodFallbackTiles = new Set([overview]);
+
+  runTraversal(root, renderer);
+
+  assert.equal(root.traversal.visible, false, 'the root is replaced by the selected overview branch');
+  assert.equal(overview.traversal.visible, true,
+    'the captured overview tile stands in for its incomplete selected descendants after camera return');
+  assert.equal(detailA.traversal.visible, false, 'ready detail waits behind its incomplete branch sibling');
+  assert.equal(detailB.traversal.visible, false);
+  assert.equal(renderer.queued.has(detailB), true, 'the missing descendant continues loading');
+  assert.equal(renderer.loadAncestors, false, 'unrelated ancestors remain evictable');
+});
