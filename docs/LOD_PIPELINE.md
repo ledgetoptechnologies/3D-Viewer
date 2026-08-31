@@ -1,5 +1,8 @@
 # LOD derivative contract
 
+The investigation, CesiumJS comparison, Obj2Tiles contracts, branch history,
+and Codex review checklist are in [LOD_RESEARCH_AND_CODEX_REVIEW.md](LOD_RESEARCH_AND_CODEX_REVIEW.md).
+
 The target interaction is Nira-like: show a lightweight overview immediately,
 refine only the visible areas as they occupy more screen pixels, reach the full
 source quality at close range, and return to lower-detail tiles as the camera
@@ -107,23 +110,22 @@ The bundled, checksum-pinned converter accepts textured OBJ. Experimental
 generation requires both the OBJ (including its MTL/textures) and an independent
 companion GLB. Standard WebODM task backups commonly satisfy this source
 contract with `assets/odm_texturing/odm_textured_model_geo.obj` and
-`assets/odm_texturing/odm_textured_model_geo.glb`. Native imported tiles are
-quarantined, audited, and registered only after the proof succeeds. Production
-enables automatic generation and bounded legacy-model reconciliation by
-default. Verified imported tiles are reused; an eligible textured OBJ plus
-companion GLB with no valid tiles receives one durable generation attempt, and
-a terminal current-revision failure permits only the existing explicit manual
-retry. Operators may deliberately disable generation with
-`MESH_DERIVATIVES_ENABLED=false`; disabling it does not make an unverified or
-missing tileset interactive.
+`assets/odm_texturing/odm_textured_model_geo.glb`. Production requires current
+KTX2 generation for eligible new OBJ+GLB work even when the bundle includes
+legacy JPEG tiles. The generated tree is registered only after its controlled
+proof succeeds. Existing ready and published versions are immutable: there is
+no legacy-model reconciliation or manual in-place retry. Operators may set
+`MESH_DERIVATIVES_ENABLED=false`, but an eligible required job then fails closed
+instead of becoming ready with missing or legacy streaming assets.
 
 GLB-only and OBJ-only inputs deliberately remain downloadable originals, but
-are not interactive Viewer layers. The runtime image does not contain a pinned mesh interchange
-converter, and format conversion alone is not proof that node transforms,
-materials, samplers, UVs, texture bytes, and coordinates survived. Do not add a
-best-effort conversion or declare generated tiles valid without an independent
-source mesh that the audit can compare. Supporting a single-format source needs
-a separately pinned converter, conversion-preservation tests for representative
+are not interactive Viewer layers. The runtime image contains the pinned
+Obj2Tiles converter for the audited OBJ+GLB contract only; format conversion
+alone is not proof that node transforms, materials, samplers, UVs, texture
+bytes, and coordinates survived. Do not add a best-effort single-format
+conversion or declare generated tiles valid without an independent source mesh
+that the audit can compare. Supporting a single-format source needs a
+separately pinned converter, conversion-preservation tests for representative
 textured and georeferenced fixtures, and the same fail-closed LOD audit before
 registration.
 
@@ -191,38 +193,44 @@ atlases, v2 rejects it because exact equivalence is no longer provable.
 The production Obj2Tiles invocation deliberately uses a bounded texture-atlas
 contract instead of `--keeptextures`: on a representative 2.53 GiB textured
 WebODM model, `--keeptextures` duplicated source textures into more than 157
-GiB before completion. The bounded invocation completed in about three minutes
-and produced a 0.89 GiB hierarchy. Its full-detail frontier contains 1,270,357
-leaf draw triangles for 1,148,233 source triangles because Obj2Tiles performs
-61,062 boundary-edge splits, adding two triangles per split, and repacks the
-texture atlases. Locally generated output therefore uses an opt-in schema-v3
-controlled-converter proof instead of weakening v2. V3 binds the approved
-architecture-specific Obj2Tiles 1.6.2 executable digest and exact command, the
-GLB and OBJ digests, every audited artifact, a valid zero-error frontier,
-full-detail bounds/area/centroid/second moments, deterministic bidirectional
-BVH samples in rebased coordinates, and all-triangle opaque textured
-base-color/TEXCOORD_0 coverage. Shifted or missing patches, unapproved
-executables, missing UVs, and untextured materials fail closed. Production Compose still queues this optional generation
-by default so missing derivatives and failures are visible in Background Work.
-The server uses the same enabled fallback when an older deployment omits the
-variable; operators can set `MESH_DERIVATIVES_ENABLED=false` to disable it.
-Verified imported tiles may stream. The original GLB is never an interactive
-layer and remains available only through authenticated Operations downloads.
-A model without verified tiles is explicitly unavailable or processing in 3D
-mode instead of risking a full-resolution browser decode.
-Automatic generation remains verification-gated: a current-revision failure
-leaves the original mesh published and requires an explicit manual retry.
-Migration 23 records the LOD recovery revision on every derivative job. When a
-shipped validator or converter fix increments that revision, startup
-maintenance may reopen each older terminal `mesh_tiles` or rejected
-`lod_audit` job exactly once with a compare-and-swap. New or first-leased jobs
-are stamped at the current revision, so ordinary failures cannot enter an
-automatic retry loop; the single authorized manual retry remains a separate,
-unchanged budget. The worker emits bounded reconciliation counts and a safe
-error code, and records every system recovery in the audit log. Imported/native
-tiles always stay on exact v2; only the trusted local generation call site may
-request controlled v3. Do not manually change either provenance or recovery
-record.
+GiB before completion. Current generation adds `--texture-format Ktx2
+--ktx2-quality 192`, producing ETC1S textures that remain GPU-compressed through
+Three.js `KTX2Loader`. The runtime smoke test executes the pinned converter,
+requires generated `KHR_texture_basisu` / `image/ktx2` payloads, runs the
+controlled audit, and fails the image build if any stage is missing.
+
+Locally generated output uses schema-v3 controlled-converter proof instead of
+weakening exact v2. V3 binds the approved architecture-specific Obj2Tiles 1.6.2
+executable digest and exact KTX2 command, the GLB and OBJ digests, every audited
+artifact, a valid zero-error frontier, full-detail bounds/area/centroid/second
+moments, deterministic bidirectional BVH samples in rebased coordinates, and
+all-triangle opaque textured base-color/TEXCOORD_0 coverage. The controlled
+path accepts bound `KHR_texture_basisu` sources while imported exact-v2 audits
+continue to reject alternate compressed sources unless their exact texture
+identity can be proved. Shifted or missing patches, unapproved executables,
+missing UVs, and untextured materials fail closed.
+The server enables the worker stage when an older deployment omits the variable.
+Setting `MESH_DERIVATIVES_ENABLED=false` makes eligible required OBJ+GLB work
+fail closed; it does not bypass KTX2 readiness. Verified imported tiles may
+stream when no eligible OBJ+GLB source is available.
+The original GLB is never an interactive layer and remains available only through
+authenticated Operations downloads. A model without verified tiles is explicitly
+unavailable or processing in 3D mode instead of risking a full-resolution browser
+decode.
+
+Automatic generation remains verification-gated. New NodeODM and import work
+with an eligible OBJ+GLB mesh stays in `derivatives` until the required KTX2 tree
+verifies, even when the source bundle includes legacy JPEG tiles. A terminal
+failure is reported as a failed job rather than a misleading ready result.
+
+Successful ready and published versions are immutable. The worker does not run
+legacy LOD discovery/recovery, does not switch an active asset row in place, and
+does not expose manual in-place generation or retry. Existing verified JPEG
+provenance remains readable. Upgrading an existing model requires a new
+processing attempt/model version, which is reviewed before explicit publication.
+Imported/native tiles stay on exact v2; only the trusted local generation call
+site may request controlled v3. Do not manually change provenance or derivative
+state.
 
 ## Validate before deployment
 

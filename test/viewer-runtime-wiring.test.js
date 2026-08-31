@@ -199,11 +199,12 @@ test('production installs the exact renderer and applies the scoped ancestor pat
   const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
   const rendererPatch = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'patch-3d-tiles-renderer.mjs'), 'utf8');
   assert.equal(packageJson.dependencies['3d-tiles-renderer'], '0.5.1');
-  assert.equal(packageJson.scripts.postinstall, 'node scripts/patch-3d-tiles-renderer.mjs');
+  assert.equal(packageJson.scripts.postinstall,
+    'node scripts/patch-3d-tiles-renderer.mjs && node scripts/install-basis-transcoder.mjs');
   assert.equal(
-    [...dockerfile.matchAll(/COPY scripts\/patch-3d-tiles-renderer\.mjs \.\/scripts\/patch-3d-tiles-renderer\.mjs\s+RUN npm ci/g)].length,
+    [...dockerfile.matchAll(/COPY scripts\/patch-3d-tiles-renderer\.mjs scripts\/install-basis-transcoder\.mjs \.\/scripts\/\s+RUN npm ci/g)].length,
     2,
-    'build and runtime installs must both receive the postinstall patch before npm ci',
+    'build and runtime installs must receive both postinstall prerequisites before npm ci',
   );
   assert.match(rendererPatch, /lodFallbackTiles\?\.has/,
     'the pinned renderer patch must preserve only captured overview fallbacks without loadAncestors');

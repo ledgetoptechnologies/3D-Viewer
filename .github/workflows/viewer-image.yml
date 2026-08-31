@@ -87,7 +87,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "26"
+          EXPECTED_SCHEMA_VERSION: "27"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_POTREE_VERSION: "1.8.2"
         run: |

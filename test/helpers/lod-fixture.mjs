@@ -25,6 +25,7 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
   imageUri = null,
   unlit = false,
   cesiumRtc = null,
+  basisu = false,
 } = {}) {
   const positions = [];
   const normals = [];
@@ -42,6 +43,15 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
   const texcoordView = append(parts, floatBytes(texcoords));
   const imageView = imageUri ? null : append(parts, textureBytes);
   const bin = Buffer.concat(parts);
+  const extensionsUsed = [
+    ...(unlit ? ['KHR_materials_unlit'] : []),
+    ...(basisu ? ['KHR_texture_basisu'] : []),
+    ...(cesiumRtc ? ['CESIUM_RTC'] : []),
+  ];
+  const extensionsRequired = [
+    ...(unlit ? ['KHR_materials_unlit'] : []),
+    ...(basisu ? ['KHR_texture_basisu'] : []),
+  ];
   const json = {
     asset: { version: '2.0', generator: 'LTDS deterministic test fixture' },
     scene: 0,
@@ -49,8 +59,10 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
     nodes: [{ mesh: 0 }],
     meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, material: 0 }] }],
     materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } }, ...(unlit ? { extensions: { KHR_materials_unlit: {} } } : {}) }],
-    textures: [{ source: 0 }],
-    images: [imageUri ? { uri: imageUri, mimeType: 'image/png' } : { bufferView: 3, mimeType: 'image/png' }],
+    textures: [basisu ? { extensions: { KHR_texture_basisu: { source: 0 } } } : { source: 0 }],
+    images: [imageUri
+      ? { uri: imageUri, mimeType: basisu ? 'image/ktx2' : 'image/png' }
+      : { bufferView: 3, mimeType: basisu ? 'image/ktx2' : 'image/png' }],
     accessors: [
       { bufferView: 0, componentType: 5126, count: positions.length / 3, type: 'VEC3' },
       { bufferView: 1, componentType: 5126, count: normals.length / 3, type: 'VEC3' },
@@ -58,8 +70,9 @@ export function makeGlb(triangles, textureBytes = Buffer.from('fixture-texture')
     ],
     bufferViews: [positionView, normalView, texcoordView, ...(imageView ? [imageView] : [])],
     buffers: [{ byteLength: bin.length }],
-    ...(unlit ? { extensionsUsed: ['KHR_materials_unlit'], extensionsRequired: ['KHR_materials_unlit'] } : {}),
-    ...(cesiumRtc ? { extensions: { CESIUM_RTC: { center: cesiumRtc } }, extensionsUsed: [...(unlit ? ['KHR_materials_unlit'] : []), 'CESIUM_RTC'] } : {}),
+    ...(extensionsUsed.length ? { extensionsUsed } : {}),
+    ...(extensionsRequired.length ? { extensionsRequired } : {}),
+    ...(cesiumRtc ? { extensions: { CESIUM_RTC: { center: cesiumRtc } } } : {}),
   };
   let jsonBytes = Buffer.from(JSON.stringify(json));
   const paddedJson = Buffer.alloc(align4(jsonBytes.length), 0x20);
@@ -194,6 +207,8 @@ export function writeAuditableFixture(directory, {
   leafBTransform,
   leafBTexcoordTransform,
   leafABytes,
+  leafABasisu = false,
+  leafBBasisu = false,
   externalTexture = false,
 } = {}) {
   fs.mkdirSync(directory, { recursive: true });
@@ -203,10 +218,12 @@ export function writeAuditableFixture(directory, {
   fs.writeFileSync(source, makeGlb([TRIANGLE_A, TRIANGLE_B], Buffer.from('fixture-texture'), imageOptions));
   fs.writeFileSync(path.join(directory, 'leaf-a.b3dm'), leafABytes || makeB3dm(makeGlb(leafATriangles, Buffer.from('fixture-texture'), {
     ...imageOptions,
+    basisu: leafABasisu,
     ...(leafATexcoordTransform ? { texcoordTransform: leafATexcoordTransform } : {}),
   }), leafARtc ? { RTC_CENTER: leafARtc } : null));
   fs.writeFileSync(path.join(directory, 'leaf-b.glb'), makeGlb(leafBTriangles, leafBTexture, {
     ...imageOptions,
+    basisu: leafBBasisu,
     ...(leafBTexcoordTransform ? { texcoordTransform: leafBTexcoordTransform } : {}),
   }));
   fs.writeFileSync(path.join(directory, 'tileset.json'), JSON.stringify({

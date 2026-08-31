@@ -1,16 +1,29 @@
 'use strict';
 
 const path = require('node:path');
-const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
+const {
+  ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256,
+  CONTROLLED_CONVERTER_BINARY_SHA256,
+} = require('../lod-converter-policy.cjs');
+const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINARY_SHA256);
+const CONTROLLED_CONVERTER_COMMAND_SHA256_SET = new Set(ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256);
 
 function meshAsset(assets, kind) {
   return assets.find((asset) => asset.kind === kind) || null;
 }
 
-function lodDerivativeSpecs(assets, { meshDerivativesEnabled = false } = {}) {
+function lodDerivativeSpecs(assets, { meshDerivativesEnabled = false, required = false } = {}) {
   const tiles = meshAsset(assets, 'tiles') || meshAsset(assets, 'nativeTiles');
   const obj = meshAsset(assets, 'obj');
   const glb = meshAsset(assets, 'glb');
+  const optional = !required;
+
+  // New processing/import work with an auditable textured source always gets
+  // the current KTX2 contract. A bundled legacy JPEG tree is not sufficient
+  // for the reduced-memory Viewer profile.
+  if (required && obj && glb) {
+    return [{ type: 'mesh_tiles', request: { optional: false } }];
+  }
 
   if (tiles && glb) {
     return [{
@@ -18,15 +31,14 @@ function lodDerivativeSpecs(assets, { meshDerivativesEnabled = false } = {}) {
       request: {
         tilesRootKey: tiles.rootKey || 'models',
         tilesRelativePath: path.posix.dirname(tiles.relativePath),
-        generateFromObjOnFailure: Boolean(meshDerivativesEnabled && obj && glb),
-        optional: true,
+        optional,
       },
     }];
   }
 
   // OpenDroneMap Obj2Tiles accepts OBJ input. A GLB-only import must retain
   // its full-mesh fallback rather than queueing a conversion the tool cannot do.
-  if (!tiles && obj && glb && meshDerivativesEnabled) return [{ type: 'mesh_tiles', request: { optional: true } }];
+  if (!tiles && obj && glb && meshDerivativesEnabled) return [{ type: 'mesh_tiles', request: { optional } }];
   return [];
 }
 
@@ -45,11 +57,11 @@ function verifiedLodProvenance(metadata, assets) {
     && provenance.audit?.algorithm === 'ltds-obj2tiles-surface-equivalence-v3'
     && provenance.converter?.name === 'OpenDroneMap/Obj2Tiles'
     && provenance.converter?.version === '1.6.2'
-    && provenance.converter?.commandSha256 === '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681'
+    && CONTROLLED_CONVERTER_COMMAND_SHA256_SET.has(String(provenance.converter?.commandSha256 || '').toLowerCase())
     && Boolean(obj?.sha256)
     && provenance.converter?.inputAsset === path.posix.basename(obj.relativePath || '')
     && provenance.converter?.inputSha256 === obj.sha256
-    && CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256 || '').toLowerCase());
+    && CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(provenance.converter?.binarySha256 || '').toLowerCase());
   if ((!exactV2 && !controlledV3)
     || provenance.sourceSha256 !== glb.sha256
     || provenance.tilesManifestSha256 !== meshAsset(assets, 'tiles')?.manifestSha256

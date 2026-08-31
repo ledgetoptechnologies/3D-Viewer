@@ -8,6 +8,7 @@ dist/
 public/models/
 public/3d-tiles/
 public/potree/
+public/basis/
 
 # Local server metadata store / derivatives cache and secrets
 data/

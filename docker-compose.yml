@@ -23,8 +23,9 @@ x-runtime: &runtime
     EMERGENCY_ADMIN_ENABLED: "false"
     PROCESSING_PLATFORM_ENABLED: ${PROCESSING_PLATFORM_ENABLED:-true}
     LOCAL_DERIVATIVES_ENABLED: "false"
-    # Generation is optional and never replaces the original mesh. A generated
-    # tileset activates only after the versioned surface/appearance audit passes.
+    # Eligible new OBJ+GLB work always queues the required KTX2 derivative.
+    # Explicit false makes that work fail closed; it never bypasses readiness.
+    # Generation preserves the original mesh as the authenticated source/fallback.
     MESH_DERIVATIVES_ENABLED: ${MESH_DERIVATIVES_ENABLED:-true}
     OBJ2TILES_BIN: /opt/obj2tiles/Obj2Tiles
     DATA_DIR: /app/storage/data
@@ -58,7 +59,12 @@ services:
 
   viewer-worker:
     <<: *runtime
-    command: [node, server/worker.js]
+    # Obj2Tiles/KTX2 generation runs here on TrueNAS, never on the Hermes host.
+    # Fixed ceilings leave eight of the server's 24 CPU cores for NodeODM,
+    # ZFS, and serving. The database singleton additionally serializes conversion.
+    cpus: "16.0"
+    mem_limit: 24g
+    command: ["node", "server/workerSupervisor.js"]
     healthcheck:
       test: [CMD, node, -e, "const {config}=require('./server/config');const {openDatabase}=require('./server/database');const db=openDatabase(config.databasePath);const row=db.prepare(\"SELECT value FROM app_state WHERE key='processing_worker_heartbeat'\").get();db.close();const value=row&&JSON.parse(row.value);if(!value||Date.parse(value.at)<=Date.now()-30000)process.exit(1)"]
       interval: 30s

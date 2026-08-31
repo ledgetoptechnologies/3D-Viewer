@@ -776,6 +776,36 @@ test('full-quality claim requires provenance for the exact active full mesh', ()
   assert.equal(inspectLodProvenance({ ...valid, sourceAsset: 'model.obj' }, '/assets/p/webodm/model.obj').verified, false);
 });
 
+test('controlled KTX2 provenance is accepted by the browser policy', () => {
+  const valid = {
+    schemaVersion: 3,
+    sourceAsset: 'model.glb',
+    sourceSha256: 'a'.repeat(64),
+    geometry: 'controlled-bidirectional-surface-equivalence',
+    textures: 'controlled-atlas-material-equivalence',
+    leafGeometricError: 0,
+    converter: {
+      name: 'OpenDroneMap/Obj2Tiles',
+      version: '1.6.2',
+      commandSha256: '8d0931aa44aae76b48832212cd6c649b73e9b9843d5d5f07462f167d0e8d5752',
+      binarySha256: '40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274',
+    },
+    audit: {
+      algorithm: 'ltds-obj2tiles-surface-equivalence-v3',
+      sourceTriangleCount: 2,
+      leafTriangleCount: 2,
+      equivalenceSha256: 'b'.repeat(64),
+      artifactCount: 3,
+      surfaceTolerance: 0.0001,
+      maximumSurfaceDistance: 0.00001,
+      minimumNormalDot: 0.999,
+      maximumReversedNormalFraction: 0,
+    },
+  };
+  assert.deepEqual(inspectLodProvenance(valid, '/assets/p/derivatives/model.glb'), { verified: true, errors: [] });
+  assert.equal(inspectLodProvenance({ ...valid, converter: { ...valid.converter, commandSha256: 'c'.repeat(64) } }, '/assets/p/derivatives/model.glb').verified, false);
+});
+
 test('unverified LOD safely falls back to the actual full mesh', () => {
   const tileset = { valid: true, errors: [] };
   assert.deepEqual(decideLodStartup(tileset, { verified: true, errors: [] }, true), {

@@ -4,7 +4,7 @@
 // useful to revisit terminal LOD work created by an older release. New jobs and
 // jobs first leased by this release are stamped at this revision, so ordinary
 // failures do not acquire an extra automatic retry.
-const LOD_DERIVATIVE_RECOVERY_REVISION = 1;
+const LOD_DERIVATIVE_RECOVERY_REVISION = 2;
 
 function isLodDerivativeType(type) {
   return type === 'mesh_tiles' || type === 'lod_audit';

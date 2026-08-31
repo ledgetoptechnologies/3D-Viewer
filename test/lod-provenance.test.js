@@ -104,6 +104,43 @@ test('server rejects stale source, renamed source, legacy assertions, and change
   assert.match(result.errors.join('\n'), /artifact size changed/);
 });
 
+test('controlled Obj2Tiles v3 accepts bound KTX2 texture sources while exact v2 stays fail-closed', async (t) => {
+  const [{ writeAuditableFixture }, { writeLodProvenance }] = await Promise.all([
+    import('./helpers/lod-fixture.mjs'),
+    import('../scripts/lib/lod-equivalence.mjs'),
+  ]);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-lod-ktx2-controlled-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const source = writeAuditableFixture(directory, { leafABasisu: true, leafBBasisu: true });
+  const converterInput = path.join(directory, 'model.obj');
+  const converterBinary = path.join(directory, 'Obj2Tiles');
+  fs.writeFileSync(converterInput, 'o controlled KTX2 fixture\n');
+  const binary = Buffer.from('pinned Obj2Tiles 1.6.2 KTX2 fixture');
+  fs.writeFileSync(converterBinary, binary);
+  const binarySha256 = require('node:crypto').createHash('sha256').update(binary).digest('hex');
+
+  await assert.rejects(
+    writeLodProvenance({ derivativeDir: directory, sourceGlb: source }),
+    /KHR_texture_basisu|alternate compressed texture sources/,
+  );
+
+  const { provenance, outputPath } = await writeLodProvenance({
+    derivativeDir: directory,
+    sourceGlb: source,
+    controlledObj2Tiles: true,
+    converterInput,
+    converterBinary,
+    trustedConverterBinarySha256: [binarySha256],
+  });
+  assert.equal(provenance.schemaVersion, 3);
+  assert.deepEqual(
+    provenance.converter.arguments.slice(-7),
+    ['--texture-format', 'Ktx2', '--ktx2-quality', '192', '--local', '<source.obj>', '<output>'],
+  );
+  assert.equal((await verifyLodProvenance(outputPath, source)).verified, false,
+    'the server must reject test-only converter binaries even when the controlled audit itself succeeds');
+});
+
 test('server verifies controlled Obj2Tiles v3 evidence and rejects converter or sampled-surface forgery',async t=>{
   const [{TRIANGLE_B,writeAuditableFixture},{writeLodProvenance}]=await Promise.all([import('./helpers/lod-fixture.mjs'),import('../scripts/lib/lod-equivalence.mjs')]);
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-lod-controlled-'));

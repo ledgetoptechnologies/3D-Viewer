@@ -68,6 +68,42 @@ test('two processes serialize the same pending upgrade migration', async (t) => 
   assertFullyMigrated(databasePath);
 });
 
+test('v27 reconciles legacy parallel LOD leases before enforcing database singleton uniqueness', (t) => {
+  const databasePath = temporaryDatabase(t, 'migration-v27-lod-singleton');
+  const database = new DatabaseSync(databasePath);
+  database.exec('PRAGMA foreign_keys=OFF');
+  database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+  for (const migration of MIGRATIONS.filter((item) => item.version < 27)) {
+    database.exec(migration.sql);
+    database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+      .run(migration.version, migration.name, new Date().toISOString());
+  }
+  const created = new Date().toISOString();
+  const future = new Date(Date.now() + 60_000).toISOString();
+  const insert = database.prepare(`INSERT INTO derivative_jobs(
+    id,attempt_id,derivative_type,status,request_json,result_json,lease_owner,lease_expires_at,heartbeat_at,created_at,updated_at
+  ) VALUES (?,?,?,'leased','{}','{}',?,?,?,?,?)`);
+  insert.run('legacy-lod-one', 'legacy-attempt-one', 'mesh_tiles', 'legacy-one', future, created, created, created);
+  insert.run('legacy-lod-two', 'legacy-attempt-two', 'lod_audit', 'legacy-two', future, created, created, created);
+
+  const migration = MIGRATIONS.find((item) => item.version === 27);
+  database.exec('BEGIN IMMEDIATE');
+  database.exec(migration.sql);
+  database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+    .run(migration.version, migration.name, new Date().toISOString());
+  database.exec('COMMIT');
+
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM derivative_jobs WHERE derivative_type IN ('mesh_tiles','lod_audit') AND status='leased'").get().n, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM derivative_jobs WHERE derivative_type IN ('mesh_tiles','lod_audit') AND status='pending'").get().n, 1);
+  assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='derivative_jobs_single_lod_lease'").get());
+  const pending = database.prepare("SELECT id FROM derivative_jobs WHERE status='pending'").get();
+  assert.throws(
+    () => database.prepare("UPDATE derivative_jobs SET status='leased',lease_owner='old-worker',lease_expires_at=? WHERE id=?").run(future, pending.id),
+    /UNIQUE constraint failed/,
+  );
+  database.close();
+});
+
 test('v17 fails closed for legacy live unbound published authorization state', (t) => {
   const databasePath = temporaryDatabase(t, 'migration-v17-auth');
   const database = new DatabaseSync(databasePath);
@@ -102,7 +138,7 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 26);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 27);
   upgraded.close();
 });
 

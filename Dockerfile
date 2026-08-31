@@ -59,7 +59,7 @@ RUN apt-get update \
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-COPY scripts/patch-3d-tiles-renderer.mjs ./scripts/patch-3d-tiles-renderer.mjs
+COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./scripts/
 RUN npm ci
 COPY . .
 COPY --from=potree /potree ./public/potree
@@ -80,11 +80,12 @@ WORKDIR /app
 RUN groupmod --gid 568 node \
     && usermod --uid 568 --gid 568 node
 COPY package.json package-lock.json ./
-COPY scripts/patch-3d-tiles-renderer.mjs ./scripts/patch-3d-tiles-renderer.mjs
+COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./scripts/
 RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
 COPY lod-policy.mjs ./lod-policy.mjs
+COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
 COPY --from=build /app/dist ./dist
 RUN printf '%s\n' "${VIEWER_SOURCE_COMMIT}" > /app/source-commit.txt \

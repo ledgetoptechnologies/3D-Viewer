@@ -3,31 +3,18 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
+  CONTROLLED_CONVERTER_BINARY_SHA256,
+  stable,
+} = require('../lod-converter-policy.cjs');
 
 const digestCache = new Map();
 const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
-const CONTROLLED_CONVERTER = Object.freeze({
-  name: 'OpenDroneMap/Obj2Tiles',
-  version: '1.6.2',
-  arguments: ['--octree', '--lods', '3', '--divisions', '2', '--lod-texture-scale', '0.5', '--local', '<source.obj>', '<output>'],
-});
-const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set([
-  '40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274',
-  'c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1',
-]);
+const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINARY_SHA256);
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIT_ARTIFACTS = 100_000;
-
-function stable(value) {
-  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
-  return JSON.stringify(value);
-}
-
-function sha256(value) {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
 
 async function sha256File(filePath) {
   const stat = await fs.promises.stat(filePath);
@@ -90,14 +77,18 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
       if (hasLeafCounts && (!Number.isInteger(audit.duplicateLeafTriangleCount) || audit.duplicateLeafTriangleCount < 0 || audit.duplicateLeafTriangleCount !== audit.leafTriangleCount - audit.triangleCount)) errors.push('audit.duplicateLeafTriangleCount must match the bounded leaf overlap');
     } else if (controlledV3) {
       const converter = provenance.converter;
-      const expectedCommandSha256 = sha256(stable(CONTROLLED_CONVERTER));
-      if (!converter || converter.name !== CONTROLLED_CONVERTER.name || converter.version !== CONTROLLED_CONVERTER.version
-        || stable(converter.arguments) !== stable(CONTROLLED_CONVERTER.arguments)
-        || converter.commandSha256 !== expectedCommandSha256) errors.push('converter must match the pinned Obj2Tiles command contract');
+      const contractMatches = ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS.some((contract) => (
+        converter
+        && converter.name === contract.converter.name
+        && converter.version === contract.converter.version
+        && stable(converter.arguments) === stable(contract.converter.arguments)
+        && converter.commandSha256 === contract.commandSha256
+      ));
+      if (!contractMatches) errors.push('converter must match the pinned Obj2Tiles command contract');
       for (const [key, value] of [['converter.inputSha256', converter?.inputSha256], ['converter.binarySha256', converter?.binarySha256]]) {
         if (!/^[a-f0-9]{64}$/i.test(String(value || ''))) errors.push(`${key} must be a SHA-256 digest`);
       }
-      if (!CONTROLLED_CONVERTER_BINARY_SHA256.has(String(converter?.binarySha256 || '').toLowerCase())) errors.push('converter.binarySha256 must match an approved Obj2Tiles 1.6.2 executable');
+      if (!CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(converter?.binarySha256 || '').toLowerCase())) errors.push('converter.binarySha256 must match an approved Obj2Tiles 1.6.2 executable');
       if (!/\.obj$/i.test(String(converter?.inputAsset || '')) || path.basename(converter?.inputAsset || '') !== converter?.inputAsset) errors.push('converter.inputAsset must name the exact OBJ input');
       if (!Number.isInteger(audit.sourceTriangleCount) || audit.sourceTriangleCount < 1 || !Number.isInteger(audit.leafTriangleCount) || audit.leafTriangleCount < 1) errors.push('controlled audit triangle counts must be positive integers');
       if (!Number.isFinite(audit.surfaceTolerance) || audit.surfaceTolerance <= 0 || !Number.isFinite(audit.diagonal) || audit.diagonal <= 0 || audit.surfaceTolerance > audit.diagonal * 1e-3) errors.push('controlled audit surface tolerance is invalid');

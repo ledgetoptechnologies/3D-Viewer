@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import converterPolicy from '../lod-converter-policy.cjs';
 import { auditControlledObj2Tiles } from './lib/lod-equivalence.mjs';
 
 function align4(value) {
@@ -69,6 +70,50 @@ function makeReferenceGlb(textureBytes) {
   return output;
 }
 
+function tileFiles(directory) {
+  const files = [];
+  const visit = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(absolute);
+      else if (/\.(?:b3dm|glb)$/i.test(entry.name)) files.push(absolute);
+    }
+  };
+  visit(directory);
+  return files;
+}
+
+function glbJson(buffer, offset = 0) {
+  if (buffer.readUInt32LE(offset) !== 0x46546c67 || buffer.readUInt32LE(offset + 4) !== 2) {
+    throw new Error('Obj2Tiles smoke tile has no GLB 2.0 payload');
+  }
+  const jsonLength = buffer.readUInt32LE(offset + 12);
+  if (buffer.readUInt32LE(offset + 16) !== 0x4e4f534a) throw new Error('Obj2Tiles smoke GLB has no JSON chunk');
+  return JSON.parse(buffer.subarray(offset + 20, offset + 20 + jsonLength).toString('utf8').trim());
+}
+
+function tileGlbJson(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  if (/\.glb$/i.test(filePath)) return glbJson(buffer);
+  if (buffer.toString('ascii', 0, 4) !== 'b3dm') throw new Error('Obj2Tiles smoke tile has no B3DM header');
+  const glbOffset = 28 + buffer.readUInt32LE(12) + buffer.readUInt32LE(16)
+    + buffer.readUInt32LE(20) + buffer.readUInt32LE(24);
+  return glbJson(buffer, glbOffset);
+}
+
+function compressedTextureCount(directory) {
+  let compressedTextures = 0;
+  for (const file of tileFiles(directory)) {
+    const json = tileGlbJson(file);
+    for (const texture of json.textures || []) {
+      const source = texture.extensions?.KHR_texture_basisu?.source;
+      if (!Number.isInteger(source) || json.images?.[source]?.mimeType !== 'image/ktx2') continue;
+      compressedTextures += 1;
+    }
+  }
+  return compressedTextures;
+}
+
 const obj2Tiles = process.env.OBJ2TILES_BIN || '/opt/obj2tiles/Obj2Tiles';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-obj2tiles-smoke-'));
 const sourceObj = path.join(root, 'model.obj');
@@ -101,14 +146,15 @@ try {
   ].join('\n'));
   fs.writeFileSync(sourceGlb, makeReferenceGlb(texture));
 
-  const conversion = spawnSync(obj2Tiles, [
-    '--octree', '--lods', '3', '--divisions', '2',
-    '--lod-texture-scale', '0.5', '--local', sourceObj, output,
-  ], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 60_000, windowsHide: true });
+  const conversion = spawnSync(obj2Tiles, converterPolicy.obj2TilesArguments(sourceObj, output), {
+    encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 60_000, windowsHide: true,
+  });
   if (conversion.error || conversion.status !== 0) {
     throw new Error(`Obj2Tiles smoke conversion failed (${conversion.error?.code || conversion.status || 'unknown'})`);
   }
   if (!fs.statSync(path.join(output, 'tileset.json')).isFile()) throw new Error('Obj2Tiles smoke produced no tileset');
+  const compressedTextures = compressedTextureCount(output);
+  if (compressedTextures < 1) throw new Error('Obj2Tiles smoke produced no KHR_texture_basisu image/ktx2 textures');
 
   const provenance = await auditControlledObj2Tiles({
     derivativeDir: output,
@@ -122,7 +168,12 @@ try {
     || !Array.isArray(provenance.audit?.artifacts) || provenance.audit.artifacts.length < 2) {
     throw new Error('Obj2Tiles smoke provenance was incomplete');
   }
-  console.log(JSON.stringify({ ok: true, schemaVersion: provenance.schemaVersion, artifacts: provenance.audit.artifacts.length }));
+  console.log(JSON.stringify({
+    ok: true,
+    schemaVersion: provenance.schemaVersion,
+    artifacts: provenance.audit.artifacts.length,
+    compressedTextures,
+  }));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

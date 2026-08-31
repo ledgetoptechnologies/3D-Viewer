@@ -105,8 +105,11 @@ async function importWebodmTask(operation, { processing, repository, storage, co
   // Existing accounting assigns adopted/reference trees to the output and
   // excludes their source dataset from the project dataset subtotal.
   processing.registerModelOutput({ versionId: ids.versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: request.projectId, rootKey: 'datasets', relativePath: dataset.relativePath, storageMode: 'adopted', byteSize: dataset.byteSize, assetCount: registeredAssets.length });
-  const lodDerivatives = lodDerivativeSpecs(assets, { meshDerivativesEnabled: config.meshDerivativesEnabled });
-  if (lodDerivatives.length) processing.enqueueOptionalDerivatives(attempt.id, lodDerivatives);
+  const lodDerivatives = lodDerivativeSpecs(assets, {
+    meshDerivativesEnabled: config.meshDerivativesEnabled,
+    required: true,
+  });
+  if (lodDerivatives.length) processing.activateImportedDerivatives(attempt.id, lodDerivatives);
   const imported = processing.recordWebodmTaskImport({ id: operation.id, sourceFingerprint: discovered.sourceFingerprint, sourceRelativePath: request.sourceRelativePath, projectId: request.projectId, taskId: task.id, datasetId: dataset.id, attemptId: attempt.id, modelId: model.id, modelVersionId: ids.versionId, assetKinds: summary.assetKinds, createdBy: operation.subject });
   await progress(0.98);
   return { project: processing.getProject(request.projectId), task: processing.getTask(task.id), attempt: processing.getAttempt(attempt.id), model: repository.getModelVersion(model.id, ids.versionId), import: imported, ...summary };

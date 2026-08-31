@@ -55,6 +55,7 @@ test('production readiness verifies the live policy and signed catalog without e
   const proxySecret = 'readiness-proxy-secret-00000000000000000000000';
   const env = {
     ...process.env,
+    NODE_NO_WARNINGS: '1',
     NODE_ENV: 'production',
     PORT: String(port),
     DATA_DIR: dataDir,
@@ -92,7 +93,7 @@ test('production readiness verifies the live policy and signed catalog without e
   assert.deepEqual(output, {
     ok: true,
     host: 'viewer.example.test',
-    build: { revision: 'unavailable', schemaVersion: 26 },
+    build: { revision: 'unavailable', schemaVersion: 27 },
     webodmMount: '',
     derivativesMount: null,
     models: 0,
@@ -169,6 +170,7 @@ test('production readiness exercises an exact protected Ops browser capability w
   const proxySecret = 'capability-proxy-secret-0000000000000000000000';
   const env = {
     ...process.env,
+    NODE_NO_WARNINGS: '1',
     NODE_ENV: 'production',
     PORT: String(port),
     DATA_DIR: dataDir,

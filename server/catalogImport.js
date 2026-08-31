@@ -150,8 +150,8 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   const model=repository.upsertModelVersion({modelId:ids.modelId,versionId:ids.versionId,provider:candidate.provider,providerModelId:`catalog:${candidate.id}`,providerVersionId:approvedFingerprint,displayName:request.taskDisplayName,status:'ready',metadata:{projectName:project.displayName,taskName:task.displayName,catalogCandidateId:candidate.id,catalogImportOperationId:operation.id},versionMetadata:{catalogImport:true,storageMode:request.storageMode,catalogImportOperationId:operation.id},sourceLocator:{catalogImport:true,projectId:candidate.externalProjectId,taskId:candidate.externalTaskId,sourceRootKey,sourceRelativePath},assets:registeredAssets,makeActive:false});
   processing.setAttemptResult(attempt.id,model.id,ids.versionId);
   processing.registerModelOutput({versionId:ids.versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:request.storageMode==='external_reference'?`${assetRootKey}@${ids.versionId}`:assetRootKey,relativePath:sourceRelativePath,storageMode:request.storageMode,byteSize:dataset.byteSize,assetCount:registeredAssets.length});
-  const lodDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled});
-  if(lodDerivatives.length)processing.enqueueOptionalDerivatives(attempt.id,lodDerivatives);
+  const lodDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
+  if(lodDerivatives.length)processing.activateImportedDerivatives(attempt.id,lodDerivatives);
   const mapped=processing.markCatalogCandidateMapped(candidate.id,{projectId:project.id,taskId:task.id,datasetId:dataset.id,attemptId:attempt.id,modelId:model.id,modelVersionId:ids.versionId},approvedFingerprint);if(!mapped)throw Object.assign(new Error('catalog source changed while mapping'),{code:'catalog_source_changed'});
   if(request.storageMode==='adopted')processing.clearCatalogAdoptionIntent(operation.id);
   await progress(0.98);

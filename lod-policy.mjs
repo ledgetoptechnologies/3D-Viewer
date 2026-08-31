@@ -9,6 +9,10 @@ export const LOD_PRESSURE_FALLBACK_SAMPLES = 4;
 export const LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET = 4096;
 export const LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET = 1024;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
+const CONTROLLED_CONVERTER_COMMAND_SHA256 = new Set([
+  '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',
+  '8d0931aa44aae76b48832212cd6c649b73e9b9843d5d5f07462f167d0e8d5752',
+]);
 
 export function detailToErrorTarget(value) {
   const parsed = Number.parseInt(value, 10);
@@ -555,7 +559,7 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
     if (!Number.isFinite(maxDelta) || maxDelta < 0 || maxDelta > tolerance) errors.push('audit maxNumericDelta must not exceed coordinateTolerance');
   }
   if (controlledV3) {
-    if (provenance.converter?.name !== 'OpenDroneMap/Obj2Tiles' || provenance.converter?.version !== '1.6.2' || provenance.converter?.commandSha256 !== '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681' || !CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256||'').toLowerCase())) errors.push('controlled audit converter contract is invalid');
+    if (provenance.converter?.name !== 'OpenDroneMap/Obj2Tiles' || provenance.converter?.version !== '1.6.2' || !CONTROLLED_CONVERTER_COMMAND_SHA256.has(String(provenance.converter?.commandSha256||'').toLowerCase()) || !CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256||'').toLowerCase())) errors.push('controlled audit converter contract is invalid');
     if (!Number.isFinite(provenance.audit?.surfaceTolerance) || provenance.audit.surfaceTolerance <= 0 || !Number.isFinite(provenance.audit?.maximumSurfaceDistance) || provenance.audit.maximumSurfaceDistance < 0 || provenance.audit.maximumSurfaceDistance > provenance.audit.surfaceTolerance || !Number.isFinite(provenance.audit?.minimumNormalDot) || !Number.isFinite(provenance.audit?.maximumReversedNormalFraction) || provenance.audit.maximumReversedNormalFraction < 0 || provenance.audit.maximumReversedNormalFraction > 0.01) errors.push('controlled audit surface evidence is invalid');
   }
   if (!Number.isInteger(provenance.audit?.artifactCount) || provenance.audit.artifactCount < 2) {

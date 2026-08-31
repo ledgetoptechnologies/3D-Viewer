@@ -97,31 +97,38 @@ normal update path must drain first. Compose grants two minutes after SIGTERM;
 do not force-kill a worker merely because a large operation has not exited yet.
 
 `LOCAL_DERIVATIVES_ENABLED` remains false in the stock image, so local Entwine
-point-cloud conversion stays disabled. Mesh generation is separately gated:
-the production image pins Obj2Tiles 1.6.2, and production Compose enables
-`MESH_DERIVATIVES_ENABLED` by default so missing derivatives and failures are
-visible in Background Work. The server fallback is also true when an older
-deployment omits the variable; operators can explicitly set it false to
-disable generation. The production path uses verified native 3D Tiles for
-interactive 3D viewing and retains the original GLB for authenticated download
-only. Missing or invalid tiles
-receive one optional background generation attempt only when both a textured
-OBJ and independent companion GLB are present; existing active published and
-review-ready imports use the same bounded backfill cursor without reimporting
-or taking the original model offline.
-Failure retains the downloadable GLB and requires an authorized manual retry; failed
-work is never automatically requeued. GLB-only and OBJ-only sources remain
-fail-closed because the image has no pinned interchange converter capable of
-supplying independently auditable preservation evidence. Native/imported 3D
-Tiles are exposed only after exact LOD-v2 evidence proves their full-detail
-geometry, attributes, materials, and texture bytes. The trusted local Obj2Tiles
-1.6.2 generation call uses a distinct schema-v3 proof because the pinned tool
-retriangulates partition edges and repacks texture atlases. V3 is bound to the
-approved architecture-specific executable and command plus source and artifact
-digests, and verifies aggregate surface invariants and deterministic
-bidirectional BVH samples with mandatory opaque textured UV coverage. Imported
-tiles cannot select v3; missing, shifted, untextured, or unrelated geometry
-remains quarantined.
+point-cloud conversion stays disabled. Mesh generation is a separate, automatic
+TrueNAS worker stage. The production image pins Obj2Tiles 1.6.2 and Compose
+enables `MESH_DERIVATIVES_ENABLED` by default. The worker itself has fixed,
+non-overridable ceilings of 16 CPUs and 24 GiB RAM so the 24-core server retains capacity for NodeODM, the Viewer API, and storage work.
+No mesh conversion runs on the Hermes host or through an SMB-mounted working
+copy.
+
+A newly processed NodeODM result, mounted WebODM task import, or Terra catalog
+import does not become `ready_for_review` while a discovered textured mesh still
+needs streaming assets. When both textured OBJ and independent companion GLB
+are available, the required derivative lane generates ETC1S KTX2 3D Tiles even
+if the import also contained legacy JPEG tiles. If generation is impossible but
+native tiles and an auditable GLB exist, the native tree must pass its exact
+audit. The worker registers the exact verified manifest and only then commits
+readiness. Thus "ready" means the model can be opened immediately rather than
+merely meaning ODM returned an archive.
+
+Generation writes lease-token-specific `.incomplete` and `.complete` trees
+under managed TrueNAS storage. Audit and snapshot verification finish before a
+same-filesystem atomic rename and SQLite registration. The job has a persisted
+24-hour deadline, a three-claim maximum, one database-backed LOD singleton,
+and continuous disk/inode pressure checks. A crash leaves deterministic output
+that the next lease re-verifies; old token directories are removed only by the
+bounded terminal-job reconciler after its grace period.
+
+Existing controlled Obj2Tiles v3 JPEG output remains accepted, but successful
+ready and published versions are immutable. There is no automatic legacy LOD
+backfill, in-place asset switch, or manual in-place retry. Upgrading one requires
+a new processing attempt/model version so the active version remains the
+rollback path. Operators may explicitly set `MESH_DERIVATIVES_ENABLED=false`,
+but eligible required OBJ+GLB work then fails closed instead of bypassing mesh
+readiness or exposing legacy tiles.
 
 ## Dataset lifecycle
 

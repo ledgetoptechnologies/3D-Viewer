@@ -1,36 +1,13 @@
 'use strict';
 const fs=require('node:fs');
 const path=require('node:path');
-const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
 const {LOD_DERIVATIVE_RECOVERY_REVISION}=require('./lodRecoveryPolicy');
 const {hashFileChunks,hashTree}=require('./storageManager');
 
-function reconcileMissingLodDerivatives(processing,storage,{meshDerivativesEnabled=false,limit=20}={}){
-  let queued=0,scanned=0,lastProcessed=null,conflict=false;
-  let candidates=processing.listLodBackfillCandidates(limit);
-  // A persisted cursor can point beyond every remaining candidate after an
-  // upgrade changes eligibility. Wrap once in the same maintenance pass so a
-  // single legacy model is not deferred until the next hourly run.
-  if(!candidates.length&&processing.lodBackfillCursor?.()){
-    processing.advanceLodBackfillCursor(null,false);
-    candidates=processing.listLodBackfillCandidates(limit);
-  }
-  for(const candidate of candidates){
-    scanned+=1;
-    try{
-      const assets=processing.modelAssetsForVersion(candidate.versionId);
-      if(!assets.some((asset)=>asset.kind==='tiles')){
-        const relative=path.posix.join(candidate.outputRelativePath||`${candidate.taskId}/${candidate.attemptId}`,'3d_tiles/model/tileset.json');
-        try{if(fs.statSync(storage.resolve(candidate.outputRootKey,relative,{mustExist:true})).isFile())assets.push({kind:'nativeTiles',rootKey:candidate.outputRootKey,relativePath:relative});}catch{}
-      }
-      const specs=lodDerivativeSpecs(assets,{meshDerivativesEnabled});
-      if(specs.length){if(!processing.enqueueOptionalDerivatives(candidate.attemptId,specs))throw Object.assign(new Error('LOD backfill candidate changed'),{code:'derivative_activation_conflict'});queued+=1;}
-      lastProcessed=candidate.attemptId;
-    }catch(error){if(error.code!=='derivative_activation_conflict')throw error;conflict=true;break;}
-  }
-  if(lastProcessed)processing.advanceLodBackfillCursor(lastProcessed,conflict||candidates.length>=limit);
-  else if(!conflict)processing.advanceLodBackfillCursor(null,false);
-  return{scanned,queued,conflict};
+function reconcileMissingLodDerivatives(){
+  // Successful ready and published versions are immutable. Upgrading one now
+  // requires a new processing attempt/model version, never an in-place job.
+  return{scanned:0,queued:0,conflict:false};
 }
 
 function reconcileLodMaintenance(processing,storage,{meshDerivativesEnabled=false,limit=20,recoveryRevision=LOD_DERIVATIVE_RECOVERY_REVISION}={}){

@@ -4,21 +4,14 @@ import path from 'node:path';
 import draco3d from 'draco3d';
 import { BufferGeometry, Float32BufferAttribute, Matrix3, Matrix4, Quaternion, Vector3 } from 'three';
 import { MeshBVH } from 'three-mesh-bvh';
+import converterPolicy from '../../lod-converter-policy.cjs';
 import { inspectLodTileset } from '../../lod-policy.mjs';
 
 export const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 export const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
-export const CONTROLLED_CONVERTER = Object.freeze({
-  name: 'OpenDroneMap/Obj2Tiles',
-  version: '1.6.2',
-  arguments: ['--octree', '--lods', '3', '--divisions', '2', '--lod-texture-scale', '0.5', '--local', '<source.obj>', '<output>'],
-});
-export const CONTROLLED_CONVERTER_BINARY_SHA256 = Object.freeze([
-  // v1.6.2 Obj2Tiles-Linux64.zip (archive SHA-256 34a576e0...baa0).
-  '40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274',
-  // v1.6.2 Obj2Tiles-LinuxArm64.zip (archive SHA-256 b5252158...ed5).
-  'c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1',
-]);
+export const CONTROLLED_CONVERTER = converterPolicy.CONTROLLED_CONVERTER;
+export const CONTROLLED_CONVERTER_BINARY_SHA256 = converterPolicy.CONTROLLED_CONVERTER_BINARY_SHA256;
+export const CONTROLLED_CONVERTER_COMMAND_SHA256 = converterPolicy.CONTROLLED_CONVERTER_COMMAND_SHA256;
 export const DEFAULT_TOLERANCE = 1e-6;
 const CONTROLLED_SAMPLE_COUNT = 16_384;
 const CONTROLLED_RELATIVE_SURFACE_TOLERANCE = 2e-5;
@@ -318,12 +311,16 @@ function resolveImage(asset, imageIndex, label) {
 function textureDescriptor(asset, index, label) {
   const texture = asset.json.textures?.[index];
   if (!texture) throw new Error(`${label}: texture ${index} is missing`);
-  if (texture.extensions?.KHR_texture_basisu || texture.extensions?.EXT_texture_webp) {
+  const basisu = texture.extensions?.KHR_texture_basisu;
+  if (texture.extensions?.EXT_texture_webp
+    || (basisu && !asset.allowCompressedTextureSources)) {
     throw new Error(`${label}: alternate compressed texture sources are not supported by v2`);
   }
+  const source = basisu?.source ?? texture.source;
+  if (!Number.isInteger(source)) throw new Error(`${label}: texture ${index} has no auditable image source`);
   const sampler = asset.json.samplers?.[texture.sampler] || {};
   return {
-    image: resolveImage(asset, texture.source, label),
+    image: resolveImage(asset, source, label),
     sampler: {
       magFilter: sampler.magFilter ?? 9729,
       minFilter: sampler.minFilter ?? 9987,
@@ -501,21 +498,21 @@ async function extractTriangles(asset, rootTransform, label) {
   return triangles;
 }
 
-function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null, applyCesiumRtc = true) {
+function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null, applyCesiumRtc = true, allowCompressedTextureSources = false) {
   const label = path.relative(root, filePath) || path.basename(filePath);
   const parsed = parseGlb(embeddedBuffer || fs.readFileSync(filePath), label);
   if ((parsed.json.buffers || []).length > 1 || (parsed.json.buffers?.[0]?.uri)) {
     throw new Error(`${label}: only a single embedded GLB buffer is supported`);
   }
   const supportedExtension = (name) => name === 'CESIUM_RTC' || name === 'KHR_mesh_quantization'
-    || name === 'KHR_draco_mesh_compression'
+    || name === 'KHR_draco_mesh_compression' || (allowCompressedTextureSources && name === 'KHR_texture_basisu')
     || name === 'KHR_texture_transform' || (/^KHR_materials_/.test(name) && name !== 'KHR_materials_variants');
   const unsupportedRequired = (parsed.json.extensionsRequired || []).find((name) => !supportedExtension(name));
   if (unsupportedRequired) throw new Error(`${label}: required extension ${unsupportedRequired} is not supported by v2`);
-  return { ...parsed, root, baseDir: path.dirname(filePath), bindExternal, applyCesiumRtc };
+  return { ...parsed, root, baseDir: path.dirname(filePath), bindExternal, applyCesiumRtc, allowCompressedTextureSources };
 }
 
-async function collectLeafTriangles(derivativeDir, artifacts) {
+async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedTextureSources = false } = {}) {
   const triangles = [];
   const visitedTilesets = new Set();
 
@@ -577,7 +574,7 @@ async function collectLeafTriangles(derivativeDir, artifacts) {
       const tileContentTransform = rtc ? world.clone().multiply(new Matrix4().makeTranslation(...rtc)) : world;
       const contentTransform = TILE_TO_GLTF.clone().multiply(tileContentTransform).multiply(GLTF_TO_TILE);
       triangles.push(...await extractTriangles(
-        loadGlbAsset(contentPath, derivativeDir, glb, bindArtifact),
+        loadGlbAsset(contentPath, derivativeDir, glb, bindArtifact, true, allowCompressedTextureSources),
         contentTransform,
         uri,
       ));
@@ -970,10 +967,12 @@ export async function auditControlledObj2Tiles({
     IDENTITY,
     path.basename(sourceGlb),
   );
-  const { triangles: leaves } = await collectLeafTriangles(derivativeDir, artifactMap);
+  const { triangles: leaves } = await collectLeafTriangles(derivativeDir, artifactMap, {
+    allowCompressedTextureSources: true,
+  });
   const artifacts = [...artifactMap.values()].sort((a, b) => a.uri.localeCompare(b.uri));
   const comparison = controlledSurfaceComparison(source, leaves, sourceDigest);
-  const commandSha256 = sha256(stable(CONTROLLED_CONVERTER));
+  const commandSha256 = CONTROLLED_CONVERTER_COMMAND_SHA256;
   const surfaceEvidence = {
     sourceTriangleCount: source.length,
     leafTriangleCount: leaves.length,

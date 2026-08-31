@@ -7,6 +7,7 @@ import 'leaflet/dist/leaflet.css';
 import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
+import { installLodKtx2Support } from './lod-ktx2.mjs';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import {
   advanceLodMemoryPressure,
@@ -152,6 +153,7 @@ let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
+let lodKtx2Support = null;
 let lodRuntimeProfileState = null;
 let lodWarmupComplete = false;
 let lodBootstrapPhase = 'inactive';
@@ -834,6 +836,7 @@ function loadTiles() {
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
   tilesRenderer = rendererInstance;
+  lodKtx2Support = installLodKtx2Support(rendererInstance, renderer);
   const detailSlider = document.getElementById('lod-detail');
   const deviceMemoryGiB = navigator.deviceMemory
     ?? (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ? 4 : 8);
@@ -983,9 +986,18 @@ function disposeTiles() {
   lodTileRetryTimer = null;
   if (restoreLodOverviewRetention) restoreLodOverviewRetention();
   restoreLodOverviewRetention = null;
-  if (!tilesRenderer) return;
+  if (!tilesRenderer) {
+    lodKtx2Support?.dispose();
+    lodKtx2Support = null;
+    return;
+  }
   tilesParent.remove(tilesRenderer.group);
-  tilesRenderer.dispose();
+  try {
+    tilesRenderer.dispose();
+  } finally {
+    lodKtx2Support?.dispose();
+    lodKtx2Support = null;
+  }
   tilesRenderer = null;
   lodRuntimeProfileState = null;
   lodWarmupComplete = false;

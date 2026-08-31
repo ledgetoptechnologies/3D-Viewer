@@ -84,8 +84,24 @@ class StorageManager {
     if(mustExist){const real=fs.realpathSync.native(candidate);if(real!==resolvedRoot&&!real.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('symlink escapes configured root'),{code:'invalid_storage_location'});return real;}
     let parent=path.dirname(candidate);while(!fs.existsSync(parent)&&parent!==resolvedRoot)parent=path.dirname(parent);const realParent=fs.realpathSync.native(parent);if(realParent!==resolvedRoot&&!realParent.startsWith(resolvedRoot+path.sep))throw Object.assign(new Error('parent symlink escapes configured root'),{code:'invalid_storage_location'});return candidate;
   }
-  space(rootKey,requiredBytes=0) { const root=this.roots[rootKey]; const stat=fs.statfsSync(root); const available=Number(stat.bavail)*Number(stat.bsize); const total=Number(stat.blocks)*Number(stat.bsize); const reserve=Math.max(this.config.storageReserveBytes,Math.ceil(total*this.config.storageReservePercent/100)); return {available,total,reserve,required:requiredBytes,ok:available-requiredBytes>=reserve}; }
+  space(rootKey,requiredBytes=0) {
+    const root=this.roots[rootKey],stat=fs.statfsSync(root);
+    const available=Number(stat.bavail)*Number(stat.bsize),total=Number(stat.blocks)*Number(stat.bsize);
+    const reserve=Math.max(this.config.storageReserveBytes,Math.ceil(total*this.config.storageReservePercent/100));
+    return {available,total,reserve,required:requiredBytes,ok:available-requiredBytes>=reserve,files:Number(stat.files),ffree:Number(stat.ffree)};
+  }
   requireSpace(rootKey,bytes) { const result=this.space(rootKey,bytes);if(!result.ok)throw Object.assign(new Error('insufficient storage headroom'),{code:'insufficient_storage',details:result});return result; }
+  requireDerivativeSpace(rootKey,{sourceBytes,expectedFiles=10000}={}){
+    const bytes=Number(sourceBytes),filesNeeded=Math.max(1,Number(expectedFiles)||0),gib=1024**3;
+    if(!Number.isSafeInteger(bytes)||bytes<0||bytes>16*gib)throw Object.assign(new Error('derivative source size is outside the supported bound'),{code:'insufficient_storage'});
+    const required=Math.max(5*gib,bytes*4);
+    if(!Number.isSafeInteger(required))throw Object.assign(new Error('derivative storage estimate overflowed'),{code:'insufficient_storage'});
+    const result=this.requireSpace(rootKey,required),totalInodes=Number(result.files),freeInodes=Number(result.ffree);
+    if(!Number.isFinite(totalInodes)||totalInodes<=0||!Number.isFinite(freeInodes)||freeInodes<0)throw Object.assign(new Error('inode headroom is unavailable'),{code:'insufficient_storage',details:result});
+    const inodeReserve=Math.min(100000,Math.max(10000,Math.ceil(totalInodes*0.05)));
+    if(freeInodes-filesNeeded<inodeReserve)throw Object.assign(new Error('insufficient inode headroom'),{code:'insufficient_storage',details:{...result,expectedFiles:filesNeeded,inodeReserve}});
+    return {...result,expectedFiles:filesNeeded,inodeReserve};
+  }
   sameFilesystem(left,right){return fs.statSync(this.roots[left]).dev===fs.statSync(this.roots[right]).dev;}
   requireProcessingHeadroom(datasetBytes,reservedDatasetBytes=[]){const estimate=(value)=>{const bytes=Math.max(0,Number(value)||0);return{datasets:0,cache:Math.max(256*1024*1024,bytes),models:Math.max(1024*1024*1024,bytes*3)};},requirements=estimate(datasetBytes),reserved=(Array.isArray(reservedDatasetBytes)?reservedDatasetBytes:[]).map(estimate),groups=new Map();for(const [rootKey,required] of Object.entries(requirements)){const dev=fs.statSync(this.roots[rootKey]).dev,key=String(dev),current=groups.get(key)||{rootKey,required:0,reservedRequired:0,roots:[]};current.required+=required;current.reservedRequired+=reserved.reduce((sum,item)=>sum+item[rootKey],0);current.roots.push(rootKey);groups.set(key,current);}const result={};for(const group of groups.values()){const checked=this.requireSpace(group.rootKey,group.required+group.reservedRequired);for(const rootKey of group.roots)result[rootKey]={...checked,required:requirements[rootKey],reservedRequired:group.reservedRequired,sharedRequired:group.required+group.reservedRequired,sharedWith:[...group.roots]};}return result;}
   chunkPath(uploadId,fileId,index) { return this.resolve('cache',`uploads/${uploadId}/${fileId}/${index}.part`); }

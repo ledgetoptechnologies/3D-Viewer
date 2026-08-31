@@ -1425,6 +1425,54 @@ const MIGRATIONS = [
         ON camera_photo_reconciliation_state(status,next_attempt_at,version_id);
     `,
   },
+  {
+    version: 27,
+    name: 'fenced_lod_conversion_singleton',
+    sql: `
+      ALTER TABLE derivative_jobs ADD COLUMN lease_token TEXT;
+      ALTER TABLE derivative_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0
+        CHECK(attempt_count >= 0);
+      ALTER TABLE derivative_jobs ADD COLUMN first_started_at TEXT;
+      ALTER TABLE derivative_jobs ADD COLUMN deadline_at TEXT;
+
+      -- A rolling upgrade can expose more than one lease created by the old
+      -- worker. Keep the longest-lived lease and fence every other old claim
+      -- before installing the database-level singleton invariant.
+      UPDATE derivative_jobs SET
+        status='pending',lease_owner=NULL,lease_token=NULL,
+        lease_expires_at=NULL,heartbeat_at=NULL
+      WHERE id IN (
+        SELECT id FROM derivative_jobs
+        WHERE derivative_type IN ('mesh_tiles','lod_audit') AND status='leased'
+        ORDER BY lease_expires_at DESC,updated_at,id
+        LIMIT -1 OFFSET 1
+      );
+      CREATE UNIQUE INDEX derivative_jobs_single_lod_lease
+        ON derivative_jobs(status)
+        WHERE derivative_type IN ('mesh_tiles','lod_audit') AND status='leased';
+      CREATE INDEX derivative_jobs_deadline_idx
+        ON derivative_jobs(status,deadline_at,lease_expires_at,created_at)
+        WHERE derivative_type IN ('mesh_tiles','lod_audit');
+
+      CREATE TABLE lod_conversion_lock (
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        job_id TEXT,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        CHECK(
+          (job_id IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+          OR
+          (job_id IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+        )
+      );
+      INSERT INTO lod_conversion_lock(id) VALUES (1);
+      CREATE TRIGGER lod_conversion_lock_no_delete
+        BEFORE DELETE ON lod_conversion_lock
+        BEGIN SELECT RAISE(ABORT,'lod_conversion_lock_immutable'); END;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

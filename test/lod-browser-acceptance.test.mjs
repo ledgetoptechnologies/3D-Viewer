@@ -1811,3 +1811,85 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     removeBrowserProfile(profile);
   }
 });
+
+test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile path', { timeout: 90_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for KTX2 browser acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'));
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-ktx2-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Log.enable');
+    await client.command('Network.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', {
+      width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+      screenWidth: 1440, screenHeight: 900,
+    });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, `(() => {
+      const tiles = window.__ltds?.tiles?.();
+      if (!tiles?.root || !tiles.group.children.length) return false;
+      let maps = 0;
+      tiles.group.traverse(object => {
+        const materials = object.material ? (Array.isArray(object.material) ? object.material : [object.material]) : [];
+        for (const material of materials) if (material.map?.image) maps += 1;
+      });
+      return maps > 0;
+    })()`, 'KTX2 tile texture did not decode and attach', 60_000);
+
+    const state = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const maps = [];
+      tiles.group.traverse(object => {
+        const materials = object.material ? (Array.isArray(object.material) ? object.material : [object.material]) : [];
+        for (const material of materials) if (material.map) maps.push({
+          compressed: Boolean(material.map.isCompressedTexture),
+          width: material.map.image?.width || 0,
+          height: material.map.image?.height || 0,
+        });
+      });
+      return {
+        maps,
+        errorPanel: getComputedStyle(document.querySelector('#error-panel')).display,
+        cacheBytes: tiles.lruCache.cachedBytes,
+      };
+    })()`);
+    assert.equal(state.errorPanel, 'none');
+    assert.ok(state.maps.length > 0, JSON.stringify(state));
+    assert.equal(state.maps.every(map => map.compressed && map.width > 0 && map.height > 0), true, JSON.stringify(state));
+    assert.ok(state.cacheBytes > 0, JSON.stringify(state));
+    const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown'
+      && !event.params.exceptionDetails?.url?.includes('/@vite/client'));
+    assert.deepEqual(exceptions, []);
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise((resolve) => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock();
+    removeBrowserProfile(profile);
+  }
+});
