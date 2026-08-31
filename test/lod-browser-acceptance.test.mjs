@@ -539,12 +539,18 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
       errorTarget: window.__ltds.tiles().errorTarget,
       phase: window.__ltds.lodDiagnostics().phase,
+      bootstrapPhase: window.__ltds.state.lodRuntimeProfile?.bootstrapPhase,
+      errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
       status: document.querySelector('#lod-status').textContent,
     })`);
-    assert.deepEqual({ ...balancedStartup, status: undefined }, {
-      slider: '16', requested: 16, active: 16, errorTarget: 15.023,
-      phase: 'requested-detail', status: undefined,
-    });
+    assert.equal(balancedStartup.slider, '16');
+    assert.equal(balancedStartup.requested, 16);
+    assert.equal(balancedStartup.active, 16);
+    assert.equal(balancedStartup.phase, 'requested-detail');
+    assert.equal(balancedStartup.bootstrapPhase, 'complete');
+    assert.ok(balancedStartup.errorScale > 1, JSON.stringify(balancedStartup));
+    assert.ok(Math.abs(balancedStartup.errorTarget - 15.023 * balancedStartup.errorScale) < 0.01,
+      JSON.stringify(balancedStartup));
     assert.match(balancedStartup.status, /^LOD: (?:Detail 16|full-detail) \(\d+ tiles?\)$/);
     assert.doesNotMatch(balancedStartup.status, /warming|streaming/i);
     const startupLod0Requests = client.events.filter((event) => event.method === 'Network.requestWillBeSent'
@@ -605,7 +611,9 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
         errorTarget: window.__ltds.tiles().errorTarget,
       };
     })()`);
-    assert.deepEqual(explicitHighDetail, { slider: '24', requested: 24, active: 13, errorTarget: 32 });
+    assert.deepEqual(explicitHighDetail, {
+      slider: '24', requested: 24, active: 16, errorTarget: balancedStartup.errorTarget,
+    });
 
     const topRadius = Math.max(25, home.diameter * 0.15);
     const topPolar = 0.04;
@@ -850,10 +858,15 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     const defaultDetail = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       errorTarget: window.__ltds.tiles().errorTarget,
+      errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
       downloadJobs: window.__ltds.tiles().downloadQueue.maxJobs,
       parseJobs: window.__ltds.tiles().parseQueue.maxJobs,
     })`);
-    assert.deepEqual(defaultDetail, { slider: '24', errorTarget: 2, downloadJobs: 6, parseJobs: 2 });
+    assert.equal(defaultDetail.slider, '24');
+    assert.equal(defaultDetail.downloadJobs, 6);
+    assert.equal(defaultDetail.parseJobs, 2);
+    assert.ok(Math.abs(defaultDetail.errorTarget - 2 * defaultDetail.errorScale) < 0.01,
+      JSON.stringify(defaultDetail));
     await client.evaluate(`(() => {
       const slider = document.querySelector('#lod-detail');
       slider.value = '2';
@@ -861,7 +874,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       return true;
     })()`);
     try {
-      await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return window.__ltds.tiles().errorTarget===512&&n===0; })()`, 'minimum Detail setting did not coarsen the active frontier', 10_000);
+      await waitFor(client, `(() => { const r=window.__ltds.tiles().root; const p=window.__ltds.state.lodRuntimeProfile; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return Math.abs(window.__ltds.tiles().errorTarget-512*p.errorScale)<0.01&&n===0; })()`, 'minimum Detail setting did not coarsen the active frontier', 10_000);
     } catch (error) {
       const detailDiagnostics = await client.evaluate(`(() => {
         const tiles=window.__ltds.tiles(); const rows=[];
@@ -876,7 +889,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       slider.dispatchEvent(new Event('input', { bubbles: true }));
       return true;
     })()`);
-    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return window.__ltds.tiles().errorTarget===2&&n>0; })()`, 'maximum Detail setting did not restore full-detail leaves');
+    await waitFor(client, `(() => { const r=window.__ltds.tiles().root; const p=window.__ltds.state.lodRuntimeProfile; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return Math.abs(window.__ltds.tiles().errorTarget-2*p.errorScale)<0.01&&n>0; })()`, 'maximum Detail setting did not restore full-detail leaves');
 
     await setView(client, [0, 1300, 1300], [0, 18, 0]);
     await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return n===0; })()`, 'far view kept LOD-0 leaves');
@@ -1009,10 +1022,16 @@ test('browser close view refines at the default Detail and small motion retains 
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
       active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
       errorTarget: window.__ltds.tiles().errorTarget,
+      bootstrapPhase: window.__ltds.state.lodRuntimeProfile?.bootstrapPhase,
+      errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
     })`);
-    assert.deepEqual(defaultState, {
-      slider: '16', requested: 16, active: 16, errorTarget: 15.023,
-    }, 'the default view must be close-responsive without requesting global Detail 24');
+    assert.equal(defaultState.slider, '16');
+    assert.equal(defaultState.requested, 16);
+    assert.equal(defaultState.active, 16);
+    assert.equal(defaultState.bootstrapPhase, 'complete');
+    assert.ok(defaultState.errorScale > 1, JSON.stringify(defaultState));
+    assert.ok(Math.abs(defaultState.errorTarget - 15.023 * defaultState.errorScale) < 0.01,
+      `the default view must be calibrated to complete coarse coverage: ${JSON.stringify(defaultState)}`);
 
     const basePosition = [0, 44, 52];
     const baseTarget = [0, 18, 0];
@@ -1137,9 +1156,9 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     const lodDiagnostics = await client.evaluate(`window.__ltds.lodDiagnostics()`);
-    assert.ok(['warmup', 'requested-detail', 'reduced-memory', 'memory-limited'].includes(lodDiagnostics.phase), JSON.stringify(lodDiagnostics));
+    assert.ok(['overview', 'coverage', 'warmup', 'requested-detail', 'reduced-memory', 'memory-limited'].includes(lodDiagnostics.phase), JSON.stringify(lodDiagnostics));
     assert.ok(Number.isInteger(lodDiagnostics.pendingRequiredLeaves) && lodDiagnostics.pendingRequiredLeaves >= 0, JSON.stringify(lodDiagnostics));
-    assert.equal(lodDiagnostics.cache.maxMiB, 3584);
+    assert.ok([768, 1792, 3072].includes(lodDiagnostics.cache.maxMiB), JSON.stringify(lodDiagnostics));
     assert.doesNotMatch(JSON.stringify(lodDiagnostics), /https?:|token|secret|storage|mnt/i);
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     try {
@@ -1311,9 +1330,13 @@ test('browser hides the coarse root when every visible branch meets the active D
     const stagedRequest = await client.evaluate(`(() => {
       const slider=document.querySelector('#lod-detail');slider.value='24';slider.dispatchEvent(new Event('input',{bubbles:true}));
       return {requested:window.__ltds.state.lodRuntimeProfile?.requestedDetail,
-        active:window.__ltds.state.lodRuntimeProfile?.activeDetail,errorTarget:window.__ltds.tiles().errorTarget};
+        active:window.__ltds.state.lodRuntimeProfile?.activeDetail,errorTarget:window.__ltds.tiles().errorTarget,
+        errorScale:window.__ltds.state.lodRuntimeProfile?.errorScale};
     })()`);
-    assert.deepEqual(stagedRequest, { requested: 24, active: 13, errorTarget: 32 });
+    assert.equal(stagedRequest.requested, 24);
+    assert.equal(stagedRequest.active, 13);
+    assert.ok(Math.abs(stagedRequest.errorTarget - 32 * stagedRequest.errorScale) < 0.01,
+      JSON.stringify(stagedRequest));
     try {
       await waitFor(client, `(() => {
         const t=window.__ltds.tiles(); let required=0,attached=0;

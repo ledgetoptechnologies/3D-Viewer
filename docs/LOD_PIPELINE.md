@@ -51,9 +51,11 @@ A renderable-root hierarchy bootstraps complete coverage before normal detail:
 
 The captured coarse frontier alone is retained in the LRU so returning to Home
 can reattach it immediately. This does not enable ancestor loading, retain
-intermediate/fine paths, or render an overlapping root backdrop. Clients
-reporting 4 GiB or less settle on the complete renderable root, remain capped at
-Detail 13, and keep the separate 768 MiB reduced-memory profile.
+intermediate/fine paths, or render an overlapping root backdrop. The renderer
+uses a shared LRU, so the narrow retention wrapper is restored on every tile
+renderer disposal before another model can load. Clients reporting 4 GiB or
+less settle on the complete renderable root, remain capped at Detail 13, and
+keep the separate 768 MiB reduced-memory profile.
 
 The ordinary desktop cache retains 0.4 GiB below a 1.75 GiB maximum, with 8
 warm entries and a 1,024-item failsafe. The byte ceiling is the real memory

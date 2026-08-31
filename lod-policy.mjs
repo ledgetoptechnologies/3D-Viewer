@@ -100,6 +100,28 @@ export function retainLodOverviewTiles(tilesRenderer, overviewTiles) {
   return retained;
 }
 
+export function installLodOverviewRetention(tilesRenderer, overviewTilesProvider) {
+  const cache = tilesRenderer?.lruCache;
+  const original = cache?.scheduleUnload;
+  if (!cache || typeof original !== 'function'
+    || typeof overviewTilesProvider !== 'function') return () => false;
+
+  let installed = true;
+  const wrapped = function (...args) {
+    const overviewTiles = overviewTilesProvider();
+    retainLodOverviewTiles(tilesRenderer, overviewTiles);
+    return original.apply(cache, args);
+  };
+  cache.scheduleUnload = wrapped;
+
+  return () => {
+    if (!installed) return false;
+    installed = false;
+    if (cache.scheduleUnload === wrapped) cache.scheduleUnload = original;
+    return true;
+  };
+}
+
 // Keep a bounded warm cache, but leave most of the budget available for the
 // camera-selected frontier. The previous 3.25 GiB soft floor combined with
 // loadAncestors pinned obsolete replacement paths and made an ordinary camera

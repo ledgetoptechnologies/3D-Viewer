@@ -12,6 +12,7 @@ import {
   detailToErrorTarget,
   inspectLodProvenance,
   inspectLodTileset,
+  installLodOverviewRetention,
   LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET,
   LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET,
   LOD_REFINEMENT_STEP,
@@ -633,6 +634,35 @@ test('overview retention pins only the captured coarse frontier in the LRU', () 
   assert.equal(retainLodOverviewTiles(renderer, [retained, evicted]), 1);
   assert.deepEqual(marked, [retained]);
   assert.equal(retainLodOverviewTiles(null, [retained]), 0);
+});
+
+test('overview retention restores the shared LRU scheduler on dispose', () => {
+  const retained = { id: 'overview' };
+  const calls = [];
+  const cache = {
+    has: (tile) => tile === retained,
+    scheduleUnload(...args) { calls.push(['schedule', ...args]); return 'scheduled'; },
+  };
+  const original = cache.scheduleUnload;
+  const renderer = {
+    lruCache: cache,
+    markTileUsed: (tile) => calls.push(['used', tile]),
+  };
+  const restore = installLodOverviewRetention(renderer, () => [retained]);
+  assert.notEqual(cache.scheduleUnload, original);
+  assert.equal(cache.scheduleUnload('frame'), 'scheduled');
+  assert.deepEqual(calls, [['used', retained], ['schedule', 'frame']]);
+  assert.equal(restore(), true);
+  assert.equal(cache.scheduleUnload, original);
+  assert.equal(restore(), false, 'restoration is idempotent');
+
+  const secondMarked = [];
+  const secondRenderer = { lruCache: cache, markTileUsed: tile => secondMarked.push(tile) };
+  const restoreSecond = installLodOverviewRetention(secondRenderer, () => [retained]);
+  cache.scheduleUnload('second');
+  assert.deepEqual(secondMarked, [retained], 'a second renderer receives one wrapper, not a retained call chain');
+  assert.equal(restoreSecond(), true);
+  assert.equal(cache.scheduleUnload, original);
 });
 
 test('large measured overview gets bounded branch-completion headroom', () => {

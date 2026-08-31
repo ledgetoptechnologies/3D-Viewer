@@ -15,6 +15,7 @@ import {
   decideLodStartup,
   inspectLodProvenance,
   inspectLodTileset,
+  installLodOverviewRetention,
   lodBootstrapCoverageErrorTarget,
   lodBootstrapRootErrorTarget,
   lodDebugSnapshot,
@@ -158,6 +159,7 @@ let lodBootstrapRootTarget = 4096;
 let lodBootstrapCoverageTarget = 1024;
 let lodErrorScale = 1;
 let lodOverviewTiles = [];
+let restoreLodOverviewRetention = null;
 let lodStarvationSamples = 0;
 let lodStarvedAtDetail = null;
 let lodCacheRecoveryActive = false;
@@ -841,13 +843,11 @@ function loadTiles() {
     detail: detailSlider?.value,
     deviceMemoryGiB,
   });
-  const scheduleLodUnload = rendererInstance.lruCache.scheduleUnload.bind(rendererInstance.lruCache);
-  rendererInstance.lruCache.scheduleUnload = () => {
-    if (tilesRenderer === rendererInstance && lodOverviewTiles.length > 0) {
-      retainLodOverviewTiles(rendererInstance, lodOverviewTiles);
-    }
-    return scheduleLodUnload();
-  };
+  if (restoreLodOverviewRetention) restoreLodOverviewRetention();
+  restoreLodOverviewRetention = installLodOverviewRetention(
+    rendererInstance,
+    () => (tilesRenderer === rendererInstance ? lodOverviewTiles : []),
+  );
   rendererInstance.errorTarget = lodBootstrapRootTarget;
   state.lodRuntimeProfile = {
     ...lodRuntimeProfileState,
@@ -964,7 +964,7 @@ function loadTiles() {
   tilesParent.add(rendererInstance.group);
 }
 
-// Free ~2.5GB of decoded tile textures/geometry. Needed before the 898MB GLB
+// Free up to 3 GiB of decoded tile textures/geometry. Needed before a large
 // Draco decode: cache + decode together OOM'd the renderer (heap hit 2.7GB).
 function disposeTiles() {
   lodBootstrapPhase = 'inactive';
@@ -982,6 +982,8 @@ function disposeTiles() {
   lodTileLastFailureAt = 0;
   if (lodTileRetryTimer) clearTimeout(lodTileRetryTimer);
   lodTileRetryTimer = null;
+  if (restoreLodOverviewRetention) restoreLodOverviewRetention();
+  restoreLodOverviewRetention = null;
   if (!tilesRenderer) return;
   tilesParent.remove(tilesRenderer.group);
   tilesRenderer.dispose();
@@ -3689,7 +3691,10 @@ function maybeAdvanceLodBootstrap() {
       lodErrorScale = lodErrorScaleForCoverage(lodBootstrapRootTarget);
       lodOverviewTiles = [root];
       retainLodOverviewTiles(tilesRenderer, lodOverviewTiles);
-      lodRuntimeProfileState.activeDetail = lodRuntimeProfileState.maximumDetail;
+      lodRuntimeProfileState.activeDetail = Math.min(
+        lodRuntimeProfileState.maximumDetail,
+        lodRuntimeProfileState.requestedDetail,
+      );
       lodWarmupComplete = true;
       lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
       lodBootstrapPhase = 'complete';

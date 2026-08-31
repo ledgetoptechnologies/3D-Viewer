@@ -75,8 +75,10 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.match(main, /lodOverviewTiles = captureLodOverviewTiles\(root\)/);
   assert.match(main, /lodCacheMaxBytesForOverview\(/);
   assert.match(main, /tilesRenderer\.lruCache\.maxBytesSize = expandedMaxBytes/);
-  assert.match(main, /retainLodOverviewTiles\(rendererInstance, lodOverviewTiles\)/);
-  assert.match(main, /rendererInstance\.lruCache\.scheduleUnload = \(\) =>/);
+  assert.match(main, /restoreLodOverviewRetention = installLodOverviewRetention\(/);
+  assert.match(main, /if \(restoreLodOverviewRetention\) restoreLodOverviewRetention\(\);\s*restoreLodOverviewRetention = null;/);
+  assert.doesNotMatch(main, /rendererInstance\.lruCache\.scheduleUnload =/);
+  assert.match(main, /lodRuntimeProfileState\.activeDetail = Math\.min\(\s*lodRuntimeProfileState\.maximumDetail,\s*lodRuntimeProfileState\.requestedDetail/);
   assert.match(main, /lodWarmupComplete = lodRuntimeProfileState\.reduced/);
   assert.match(main, /LOD: reduced-memory/);
   assert.doesNotMatch(main, /engineData\.scene\.visible\s*=/);
