@@ -1,5 +1,37 @@
 # Viewer LOD and camera investigation handoff
 
+## 2026-08-30 authenticated complete-coverage fix
+
+The authenticated church hierarchy proved the remaining blank-space problem was
+startup order, foreground priority, and replacement-branch headroom:
+
+- Detail 13 selected all 256 zero-error leaves before any complete coarse
+  frontier had been established.
+- SSE-first queue ordering loaded farther positive-error intermediate content
+  ahead of nearby zero-error leaves.
+- The complete 16-tile coarse frontier consumed about 1.27 GiB decoded, leaving
+  too little of the ordinary 1.75 GiB ceiling to finish a foreground REPLACE
+  branch before its parent could be replaced.
+
+The Viewer now loads one renderable root overview, replaces it only after a
+complete coarse frontier is attached and queues settle, captures that frontier
+for narrow LRU retention, and calibrates Detail 16 to the measured coverage
+SSE. Queue priority follows optimized traversal: used/in-frustum, then nearest
+camera distance. Large measured overview frontiers receive bounded
+branch-completion headroom up to 3 GiB; small models remain at 1.75 GiB and
+reduced-memory clients settle on the complete root under the existing 768 MiB
+cap. `loadAncestors`, sibling preloads, automatic global detail rollback, root
+`ADD`, and overlapping coarse rendering remain disabled.
+
+The final local bundle was run against the protected production church assets.
+All 40 sampled bootstrap, close, orbit, and return frames retained structural
+coverage. Startup attached 16/16 coarse tiles, close/orbit attached 12 nearby
+fine leaves, return immediately exposed all 16 coarse tiles, loaded fine leaves
+had median camera distance 6.9 versus 23.5 for pending leaves, and no runtime
+exceptions occurred. A 64-leaf local fixture also passed initial, close, tiny
+move, wide, and return, while a forced 4 GiB browser stayed on one complete root
+with no pending work.
+
 ## 2026-08-30 local item-admission reproduction
 
 Commit `7c0639c` was reproduced in a real headless browser with a generated

@@ -11,19 +11,25 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-
 import {
   advanceLodMemoryPressure,
   configureLodRenderer,
+  DEFAULT_LOD_DETAIL,
   decideLodStartup,
-  detailToErrorTarget,
   inspectLodProvenance,
   inspectLodTileset,
+  lodBootstrapCoverageErrorTarget,
+  lodBootstrapRootErrorTarget,
   lodDebugSnapshot,
+  lodCacheMaxBytesForOverview,
   lodDetailRequestPending,
+  lodErrorScaleForCoverage,
   lodCacheRetentionMinBytes,
   lodQueuesSettled,
   lodViewChangeRequiresRetry,
   refreshLodResolution,
   recoverLodCacheAdmission,
+  retainLodOverviewTiles,
   resolveLodDetailRequest,
   resolveLodWarmupAdvance,
+  scaledDetailToErrorTarget,
   visibleLodFrontier,
   visibleLodTargetSatisfied,
 } from './lod-policy.mjs';
@@ -147,6 +153,11 @@ let lodFailureHandled = false;
 let tilesRenderer = null;
 let lodRuntimeProfileState = null;
 let lodWarmupComplete = false;
+let lodBootstrapPhase = 'inactive';
+let lodBootstrapRootTarget = 4096;
+let lodBootstrapCoverageTarget = 1024;
+let lodErrorScale = 1;
+let lodOverviewTiles = [];
 let lodStarvationSamples = 0;
 let lodStarvedAtDetail = null;
 let lodCacheRecoveryActive = false;
@@ -803,6 +814,11 @@ function drainBVH() {
 // ───────────────────────────────────────────────────────────────
 function loadTiles() {
   if (tilesRenderer) return;
+  lodBootstrapPhase = 'root';
+  lodBootstrapRootTarget = lodBootstrapRootErrorTarget();
+  lodBootstrapCoverageTarget = 1024;
+  lodErrorScale = 1;
+  lodOverviewTiles = [];
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
   lodCacheRecoveryActive = false;
@@ -825,16 +841,24 @@ function loadTiles() {
     detail: detailSlider?.value,
     deviceMemoryGiB,
   });
-  state.lodRuntimeProfile = { ...lodRuntimeProfileState, deviceMemoryGiB, starvedAtDetail: null };
-  lodWarmupComplete = lodRuntimeProfileState.reduced;
+  const scheduleLodUnload = rendererInstance.lruCache.scheduleUnload.bind(rendererInstance.lruCache);
+  rendererInstance.lruCache.scheduleUnload = () => {
+    if (tilesRenderer === rendererInstance && lodOverviewTiles.length > 0) {
+      retainLodOverviewTiles(rendererInstance, lodOverviewTiles);
+    }
+    return scheduleLodUnload();
+  };
+  rendererInstance.errorTarget = lodBootstrapRootTarget;
+  state.lodRuntimeProfile = {
+    ...lodRuntimeProfileState,
+    deviceMemoryGiB,
+    starvedAtDetail: null,
+    bootstrapPhase: lodBootstrapPhase,
+    errorScale: lodErrorScale,
+  };
+  lodWarmupComplete = false;
   state.lodRootBackdrop = null;
-  if (lodRuntimeProfileState.reduced) {
-    dom.lodStatus.textContent = `LOD: reduced-memory (Detail ${lodRuntimeProfileState.activeDetail}; ${lodRuntimeProfileState.maximumDetail} max)`;
-  } else if (lodDetailRequestPending(lodRuntimeProfileState)) {
-    dom.lodStatus.textContent = `LOD: warming (Detail ${lodRuntimeProfileState.activeDetail} → ${lodRuntimeProfileState.requestedDetail})`;
-  } else {
-    dom.lodStatus.textContent = `LOD: Detail ${lodRuntimeProfileState.activeDetail}`;
-  }
+  dom.lodStatus.textContent = 'LOD: loading complete overview';
   emitLodDebugSnapshot('startup', true);
   lodFailureHandled = false;
 
@@ -850,6 +874,22 @@ function loadTiles() {
     }
     if (rendererInstance.root?.internal?.hasRenderableContent) {
       rendererInstance.requestTileContents(rendererInstance.root);
+    } else {
+      // External/delegating roots have no single renderable overview. Preserve
+      // the existing staged path for those manifests instead of blocking on a
+      // root scene that can never exist.
+      lodBootstrapPhase = 'complete';
+      lodWarmupComplete = lodRuntimeProfileState.reduced;
+      rendererInstance.errorTarget = scaledDetailToErrorTarget(
+        lodRuntimeProfileState.activeDetail,
+        lodErrorScale,
+      );
+      state.lodRuntimeProfile = {
+        ...state.lodRuntimeProfile,
+        ...lodRuntimeProfileState,
+        bootstrapPhase: lodBootstrapPhase,
+        errorScale: lodErrorScale,
+      };
     }
     if (!report.canConvergeToZeroError) {
       console.warn('LOD root delegates to external tilesets; validate each child manifest.', report);
@@ -927,6 +967,11 @@ function loadTiles() {
 // Free ~2.5GB of decoded tile textures/geometry. Needed before the 898MB GLB
 // Draco decode: cache + decode together OOM'd the renderer (heap hit 2.7GB).
 function disposeTiles() {
+  lodBootstrapPhase = 'inactive';
+  lodBootstrapRootTarget = 4096;
+  lodBootstrapCoverageTarget = 1024;
+  lodErrorScale = 1;
+  lodOverviewTiles = [];
   lodStarvationSamples = 0;
   lodStarvedAtDetail = null;
   lodCacheRecoveryActive = false;
@@ -3341,13 +3386,28 @@ function bindUI() {
     if (!tilesRenderer || !lodRuntimeProfileState) return;
     tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, false);
     const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
+    if (lodBootstrapPhase !== 'complete') {
+      lodRuntimeProfileState.requestedDetail = next.requestedDetail;
+      state.lodRuntimeProfile = {
+        ...state.lodRuntimeProfile,
+        ...lodRuntimeProfileState,
+        bootstrapPhase: lodBootstrapPhase,
+        errorScale: lodErrorScale,
+        starvedAtDetail: null,
+      };
+      dom.lodStatus.textContent = lodBootstrapPhase === 'root'
+        ? 'LOD: loading complete overview'
+        : 'LOD: loading complete coarse coverage';
+      emitLodDebugSnapshot('detail-change-during-bootstrap', true);
+      return;
+    }
     if (Number.isFinite(lodLastSettledDetail)) {
       lodLastSettledDetail = Math.min(lodLastSettledDetail, next.activeDetail);
     }
     lodRuntimeProfileState.requestedDetail = next.requestedDetail;
     lodRuntimeProfileState.activeDetail = next.activeDetail;
     lodWarmupComplete = next.warmupComplete;
-    tilesRenderer.errorTarget = detailToErrorTarget(next.activeDetail);
+    tilesRenderer.errorTarget = lodTargetForDetail(next.activeDetail);
     state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState, starvedAtDetail: null };
     const detailPending = lodDetailRequestPending(lodRuntimeProfileState);
     dom.lodStatus.textContent = lodRuntimeProfileState.reduced
@@ -3569,7 +3629,15 @@ function toggleFullscreen() {
 let statTimer = 0;
 function emitLodDebugSnapshot(reason = 'status', force = false) {
   const runtimeProfile = lodRuntimeProfileState
-    ? { ...lodRuntimeProfileState, starvedAtDetail: lodStarvedAtDetail }
+    ? {
+      ...lodRuntimeProfileState,
+      starvedAtDetail: lodStarvedAtDetail,
+      bootstrapPhase: lodBootstrapPhase,
+      bootstrapRootTarget: lodBootstrapRootTarget,
+      bootstrapCoverageTarget: lodBootstrapCoverageTarget,
+      overviewTileCount: lodOverviewTiles.length,
+      errorScale: lodErrorScale,
+    }
     : null;
   const snapshot = lodDebugSnapshot(tilesRenderer, runtimeProfile, lodWarmupComplete);
   const signature = JSON.stringify(snapshot);
@@ -3579,8 +3647,131 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
   return snapshot;
 }
 
+function lodTargetForDetail(detail) {
+  return scaledDetailToErrorTarget(detail, lodErrorScale);
+}
+
+function lodTileSceneAttached(tile) {
+  const scene = tile?.engineData?.scene;
+  return Boolean(scene && tilesRenderer?.group?.children?.includes(scene));
+}
+
+function captureLodOverviewTiles(root) {
+  const overview = [];
+  const visit = (tile) => {
+    if (!tile) return;
+    if (tile?.traversal?.visible === true && lodTileSceneAttached(tile)) {
+      overview.push(tile);
+      return;
+    }
+    for (const child of tile.children || []) visit(child);
+  };
+  visit(root);
+  return overview;
+}
+
+function maybeAdvanceLodBootstrap() {
+  if (!tilesRenderer || !lodRuntimeProfileState
+    || !['root', 'coverage'].includes(lodBootstrapPhase)) return false;
+  const root = tilesRenderer.root;
+  if (!root) return true;
+
+  if (lodBootstrapPhase === 'root') {
+    lodBootstrapRootTarget = lodBootstrapRootErrorTarget(root?.traversal?.error);
+    tilesRenderer.errorTarget = lodBootstrapRootTarget;
+    const rootReady = root?.traversal?.visible === true && lodTileSceneAttached(root);
+    if (!rootReady) return true;
+    if (lodRuntimeProfileState.reduced) {
+      // The measured coarse church frontier alone exceeds the reduced-memory
+      // cache. Settle on the complete renderable root instead of waiting
+      // forever for a frontier the client cannot safely retain.
+      lodBootstrapCoverageTarget = lodBootstrapRootTarget;
+      lodErrorScale = lodErrorScaleForCoverage(lodBootstrapRootTarget);
+      lodOverviewTiles = [root];
+      retainLodOverviewTiles(tilesRenderer, lodOverviewTiles);
+      lodRuntimeProfileState.activeDetail = lodRuntimeProfileState.maximumDetail;
+      lodWarmupComplete = true;
+      lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
+      lodBootstrapPhase = 'complete';
+      tilesRenderer.errorTarget = lodTargetForDetail(lodRuntimeProfileState.activeDetail);
+      state.lodRuntimeProfile = {
+        ...state.lodRuntimeProfile,
+        ...lodRuntimeProfileState,
+        bootstrapPhase: lodBootstrapPhase,
+        bootstrapRootTarget: lodBootstrapRootTarget,
+        bootstrapCoverageTarget: lodBootstrapCoverageTarget,
+        overviewTileCount: lodOverviewTiles.length,
+        errorScale: lodErrorScale,
+      };
+      dom.lodStatus.textContent = `LOD: reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`;
+      emitLodDebugSnapshot('reduced-overview-ready', true);
+      return true;
+    }
+    lodBootstrapCoverageTarget = lodBootstrapCoverageErrorTarget(
+      root?.traversal?.error,
+      (root.children || []).map(child => child?.traversal?.error),
+    );
+    lodBootstrapPhase = 'coverage';
+    tilesRenderer.errorTarget = lodBootstrapCoverageTarget;
+    state.lodRuntimeProfile = {
+      ...state.lodRuntimeProfile,
+      bootstrapPhase: lodBootstrapPhase,
+      bootstrapRootTarget: lodBootstrapRootTarget,
+      bootstrapCoverageTarget: lodBootstrapCoverageTarget,
+    };
+    dom.lodStatus.textContent = 'LOD: loading complete coarse coverage';
+    emitLodDebugSnapshot('overview-ready', true);
+    return true;
+  }
+
+  tilesRenderer.errorTarget = lodBootstrapCoverageTarget;
+  if (!lodQueuesSettled(tilesRenderer)
+    || !visibleLodTargetSatisfied(root, lodBootstrapCoverageTarget)) return true;
+
+  lodOverviewTiles = captureLodOverviewTiles(root);
+  const measuredOverviewBytes = tilesRenderer.lruCache.cachedBytes;
+  const expandedMaxBytes = lodCacheMaxBytesForOverview(
+    tilesRenderer.lruCache.maxBytesSize,
+    measuredOverviewBytes,
+    lodRuntimeProfileState.reduced,
+  );
+  tilesRenderer.lruCache.maxBytesSize = expandedMaxBytes;
+  lodRuntimeProfileState.budget = {
+    ...lodRuntimeProfileState.budget,
+    maxBytesSize: expandedMaxBytes,
+  };
+  retainLodOverviewTiles(tilesRenderer, lodOverviewTiles);
+  lodErrorScale = lodErrorScaleForCoverage(lodBootstrapCoverageTarget);
+  const requested = Math.min(
+    lodRuntimeProfileState.maximumDetail,
+    lodRuntimeProfileState.requestedDetail,
+  );
+  lodRuntimeProfileState.activeDetail = lodRuntimeProfileState.reduced
+    ? requested
+    : Math.min(requested, DEFAULT_LOD_DETAIL);
+  lodWarmupComplete = true;
+  lodLastSettledDetail = lodRuntimeProfileState.activeDetail;
+  lodBootstrapPhase = 'complete';
+  tilesRenderer.errorTarget = lodTargetForDetail(lodRuntimeProfileState.activeDetail);
+  state.lodRuntimeProfile = {
+    ...state.lodRuntimeProfile,
+    ...lodRuntimeProfileState,
+    bootstrapPhase: lodBootstrapPhase,
+    bootstrapRootTarget: lodBootstrapRootTarget,
+    bootstrapCoverageTarget: lodBootstrapCoverageTarget,
+    overviewTileCount: lodOverviewTiles.length,
+    errorScale: lodErrorScale,
+  };
+  dom.lodStatus.textContent = lodDetailRequestPending(lodRuntimeProfileState)
+    ? `LOD: warming Detail ${lodRuntimeProfileState.activeDetail} → ${lodRuntimeProfileState.requestedDetail}`
+    : `LOD: Detail ${lodRuntimeProfileState.activeDetail}`;
+  emitLodDebugSnapshot('coarse-coverage-ready', true);
+  return true;
+}
+
 function maybeAdvanceLodWarmup() {
   if (!tilesRenderer || !lodRuntimeProfileState
+    || lodBootstrapPhase !== 'complete'
     || lodRuntimeProfileState.reduced) return false;
   if (!lodQueuesSettled(tilesRenderer)
     || !visibleLodTargetSatisfied(tilesRenderer.root, tilesRenderer.errorTarget)) return false;
@@ -3591,7 +3782,7 @@ function maybeAdvanceLodWarmup() {
   if (!advance) return false;
   Object.assign(lodRuntimeProfileState, advance);
   const targetDetail = advance.activeDetail;
-  tilesRenderer.errorTarget = detailToErrorTarget(targetDetail);
+  tilesRenderer.errorTarget = lodTargetForDetail(targetDetail);
   lodWarmupComplete = advance.warmupComplete;
   state.lodRuntimeProfile = { ...state.lodRuntimeProfile, ...lodRuntimeProfileState };
   dom.lodStatus.textContent = `LOD: warming Detail ${targetDetail} → ${advance.requestedDetail}`;
@@ -3626,7 +3817,7 @@ function retryLodForChangedView() {
   );
   Object.assign(lodRuntimeProfileState, next);
   lodWarmupComplete = next.warmupComplete;
-  tilesRenderer.errorTarget = detailToErrorTarget(next.activeDetail);
+  tilesRenderer.errorTarget = lodTargetForDetail(next.activeDetail);
   state.lodRuntimeProfile = {
     ...state.lodRuntimeProfile,
     ...lodRuntimeProfileState,
@@ -3649,7 +3840,7 @@ function startLoop() {
       if (camGroupParent?.visible) refreshCameraMarkerScales();
       if (tilesRenderer && tilesParent.visible) {
         tilesRenderer.update();
-        maybeAdvanceLodWarmup();
+        if (!maybeAdvanceLodBootstrap()) maybeAdvanceLodWarmup();
       }
       drainBVH();
 
@@ -3724,7 +3915,7 @@ function updateStats() {
     }
     if (pressure.changed) {
       lodRuntimeProfileState.activeDetail = pressure.profile.activeDetail;
-      tilesRenderer.errorTarget = detailToErrorTarget(pressure.profile.activeDetail);
+      tilesRenderer.errorTarget = lodTargetForDetail(pressure.profile.activeDetail);
       lodWarmupComplete = pressure.profile.activeDetail >= 13;
       lodPressureView = captureLodPressureView();
       state.lodRuntimeProfile = {
@@ -3737,7 +3928,11 @@ function updateStats() {
     const memoryLimited = lodStarvedAtDetail !== null
       && lodRuntimeProfileState?.activeDetail < lodRuntimeProfileState?.requestedDetail;
     const detailPending = lodDetailRequestPending(lodRuntimeProfileState);
-    const quality = memoryLimited
+    const quality = lodBootstrapPhase === 'root'
+      ? 'loading complete overview'
+      : lodBootstrapPhase === 'coverage'
+        ? 'loading complete coarse coverage'
+        : memoryLimited
       ? `memory-limited Detail ${lodRuntimeProfileState.activeDetail}`
       : lodRuntimeProfileState?.reduced
       ? `reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`

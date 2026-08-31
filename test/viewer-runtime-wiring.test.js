@@ -62,11 +62,25 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
   assert.match(main, /const advance = resolveLodWarmupAdvance\(lodRuntimeProfileState\)/);
   assert.match(main, /Object\.assign\(lodRuntimeProfileState, advance\)/);
-  assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(targetDetail\)/);
+  assert.match(main, /tilesRenderer\.errorTarget = lodTargetForDetail\(targetDetail\)/);
+  assert.match(main, /function maybeAdvanceLodBootstrap\(\)/);
+  assert.match(main, /lodBootstrapRootTarget = lodBootstrapRootErrorTarget\(root\?\.traversal\?\.error\)/);
+  assert.match(main, /lodBootstrapCoverageTarget = lodBootstrapCoverageErrorTarget\(/);
+  assert.match(main, /if \(lodRuntimeProfileState\.reduced\) \{/);
+  assert.match(main, /lodOverviewTiles = \[root\]/);
+  assert.match(main, /emitLodDebugSnapshot\('reduced-overview-ready', true\)/);
+  assert.match(main, /root\?\.traversal\?\.visible === true && lodTileSceneAttached\(root\)/);
+  assert.match(main, /visibleLodTargetSatisfied\(root, lodBootstrapCoverageTarget\)/);
+  assert.match(main, /lodErrorScale = lodErrorScaleForCoverage\(lodBootstrapCoverageTarget\)/);
+  assert.match(main, /lodOverviewTiles = captureLodOverviewTiles\(root\)/);
+  assert.match(main, /lodCacheMaxBytesForOverview\(/);
+  assert.match(main, /tilesRenderer\.lruCache\.maxBytesSize = expandedMaxBytes/);
+  assert.match(main, /retainLodOverviewTiles\(rendererInstance, lodOverviewTiles\)/);
+  assert.match(main, /rendererInstance\.lruCache\.scheduleUnload = \(\) =>/);
   assert.match(main, /lodWarmupComplete = lodRuntimeProfileState\.reduced/);
   assert.match(main, /LOD: reduced-memory/);
   assert.doesNotMatch(main, /engineData\.scene\.visible\s*=/);
-  assert.match(main, /tilesRenderer\.update\(\);\s*maybeAdvanceLodWarmup\(\)/);
+  assert.match(main, /tilesRenderer\.update\(\);\s*if \(!maybeAdvanceLodBootstrap\(\)\) maybeAdvanceLodWarmup\(\)/);
   assert.match(main, /preserveIncomingModelView = !tilesRenderer\?\.root;\s*controls\.setView\(camW, tgtW\)/);
 });
 
@@ -165,7 +179,7 @@ test('LOD starts close-responsive, stages explicit high-detail requests, and cap
   assert.match(main, /lodRuntimeProfileState\.requestedDetail = next\.requestedDetail/);
   assert.match(main, /lodRuntimeProfileState\.activeDetail = next\.activeDetail/);
   assert.match(main, /const detailPending = lodDetailRequestPending\(lodRuntimeProfileState\)/);
-  assert.match(main, /tilesRenderer\.errorTarget = detailToErrorTarget\(next\.activeDetail\)/);
+  assert.match(main, /tilesRenderer\.errorTarget = lodTargetForDetail\(next\.activeDetail\)/);
   assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
   assert.match(main, /!lodDetailRequestPending\(lodRuntimeProfileState\)\) return false/);
   assert.match(main, /const queuesSettled = lodQueuesSettled\(tilesRenderer\)/);
@@ -214,7 +228,7 @@ test('LOD memory pressure preserves camera-driven quality and resets on explicit
   assert.match(statsBlock, /lodCacheRecoveryActive = false/);
   assert.match(statsBlock, /tilesRenderer\.lruCache\.minBytesSize = lodCacheRetentionMinBytes\(lodRuntimeProfileState\.budget, false\)/);
   assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);
-  assert.match(statsBlock, /tilesRenderer\.errorTarget = detailToErrorTarget\(pressure\.profile\.activeDetail\)/);
+  assert.match(statsBlock, /tilesRenderer\.errorTarget = lodTargetForDetail\(pressure\.profile\.activeDetail\)/);
   assert.match(statsBlock, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
   assert.match(main, /function retryLodForChangedView\(\)/);
   assert.match(main, /lodViewChangeRequiresRetry\(lodPressureView, currentView\)/);

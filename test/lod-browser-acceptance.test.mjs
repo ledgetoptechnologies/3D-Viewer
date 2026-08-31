@@ -1610,10 +1610,15 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
       errorTarget: window.__ltds.tiles().errorTarget,
       phase: window.__ltds.lodDiagnostics().phase,
+      bootstrapPhase: window.__ltds.state.lodRuntimeProfile?.bootstrapPhase,
+      errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
     })`);
-    assert.deepEqual(balancedStartup, {
-      slider: '16', requested: 16, active: 16, errorTarget: 15.023, phase: 'requested-detail',
+    assert.deepEqual({ ...balancedStartup, errorTarget: undefined, errorScale: undefined }, {
+      slider: '16', requested: 16, active: 16, errorTarget: undefined,
+      phase: 'requested-detail', bootstrapPhase: 'complete', errorScale: undefined,
     });
+    assert.ok(balancedStartup.errorTarget > 15.023, JSON.stringify(balancedStartup));
+    assert.ok(balancedStartup.errorScale > 1, JSON.stringify(balancedStartup));
     const startupRefinementDeadline = Date.now() + 10_000;
     while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
       || requestPath.endsWith('/leaf-b.glb')) && Date.now() < startupRefinementDeadline) {
@@ -1622,6 +1627,11 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     assert.equal(fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
       || requestPath.endsWith('/leaf-b.glb')), true,
     'balanced startup did not request close-responsive child refinement');
+    const coarseRequestIndex = fixture.requests.findIndex(requestPath => requestPath.endsWith('/coarse.glb'));
+    const firstFineRequestIndex = fixture.requests.findIndex(requestPath => requestPath.endsWith('/leaf-a.b3dm')
+      || requestPath.endsWith('/leaf-b.glb'));
+    assert.ok(coarseRequestIndex >= 0 && firstFineRequestIndex > coarseRequestIndex,
+      `the complete coarse root was not requested before refinement: ${JSON.stringify(fixture.requests)}`);
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); const root=t.root;
       const rootAttached=Boolean(root?.engineData?.scene&&t.group.children.includes(root.engineData.scene));
       const childAttached=root?.children?.some(child=>child.engineData?.scene&&t.group.children.includes(child.engineData.scene));
@@ -1638,7 +1648,9 @@ test('an open authenticated workspace discovers completed LOD tiles without load
         errorTarget: window.__ltds.tiles().errorTarget,
       };
     })()`);
-    assert.deepEqual(explicitHighDetail, { requested: 24, active: 16, errorTarget: 15.023 });
+    assert.deepEqual(explicitHighDetail, {
+      requested: 24, active: 16, errorTarget: balancedStartup.errorTarget,
+    });
     const fallbackSampleDeadline = Date.now() + 1_000;
     let fallbackSamples = 0;
     while (Date.now() < fallbackSampleDeadline) {

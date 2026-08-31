@@ -26,53 +26,61 @@ target decides when a tile refines; there is no fixed camera-distance switch.
 When the camera is inside a tile bounding volume, the renderer may report an
 infinite screen-space error. A visible terminal leaf with `geometricError: 0`
 still satisfies the target because it has no finer child to request. Infinite
-error on a non-terminal or non-zero-error tile remains unsatisfied and continues
-to block warmup advancement. The queue priority also treats positive infinity
-as the highest screen-space error, so a refinable branch containing the camera
-is not sorted behind distant finite-error work. Malformed non-finite values
-remain lowest priority.
+error on a non-terminal or non-zero-error tile remains unsatisfied.
+
+With ancestor loading disabled, queue priority is camera-driven rather than
+SSE-driven: used and in-frustum content first, then nearest camera distance,
+then shallow depth for stable ties. Sorting by highest SSE first starves nearby
+zero-error leaves behind farther positive-error parents and produces the exact
+symptom where distant regions sharpen before the foreground.
 
 The persisted and runtime hierarchy remain `REPLACE`. The renderer keeps the
 currently displayed parent until its selected children are content-ready, but
 `loadAncestors`, sibling preload, and ancestor-sibling preload are disabled so
-replaced off-view paths can become unused and leave the cache. The Viewer does
-not manually toggle cached scene visibility, tile active/visible state, or LRU
-usage.
+replaced fine paths can become unused and leave the cache. The Viewer does not
+manually toggle cached scene visibility or tile active/visible state.
 
-The Viewer starts with requested Detail 16 and active Detail 13
-(`errorTarget = 32`). After that complete visible frontier settles it advances
-once to Detail 16 (`errorTarget = 15.023`). Raising the slider explicitly
-requests finer visible coverage. Desktop requests above Detail 13 advance in
-bounded three-detail stages (`13 → 16 → 19 → 22 → requested`) only after each
-visible frontier meets its active target and all renderer queues settle.
-Clients reporting 4 GiB or less are capped at Detail 13 and use a separate
-768 MiB cache profile.
+A renderable-root hierarchy bootstraps complete coverage before normal detail:
 
-The desktop cache retains 0.4 GiB below a 1.75 GiB maximum, with 8 warm entries
-and a 1,024-item failsafe. The byte ceiling is the real memory guard. A low
-48-item ceiling is invalid because a camera-selected frontier can contain more
-than 48 small leaves and branch parents while using almost none of the byte
-budget. The reduced profile retains 640 MiB below 768 MiB, with 256 warm and
-512 maximum entries. Both profiles unload 20 percent per eviction pass once
-unused content exceeds their warm floors.
+1. Select and display the root overview.
+2. Select a coarse frontier whose target is above every direct-child SSE but
+   below the root SSE. Keep the root visible until the frontier is attached and
+   all queues settle.
+3. Capture that complete coarse frontier, calibrate Detail 16 to its measured
+   SSE target, and only then enable camera-driven refinement.
 
-Two consecutive one-second full-cache, idle-queue samples with a selected
-in-frustum tile still pending request bounded cache-admission recovery. The soft
-byte floor is lowered only far enough to release one stale LRU tile and is never
-set to zero. Cache pressure never lowers `activeDetail`, changes the requested
-screen-space-error target, or latches a global quality ceiling.
+The captured coarse frontier alone is retained in the LRU so returning to Home
+can reattach it immediately. This does not enable ancestor loading, retain
+intermediate/fine paths, or render an overlapping root backdrop. Clients
+reporting 4 GiB or less settle on the complete renderable root, remain capped at
+Detail 13, and keep the separate 768 MiB reduced-memory profile.
 
-A local 64-leaf, eight-branch browser stress fixture reproduced the production
-symptom with the former 48-item cap. At Detail 16 the cache stopped at 48 items
-while using about 9 KiB against the 1.75 GiB ceiling, all queues were idle, 16
-selected leaves remained pending, and only five of seven selected rows had
-fine coverage. Raising only the failsafe item cap to 1,024 allowed the same pose
-to settle with all 56 selected leaves attached, zero pending tiles, and no
-cache pressure. A wide zoom-out returned to eight coarse branch tiles and the
-close return restored all selected detail.
+The ordinary desktop cache retains 0.4 GiB below a 1.75 GiB maximum, with 8
+warm entries and a 1,024-item failsafe. The byte ceiling is the real memory
+guard. A low 48-item ceiling is invalid because a camera-selected frontier can
+contain more than 48 small leaves and branch parents while using almost none of
+the byte budget. When a measured complete overview is at least 0.75 GiB and
+already consumes most of the ordinary ceiling, the runtime grants bounded
+branch-completion headroom equal to overview bytes plus 1.75 GiB, capped at
+3 GiB. Small models stay at 1.75 GiB and reduced-memory clients never expand.
 
-The exact authenticated production dataset remains the final release gate. See
-[`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for historical
+The reduced profile retains 640 MiB below 768 MiB, with 256 warm and 512
+maximum entries. Both profiles unload 20 percent per eviction pass once unused
+content exceeds their warm floors. Two consecutive one-second full-cache,
+idle-queue samples with a selected in-frustum tile still pending request bounded
+cache-admission recovery. Cache pressure never lowers `activeDetail`, changes
+the requested screen-space-error target, or latches a global quality ceiling.
+
+A local 64-leaf, eight-branch browser fixture verifies complete coarse startup,
+nearby refinement, stable tiny movement, wide zoom-out, and close return. The
+authenticated church hierarchy verifies the large-model path: 16/16 coarse
+tiles attached before refinement, all 40 sampled bootstrap/close/orbit/return
+frames retained structural coverage, 12 nearby fine leaves became visible, and
+return restored 16/16 coarse tiles without a blank interval. Loaded fine leaves
+had median camera distance about 6.9 versus 23.5 for pending leaves, and no
+runtime exceptions occurred.
+
+See [`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for historical
 measurements, superseded approaches, and diagnostic commands.
 
 ## Full-quality attestation

@@ -12,8 +12,14 @@ import {
   detailToErrorTarget,
   inspectLodProvenance,
   inspectLodTileset,
+  LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET,
+  LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET,
   LOD_REFINEMENT_STEP,
   LOD_WARMUP_DETAIL,
+  lodBootstrapCoverageErrorTarget,
+  lodBootstrapRootErrorTarget,
+  lodCacheMaxBytesForOverview,
+  lodErrorScaleForCoverage,
   lodQueuesSettled,
   lodCacheBudget,
   lodCacheRetentionMinBytes,
@@ -24,9 +30,11 @@ import {
   lodWarmupSatisfiedByDetail,
   refreshLodResolution,
   recoverLodCacheAdmission,
+  retainLodOverviewTiles,
   resolveLodDetailRequest,
   resolveLodMemoryPressure,
   resolveLodWarmupAdvance,
+  scaledDetailToErrorTarget,
   screenSpaceErrorPriority,
   visibleLodFrontier,
   visibleLodTargetSatisfied,
@@ -40,6 +48,20 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.equal(detailToErrorTarget(-100), 512);
   assert.equal(detailToErrorTarget(100), 2);
   assert.equal(detailToErrorTarget(undefined), 15.023, 'missing detail defaults to balanced staged view-local refinement');
+});
+
+test('overview bootstrap selects one complete coarse frontier before camera-scaled detail', () => {
+  assert.equal(LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET, 4096);
+  assert.equal(LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET, 1024);
+  assert.equal(lodBootstrapRootErrorTarget(1983.5), 4096);
+  assert.equal(lodBootstrapRootErrorTarget(5000), 5500);
+  assert.equal(lodBootstrapCoverageErrorTarget(1983.5, [418, 524, 729]), 1024);
+  assert.equal(lodBootstrapCoverageErrorTarget(900, [800, 700]), 850);
+  const scale = lodErrorScaleForCoverage(1024);
+  assert.ok(Math.abs(scaledDetailToErrorTarget(16, scale) - 1024) < 1e-9);
+  assert.ok(scaledDetailToErrorTarget(24, scale) < 140);
+  assert.ok(scaledDetailToErrorTarget(2, scale) > 34000);
+  assert.equal(scaledDetailToErrorTarget(16, 0), detailToErrorTarget(16));
 });
 
 test('renderer configuration streams without pinning ancestors or siblings', () => {
@@ -93,6 +115,13 @@ test('renderer configuration streams without pinning ancestors or siblings', () 
     maxSize: 1024,
     unloadPercent: 0.20,
   });
+  assert.deepEqual(lodCacheBudget(16), {
+    minBytesSize: 0.4 * 1024 * 1024 * 1024,
+    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    minSize: 8,
+    maxSize: 1024,
+    unloadPercent: 0.20,
+  }, 'normal clients keep the streaming cap until a measured overview proves more branch headroom is required');
   assert.ok(
     lodCacheBudget(8).maxSize >= 1024,
     'item admission must not block a valid multi-branch frontier before the byte ceiling',
@@ -574,26 +603,45 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   assert.doesNotMatch(JSON.stringify(value), /private\.example|customer-42|Mesh-B\.b3dm|token|secret/);
 });
 
-test('LOD queue priority favors visible high-error foreground tiles', () => {
+test('LOD queue priority favors the closest in-frustum replacement work', () => {
   const tile = ({ used = true, inFrustum = true, error, distanceFromCamera, depth = 1 } = {}) => ({
     priority: 0,
     traversal: { used, inFrustum, error, distanceFromCamera },
-    internal: { depthFromRenderedParent: depth },
+    internal: { depthFromRenderedParent: depth, hasUnrenderableContent: false },
   });
-  const foreground = tile({ error: 18, distanceFromCamera: 30 });
-  const background = tile({ error: 4, distanceFromCamera: 10 });
-  const outside = tile({ inFrustum: false, error: 100, distanceFromCamera: 1 });
-  const containingCamera = tile({ error: Infinity, distanceFromCamera: 0 });
-  const malformed = tile({ error: Number.NaN, distanceFromCamera: 0 });
-  assert.equal(screenSpaceErrorPriority(foreground, background), 1);
-  assert.equal(screenSpaceErrorPriority(background, foreground), -1);
-  assert.equal(screenSpaceErrorPriority(foreground, outside), 1);
-  assert.equal(screenSpaceErrorPriority(outside, foreground), -1);
-  assert.equal(screenSpaceErrorPriority(containingCamera, foreground), 1,
-    'a refinable tile containing the camera has infinite SSE and must load first');
-  assert.equal(screenSpaceErrorPriority(foreground, containingCamera), -1);
-  assert.equal(screenSpaceErrorPriority(foreground, malformed), 1,
-    'malformed non-finite SSE remains lowest priority');
+  const nearLeaf = tile({ error: 0, distanceFromCamera: 5, depth: 2 });
+  const farParent = tile({ error: 900, distanceFromCamera: 30 });
+  const outside = tile({ inFrustum: false, error: 1000, distanceFromCamera: 1 });
+  const malformedDistance = tile({ error: 1000, distanceFromCamera: Number.NaN });
+  assert.equal(screenSpaceErrorPriority(nearLeaf, farParent), 1,
+    'a selected zero-error leaf near the camera must load before a farther coarse tile');
+  assert.equal(screenSpaceErrorPriority(farParent, nearLeaf), -1);
+  assert.equal(screenSpaceErrorPriority(nearLeaf, outside), 1);
+  assert.equal(screenSpaceErrorPriority(outside, nearLeaf), -1);
+  assert.equal(screenSpaceErrorPriority(farParent, malformedDistance), 1,
+    'non-finite distance remains lowest priority');
+});
+
+test('overview retention pins only the captured coarse frontier in the LRU', () => {
+  const retained = { id: 'overview' };
+  const evicted = { id: 'not-cached' };
+  const marked = [];
+  const renderer = {
+    lruCache: { has: (tile) => tile === retained },
+    markTileUsed: (tile) => marked.push(tile),
+  };
+  assert.equal(retainLodOverviewTiles(renderer, [retained, evicted]), 1);
+  assert.deepEqual(marked, [retained]);
+  assert.equal(retainLodOverviewTiles(null, [retained]), 0);
+});
+
+test('large measured overview gets bounded branch-completion headroom', () => {
+  const GiB = 1024 * 1024 * 1024;
+  assert.equal(lodCacheMaxBytesForOverview(1.75 * GiB, 1.27 * GiB, false), 3 * GiB);
+  assert.equal(lodCacheMaxBytesForOverview(1.75 * GiB, 0.2 * GiB, false), 1.75 * GiB,
+    'small models keep the normal streaming ceiling');
+  assert.equal(lodCacheMaxBytesForOverview(768 * 1024 * 1024, 1.27 * GiB, true),
+    768 * 1024 * 1024, 'reduced-memory clients never expand');
 });
 
 test('standard root REPLACE refinement is inherited by lazy descendants without runtime mutation', () => {

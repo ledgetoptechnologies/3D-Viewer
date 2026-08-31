@@ -6,12 +6,9 @@ export const LOD_REFINEMENT_STEP = 3;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 export const LOD_ADMISSION_RECOVERY_SAMPLES = 2;
 export const LOD_PRESSURE_FALLBACK_SAMPLES = 4;
+export const LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET = 4096;
+export const LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET = 1024;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
-
-function screenSpaceErrorSortValue(value) {
-  if (value === Infinity) return Infinity;
-  return Number.isFinite(value) ? value : -Infinity;
-}
 
 export function detailToErrorTarget(value) {
   const parsed = Number.parseInt(value, 10);
@@ -22,9 +19,47 @@ export function detailToErrorTarget(value) {
   return Number((2 * Math.pow(256, coarseFraction)).toFixed(3));
 }
 
-// PriorityQueue callbacks return 1 when `a` should be processed first. Keep
-// optimized traversal (no ancestor/sibling overfetch), but prefer the currently
-// visible tile with the greatest screen-space error before camera distance.
+export function lodBootstrapRootErrorTarget(rootScreenSpaceError) {
+  const error = Number(rootScreenSpaceError);
+  const target = Number.isFinite(error) && error > 0
+    ? Math.max(LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET, error * 1.10)
+    : LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET;
+  return Number(target.toFixed(3));
+}
+
+export function lodBootstrapCoverageErrorTarget(rootScreenSpaceError, childScreenSpaceErrors = []) {
+  const rootError = Number(rootScreenSpaceError);
+  const childErrors = Array.from(childScreenSpaceErrors || [], Number)
+    .filter(value => Number.isFinite(value) && value >= 0);
+  const maximumChildError = childErrors.length ? Math.max(...childErrors) : 0;
+  let target = Math.max(LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET, maximumChildError * 1.05);
+  // A valid REPLACE hierarchy normally leaves a clean target band between a
+  // parent and its direct children. When a small fixture or unusual converter
+  // puts the minimum coverage target above the root error, use that band rather
+  // than leaving the root selected forever.
+  if (Number.isFinite(rootError) && rootError > maximumChildError && target >= rootError) {
+    target = (rootError + maximumChildError) / 2;
+  }
+  return Number(Math.max(1, target).toFixed(3));
+}
+
+export function lodErrorScaleForCoverage(coverageErrorTarget) {
+  const coverage = Number(coverageErrorTarget);
+  if (!Number.isFinite(coverage) || coverage <= 0) return 1;
+  return coverage / detailToErrorTarget(DEFAULT_LOD_DETAIL);
+}
+
+export function scaledDetailToErrorTarget(detail, scale = 1) {
+  const parsedScale = Number(scale);
+  const multiplier = Number.isFinite(parsedScale) && parsedScale > 0 ? parsedScale : 1;
+  return Number((detailToErrorTarget(detail) * multiplier).toFixed(3));
+}
+
+// With loadAncestors disabled, selected zero-error leaves are the actual
+// replacement work. Sorting by SSE first starves those leaves behind farther
+// positive-error parents, so distant regions sharpen while the foreground
+// never completes. Match the renderer's optimized traversal: in-frustum and
+// camera distance first, then shallower content for stable ties.
 export function screenSpaceErrorPriority(a, b) {
   const aPriority = a?.priority ?? 0;
   const bPriority = b?.priority ?? 0;
@@ -36,9 +71,9 @@ export function screenSpaceErrorPriority(a, b) {
   if (at.used !== bt.used) return at.used ? 1 : -1;
   if (at.inFrustum !== bt.inFrustum) return at.inFrustum ? 1 : -1;
 
-  const aError = screenSpaceErrorSortValue(at.error);
-  const bError = screenSpaceErrorSortValue(bt.error);
-  if (aError !== bError) return aError > bError ? 1 : -1;
+  const aExternal = Boolean(a?.internal?.hasUnrenderableContent);
+  const bExternal = Boolean(b?.internal?.hasUnrenderableContent);
+  if (aExternal !== bExternal) return aExternal ? 1 : -1;
 
   const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
   const bDistance = Number.isFinite(bt.distanceFromCamera) ? bt.distanceFromCamera : Infinity;
@@ -48,6 +83,21 @@ export function screenSpaceErrorPriority(a, b) {
   const bDepth = b?.internal?.depthFromRenderedParent ?? 0;
   if (aDepth !== bDepth) return aDepth > bDepth ? -1 : 1;
   return 0;
+}
+
+export function retainLodOverviewTiles(tilesRenderer, overviewTiles) {
+  const cache = tilesRenderer?.lruCache;
+  if (!cache || typeof cache.has !== 'function'
+    || typeof tilesRenderer?.markTileUsed !== 'function'
+    || !Array.isArray(overviewTiles)) return 0;
+
+  let retained = 0;
+  for (const tile of overviewTiles) {
+    if (!tile || !cache.has(tile)) continue;
+    tilesRenderer.markTileUsed(tile);
+    retained += 1;
+  }
+  return retained;
 }
 
 // Keep a bounded warm cache, but leave most of the budget available for the
@@ -83,6 +133,21 @@ export function lodCacheBudget(deviceMemoryGiB) {
     maxSize: 1024,
     unloadPercent: 0.20,
   };
+}
+
+export function lodCacheMaxBytesForOverview(currentMaxBytes, overviewBytes, reduced = false) {
+  const current = Number(currentMaxBytes);
+  if (!Number.isFinite(current) || current <= 0 || reduced) return currentMaxBytes;
+
+  const overview = Number(overviewBytes);
+  const GiB = 1024 * 1024 * 1024;
+  if (!Number.isFinite(overview) || overview < 0.75 * GiB) return current;
+
+  // The measured church overview is about 1.27 GiB. A 1.75 GiB hard cap
+  // leaves too little room to complete a foreground REPLACE branch, so loaded
+  // leaves stay hidden behind their parent. Add bounded, dataset-driven
+  // headroom while keeping small and reduced-memory models on the normal cap.
+  return Math.max(current, Math.min(3 * GiB, overview + 1.75 * GiB));
 }
 
 export function lodCacheRetentionMinBytes(budget, recoveryActive = false, cache = null) {
@@ -633,9 +698,14 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   const memoryLimited = runtimeProfile?.starvedAtDetail !== null
     && runtimeProfile?.starvedAtDetail !== undefined
     && Number(runtimeProfile?.activeDetail) < Number(runtimeProfile?.requestedDetail);
+  const bootstrapPhase = runtimeProfile?.bootstrapPhase;
   const detailPending = lodDetailRequestPending(runtimeProfile);
   return {
-    phase: memoryLimited
+    phase: bootstrapPhase === 'root'
+      ? 'overview'
+      : bootstrapPhase === 'coverage'
+        ? 'coverage'
+        : memoryLimited
       ? 'memory-limited'
       : runtimeProfile?.reduced ? 'reduced-memory' : detailPending ? 'warmup' : 'requested-detail',
     requestedDetail: Number(runtimeProfile?.requestedDetail) || null,
