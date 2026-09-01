@@ -74,6 +74,17 @@ async function stageSource(operation, { storage, config }, signal, progress) {
 function manifestHash(files) { return crypto.createHash('sha256').update(JSON.stringify(files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })))).digest('hex'); }
 
 async function importWebodmTask(operation, { processing, repository, storage, config }, progress = async () => {}, signal = null) {
+  const replay=processing.getWebodmTaskImport(operation.id);
+  if(replay){
+    const payload=JSON.parse(operation.payload_json||'{}'),ids=payload.ids||{},project=processing.getProject(replay.projectId),task=processing.getTask(replay.taskId),attempt=processing.getAttempt(replay.attemptId),dataset=processing.getDataset(replay.datasetId,true),model=repository.getModelVersion(replay.modelId,replay.modelVersionId);
+    if(!project||!task||!attempt||!dataset||dataset.status!=='finalized'||!model||replay.sourceRelativePath!==payload.request?.sourceRelativePath||replay.projectId!==payload.request?.projectId||replay.taskId!==ids.taskId||replay.datasetId!==ids.datasetId||replay.attemptId!==ids.attemptId||replay.modelId!==ids.modelId||replay.modelVersionId!==ids.versionId||attempt.status!=='ingesting')throw Object.assign(new Error('WebODM import replay state changed'),{code:'webodm_import_replay_conflict'});
+    const datasetRoot=storage.resolve('datasets',dataset.relativePath,{mustExist:true}),rediscovered=await discoverAssets(datasetRoot);
+    if(rediscovered.sourceFingerprint!==replay.sourceFingerprint)throw Object.assign(new Error('WebODM import replay source changed'),{code:'webodm_import_replay_conflict'});
+    const assets=rediscovered.assets.map((asset)=>({...asset,rootKey:'datasets',relativePath:`${dataset.relativePath}/${asset.relativePath}`,storageMode:'adopted',published:false,sourceAttemptId:attempt.id})),summary=capabilitySummary(assets);
+    if(JSON.stringify(summary.assetKinds)!==JSON.stringify(replay.assetKinds))throw Object.assign(new Error('WebODM import replay assets changed'),{code:'webodm_import_replay_conflict'});
+    const requiredDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
+    return{project,task,attempt,model,import:replay,requiredDerivatives,...summary};
+  }
   const { payload, request, staging, stagingRelative } = await stageSource(operation, { storage, config }, signal, progress);
   const ids = payload.ids || {}, discovered = await discoverAssets(staging), summary = capabilitySummary(discovered.assets);
   const discoveredCameraPhotos = discoverCameraPhotoLinks(staging, discovered);
@@ -90,7 +101,7 @@ async function importWebodmTask(operation, { processing, repository, storage, co
   }
   let task = processing.getTask(ids.taskId);
   if (!task) task = processing.createTask({ id: ids.taskId, projectId: request.projectId, datasetId: dataset.id, displayName: request.taskDisplayName, createdBy: operation.subject, metadata: { catalogImportOperationId: operation.id, webodmTaskImportOperationId: operation.id, assetKinds: summary.assetKinds } });
-  const attempt = processing.createImportedAttempt({ id: ids.attemptId, taskId: task.id, datasetId: dataset.id, providerTaskId: request.externalTaskId ? `webodm:${request.externalTaskId}` : `webodm-import:${discovered.sourceFingerprint}`, createdBy: operation.subject, displayName: request.taskDisplayName, metadata: { webodmTaskImport: true } });
+  const attempt = processing.createImportedAttempt({ id: ids.attemptId, taskId: task.id, datasetId: dataset.id, providerTaskId: request.externalTaskId ? `webodm:${request.externalTaskId}` : `webodm-import:${discovered.sourceFingerprint}`, createdBy: operation.subject, displayName: request.taskDisplayName, metadata: { webodmTaskImport: true }, staged: true });
   const datasetRoot = storage.resolve('datasets', dataset.relativePath, { mustExist: true }), assets = [];
   for (const asset of discovered.assets) {
     const entry = { ...asset, rootKey: 'datasets', relativePath: `${dataset.relativePath}/${asset.relativePath}`, storageMode: 'adopted', published: false, sourceAttemptId: attempt.id };
@@ -100,19 +111,18 @@ async function importWebodmTask(operation, { processing, repository, storage, co
   const odmMetadata = readOdmTaskMetadata(datasetRoot);
   const cameraPhotos = discoveredCameraPhotos.map((photo) => ({ ...photo, rootKey: 'datasets', relativePath: `${dataset.relativePath}/${photo.relativePath}` }));
   const registeredAssets = assets.filter((asset) => asset.kind !== 'tiles');
-  const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${operation.id}`, providerVersionId: discovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'ready', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds, processingMetrics: odmMetadata.processingMetrics }, georef: odmMetadata.georef, pointCount: odmMetadata.pointCount, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets: registeredAssets, cameraPhotos, makeActive: false });
+  const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${operation.id}`, providerVersionId: discovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'importing', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds, processingMetrics: odmMetadata.processingMetrics }, georef: odmMetadata.georef, pointCount: odmMetadata.pointCount, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets: registeredAssets, cameraPhotos, makeActive: false });
   processing.setAttemptResult(attempt.id, model.id, ids.versionId);
   // Existing accounting assigns adopted/reference trees to the output and
   // excludes their source dataset from the project dataset subtotal.
-  processing.registerModelOutput({ versionId: ids.versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: request.projectId, rootKey: 'datasets', relativePath: dataset.relativePath, storageMode: 'adopted', byteSize: dataset.byteSize, assetCount: registeredAssets.length });
+  processing.registerModelOutput({ versionId: ids.versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: request.projectId, rootKey: 'datasets', relativePath: dataset.relativePath, storageMode: 'adopted', status: 'staged', byteSize: dataset.byteSize, assetCount: registeredAssets.length });
   const lodDerivatives = lodDerivativeSpecs(assets, {
     meshDerivativesEnabled: config.meshDerivativesEnabled,
     required: true,
   });
-  if (lodDerivatives.length) processing.activateImportedDerivatives(attempt.id, lodDerivatives);
   const imported = processing.recordWebodmTaskImport({ id: operation.id, sourceFingerprint: discovered.sourceFingerprint, sourceRelativePath: request.sourceRelativePath, projectId: request.projectId, taskId: task.id, datasetId: dataset.id, attemptId: attempt.id, modelId: model.id, modelVersionId: ids.versionId, assetKinds: summary.assetKinds, createdBy: operation.subject });
   await progress(0.98);
-  return { project: processing.getProject(request.projectId), task: processing.getTask(task.id), attempt: processing.getAttempt(attempt.id), model: repository.getModelVersion(model.id, ids.versionId), import: imported, ...summary };
+  return { project: processing.getProject(request.projectId), task: processing.getTask(task.id), attempt: processing.getAttempt(attempt.id), model: repository.getModelVersion(model.id, ids.versionId), import: imported, requiredDerivatives: lodDerivatives, ...summary };
 }
 
 module.exports = { CAPABILITIES, capabilitySummary, copyTree, importWebodmTask, stageSource };

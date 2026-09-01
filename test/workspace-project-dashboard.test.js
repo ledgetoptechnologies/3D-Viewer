@@ -110,6 +110,9 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/data-action="retry-operation"/);
   assert.match(source,/\['background','↻','Background work'\]/);
   assert.match(source,/background-work-count/);
+  assert.match(source,/OPERATION_ACTIVE=new Set\(\['queued','leased','awaiting_derivatives'\]\)/);
+  assert.match(source,/operation\.status==='awaiting_derivatives'\?'Waiting for required derivatives'/);
+  assert.match(source,/result\.operation\.status==='awaiting_derivatives'\?'Required derivative queued for retry':'Import queued for retry'/);
   assert.match(source,/function background\(\)/);
   assert.match(source,/\/api\/v1\/operations\/\$\{encodeURIComponent\(id\)\}\/retry/);
   assert.match(source,/pagedApi\('\/api\/v1\/processing\/derivatives','derivatives'\)/);

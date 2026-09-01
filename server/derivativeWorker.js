@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { sanitizeLogMessage } = require('./processingSecurity');
-const { hashFile, hashTree } = require('./storageManager');
+const { hashTree } = require('./storageManager');
 const { verifyLodProvenance } = require('./lodProvenance');
 const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
@@ -98,16 +98,6 @@ function emitReady(processing, config, attempt, job, owner, result) {
   return completed;
 }
 
-async function registerTreeAsset(processing, input, directory, manifestName) {
-  const integrity = await hashTree(directory);
-  return processing.addModelAsset({
-    ...input,
-    sha256: await hashFile(path.join(directory, manifestName)),
-    manifestSha256: integrity.manifestSha256,
-    manifestFiles: integrity.files,
-  });
-}
-
 function assertLodArtifactsMatchSnapshot(artifacts, integrity) {
   const snapshot = new Map(integrity.files.map((file) => [file.relativePath, file]));
   for (const artifact of artifacts) {
@@ -179,7 +169,8 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
   const auditSource = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
   const outputRecord = processing.getModelOutput(attempt.resultModelVersionId);
   const sourceBytes = Math.max(Number(outputRecord?.byteSize) || 0, (Number(obj.byte_size) || 0) + (Number(glb.byte_size) || 0));
-  const admission = storage.requireDerivativeSpace('models', { sourceBytes, expectedFiles: 10_000 });
+  const reservation=processing.derivativeStorageReservation(job.id);
+  const admission = storage.requireDerivativeSpace('models', { sourceBytes, expectedFiles: 10_000, reservedBytes: reservation?.accountedByteSize || 0, otherReservedBytes: processing.activeDerivativeReservationBytes(job.id), reservedDatasetBytes: processing.activeProcessingReservationBytes(attempt.id) });
   const assetInput = (directory) => ({
     versionId: attempt.resultModelVersionId,
     rootKey: 'models',
@@ -353,33 +344,32 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       if (!config.localDerivativesEnabled) throw Object.assign(new Error('local point-cloud derivative fallback is disabled'), { code: 'derivative_unavailable' });
       const point = assets.find((asset) => asset.kind === 'pointCloud');
       if (!point) throw new Error('point cloud source is missing');
+      const source = storage.resolve(point.root_key, point.relative_path, { mustExist: true });
       const base = storage.resolve('models', `${task.id}/${attempt.id}`);
       fs.mkdirSync(base, { recursive: true });
-      const output = path.join(base, 'ept');
-      const incomplete = `${output}.${job.id}.incomplete`;
-      fs.rmSync(incomplete, { recursive: true, force: true });
+      const outputName = `ept-${job.id}`, outputRelative = `${task.id}/${attempt.id}/${outputName}`, output = path.join(base, outputName);
+      const incomplete = `${output}.${job.lease_token}.incomplete`, complete = `${output}.${job.lease_token}.complete`;
+      const verifiedAsset = async (directory) => {
+        const integrity=await hashTree(directory),manifest=integrity.files.find((file)=>file.relativePath==='ept.json');
+        if(!manifest)throw Object.assign(new Error('Entwine did not produce ept.json'),{code:'invalid_asset_tree'});
+        return{asset:{versionId:attempt.resultModelVersionId,rootKey:'models',relativePath:`${outputRelative}/ept.json`,format:'ept',contentType:'application/json',byteSize:manifest.byteSize,attemptId:attempt.id,sha256:manifest.sha256,manifestSha256:integrity.manifestSha256,manifestFiles:integrity.files},retainedBytes:manifestTreeBytes(integrity.files)};
+      };
       try {
-        derivativePhase(processing, job, owner, 'indexing');
-        await run(config.entwineBin, ['build', '-i', storage.resolve(point.root_key, point.relative_path, { mustExist: true }), '-o', incomplete], { signal: controller.signal });
-        if (!fs.existsSync(path.join(incomplete, 'ept.json'))) throw new Error('Entwine did not produce ept.json');
-        fs.rmSync(output, { recursive: true, force: true });
-        fs.renameSync(incomplete, output);
-        derivativePhase(processing, job, owner, 'registering');
-        await registerTreeAsset(processing, {
-          versionId: attempt.resultModelVersionId,
-          kind: 'ept',
-          rootKey: 'models',
-          relativePath: `${task.id}/${attempt.id}/ept/ept.json`,
-          format: 'ept',
-          contentType: 'application/json',
-          byteSize: fs.statSync(path.join(output, 'ept.json')).size,
-          attemptId: attempt.id,
-        }, output, 'ept.json');
+        if(fs.existsSync(output)){
+          derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(output);derivativePhase(processing,job,owner,'registering');if(!processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token}))throw Object.assign(new Error('derivative lease was lost before verified EPT registration'),{code:'lease_lost'});derivativeResult={verified:true,resumed:true,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};
+        }else{
+          fs.rmSync(incomplete,{recursive:true,force:true});fs.rmSync(complete,{recursive:true,force:true});
+          const outputRecord=processing.getModelOutput(attempt.resultModelVersionId),reservation=processing.derivativeStorageReservation(job.id);storage.requireDerivativeSpace('models',{sourceBytes:Math.max(Number(outputRecord?.byteSize)||0,Number(point.byte_size)||0),expectedFiles:100000,reservedBytes:reservation?.accountedByteSize||0,otherReservedBytes:processing.activeDerivativeReservationBytes(job.id),reservedDatasetBytes:processing.activeProcessingReservationBytes(attempt.id)});
+          derivativePhase(processing, job, owner, 'indexing');
+          await run(config.entwineBin, ['build', '-i', source, '-o', incomplete], { signal: controller.signal });
+          derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(incomplete);fs.renameSync(incomplete,complete);derivativePhase(processing,job,owner,'registering');
+          const registered=processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token,promote:()=>{if(fs.existsSync(output))throw Object.assign(new Error('EPT final appeared during activation'),{code:'derivative_activation_conflict'});if(fs.statSync(complete).dev!==fs.statSync(base).dev)throw Object.assign(new Error('EPT activation crossed filesystems'),{code:'invalid_storage_location'});fs.renameSync(complete,output);}});
+          if(!registered)throw Object.assign(new Error('derivative lease was lost before verified EPT registration'),{code:'lease_lost'});derivativeResult={verified:true,resumed:false,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};
+        }
       } catch (error) {
-        fs.rmSync(incomplete, { recursive: true, force: true });
+        fs.rmSync(incomplete, { recursive: true, force: true });fs.rmSync(complete,{recursive:true,force:true});
         throw error;
       }
-      derivativeResult = { verified: true };
     } else if (job.derivative_type === 'mesh_tiles') {
       const generation = await generateMeshTilesImpl({ processing, storage, config, attempt, job, owner, task, obj, glb, previousTiles, audit, signal: controller.signal, onPhase: (phase) => derivativePhase(processing, job, owner, phase) });
       derivativeResult = { verified: true, reused: false, ...generation };

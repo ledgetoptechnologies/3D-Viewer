@@ -1473,6 +1473,316 @@ const MIGRATIONS = [
         BEGIN SELECT RAISE(ABORT,'lod_conversion_lock_immutable'); END;
     `,
   },
+  {
+    version: 28,
+    name: 'retained_import_workflow',
+    sql: `
+      CREATE TEMP TABLE migration_v28_guard(value INTEGER PRIMARY KEY);
+      INSERT INTO migration_v28_guard(value) VALUES (1);
+      INSERT INTO migration_v28_guard(value)
+        SELECT 1 FROM sqlite_master
+        WHERE type='table' AND name IN (
+          'retained_imports','retained_import_files','import_cleanup_jobs',
+          'model_output_storage_components','derivative_storage_journal'
+        ) LIMIT 1;
+      DROP TABLE migration_v28_guard;
+
+      DROP INDEX derivative_jobs_single_lod_lease;
+      DROP INDEX derivative_jobs_deadline_idx;
+      CREATE TEMP TABLE migration_v28_heavy_winner(id TEXT PRIMARY KEY);
+      CREATE TEMP TABLE migration_v28_expired_required(attempt_id TEXT PRIMARY KEY,error_code TEXT NOT NULL,error_message TEXT NOT NULL);
+      INSERT INTO migration_v28_expired_required(attempt_id,error_code,error_message)
+        SELECT DISTINCT attempt_id,'derivative_timeout','derivative wall-clock deadline expired' FROM derivative_jobs
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased'
+          AND deadline_at IS NOT NULL AND deadline_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          AND COALESCE(json_extract(request_json,'$.optional'),0)<>1;
+      INSERT INTO migration_v28_heavy_winner(id)
+        SELECT id FROM derivative_jobs
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit')
+          AND status='leased'
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL
+          AND lease_expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          AND (deadline_at IS NULL OR deadline_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        ORDER BY lease_expires_at DESC,updated_at DESC,id DESC LIMIT 1;
+      INSERT OR IGNORE INTO migration_v28_expired_required(attempt_id,error_code,error_message)
+        SELECT DISTINCT attempt_id,'derivative_retry_exhausted','derivative retry budget exhausted during migration' FROM derivative_jobs
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased'
+          AND id NOT IN (SELECT id FROM migration_v28_heavy_winner) AND attempt_count>=3
+          AND COALESCE(json_extract(request_json,'$.optional'),0)<>1;
+      UPDATE derivative_jobs SET
+        status='failed',result_json=json_object('error','derivative wall-clock deadline expired','code','derivative_timeout'),
+        lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,
+        completed_at=COALESCE(completed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased'
+          AND deadline_at IS NOT NULL AND deadline_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now');
+      UPDATE derivative_jobs SET
+        status='failed',result_json=json_object('error','derivative retry budget exhausted during migration','code','derivative_retry_exhausted'),
+        lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,
+        completed_at=COALESCE(completed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased'
+          AND id NOT IN (SELECT id FROM migration_v28_heavy_winner) AND attempt_count>=3;
+      UPDATE derivative_jobs SET
+        status='pending',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL,
+        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased'
+          AND id NOT IN (SELECT id FROM migration_v28_heavy_winner);
+      UPDATE lod_conversion_lock SET
+        job_id=(SELECT id FROM derivative_jobs WHERE id=(SELECT id FROM migration_v28_heavy_winner)),
+        lease_owner=(SELECT lease_owner FROM derivative_jobs WHERE id=(SELECT id FROM migration_v28_heavy_winner)),
+        lease_token=(SELECT lease_token FROM derivative_jobs WHERE id=(SELECT id FROM migration_v28_heavy_winner)),
+        lease_expires_at=(SELECT lease_expires_at FROM derivative_jobs WHERE id=(SELECT id FROM migration_v28_heavy_winner)),
+        heartbeat_at=(SELECT heartbeat_at FROM derivative_jobs WHERE id=(SELECT id FROM migration_v28_heavy_winner))
+        WHERE id=1;
+      DROP TABLE migration_v28_heavy_winner;
+      CREATE UNIQUE INDEX derivative_jobs_single_heavy_lease
+        ON derivative_jobs((1))
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased';
+      CREATE INDEX derivative_jobs_deadline_idx
+        ON derivative_jobs(status,deadline_at,lease_expires_at,created_at)
+        WHERE derivative_type IN ('ept','mesh_tiles','lod_audit');
+
+      DROP INDEX dataset_operations_claim_idx;
+      DROP INDEX dataset_operations_subject_idx;
+      DROP INDEX dataset_operations_active_upload_idx;
+      DROP INDEX dataset_operations_active_preview_idx;
+      DROP INDEX subject_operation_receipts_operation_idx;
+      ALTER TABLE subject_operation_receipts RENAME TO subject_operation_receipts_v27;
+      ALTER TABLE dataset_operations RENAME TO dataset_operations_v27;
+
+      CREATE TABLE dataset_operations (
+        id TEXT PRIMARY KEY,
+        operation_type TEXT NOT NULL CHECK(operation_type IN ('upload_finalize','import_preview','import_adopt','catalog_scan','catalog_map')),
+        subject TEXT NOT NULL,
+        session_id TEXT,
+        dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+        upload_id TEXT REFERENCES upload_sessions(id) ON DELETE SET NULL,
+        import_preview_id TEXT REFERENCES dataset_import_previews(id) ON DELETE SET NULL,
+        processing_attempt_id TEXT REFERENCES processing_attempts(id) ON DELETE SET NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN ('queued','leased','awaiting_derivatives','succeeded','failed','cancelled')),
+        progress REAL NOT NULL DEFAULT 0 CHECK(progress >= 0 AND progress <= 1),
+        result_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        CHECK(processing_attempt_id IS NULL OR operation_type='catalog_map'),
+        CHECK(status<>'awaiting_derivatives' OR (
+          processing_attempt_id IS NOT NULL AND lease_owner IS NULL
+          AND lease_expires_at IS NULL AND completed_at IS NULL
+        ))
+      );
+      INSERT INTO dataset_operations(
+        id,operation_type,subject,session_id,dataset_id,upload_id,import_preview_id,
+        payload_json,status,progress,result_json,error_code,error_message,lease_owner,
+        lease_expires_at,heartbeat_at,attempt_count,available_at,created_at,updated_at,completed_at
+      ) SELECT
+        id,operation_type,subject,session_id,dataset_id,upload_id,import_preview_id,
+        payload_json,status,progress,result_json,error_code,error_message,lease_owner,
+        lease_expires_at,heartbeat_at,attempt_count,available_at,created_at,updated_at,completed_at
+      FROM dataset_operations_v27;
+
+      CREATE TABLE subject_operation_receipts (
+        subject TEXT NOT NULL,
+        client_key TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+        response_status INTEGER,
+        response_json TEXT,
+        operation_id TEXT REFERENCES dataset_operations(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(subject,client_key)
+      );
+      INSERT INTO subject_operation_receipts
+        SELECT * FROM subject_operation_receipts_v27;
+      DROP TABLE subject_operation_receipts_v27;
+      DROP TABLE dataset_operations_v27;
+
+      CREATE INDEX dataset_operations_claim_idx
+        ON dataset_operations(status,available_at,lease_expires_at,created_at);
+      CREATE INDEX dataset_operations_subject_idx
+        ON dataset_operations(subject,created_at DESC,id DESC);
+      CREATE UNIQUE INDEX dataset_operations_active_upload_idx
+        ON dataset_operations(upload_id)
+        WHERE upload_id IS NOT NULL AND status IN ('queued','leased','awaiting_derivatives','succeeded');
+      CREATE UNIQUE INDEX dataset_operations_active_preview_idx
+        ON dataset_operations(import_preview_id)
+        WHERE import_preview_id IS NOT NULL AND status IN ('queued','leased','awaiting_derivatives','succeeded');
+      CREATE UNIQUE INDEX dataset_operations_waiting_attempt_idx
+        ON dataset_operations(processing_attempt_id)
+        WHERE processing_attempt_id IS NOT NULL AND status='awaiting_derivatives';
+      CREATE INDEX subject_operation_receipts_operation_idx
+        ON subject_operation_receipts(operation_id);
+
+      UPDATE model_outputs SET status='failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE attempt_id IN (SELECT attempt_id FROM migration_v28_expired_required)
+          AND status IN ('staged','ready');
+      UPDATE model_versions SET status='failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id IN (SELECT result_model_version_id FROM processing_attempts WHERE id IN (SELECT attempt_id FROM migration_v28_expired_required))
+          AND NOT EXISTS (SELECT 1 FROM models WHERE models.id=model_versions.model_id AND models.active_version_id=model_versions.id);
+      UPDATE models SET status=CASE WHEN active_version_id IS NULL THEN 'failed' ELSE 'ready' END,
+        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id IN (SELECT result_model_id FROM processing_attempts WHERE id IN (SELECT attempt_id FROM migration_v28_expired_required));
+      UPDATE processing_attempts SET status='failed',
+        error_code=(SELECT x.error_code FROM migration_v28_expired_required x WHERE x.attempt_id=processing_attempts.id),
+        error_message=(SELECT x.error_message FROM migration_v28_expired_required x WHERE x.attempt_id=processing_attempts.id),completed_at=COALESCE(completed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id IN (SELECT attempt_id FROM migration_v28_expired_required)
+          AND status NOT IN ('cancelled','published','failed');
+      UPDATE processing_tasks SET status='failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE active_attempt_id IN (SELECT attempt_id FROM migration_v28_expired_required);
+      INSERT OR IGNORE INTO event_outbox(id,event_type,payload_json,status,attempt_count,available_at,created_at,updated_at)
+        SELECT 'processing-failed-'||a.id,'processing.failed',json_object(
+          'eventId','processing-failed-'||a.id,'schemaVersion',1,'type','processing.failed',
+          'occurredAt',strftime('%Y-%m-%dT%H:%M:%fZ','now'),'projectId',p.id,'projectDisplayName',p.display_name,
+          'taskId',t.id,'taskDisplayName',t.display_name,'attemptId',a.id,'requestedBySubject',a.created_by,
+          'status','failed','error',json_object('code',x.error_code,'message',x.error_message)
+        ),'pending',0,strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now'),strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        FROM migration_v28_expired_required x
+        JOIN processing_attempts a ON a.id=x.attempt_id
+        JOIN processing_tasks t ON t.id=a.task_id
+        JOIN projects p ON p.id=t.project_id;
+      INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at)
+        SELECT lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||substr(lower(hex(randomblob(2))),2)||'-a'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))),
+          'system',NULL,'derivative.migration_terminalized','processing_attempt',a.id,
+          json_object('errorCode',x.error_code,'migrationVersion',28),strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        FROM migration_v28_expired_required x JOIN processing_attempts a ON a.id=x.attempt_id;
+      DROP TABLE migration_v28_expired_required;
+
+      CREATE TABLE retained_imports (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT UNIQUE REFERENCES dataset_operations(id) ON DELETE CASCADE,
+        attempt_id TEXT UNIQUE,
+        dataset_id TEXT,
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('backup_zip','server_folder','nodeodm_result')),
+        source_root_key TEXT,
+        source_relative_path TEXT,
+        source_byte_size INTEGER CHECK(source_byte_size IS NULL OR source_byte_size >= 0),
+        source_sha256 TEXT CHECK(source_sha256 IS NULL OR length(source_sha256)=64),
+        source_dev TEXT,
+        source_ino TEXT,
+        source_ctime_ns TEXT,
+        source_mtime_ns TEXT,
+        extracted_tree_sha256 TEXT CHECK(extracted_tree_sha256 IS NULL OR length(extracted_tree_sha256)=64),
+        staging_root_key TEXT NOT NULL,
+        staging_relative_path TEXT NOT NULL,
+        manifest_sha256 TEXT CHECK(manifest_sha256 IS NULL OR length(manifest_sha256)=64),
+        retained_file_count INTEGER NOT NULL DEFAULT 0 CHECK(retained_file_count >= 0),
+        retained_byte_size INTEGER NOT NULL DEFAULT 0 CHECK(retained_byte_size >= 0),
+        cleanup_jobs_inserted INTEGER NOT NULL DEFAULT 0 CHECK(cleanup_jobs_inserted IN (0,1)),
+        active_slot INTEGER NOT NULL DEFAULT 1 CHECK(active_slot=1),
+        slot_lease_owner TEXT,
+        slot_lease_token TEXT,
+        slot_lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(slot_lease_generation >= 0),
+        slot_lease_expires_at TEXT,
+        reserved_byte_size INTEGER NOT NULL DEFAULT 0 CHECK(reserved_byte_size >= 0),
+        state TEXT NOT NULL CHECK(state IN (
+          'queued','source_snapshotted','extracted','manifest_persisted','materialized',
+          'registering','awaiting_derivatives','ready','failed'
+        )),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(state <> 'ready' OR cleanup_jobs_inserted = 1),
+        CHECK(state IN ('queued','awaiting_derivatives','ready','failed') OR (
+          slot_lease_owner IS NOT NULL AND slot_lease_token IS NOT NULL AND slot_lease_expires_at IS NOT NULL
+        )),
+        CHECK(
+          (source_kind='backup_zip' AND source_root_key IS NOT NULL AND source_relative_path IS NOT NULL
+            AND source_byte_size IS NOT NULL AND source_sha256 IS NOT NULL
+            AND source_dev IS NOT NULL AND source_ino IS NOT NULL
+            AND source_ctime_ns IS NOT NULL AND source_mtime_ns IS NOT NULL)
+          OR (source_kind='server_folder' AND source_root_key IS NOT NULL AND source_relative_path IS NOT NULL)
+          OR (source_kind='nodeodm_result' AND source_root_key IS NULL AND source_relative_path IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX retained_imports_single_active
+        ON retained_imports(active_slot)
+        WHERE state IN ('source_snapshotted','extracted','manifest_persisted','materialized','registering','awaiting_derivatives');
+
+      CREATE TABLE retained_import_files (
+        retained_import_id TEXT NOT NULL REFERENCES retained_imports(id) ON DELETE CASCADE,
+        relative_path TEXT NOT NULL,
+        source_relative_path TEXT NOT NULL,
+        role TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        PRIMARY KEY(retained_import_id,relative_path)
+      );
+
+      CREATE TABLE import_cleanup_jobs (
+        id TEXT PRIMARY KEY,
+        retained_import_id TEXT NOT NULL REFERENCES retained_imports(id) ON DELETE CASCADE,
+        cleanup_type TEXT NOT NULL CHECK(cleanup_type IN ('staging_tree','source_zip')),
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        expected_byte_size INTEGER CHECK(expected_byte_size IS NULL OR expected_byte_size >= 0),
+        expected_sha256 TEXT CHECK(expected_sha256 IS NULL OR length(expected_sha256)=64),
+        expected_dev TEXT,
+        expected_ino TEXT,
+        expected_ctime_ns TEXT,
+        expected_mtime_ns TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending','leased','quarantined','complete','source_changed','cleanup_skipped_cross_mount','cleanup_skipped_read_only','cleanup_skipped_hardlink','failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        available_at TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(lease_generation >= 0),
+        lease_expires_at TEXT,
+        quarantine_relative_path TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE(retained_import_id,cleanup_type),
+        CHECK((status='leased' AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL) OR status<>'leased')
+      );
+
+      CREATE TABLE model_output_storage_components (
+        output_id TEXT NOT NULL REFERENCES model_outputs(id) ON DELETE CASCADE,
+        component_key TEXT NOT NULL,
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+        manifest_sha256 TEXT CHECK(manifest_sha256 IS NULL OR length(manifest_sha256)=64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(output_id,component_key)
+      );
+      INSERT INTO model_output_storage_components(output_id,component_key,root_key,relative_path,byte_size,manifest_sha256,created_at,updated_at)
+        SELECT id,'base',root_key,relative_path,byte_size,NULL,created_at,updated_at FROM model_outputs;
+
+      CREATE TABLE derivative_storage_journal (
+        job_id TEXT PRIMARY KEY REFERENCES derivative_jobs(id) ON DELETE CASCADE,
+        output_id TEXT NOT NULL REFERENCES model_outputs(id) ON DELETE CASCADE,
+        lease_token TEXT,
+        root_key TEXT NOT NULL CHECK(root_key='models'),
+        incomplete_relative_path TEXT,
+        complete_relative_path TEXT,
+        final_relative_path TEXT,
+        state TEXT NOT NULL CHECK(state IN ('reserved','building','verified','promoted','registered','terminal')),
+        reserved_byte_size INTEGER NOT NULL CHECK(reserved_byte_size >= 0),
+        actual_byte_size INTEGER CHECK(actual_byte_size IS NULL OR actual_byte_size >= 0),
+        accounted_byte_size INTEGER NOT NULL CHECK(accounted_byte_size >= COALESCE(actual_byte_size,0)),
+        manifest_sha256 TEXT CHECK(manifest_sha256 IS NULL OR length(manifest_sha256)=64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK(state='reserved' OR (
+          lease_token IS NOT NULL AND incomplete_relative_path IS NOT NULL
+          AND complete_relative_path IS NOT NULL AND final_relative_path IS NOT NULL
+        ))
+      );
+    `,
+  },
 ];
 
 function applyMigrations(database) {

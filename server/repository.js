@@ -323,7 +323,7 @@ class ViewerRepository {
         );
       } else {
         this.database.prepare(`UPDATE models SET
-          display_name=?,status=?,metadata_json=?,updated_at=?,unregistered_at=NULL
+          display_name=?,status=CASE WHEN active_version_id IS NOT NULL THEN 'ready' ELSE ? END,metadata_json=?,updated_at=?,unregistered_at=NULL
           WHERE id=?`).run(
           input.displayName,
           input.status || 'ready',

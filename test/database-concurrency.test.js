@@ -68,6 +68,70 @@ test('two processes serialize the same pending upgrade migration', async (t) => 
   assertFullyMigrated(databasePath);
 });
 
+test('v28 preserves operation receipts and creates the complete retained-import schema', (t) => {
+  const databasePath = temporaryDatabase(t, 'migration-v28-retained-imports');
+  const database = new DatabaseSync(databasePath);
+  database.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL');
+  database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+  for (const migration of MIGRATIONS.filter((item) => item.version < 28)) {
+    database.exec(migration.sql);
+    database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+      .run(migration.version, migration.name, new Date().toISOString());
+  }
+  const created = new Date().toISOString(), future = new Date(Date.now() + 60_000).toISOString();
+  const legacyProcessing=new ProcessingRepository(database),legacyRepository=new ViewerRepository(database),legacyProject=legacyProcessing.createProject({displayName:'Legacy accounting'}),legacyDataset=legacyProcessing.createDataset({projectId:legacyProject.id,displayName:'Legacy source',storageMode:'managed',rootKey:'datasets',relativePath:'legacy-source'});legacyProcessing.finalizeDataset(legacyDataset.id,[{relativePath:'model.glb',byteSize:123,sha256:'b'.repeat(64)}],'c'.repeat(64));const legacyTask=legacyProcessing.createTask({projectId:legacyProject.id,datasetId:legacyDataset.id,displayName:'Legacy task'}),legacyAttempt=legacyProcessing.createImportedAttempt({id:crypto.randomUUID(),taskId:legacyTask.id,datasetId:legacyDataset.id,providerTaskId:'legacy:v28',createdBy:'ops:test',staged:false}),legacyModel=legacyRepository.upsertModelVersion({provider:'webodm',providerModelId:'legacy:v28',providerVersionId:legacyAttempt.id,displayName:'Legacy task',status:'ready',assets:[],makeActive:false}),legacyVersionId=database.prepare('SELECT id FROM model_versions WHERE model_id=?').get(legacyModel.id).id;legacyProcessing.setAttemptResult(legacyAttempt.id,legacyModel.id,legacyVersionId);database.prepare("INSERT INTO model_outputs(id,model_id,task_id,attempt_id,project_id,root_key,relative_path,storage_mode,status,byte_size,asset_count,created_at,updated_at) VALUES (?,?,?,?,?,'models',?,'managed','ready',123,0,?,?)").run(legacyVersionId,legacyModel.id,legacyTask.id,legacyAttempt.id,legacyProject.id,`${legacyTask.id}/${legacyAttempt.id}`,created,created);
+  for (const status of ['queued','leased','succeeded','failed']) {
+    const id=`operation-${status}`;
+    database.prepare(`INSERT INTO dataset_operations(id,operation_type,subject,payload_json,status,lease_owner,lease_expires_at,available_at,created_at,updated_at,completed_at)
+      VALUES (?,'catalog_map','ops:test','{}',?,?,?,?,?,?,?)`).run(id,status,status==='leased'?'legacy-worker':null,status==='leased'?future:null,created,created,created,['succeeded','failed'].includes(status)?created:null);
+    database.prepare("INSERT INTO subject_operation_receipts(subject,client_key,method,path,request_sha256,operation_id,created_at,updated_at) VALUES ('ops:test',?,'POST','/imports',?,?,?,?)").run(`receipt-${status}`,crypto.createHash('sha256').update(status).digest('hex'),id,created,created);
+  }
+  database.close();
+
+  const upgraded = openDatabase(databasePath);
+  const columns = upgraded.prepare('PRAGMA table_info(dataset_operations)').all().map((row) => row.name);
+  assert.ok(columns.includes('processing_attempt_id'));
+  assert.equal(columns.includes('awaiting_derivatives'),false);
+  assert.deepEqual(upgraded.prepare('SELECT id,status FROM dataset_operations ORDER BY id').all().map((row)=>[row.id,row.status]),[['operation-failed','failed'],['operation-leased','leased'],['operation-queued','queued'],['operation-succeeded','succeeded']]);
+  assert.deepEqual(upgraded.prepare('SELECT client_key,operation_id FROM subject_operation_receipts ORDER BY client_key').all().map((row)=>[row.client_key,row.operation_id]),[['receipt-failed','operation-failed'],['receipt-leased','operation-leased'],['receipt-queued','operation-queued'],['receipt-succeeded','operation-succeeded']]);
+  const tables=['retained_imports','retained_import_files','import_cleanup_jobs','model_output_storage_components','derivative_storage_journal'];
+  for(const name of tables)assert.ok(upgraded.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name),name);
+  const baseComponent=upgraded.prepare("SELECT component_key,root_key,relative_path,byte_size FROM model_output_storage_components WHERE output_id=?").get(legacyVersionId);assert.equal(baseComponent.component_key,'base');assert.equal(baseComponent.root_key,'models');assert.equal(baseComponent.relative_path,`${legacyTask.id}/${legacyAttempt.id}`);assert.equal(baseComponent.byte_size,123);
+  const identityTypes=Object.fromEntries(upgraded.prepare('PRAGMA table_info(retained_imports)').all().filter((row)=>['source_dev','source_ino','source_ctime_ns','source_mtime_ns'].includes(row.name)).map((row)=>[row.name,row.type]));
+  assert.deepEqual(identityTypes,{source_dev:'TEXT',source_ino:'TEXT',source_ctime_ns:'TEXT',source_mtime_ns:'TEXT'});
+  assert.match(upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='dataset_operations'").get().sql,/awaiting_derivatives/);
+  assert.throws(()=>upgraded.prepare("UPDATE dataset_operations SET status='awaiting_derivatives' WHERE id='operation-failed'").run(),/CHECK constraint failed/);
+  const insertRetained=upgraded.prepare(`INSERT INTO retained_imports(id,source_kind,staging_root_key,staging_relative_path,active_slot,slot_lease_owner,slot_lease_token,slot_lease_expires_at,state,created_at,updated_at)
+    VALUES (?,'nodeodm_result','cache',?,1,'worker','token',?,'source_snapshotted',?,?)`);
+  insertRetained.run('retained-one','one',future,created,created);
+  assert.throws(()=>insertRetained.run('retained-two','two',future,created,created),/UNIQUE constraint failed/);
+  assert.deepEqual(upgraded.prepare('PRAGMA foreign_key_check').all(),[]);
+  upgraded.close();
+});
+
+test('v28 refuses a partially initialized retained-import schema without modifying v27', (t) => {
+  const databasePath=temporaryDatabase(t,'migration-v28-corrupt-partial'),database=new DatabaseSync(databasePath);database.exec('PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');for(const migration of MIGRATIONS.filter((item)=>item.version<28)){database.exec(migration.sql);database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)').run(migration.version,migration.name,new Date().toISOString());}database.exec('CREATE TABLE retained_imports(unexpected TEXT)');database.close();
+  assert.throws(()=>openDatabase(databasePath),/migration_v28_guard|UNIQUE constraint failed/);const unchanged=new DatabaseSync(databasePath,{readOnly:true});assert.equal(unchanged.prepare('SELECT MAX(version) version FROM schema_migrations').get().version,27);assert.ok(unchanged.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_imports'").get());assert.equal(unchanged.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_import_files'").get(),undefined);unchanged.close();
+});
+
+test('v28 reconciles all heavy leases and expands the singleton to EPT', (t) => {
+  const databasePath=temporaryDatabase(t,'migration-v28-heavy-singleton'),database=new DatabaseSync(databasePath);database.exec('PRAGMA foreign_keys=OFF');database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');for(const migration of MIGRATIONS.filter((item)=>item.version<28)){database.exec(migration.sql);database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)').run(migration.version,migration.name,new Date().toISOString());}
+  const past='2000-01-01T00:00:00.000Z',created='2026-01-01T00:00:00.000Z',futureOne=new Date(Date.now()+60_000).toISOString(),futureTwo=new Date(Date.now()+120_000).toISOString(),futureThree=new Date(Date.now()+180_000).toISOString(),insert=database.prepare(`INSERT INTO derivative_jobs(id,attempt_id,derivative_type,status,request_json,result_json,lease_owner,lease_token,lease_expires_at,heartbeat_at,attempt_count,first_started_at,deadline_at,created_at,updated_at)
+    VALUES (?,?,?,'leased','{}','{}',?,?,?,?,1,?,?,?,?)`);
+  insert.run('expired-ept','attempt-expired','ept','expired-owner','expired-token',past,created,created,past,created,created);
+  insert.run('future-mesh','attempt-mesh','mesh_tiles','mesh-owner','mesh-token',futureOne,created,created,futureTwo,created,created);database.prepare("UPDATE derivative_jobs SET attempt_count=3 WHERE id='future-mesh'").run();
+  insert.run('future-ept','attempt-ept','ept','ept-owner','ept-token',futureTwo,created,created,futureTwo,created,'2026-01-01T00:00:01.000Z');
+  insert.run('legacy-tokenless','attempt-tokenless','ept','legacy-owner',null,futureThree,created,created,futureThree,created,'2026-01-01T00:00:02.000Z');database.close();
+  const upgraded=openDatabase(databasePath),rows=Object.fromEntries(upgraded.prepare("SELECT id,status,lease_owner,lease_token FROM derivative_jobs WHERE id IN ('expired-ept','future-mesh','future-ept','legacy-tokenless')").all().map((row)=>[row.id,row]));
+  assert.equal(rows['expired-ept'].status,'failed');assert.equal(rows['expired-ept'].lease_token,null);assert.equal(rows['future-mesh'].status,'failed');assert.equal(rows['future-mesh'].lease_owner,null);assert.equal(rows['future-mesh'].lease_token,null);assert.equal(rows['future-ept'].status,'leased');assert.equal(rows['future-ept'].lease_token,'ept-token');assert.equal(rows['legacy-tokenless'].status,'pending');assert.equal(rows['legacy-tokenless'].lease_owner,null);assert.equal(rows['legacy-tokenless'].lease_token,null);
+  const lock=upgraded.prepare('SELECT job_id,lease_owner,lease_token FROM lod_conversion_lock WHERE id=1').get();assert.equal(lock.job_id,'future-ept');assert.equal(lock.lease_owner,'ept-owner');assert.equal(lock.lease_token,'ept-token');assert.ok(upgraded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='derivative_jobs_single_heavy_lease'").get());assert.equal(upgraded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='derivative_jobs_single_lod_lease'").get(),undefined);assert.match(upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='derivative_jobs_deadline_idx'").get().sql,/'ept'/);
+  assert.throws(()=>upgraded.prepare("UPDATE derivative_jobs SET status='leased',lease_owner='other',lease_token='other-token',lease_expires_at=? WHERE id='future-mesh'").run(futureTwo),/UNIQUE constraint failed/);upgraded.close();
+});
+
+test('v28 propagates an expired required heavy lease to its owning processing state', (t) => {
+  const databasePath=temporaryDatabase(t,'migration-v28-required-terminal'),database=new DatabaseSync(databasePath);database.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');for(const migration of MIGRATIONS.filter((item)=>item.version<28)){database.exec(migration.sql);database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)').run(migration.version,migration.name,new Date().toISOString());}const processing=new ProcessingRepository(database),repository=new ViewerRepository(database),project=processing.createProject({displayName:'Expired migration'}),data=processing.createDataset({projectId:project.id,displayName:'Expired source',storageMode:'managed',rootKey:'datasets',relativePath:'expired-source'});processing.finalizeDataset(data.id,[{relativePath:'cloud.laz',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));const task=processing.createTask({projectId:project.id,datasetId:data.id,displayName:'Expired task'}),attempt=processing.createImportedAttempt({id:crypto.randomUUID(),taskId:task.id,datasetId:data.id,providerTaskId:'migration:expired',createdBy:'ops:test'}),model=repository.upsertModelVersion({provider:'webodm',providerModelId:'migration:expired',providerVersionId:attempt.id,displayName:task.displayName,status:'importing',assets:[],makeActive:false}),versionId=database.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id,created=new Date().toISOString();processing.setAttemptResult(attempt.id,model.id,versionId);database.prepare("INSERT INTO model_outputs(id,model_id,task_id,attempt_id,project_id,root_key,relative_path,storage_mode,status,byte_size,asset_count,created_at,updated_at) VALUES (?,?,?,?,?,'models',?,'managed','staged',1,0,?,?)").run(versionId,model.id,task.id,attempt.id,project.id,`${task.id}/${attempt.id}`,created,created);database.prepare("UPDATE processing_attempts SET status='derivatives' WHERE id=?").run(attempt.id);database.prepare("UPDATE processing_tasks SET status='processing' WHERE id=?").run(task.id);const jobId=processing.enqueueDerivative(attempt.id,'ept',{optional:false}),past='2000-01-01T00:00:00.000Z';database.prepare("UPDATE derivative_jobs SET status='leased',lease_owner='legacy-worker',lease_token='11111111111111111111111111111111',lease_expires_at=?,heartbeat_at=?,attempt_count=3,first_started_at=?,deadline_at=? WHERE id=?").run(past,past,past,past,jobId);database.prepare("UPDATE lod_conversion_lock SET job_id=?,lease_owner='legacy-worker',lease_token='11111111111111111111111111111111',lease_expires_at=?,heartbeat_at=? WHERE id=1").run(jobId,past,past);database.close();const upgraded=openDatabase(databasePath);t.after(()=>upgraded.close());assert.equal(upgraded.prepare('SELECT status FROM derivative_jobs WHERE id=?').get(jobId).status,'failed');assert.equal(upgraded.prepare('SELECT status FROM processing_attempts WHERE id=?').get(attempt.id).status,'failed');assert.equal(upgraded.prepare('SELECT status FROM processing_tasks WHERE id=?').get(task.id).status,'failed');assert.equal(upgraded.prepare('SELECT status FROM model_outputs WHERE id=?').get(versionId).status,'failed');assert.equal(upgraded.prepare('SELECT status FROM model_versions WHERE id=?').get(versionId).status,'failed');assert.equal(upgraded.prepare('SELECT status FROM models WHERE id=?').get(model.id).status,'failed');assert.equal(upgraded.prepare("SELECT COUNT(*) n FROM event_outbox WHERE id=? AND event_type='processing.failed'").get(`processing-failed-${attempt.id}`).n,1);assert.deepEqual(upgraded.prepare('PRAGMA foreign_key_check').all(),[]);
+});
+
 test('v27 reconciles legacy parallel LOD leases before enforcing database singleton uniqueness', (t) => {
   const databasePath = temporaryDatabase(t, 'migration-v27-lod-singleton');
   const database = new DatabaseSync(databasePath);
@@ -138,7 +202,7 @@ test('v17 fails closed for legacy live unbound published authorization state', (
   assert.ok(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-live'").get().revoked_at);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='published-expired'").get().revoked_at, null);
   assert.equal(upgraded.prepare("SELECT revoked_at FROM viewer_sessions WHERE id='review-live'").get().revoked_at, null);
-  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 27);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, MIGRATIONS.at(-1).version);
   upgraded.close();
 });
 
@@ -184,7 +248,7 @@ test('v25 preserves import history while replacing fingerprint uniqueness with a
   const dataset=processing.createDataset({id:'dataset-one',projectId:project.id,displayName:'Migration dataset',sourceType:'webodm',storageMode:'adopted',rootKey:'datasets',relativePath:'dataset-one'});
   processing.finalizeDataset(dataset.id,[],crypto.createHash('sha256').digest('hex'));
   const task=processing.createTask({id:'task-one',projectId:project.id,datasetId:dataset.id,displayName:'Migration task'});
-  const attempt=processing.createImportedAttempt({id:'attempt-one',taskId:task.id,datasetId:dataset.id,providerTaskId:'webodm:migration',createdBy:'ops:test'});
+  const attempt=processing.createImportedAttempt({id:'attempt-one',taskId:task.id,datasetId:dataset.id,providerTaskId:'webodm:migration',createdBy:'ops:test',staged:false});
   const model=repository.upsertModelVersion({modelId:'model-one',versionId:'version-one',provider:'webodm',providerModelId:'task-import:import-one',providerVersionId:fingerprint,displayName:'Migration task',status:'ready',assets:[],makeActive:false});
   processing.setAttemptResult(attempt.id,model.id,'version-one');
   processing.recordWebodmTaskImport({id:'import-one',sourceFingerprint:fingerprint,sourceRelativePath:'backup.zip',projectId:project.id,taskId:task.id,datasetId:dataset.id,attemptId:attempt.id,modelId:model.id,modelVersionId:'version-one',assetKinds:[],createdBy:'ops:test'});

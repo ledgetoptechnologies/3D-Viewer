@@ -33,7 +33,7 @@ function readyModel(c,{assets=['glb','obj']}={}){
   const dataset=c.processing.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
   c.processing.finalizeDataset(dataset.id,[],'a'.repeat(64));
   const task=c.processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Legacy model'});
-  const attempt=c.processing.createImportedAttempt({id:crypto.randomUUID(),taskId:task.id,datasetId:dataset.id,providerTaskId:'legacy',createdBy:'ops:test'});
+  const attempt=c.processing.createImportedAttempt({id:crypto.randomUUID(),taskId:task.id,datasetId:dataset.id,providerTaskId:'legacy',createdBy:'ops:test',staged:false});
   const model=c.repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,status:'ready',assets:assets.map(kind=>({kind,rootKey:'datasets',relativePath:`legacy/model.${kind==='obj'?'obj':'glb'}`,sha256:'b'.repeat(64),published:false})),makeActive:false});
   const versionId=c.db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;
   c.processing.setAttemptResult(attempt.id,model.id,versionId);

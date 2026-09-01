@@ -54,6 +54,7 @@ function readyAttempt(processing, label) {
     datasetId: dataset.id,
     providerTaskId: `fixture:${label}`,
     createdBy: 'ops:test',
+    staged: false,
   });
 }
 
@@ -89,12 +90,13 @@ test('required new ingest generates KTX2 instead of accepting bundled JPEG tiles
   ]);
 });
 
-test('migration and BEGIN IMMEDIATE singleton fence concurrent LOD claims with unique tokens', (t) => {
+test('migration and BEGIN IMMEDIATE singleton fence concurrent heavy derivative claims with unique tokens', (t) => {
   const c = fixture(t);
   const firstAttempt = readyAttempt(c.processing, 'First');
   const secondAttempt = readyAttempt(c.processing, 'Second');
-  c.processing.enqueueDerivative(firstAttempt.id, 'mesh_tiles', { optional: true });
+  c.processing.enqueueDerivative(firstAttempt.id, 'ept', { optional: true });
   c.processing.enqueueDerivative(secondAttempt.id, 'mesh_tiles', { optional: true });
+  c.db.prepare("UPDATE derivative_jobs SET created_at=CASE derivative_type WHEN 'ept' THEN '2026-01-01T00:00:00.000Z' ELSE '2026-01-01T00:00:01.000Z' END").run();
 
   const secondDb = openDatabase(c.databasePath);
   const second = new ProcessingRepository(secondDb);
@@ -119,7 +121,7 @@ test('migration and BEGIN IMMEDIATE singleton fence concurrent LOD claims with u
   assert.notEqual(next.lease_token, claimed.lease_token);
 });
 
-test('database uniqueness blocks a pre-v27 worker from claiming a second live LOD job', (t) => {
+test('database uniqueness blocks a pre-v28 worker from claiming a second live heavy job', (t) => {
   const c = fixture(t);
   const firstAttempt = readyAttempt(c.processing, 'DB singleton first');
   const secondAttempt = readyAttempt(c.processing, 'DB singleton second');
@@ -131,7 +133,7 @@ test('database uniqueness blocks a pre-v27 worker from claiming a second live LO
     () => c.db.prepare("UPDATE derivative_jobs SET status='leased',lease_owner='old-worker',lease_expires_at=? WHERE id=?").run(new Date(Date.now() + 60_000).toISOString(), pending.id),
     /UNIQUE constraint failed/,
   );
-  assert.equal(c.db.prepare("SELECT COUNT(*) AS n FROM derivative_jobs WHERE derivative_type IN ('mesh_tiles','lod_audit') AND status='leased'").get().n, 1);
+  assert.equal(c.db.prepare("SELECT COUNT(*) AS n FROM derivative_jobs WHERE derivative_type IN ('ept','mesh_tiles','lod_audit') AND status='leased'").get().n, 1);
 });
 
 test('an active legacy LOD lease without a singleton row fences new conversion claims', (t) => {
@@ -150,20 +152,27 @@ test('an active legacy LOD lease without a singleton row fences new conversion c
   assert.equal(c.db.prepare("SELECT COUNT(*) AS n FROM derivative_jobs WHERE status='leased'").get().n, 1);
 });
 
-test('non-LOD derivative retries are not constrained by the LOD claim budget', (t) => {
+test('mesh conversion consumes its durable reservation and all concurrent admission reserves',()=>{const source=fs.readFileSync(path.join(__dirname,'..','server','derivativeWorker.js'),'utf8'),start=source.indexOf('async function generateMeshTiles'),end=source.indexOf('async function processOneDerivative',start),block=source.slice(start,end);assert.match(block,/derivativeStorageReservation/);assert.match(block,/activeDerivativeReservationBytes/);assert.match(block,/activeProcessingReservationBytes/);const admission=block.indexOf('requireDerivativeSpace'),spawn=block.indexOf('await run(config.obj2TilesBin');assert.ok(admission>=0&&spawn>admission);});
+
+test('EPT worker uses token-specific staging and fenced promotion without deleting a shared final',()=>{const source=fs.readFileSync(path.join(__dirname,'..','server','derivativeWorker.js'),'utf8'),start=source.indexOf("job.derivative_type === 'ept'"),end=source.indexOf("job.derivative_type === 'mesh_tiles'",start),block=source.slice(start,end);assert.match(block,/ept-\$\{job\.id\}/);assert.match(block,/\$\{output\}\.\$\{job\.lease_token\}\.incomplete/);assert.match(block,/registerVerifiedEptAsset/);const admission=block.indexOf('requireDerivativeSpace'),spawn=block.indexOf('await run(config.entwineBin');assert.ok(admission>=0&&spawn>admission);assert.match(block,/activeDerivativeReservationBytes/);assert.doesNotMatch(block,/rmSync\(output/);assert.doesNotMatch(block,/addModelAsset/);});
+
+test('EPT retries share the three-claim heavy derivative budget', (t) => {
   const c = fixture(t);
   const attempt = readyAttempt(c.processing, 'EPT retries');
   c.processing.enqueueDerivative(attempt.id, 'ept', { optional: true });
   let claimed;
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < 3; index += 1) {
     claimed = c.processing.claimDerivative(`ept-worker-${index}`);
     assert.equal(claimed.derivative_type, 'ept');
     c.db.prepare("UPDATE derivative_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(claimed.id);
+    c.db.prepare("UPDATE lod_conversion_lock SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE job_id=?").run(claimed.id);
   }
-  assert.equal(claimed.attempt_count, 4);
+  assert.equal(claimed.attempt_count, 3);
+  assert.equal(c.processing.claimDerivative('ept-worker-exhausted'),null);
+  assert.equal(c.db.prepare('SELECT status FROM derivative_jobs WHERE id=?').get(claimed.id).status,'failed');
 });
 
-test('manual retry starts a fresh non-LOD lease budget and deadline', (t) => {
+test('manual retry starts a fresh heavy lease budget and deadline', (t) => {
   const c = fixture(t);
   const attempt = readyOutputAttempt(c, 'EPT manual retry');
   c.processing.enqueueDerivative(attempt.id, 'ept', { optional: true });
@@ -176,7 +185,7 @@ test('manual retry starts a fresh non-LOD lease budget and deadline', (t) => {
   assert.deepEqual({ ...row }, { status: 'pending', attempt_count: 0, first_started_at: null, deadline_at: null });
 });
 
-test('expired non-LOD derivative deadlines become terminal without a LOD lock', (t) => {
+test('expired EPT deadlines become terminal and release the heavy lock', (t) => {
   const c = fixture(t);
   const attempt = readyAttempt(c.processing, 'EPT deadline');
   c.processing.enqueueDerivative(attempt.id, 'ept', { optional: true });
@@ -439,7 +448,8 @@ test('derivative storage reconciliation advances past terminal jobs without toke
   assert.equal(c.processing.failOptionalDerivative(second.id, 'cleanup-cursor-second', 'fixture', 'derivative_failed', second.lease_token), true);
   c.db.prepare("UPDATE derivative_jobs SET updated_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(first.id);
   c.db.prepare("UPDATE derivative_jobs SET updated_at='2001-01-01T00:00:00.000Z' WHERE id=?").run(second.id);
-  const base = path.join(c.storage.roots.models, secondAttempt.taskId, secondAttempt.id);
+  const secondClaimAttempt = c.processing.getAttempt(second.attempt_id);
+  const base = path.join(c.storage.roots.models, secondClaimAttempt.taskId, second.attempt_id);
   const stale = path.join(base, `tiles-ktx2-etc1s-${second.id}.${second.lease_token}.incomplete`);
   fs.mkdirSync(stale, { recursive: true });
   const old = new Date(Date.now() - 48 * 3600_000);
@@ -525,4 +535,6 @@ test('derivative storage admission includes source expansion and inode reserve',
   assert.equal(admitted.required, 5 * 1024 ** 3);
   assert.equal(admitted.expectedFiles, 10_000);
   assert.ok(admitted.inodeReserve >= 10_000);
+  const reserved=c.storage.requireDerivativeSpace('models',{sourceBytes:1024**3,expectedFiles:10_000,reservedBytes:8*1024**3,otherReservedBytes:2*1024**3,reservedDatasetBytes:[1024**3]});
+  assert.equal(reserved.required,14*1024**3);
 });

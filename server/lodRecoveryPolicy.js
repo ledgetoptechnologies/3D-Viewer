@@ -10,4 +10,8 @@ function isLodDerivativeType(type) {
   return type === 'mesh_tiles' || type === 'lod_audit';
 }
 
-module.exports = { LOD_DERIVATIVE_RECOVERY_REVISION, isLodDerivativeType };
+function isHeavyDerivativeType(type) {
+  return type === 'ept' || isLodDerivativeType(type);
+}
+
+module.exports = { LOD_DERIVATIVE_RECOVERY_REVISION, isHeavyDerivativeType, isLodDerivativeType };

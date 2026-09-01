@@ -37,7 +37,7 @@ function legacyImport(c, georef = {}, { metadataAvailable = true } = {}) {
   }
   c.processing.finalizeDataset(dataset.id, [], 'a'.repeat(64));
   const task = c.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Imported task' });
-  const attempt = c.processing.createImportedAttempt({ id: crypto.randomUUID(), taskId: task.id, datasetId: dataset.id, providerTaskId: `legacy:${task.id}`, createdBy: 'ops:test' });
+  const attempt = c.processing.createImportedAttempt({ id: crypto.randomUUID(), taskId: task.id, datasetId: dataset.id, providerTaskId: `legacy:${task.id}`, createdBy: 'ops:test', staged: false });
   const model = c.repository.upsertModelVersion({ provider: 'webodm', providerModelId: `task-import:${task.id}`, providerVersionId: attempt.id, displayName: task.displayName, status: 'ready', georef, assets: [], makeActive: false });
   const versionId = c.db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;
   c.processing.setAttemptResult(attempt.id, model.id, versionId);

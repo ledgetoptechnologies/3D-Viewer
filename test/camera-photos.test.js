@@ -158,6 +158,7 @@ test('startup reconciliation restores exact camera-photo links for imports creat
     datasetId,
     providerTaskId: 'webodm-import:legacy-camera',
     displayName: task.displayName,
+    staged: false,
   });
   const versionId = 'legacy-camera-version';
   const model = repository.upsertModelVersion({

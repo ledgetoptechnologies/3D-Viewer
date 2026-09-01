@@ -4,8 +4,9 @@ const crypto = require('node:crypto');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
 const { importWebodmTask } = require('./webodmTaskImport');
+const { processingReadyEvent } = require('./processingReadyEvent');
 
-function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{let absolute=null;try{absolute=storage.resolve(item.rootKey,item.relativePath,{mustExist:true});}catch(error){if(error.code!=='ENOENT'&&!/ENOENT/.test(error.message))throw error;}if(absolute)storage.removeAdoptedSource(absolute);processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch{/* durable journal retries during maintenance */}}return cleaned;}
+async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
 
 function manifestHash(files) {
@@ -131,13 +132,22 @@ async function processOneDatasetOperation(deps, owner) {
       else{result=await mapCatalogCandidate(operation,deps,updateProgress);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});}
     }
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
-    if (lostLease || !deps.processing.completeDatasetOperation(operation.id, owner, result))
+    let completed;
+    if(operation.operation_type==='catalog_map'){
+      if(!result?.attempt?.id||!Array.isArray(result.requiredDerivatives))throw Object.assign(new Error('catalog import returned an invalid readiness result'),{code:'invalid_import_result'});
+      if(result.requiredDerivatives.length){
+        if(result.attempt.status!=='ingesting')throw Object.assign(new Error('catalog import entered an unexpected derivative state'),{code:'invalid_import_state'});
+        completed=deps.processing.activateImportedDerivativesForOperation(operation.id,owner,result.attempt.id,result.requiredDerivatives,result);
+      }else{
+        if(result.attempt.status!=='ingesting')throw Object.assign(new Error('catalog import entered an unexpected readiness state'),{code:'invalid_import_state'});
+        completed=deps.processing.completeDatasetOperationWithImportReadiness(operation.id,owner,result,processingReadyEvent(deps.processing,deps.config,result.attempt));
+      }
+    }else completed=deps.processing.completeDatasetOperation(operation.id,owner,result);
+    if (lostLease || !completed)
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
-    if(operation.operation_type==='catalog_map'&&JSON.parse(operation.payload_json||'{}').webodmTaskImport)deps.processing.clearCatalogAdoptionIntent(operation.id);
-    if(operation.operation_type==='catalog_map'){reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);}
+    if(operation.operation_type==='catalog_map'){deps.processing.clearCatalogAdoptionIntent(operation.id);await reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);}
   } catch (error) {
     if(operation.operation_type==='catalog_map'){
-      try{if(JSON.parse(operation.payload_json||'{}').webodmTaskImport)deps.processing.deleteWebodmTaskImportRecord(operation.id);}catch{/* rollback below remains the authority */}
       try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
     }
     deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
