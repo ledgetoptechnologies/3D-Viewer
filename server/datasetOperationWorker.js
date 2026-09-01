@@ -137,16 +137,17 @@ async function processOneDatasetOperation(deps, owner) {
       if(!result?.attempt?.id||!Array.isArray(result.requiredDerivatives))throw Object.assign(new Error('catalog import returned an invalid readiness result'),{code:'invalid_import_result'});
       if(result.requiredDerivatives.length){
         if(result.attempt.status!=='ingesting')throw Object.assign(new Error('catalog import entered an unexpected derivative state'),{code:'invalid_import_state'});
-        completed=deps.processing.activateImportedDerivativesForOperation(operation.id,owner,result.attempt.id,result.requiredDerivatives,result);
+        completed=deps.processing.activateImportedDerivativesForOperation(operation.id,owner,result.attempt.id,result.requiredDerivatives,result,result.retainedLeaseToken);
       }else{
         if(result.attempt.status!=='ingesting')throw Object.assign(new Error('catalog import entered an unexpected readiness state'),{code:'invalid_import_state'});
-        completed=deps.processing.completeDatasetOperationWithImportReadiness(operation.id,owner,result,processingReadyEvent(deps.processing,deps.config,result.attempt));
+        completed=deps.processing.completeDatasetOperationWithImportReadiness(operation.id,owner,result,processingReadyEvent(deps.processing,deps.config,result.attempt),result.retainedLeaseToken);
       }
     }else completed=deps.processing.completeDatasetOperation(operation.id,owner,result);
     if (lostLease || !completed)
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
     if(operation.operation_type==='catalog_map'){deps.processing.clearCatalogAdoptionIntent(operation.id);await reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);}
   } catch (error) {
+    if(error?.code==='retained_import_busy'&&deps.processing.deferDatasetOperation(operation.id,owner,5_000))return true;
     if(operation.operation_type==='catalog_map'){
       try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
     }

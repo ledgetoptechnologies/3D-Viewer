@@ -2,6 +2,10 @@
 
 const path = require('node:path');
 
+function compareUtf8(left, right) {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
 function safeRelativePath(value) {
   if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\')) return null;
   const normalized = path.posix.normalize(value.replace(/^\/+/, ''));
@@ -34,4 +38,4 @@ function adminOutputAssetKind(kind) {
   return publicDerivativeKind(kind) || kind === 'report';
 }
 
-module.exports = { adminOutputAssetKind, publicDerivativeKind, safeRelativePath, sanitizeLogMessage };
+module.exports = { adminOutputAssetKind, compareUtf8, publicDerivativeKind, safeRelativePath, sanitizeLogMessage };
