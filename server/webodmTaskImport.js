@@ -4,7 +4,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
-const { extractZipFile } = require('./safeZip');
+const { extractZipDescriptor } = require('./safeZip');
+const { matchesSourceSnapshot, openImportFolderSource, openImportZipSource } = require('./importSourceSnapshot');
 const { discoverAssets } = require('./catalogImport');
 const { validateImportSelection } = require('./importBrowser');
 const { hashFile, hashTree } = require('./storageManager');
@@ -23,34 +24,39 @@ function capabilitySummary(assets) {
   return { assetKinds, capabilities: [...new Set(assetKinds.map((kind) => CAPABILITIES[kind]).filter(Boolean))].sort() };
 }
 
-async function copyTree(source, destination, { maxFiles, maxBytes, signal, progress = async () => {} }) {
-  const files = [];
-  const walk = (directory, relative = '') => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (signal?.aborted) throw Object.assign(new Error('task import cancelled'), { code: 'lease_lost' });
-      const absolute = path.join(directory, entry.name), rel = relative ? `${relative}/${entry.name}` : entry.name;
-      const stat = fs.lstatSync(absolute);
-      if (stat.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) throw Object.assign(new Error('task import contains an unsupported file'), { code: 'invalid_asset_tree' });
-      if (entry.isDirectory()) walk(absolute, rel);
-      else files.push({ absolute, rel, bytes: stat.size });
-      if (files.length > maxFiles) throw Object.assign(new Error('task import contains too many files'), { code: 'too_many_files' });
+async function copyTree(sourceFd, destination, { maxFiles, maxBytes, signal, progress = async () => {} }) {
+  const same=(left,right)=>left.dev===right.dev&&left.ino===right.ino&&left.mode===right.mode&&left.size===right.size&&left.ctimeNs===right.ctimeNs&&left.mtimeNs===right.mtimeNs;
+  let files=0,bytes=0;
+  fs.mkdirSync(destination,{recursive:true});
+  const walk=async(directoryFd,relative='')=>{
+    if(signal?.aborted)throw Object.assign(new Error('task import cancelled'),{code:'lease_lost'});
+    const beforeDirectory=fs.fstatSync(directoryFd,{bigint:true}),directoryPath=`/proc/self/fd/${directoryFd}`;
+    for(const entry of fs.readdirSync(directoryPath,{withFileTypes:true})){
+      if(signal?.aborted)throw Object.assign(new Error('task import cancelled'),{code:'lease_lost'});
+      const rel=relative?`${relative}/${entry.name}`:entry.name,childPath=`${directoryPath}/${entry.name}`,before=fs.lstatSync(childPath,{bigint:true});
+      if(before.isSymbolicLink()||(!before.isDirectory()&&!before.isFile()))throw Object.assign(new Error('task import contains an unsupported file'),{code:'invalid_asset_tree'});
+      if(before.isDirectory()){
+        let childFd;try{childFd=fs.openSync(childPath,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);}catch{throw Object.assign(new Error('task import source changed during traversal'),{code:'source_changed'});}
+        try{const opened=fs.fstatSync(childFd,{bigint:true});if(!opened.isDirectory()||!same(before,opened))throw Object.assign(new Error('task import source changed during traversal'),{code:'source_changed'});fs.mkdirSync(path.join(destination,...rel.split('/')),{recursive:true});await walk(childFd,rel);}finally{fs.closeSync(childFd);}
+        continue;
+      }
+      let fileFd;try{fileFd=fs.openSync(childPath,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);}catch{throw Object.assign(new Error('task import source changed during traversal'),{code:'source_changed'});}
+      try{
+        const opened=fs.fstatSync(fileFd,{bigint:true});if(!opened.isFile()||!same(before,opened)||opened.size>BigInt(Number.MAX_SAFE_INTEGER))throw Object.assign(new Error('task import source changed during traversal'),{code:'source_changed'});
+        files+=1;bytes+=Number(opened.size);if(files>maxFiles)throw Object.assign(new Error('task import contains too many files'),{code:'too_many_files'});if(!Number.isSafeInteger(bytes)||bytes>maxBytes)throw Object.assign(new Error('task import exceeds the configured size limit'),{code:'import_too_large'});
+        const target=path.join(destination,...rel.split('/'));fs.mkdirSync(path.dirname(target),{recursive:true});const duplicate=fs.openSync(`/proc/self/fd/${fileFd}`,fs.constants.O_RDONLY|fs.constants.O_CLOEXEC),streams=[fs.createReadStream(null,{fd:duplicate,autoClose:true,start:0}),fs.createWriteStream(target,{flags:'wx',mode:0o600})];if(signal)await pipeline(...streams,{signal});else await pipeline(...streams);
+        if(!same(opened,fs.fstatSync(fileFd,{bigint:true})))throw Object.assign(new Error('task import source changed while copying'),{code:'source_changed'});
+      }finally{fs.closeSync(fileFd);}
+      await progress(files/(files+1));
     }
+    if(!same(beforeDirectory,fs.fstatSync(directoryFd,{bigint:true})))throw Object.assign(new Error('task import source changed during traversal'),{code:'source_changed'});
   };
-  walk(source);
-  const bytes = files.reduce((sum, file) => sum + file.bytes, 0);
-  if (bytes > maxBytes) throw Object.assign(new Error('task import exceeds the configured size limit'), { code: 'import_too_large' });
-  fs.mkdirSync(destination, { recursive: true });
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index], target = path.join(destination, ...file.rel.split('/'));
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    await pipeline(fs.createReadStream(file.absolute), fs.createWriteStream(target, { flags: 'wx', mode: 0o600 }), { signal });
-    await progress((index + 1) / Math.max(1, files.length));
-  }
+  await walk(sourceFd);await progress(1);
 }
 
-async function stageSource(operation, { storage, config }, signal, progress) {
+async function stageSource(operation, { processing, storage, config }, signal, progress) {
   const payload = JSON.parse(operation.payload_json || '{}'), request = payload.request || {};
-  validateImportSelection(storage, request.sourceRelativePath);
+  const expectedKind=payload.importSource?.kind==='server_zip'?'zip':payload.importSource?.kind==='server_folder'?'folder':null,selected=validateImportSelection(storage, request.sourceRelativePath,{expectedKind});
   const source = storage.resolve('dataset_import', request.sourceRelativePath, { mustExist: true });
   const stat = fs.lstatSync(source);
   if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw Object.assign(new Error('WebODM task source must be a folder or ZIP archive'), { code: 'invalid_import_source' });
@@ -59,14 +65,20 @@ async function stageSource(operation, { storage, config }, signal, progress) {
   const available = storage.space('datasets', 0), cacheSpace = storage.space('cache', stat.isFile() ? stat.size : 0);
   if (!cacheSpace.ok) throw Object.assign(new Error('insufficient cache headroom for WebODM task staging'), { code: 'insufficient_storage' });
   const maxBytes = Math.max(0, Math.min(available.available - available.reserve, cacheSpace.available - cacheSpace.reserve));
-  if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true });
-  if (stat.isDirectory()) await copyTree(source, staging, { maxFiles, maxBytes, signal, progress: (value) => progress(value * 0.25) });
+  if(selected.kind==='folder'){
+    const opened=openImportFolderSource(storage,request.sourceRelativePath);
+    try{if(fs.existsSync(staging))fs.rmSync(staging,{recursive:true,force:true});await copyTree(opened.fd,staging,{maxFiles,maxBytes,signal,progress:(value)=>progress(value*0.25)});}finally{opened.close();}
+  }
   else {
-    if (path.extname(source).toLowerCase() !== '.zip') throw Object.assign(new Error('WebODM task archive must use .zip'), { code: 'invalid_archive_type' });
-    await extractZipFile(source, staging, {
-      maxEntries: maxFiles, maxBytes, workId: operation.id, signal,
-      onProgress: (value) => progress(value * 0.25),
-    });
+    const opened=openImportZipSource(storage,request.sourceRelativePath);
+    try{
+      const snapshot=await opened.snapshot({signal}),persisted=payload.sourceSnapshot;
+      if(persisted&&!matchesSourceSnapshot(persisted,snapshot))throw Object.assign(new Error('WebODM task source changed before extraction'),{code:'source_changed'});
+      if(!persisted&&!processing.setWebodmImportSourceSnapshot(operation.id,operation.lease_owner,snapshot))throw Object.assign(new Error('task import lease was lost before source snapshot was persisted'),{code:'operation_lease_lost'});
+      if(!fs.existsSync(staging))await extractZipDescriptor(opened.fd,snapshot.byteSize,staging,{maxEntries:maxFiles,maxBytes,workId:operation.id,signal,onProgress:(value)=>progress(value*0.25)});
+      else{const stagedStat=fs.lstatSync(staging);if(stagedStat.isSymbolicLink()||!stagedStat.isDirectory())throw Object.assign(new Error('WebODM extraction staging changed'),{code:'invalid_asset_tree'});await progress(0.25);}
+      if(await opened.hash({signal})!==snapshot.sha256)throw Object.assign(new Error('WebODM task source changed during extraction'),{code:'source_changed'});
+    }finally{opened.close();}
   }
   return { payload, request, source, staging, stagingRelative };
 }
@@ -85,10 +97,10 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     const requiredDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
     return{project,task,attempt,model,import:replay,requiredDerivatives,...summary};
   }
-  const { payload, request, staging, stagingRelative } = await stageSource(operation, { storage, config }, signal, progress);
+  const { payload, request, staging, stagingRelative } = await stageSource(operation, { processing, storage, config }, signal, progress);
   const ids = payload.ids || {}, discovered = await discoverAssets(staging), summary = capabilitySummary(discovered.assets);
   const discoveredCameraPhotos = discoverCameraPhotoLinks(staging, discovered);
-  if (!summary.assetKinds.length) { fs.rmSync(staging, { recursive: true, force: true }); throw Object.assign(new Error('No supported WebODM task artifacts were found'), { code: 'no_supported_assets' }); }
+  if (!summary.assetKinds.length) throw Object.assign(new Error('No supported WebODM task artifacts were found'), { code: 'no_supported_assets' });
   await progress(0.35);
 
   if(!processing.setCatalogAdoptionIntent(operation.id,operation.lease_owner,{rootKey:'cache',relativePath:stagingRelative,datasetRelative:ids.datasetId}))throw Object.assign(new Error('task import lease was lost before adoption was journaled'),{code:'operation_lease_lost'});
