@@ -75,6 +75,12 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
     'the startup deadline is an honest telemetry milestone, not unsafe partial promotion');
   assert.match(main, /tilesRenderer\.maxDepth = Infinity/);
   assert.match(main, /lodOverviewTiles = captured\.shell/);
+  assert.match(main, /maxBytes = lodFallbackShellMaxBytes\(tilesRenderer\?\.lruCache\?\.maxBytesSize/,
+    'shell safety limit must be derived from the configured cache budget');
+  assert.match(main, /captured\.overSoftBudget && !lodPrefetchSoftBudgetReported[\s\S]*?shell-soft-budget-exceeded/,
+    'crossing the preferred shell target must be diagnostic rather than terminal');
+  assert.doesNotMatch(main, /lodPrefetchExitReason = 'shell-soft-budget-exceeded'/,
+    'a non-terminal soft-budget warning must not overwrite the actual prefetch exit state');
   assert.match(main, /tilesRenderer\.lodFallbackTiles = new Set\(lodOverviewTiles\)/);
   assert.match(main, /function lodTileSceneReady\(tile\)/);
   assert.match(main, /isReady: lodTileSceneReady/,

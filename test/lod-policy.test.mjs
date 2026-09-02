@@ -16,6 +16,7 @@ import {
   classifyLodQuality,
   createLodFocusPriorityCallback,
   lodBranchBlockerCut,
+  lodFallbackShellMaxBytes,
   lodFallbackShellPlan,
   lodFocusPriorityPenalty,
   LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET,
@@ -201,6 +202,7 @@ test('desktop fallback promotion requires a complete bounded direct-child shell 
     ready: [first],
     bytes: 700,
     complete: false,
+    overSoftBudget: false,
     overBudget: false,
     unsupported: true,
     pending: 1,
@@ -222,6 +224,57 @@ test('desktop fallback promotion requires a complete bounded direct-child shell 
   const overBudget = lodFallbackShellPlan(root, { ...options, maxBytes: 699 });
   assert.equal(overBudget.complete, false);
   assert.equal(overBudget.overBudget, true);
+});
+
+test('fallback shell allowance admits the measured church shell without starving detail headroom', () => {
+  const MiB = 1024 * 1024;
+  const GiB = 1024 * MiB;
+  const desktopLimit = lodFallbackShellMaxBytes(3 * GiB, { bootstrapResidentBytes: 31 * MiB });
+  assert.equal(desktopLimit, 1408 * MiB,
+    'the 3 GiB cache keeps 1664 MiB reserved for focused detail');
+  assert.equal(lodFallbackShellMaxBytes(6 * GiB), 1.5 * GiB,
+    'large caches must not make fallback retention unbounded');
+  assert.equal(lodFallbackShellMaxBytes(2 * GiB), 384 * MiB,
+    'smaller caches must preserve the minimum focused-detail reserve');
+  assert.equal(lodFallbackShellMaxBytes(undefined), 0,
+    'an unknown cache budget must fail closed instead of guessing');
+  assert.equal(lodFallbackShellMaxBytes(3 * GiB, { bootstrapResidentBytes: 2.75 * GiB }), 256 * MiB,
+    'the root and shell must fit together during bootstrap');
+
+  const root = { children: [] };
+  const shell = Array.from({ length: 16 }, (_, index) => ({
+    name: `church-shell-${index}`,
+    internal: { hasRenderableContent: true },
+  }));
+  root.children = shell;
+  const measuredChurchBytes = 1329 * MiB;
+  const bytesPerTile = measuredChurchBytes / shell.length;
+  const ready = new Set(shell.slice(0, 15));
+  const options = {
+    isReady: tile => ready.has(tile),
+    getBytes: () => bytesPerTile,
+    softMaxBytes: 1.25 * GiB,
+    maxBytes: desktopLimit,
+  };
+  const partial = lodFallbackShellPlan(root, options);
+  assert.equal(partial.complete, false, '15 of 16 children must never promote');
+  assert.equal(partial.pending, 1);
+  assert.equal(partial.overSoftBudget, true, 'the old threshold remains visible as telemetry');
+  assert.equal(partial.overBudget, false, 'the measured shell is safe under the cache-derived hard limit');
+
+  ready.add(shell[15]);
+  const complete = lodFallbackShellPlan(root, options);
+  assert.equal(complete.complete, true, 'the complete measured production shell must promote');
+  assert.equal(complete.overSoftBudget, true);
+  assert.equal(complete.overBudget, false);
+
+  const unsafe = lodFallbackShellPlan(root, {
+    ...options,
+    isReady: () => true,
+    getBytes: () => (desktopLimit + 1) / shell.length,
+  });
+  assert.equal(unsafe.complete, false, 'a shell one byte beyond the hard limit must remain root-only');
+  assert.equal(unsafe.overBudget, true);
 });
 
 test('full-detail status requires a stable attached frontier with no pending replacement work', () => {
@@ -652,7 +705,17 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   assert.deepEqual(value, {
     phase: 'requested-detail', requestedDetail: 24, activeDetail: 24, maximumDetail: 24,
     errorTarget: 2, rawErrorTarget: 2,
-    prefetch: { elapsedMs: null, exitReason: null, fallbackTiles: 0, fallbackMiB: null },
+    prefetch: {
+      elapsedMs: null,
+      exitReason: null,
+      fallbackTiles: 0,
+      fallbackMiB: null,
+      shellMiB: null,
+      overSoftBudget: false,
+      shellSoftLimitMiB: null,
+      shellLimitMiB: null,
+      detailReserveMiB: null,
+    },
     focusPriority: null,
     visible: { root: 0, lod0: 1, lod1: 0, other: 0 },
     visibleDepths: { 0: 1 },

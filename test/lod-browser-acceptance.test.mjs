@@ -206,7 +206,7 @@ async function startStreamingOnlyFixture(assetOverrides = {}) {
   return { server, vite, requests, glbPath: config.assets.glb, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
-async function startSessionRefreshFixture(tileRoot, { fineTileDelayMs = 0 } = {}) {
+async function startSessionRefreshFixture(tileRoot, { fineTileDelayMs = 0, shellTileDelayMs = 0 } = {}) {
   const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
   const requests = [];
   let currentRequests = 0;
@@ -249,7 +249,9 @@ async function startSessionRefreshFixture(tileRoot, { fineTileDelayMs = 0 } = {}
         reply.writeHead(200, { 'Content-Type': contentType(file), 'Content-Length': statSync(file).size });
         createReadStream(file).pipe(reply);
       };
-      if (fineTileDelayMs > 0 && /^leaf-(?:a\.b3dm|b\.glb)$/i.test(relative)) {
+      if (shellTileDelayMs > 0 && /^mid-(?:a|b)\.glb$/i.test(relative)) {
+        setTimeout(sendAsset, shellTileDelayMs);
+      } else if (fineTileDelayMs > 0 && /^leaf-(?:a\.b3dm|b\.glb)$/i.test(relative)) {
         setTimeout(sendAsset, fineTileDelayMs);
       } else {
         sendAsset();
@@ -1608,7 +1610,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client, fixture;
   try {
-    fixture = await startSessionRefreshFixture(tileRoot, { fineTileDelayMs: 3_000 });
+    fixture = await startSessionRefreshFixture(tileRoot, { fineTileDelayMs: 3_000, shellTileDelayMs: 5_000 });
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
@@ -1655,9 +1657,24 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     const browserErrors = client.events.filter((event) => event.method === 'Log.entryAdded'
       || event.method === 'Runtime.exceptionThrown' || event.method === 'Runtime.consoleAPICalled').slice(-10);
     assert.equal(refreshedRuntime.root, true, `refreshed session did not attach the LOD hierarchy: ${JSON.stringify({ refreshedRuntime, requests: fixture.requests, browserErrors })}`);
+    const logicalShellBytes = 1329 * 1024 * 1024;
+    await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const shell = tiles.root.children;
+      const originalGet = Map.prototype.get;
+      const bytesMap = tiles.lruCache.bytesMap;
+      const logicalBytesPerTile = ${logicalShellBytes} / shell.length;
+      Map.prototype.get = function (key) {
+        if (this === bytesMap && shell.includes(key)) return logicalBytesPerTile;
+        return originalGet.call(this, key);
+      };
+      window.__restoreLogicalShellBytes = () => { Map.prototype.get = originalGet; };
+      return true;
+    })()`);
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20
       && window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
       'refreshed session did not enter direct Detail 20 refinement', 20_000);
+    await client.evaluate(`window.__restoreLogicalShellBytes?.()`);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1667,13 +1684,21 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       bootstrapPhase: window.__ltds.state.lodRuntimeProfile?.bootstrapPhase,
       bootstrapCoverageTarget: window.__ltds.state.lodRuntimeProfile?.bootstrapCoverageTarget,
       errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
+      prefetch: window.__ltds.lodDiagnostics().prefetch,
     })`);
-    assert.deepEqual({ ...balancedStartup, errorTarget: undefined, errorScale: undefined, bootstrapCoverageTarget: undefined }, {
+    assert.deepEqual({ ...balancedStartup, errorTarget: undefined, errorScale: undefined, bootstrapCoverageTarget: undefined, prefetch: undefined }, {
       slider: '20', requested: 20, active: 20, errorTarget: undefined,
       phase: 'requested-detail', bootstrapPhase: 'complete', errorScale: undefined,
-      bootstrapCoverageTarget: undefined,
+      bootstrapCoverageTarget: undefined, prefetch: undefined,
     });
     assert.equal(balancedStartup.errorScale, 1);
+    assert.equal(balancedStartup.prefetch.shellMiB, 1329,
+      `runtime did not measure the production-sized logical shell: ${JSON.stringify(balancedStartup)}`);
+    assert.equal(balancedStartup.prefetch.shellSoftLimitMiB, 1280);
+    assert.equal(balancedStartup.prefetch.shellLimitMiB, 1408);
+    assert.equal(balancedStartup.prefetch.detailReserveMiB, 1664);
+    assert.equal(balancedStartup.prefetch.overSoftBudget, true,
+      'crossing the 1.25 GiB target must remain diagnostic while the safe shell promotes');
     assert.equal(balancedStartup.errorTarget, 5.481,
       `steady Detail 20 did not use raw SSE: ${JSON.stringify(balancedStartup)}`);
     assert.ok(balancedStartup.errorTarget < balancedStartup.bootstrapCoverageTarget, JSON.stringify(balancedStartup));

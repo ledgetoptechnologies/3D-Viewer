@@ -12,7 +12,14 @@ export const LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET = 4096;
 export const LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET = 1024;
 export const LOD_PREFETCH_MAX_MS = 3_000;
 export const LOD_PREFETCH_MAX_DEPTH = 2;
-export const LOD_FALLBACK_MAX_BYTES = 1.25 * 1024 * 1024 * 1024;
+// 1.25 GiB is the preferred shell target, not a universal safety boundary.
+// Real decoded texture footprints vary slightly by browser and GPU; the
+// production church shell measures about 1.30 GiB. Allow a bounded expansion
+// only when the configured cache can still reserve more than half of its 3 GiB
+// desktop budget for the camera-selected detail frontier.
+export const LOD_FALLBACK_TARGET_BYTES = 1.25 * 1024 * 1024 * 1024;
+export const LOD_FALLBACK_HARD_MAX_BYTES = 1.5 * 1024 * 1024 * 1024;
+export const LOD_FALLBACK_MIN_DETAIL_BYTES = 1.625 * 1024 * 1024 * 1024;
 export const LOD_FOCUS_IDLE_MS = 250;
 export const LOD_FOCUS_DECAY_MS = 500;
 export const LOD_QUALITY_STABLE_FRAMES = 2;
@@ -82,10 +89,35 @@ export function steadyStateLodErrorTarget(detail, coverageScale = 1) {
 // spatial shell immediately below the root is attached and fits the reserved
 // fallback budget. The caller may still retain the root briefly in the LRU,
 // but it must not include it in the steady-state fallback set.
+export function lodFallbackShellMaxBytes(cacheMaxBytes, {
+  targetBytes = LOD_FALLBACK_TARGET_BYTES,
+  hardMaxBytes = LOD_FALLBACK_HARD_MAX_BYTES,
+  minimumDetailBytes = LOD_FALLBACK_MIN_DETAIL_BYTES,
+  bootstrapResidentBytes = 0,
+} = {}) {
+  const cache = Number(cacheMaxBytes);
+  const target = Math.max(0, Number(targetBytes) || 0);
+  const hardMaximum = Math.max(target, Number(hardMaxBytes) || 0);
+  const detailReserve = Math.max(0, Number(minimumDetailBytes) || 0);
+  const bootstrapResident = Math.max(0, Number(bootstrapResidentBytes) || 0);
+  if (!Number.isFinite(cache) || cache <= 0) return 0;
+
+  // Never grow the fallback beyond the absolute bound or consume the detail
+  // reserve. On the normal 3 GiB cache this yields a 1.375 GiB shell ceiling;
+  // smaller custom caches fail closed earlier instead of silently starving
+  // refinement. Reduced-memory clients bypass shell promotion entirely.
+  return Math.max(0, Math.min(
+    hardMaximum,
+    cache - detailReserve,
+    cache - bootstrapResident,
+  ));
+}
+
 export function lodFallbackShellPlan(root, {
   isReady = () => false,
   getBytes = () => 0,
-  maxBytes = LOD_FALLBACK_MAX_BYTES,
+  softMaxBytes = LOD_FALLBACK_TARGET_BYTES,
+  maxBytes = LOD_FALLBACK_TARGET_BYTES,
 } = {}) {
   const children = Array.isArray(root?.children) ? root.children : [];
   const unsupported = children.some((tile) => tile?.internal?.hasUnrenderableContent === true
@@ -97,13 +129,16 @@ export function lodFallbackShellPlan(root, {
   // the renderer. A ready scene can be attached synchronously when selected,
   // so scene readiness—not current visibility—is the safe promotion gate.
   const ready = shell.filter(tile => isReady(tile));
+  const softBudget = Number(softMaxBytes);
   const budget = Number(maxBytes);
+  const overSoftBudget = Number.isFinite(softBudget) && softBudget >= 0 && bytes > softBudget;
   const overBudget = Number.isFinite(budget) && budget >= 0 && bytes > budget;
   return {
     shell,
     ready,
     bytes,
     complete: shell.length > 0 && ready.length === shell.length && !overBudget && !unsupported,
+    overSoftBudget,
     overBudget,
     unsupported,
     pending: Math.max(0, shell.length - ready.length),
@@ -879,6 +914,11 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
       exitReason: runtimeProfile?.prefetchExitReason || null,
       fallbackTiles: Number(runtimeProfile?.fallbackTileCount) || 0,
       fallbackMiB: toMiB(runtimeProfile?.fallbackBytes),
+      shellMiB: toMiB(runtimeProfile?.prefetchShellBytes),
+      overSoftBudget: runtimeProfile?.shellOverSoftBudget === true,
+      shellSoftLimitMiB: toMiB(runtimeProfile?.fallbackSoftBudgetBytes),
+      shellLimitMiB: toMiB(runtimeProfile?.fallbackBudgetBytes),
+      detailReserveMiB: toMiB(runtimeProfile?.fallbackDetailReserveBytes),
     },
     focusPriority: runtimeProfile?.focusPriority || null,
     visible,

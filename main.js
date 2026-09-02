@@ -21,8 +21,10 @@ import {
   lodBootstrapCoverageErrorTarget,
   lodBootstrapRootErrorTarget,
   lodBranchBlockerCut,
+  lodFallbackShellMaxBytes,
   lodFallbackShellPlan,
-  LOD_FALLBACK_MAX_BYTES,
+  LOD_FALLBACK_MIN_DETAIL_BYTES,
+  LOD_FALLBACK_TARGET_BYTES,
   LOD_PREFETCH_MAX_DEPTH,
   LOD_PREFETCH_MAX_MS,
   lodDebugSnapshot,
@@ -168,6 +170,7 @@ let lodPrefetchStartedAt = 0;
 let lodPrefetchElapsedMs = null;
 let lodPrefetchReadyFrames = 0;
 let lodPrefetchExitReason = null;
+let lodPrefetchSoftBudgetReported = false;
 let lodOverviewTiles = [];
 let restoreLodOverviewRetention = null;
 let lodStarvationSamples = 0;
@@ -845,6 +848,7 @@ function loadTiles() {
   lodPrefetchElapsedMs = null;
   lodPrefetchReadyFrames = 0;
   lodPrefetchExitReason = null;
+  lodPrefetchSoftBudgetReported = false;
   lodOverviewTiles = [];
   lodRecentFrontier = new Map();
   lodBranchBlockers = new Set();
@@ -1006,6 +1010,7 @@ function disposeTiles() {
   lodPrefetchElapsedMs = null;
   lodPrefetchReadyFrames = 0;
   lodPrefetchExitReason = null;
+  lodPrefetchSoftBudgetReported = false;
   lodOverviewTiles = [];
   lodRecentFrontier = new Map();
   lodStarvationSamples = 0;
@@ -3695,6 +3700,11 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
       prefetchExitReason: lodPrefetchExitReason,
       fallbackTileCount: lodOverviewTiles.length,
       fallbackBytes: state.lodRuntimeProfile?.fallbackBytes ?? 0,
+      prefetchShellBytes: state.lodRuntimeProfile?.prefetchShellBytes ?? null,
+      shellOverSoftBudget: state.lodRuntimeProfile?.shellOverSoftBudget === true,
+      fallbackSoftBudgetBytes: state.lodRuntimeProfile?.fallbackSoftBudgetBytes ?? null,
+      fallbackBudgetBytes: state.lodRuntimeProfile?.fallbackBudgetBytes ?? null,
+      fallbackDetailReserveBytes: state.lodRuntimeProfile?.fallbackDetailReserveBytes ?? null,
       focusPriority: controls?.getInteractionState?.() || null,
       errorScale: lodErrorScale,
     }
@@ -3833,10 +3843,15 @@ function updateLodBranchBlockers() {
 
 function captureLodPrefetchShell(root) {
   const bytesMap = tilesRenderer?.lruCache?.bytesMap;
+  const rootBytes = Number(bytesMap?.get?.(root)) || 0;
+  const maxBytes = lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
+    bootstrapResidentBytes: rootBytes,
+  });
   return lodFallbackShellPlan(root, {
     isReady: lodTileSceneReady,
     getBytes: tile => Number(bytesMap?.get?.(tile)) || 0,
-    maxBytes: LOD_FALLBACK_MAX_BYTES,
+    softMaxBytes: LOD_FALLBACK_TARGET_BYTES,
+    maxBytes,
   });
 }
 
@@ -3859,6 +3874,11 @@ function enterLodRootOnly(reason) {
     prefetchElapsedMs: lodPrefetchElapsedMs,
     fallbackTileCount: lodOverviewTiles.length,
     fallbackBytes: Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0,
+    fallbackSoftBudgetBytes: LOD_FALLBACK_TARGET_BYTES,
+    fallbackBudgetBytes: lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
+      bootstrapResidentBytes: Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0,
+    }),
+    fallbackDetailReserveBytes: LOD_FALLBACK_MIN_DETAIL_BYTES,
     errorScale: 1,
   };
   dom.lodStatus.textContent = 'LOD: complete overview (detail shell unavailable)';
@@ -3894,6 +3914,11 @@ function finishLodPrefetch(reason, captured = captureLodPrefetchShell(tilesRende
     fallbackBytes: lodRuntimeProfileState?.reduced
       ? Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0
       : captured.bytes,
+    fallbackSoftBudgetBytes: LOD_FALLBACK_TARGET_BYTES,
+    fallbackBudgetBytes: lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
+      bootstrapResidentBytes: Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0,
+    }),
+    fallbackDetailReserveBytes: LOD_FALLBACK_MIN_DETAIL_BYTES,
     errorScale: 1,
   };
   dom.lodStatus.textContent = lodRuntimeProfileState.reduced
@@ -3927,6 +3952,7 @@ function maybeAdvanceLodBootstrap() {
     lodBootstrapPhase = 'prefetch';
     lodPrefetchStartedAt = performance.now();
     lodPrefetchReadyFrames = 0;
+    lodPrefetchSoftBudgetReported = false;
     tilesRenderer.errorTarget = lodBootstrapCoverageTarget;
     tilesRenderer.maxDepth = LOD_PREFETCH_MAX_DEPTH;
     // With maxDepth bounded to the direct shell, sibling loading requests all
@@ -3938,6 +3964,11 @@ function maybeAdvanceLodBootstrap() {
       bootstrapPhase: lodBootstrapPhase,
       bootstrapRootTarget: lodBootstrapRootTarget,
       bootstrapCoverageTarget: lodBootstrapCoverageTarget,
+      fallbackSoftBudgetBytes: LOD_FALLBACK_TARGET_BYTES,
+      fallbackBudgetBytes: lodFallbackShellMaxBytes(tilesRenderer.lruCache?.maxBytesSize, {
+        bootstrapResidentBytes: Number(tilesRenderer.lruCache?.bytesMap?.get?.(root)) || 0,
+      }),
+      fallbackDetailReserveBytes: LOD_FALLBACK_MIN_DETAIL_BYTES,
     };
     dom.lodStatus.textContent = 'LOD: prefetching nearby coverage';
     emitLodDebugSnapshot('overview-ready', true);
@@ -3948,9 +3979,18 @@ function maybeAdvanceLodBootstrap() {
   tilesRenderer.maxDepth = LOD_PREFETCH_MAX_DEPTH;
   tilesRenderer.loadSiblings = true;
   const captured = captureLodPrefetchShell(root);
+  state.lodRuntimeProfile = {
+    ...state.lodRuntimeProfile,
+    prefetchShellBytes: captured.bytes,
+    shellOverSoftBudget: captured.overSoftBudget,
+  };
   lodPrefetchReadyFrames = captured.complete ? lodPrefetchReadyFrames + 1 : 0;
   const elapsed = performance.now() - lodPrefetchStartedAt;
   const cachePressure = Boolean(tilesRenderer.lruCache?.isFull?.());
+  if (captured.overSoftBudget && !lodPrefetchSoftBudgetReported) {
+    lodPrefetchSoftBudgetReported = true;
+    emitLodDebugSnapshot('shell-soft-budget-exceeded', true);
+  }
   if (captured.unsupported) {
     enterLodRootOnly('unsupported-direct-shell');
   } else if (captured.shell.length === 0) {
