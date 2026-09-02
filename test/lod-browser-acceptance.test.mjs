@@ -1907,6 +1907,8 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     orbitPoint = await findOrbitPoint();
     assert.ok(orbitPoint, 'panned detail frontier did not expose a rendered surface for orbit testing');
     for (const pixels of [1, 2, 4, 8]) {
+      orbitPoint = await findOrbitPoint();
+      assert.ok(orbitPoint, `settled detail frontier did not expose a rendered surface before a ${pixels}-pixel orbit gesture`);
       const beforeActivity = await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime`);
       const beforeMatrix = await cameraMatrix();
       await client.command('Input.dispatchMouseEvent', {
