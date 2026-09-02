@@ -109,6 +109,52 @@ test('v28 preserves operation receipts and creates the complete retained-import 
   upgraded.close();
 });
 
+test('v29 upgrades already-applied v28 cleanup journals without rewriting migration history', (t) => {
+  const databasePath = temporaryDatabase(t, 'migration-v29-cleanup-executor');
+  const database = new DatabaseSync(databasePath);
+  database.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL');
+  database.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');
+  for (const migration of MIGRATIONS.filter((item) => item.version <= 28)) {
+    database.exec(migration.sql);
+    database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+      .run(migration.version, migration.name, new Date().toISOString());
+  }
+  const created = '2026-09-01T00:00:00.000Z';
+  const future = '2099-01-01T00:00:00.000Z';
+  const insertRetained = database.prepare(`INSERT INTO retained_imports(
+    id,source_kind,staging_root_key,staging_relative_path,active_slot,state,cleanup_jobs_inserted,created_at,updated_at
+  ) VALUES (?,'nodeodm_result','cache',?,1,'ready',1,?,?)`);
+  const insertCleanup = database.prepare(`INSERT INTO import_cleanup_jobs(
+    id,retained_import_id,cleanup_type,root_key,relative_path,quarantine_relative_path,status,
+    lease_owner,lease_token,lease_expires_at,available_at,created_at,updated_at
+  ) VALUES (?,?,'staging_tree','cache',?,?,?,?,?,?,?,?,?)`);
+  for (const id of ['pending','leased','broken-quarantined','terminal-with-lease']) {
+    insertRetained.run(`retained-${id}`, `webodm-task-imports/retained-${id}`, created, created);
+  }
+  insertCleanup.run('cleanup-pending','retained-pending','webodm-task-imports/retained-pending',null,'pending',null,null,null,created,created,created);
+  insertCleanup.run('cleanup-leased','retained-leased','webodm-task-imports/retained-leased',null,'leased','worker','a'.repeat(32),future,created,created,created);
+  insertCleanup.run('cleanup-broken-quarantined','retained-broken-quarantined','webodm-task-imports/retained-broken-quarantined','webodm-task-imports/retained-broken-quarantined.cleanup-a.quarantine','quarantined',null,null,null,created,created,created);
+  insertCleanup.run('cleanup-terminal','retained-terminal-with-lease','webodm-task-imports/retained-terminal-with-lease',null,'source_changed','stale-worker','b'.repeat(32),future,created,created,created);
+  database.close();
+
+  const upgraded = openDatabase(databasePath);
+  assert.equal(upgraded.prepare('SELECT MAX(version) version FROM schema_migrations').get().version, 29);
+  const tableSql = upgraded.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='import_cleanup_jobs'").get().sql;
+  assert.match(tableSql, /cleanup_quarantine_conflict/);
+  assert.match(tableSql, /status IN \('leased','quarantined'\)/);
+  assert.equal(upgraded.prepare("SELECT status,lease_owner FROM import_cleanup_jobs WHERE id='cleanup-leased'").get().status, 'leased');
+  assert.deepEqual({ ...upgraded.prepare("SELECT status,lease_owner,lease_token,lease_expires_at FROM import_cleanup_jobs WHERE id='cleanup-broken-quarantined'").get() }, {
+    status: 'pending', lease_owner: null, lease_token: null, lease_expires_at: null,
+  });
+  assert.deepEqual({ ...upgraded.prepare("SELECT status,lease_owner,lease_token,lease_expires_at FROM import_cleanup_jobs WHERE id='cleanup-terminal'").get() }, {
+    status: 'source_changed', lease_owner: null, lease_token: null, lease_expires_at: null,
+  });
+  assert.throws(() => upgraded.prepare("UPDATE import_cleanup_jobs SET status='quarantined' WHERE id='cleanup-pending'").run(), /CHECK constraint failed/);
+  assert.throws(() => upgraded.prepare("UPDATE import_cleanup_jobs SET lease_owner='stale',lease_token='stale',lease_expires_at=? WHERE id='cleanup-terminal'").run(future), /CHECK constraint failed/);
+  assert.deepEqual(upgraded.prepare('PRAGMA foreign_key_check').all(), []);
+  upgraded.close();
+});
+
 test('v28 refuses a partially initialized retained-import schema without modifying v27', (t) => {
   const databasePath=temporaryDatabase(t,'migration-v28-corrupt-partial'),database=new DatabaseSync(databasePath);database.exec('PRAGMA foreign_keys=ON; CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at TEXT NOT NULL)');for(const migration of MIGRATIONS.filter((item)=>item.version<28)){database.exec(migration.sql);database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)').run(migration.version,migration.name,new Date().toISOString());}database.exec('CREATE TABLE retained_imports(unexpected TEXT)');database.close();
   assert.throws(()=>openDatabase(databasePath),/migration_v28_guard|UNIQUE constraint failed/);const unchanged=new DatabaseSync(databasePath,{readOnly:true});assert.equal(unchanged.prepare('SELECT MAX(version) version FROM schema_migrations').get().version,27);assert.ok(unchanged.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_imports'").get());assert.equal(unchanged.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='retained_import_files'").get(),undefined);unchanged.close();

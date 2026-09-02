@@ -21,6 +21,12 @@ function physicalStorageRootKey(value) {
   return scopedStorageRootKey(key) || key;
 }
 
+function descriptorMountId(fd) {
+  const value = fs.readFileSync(`/proc/self/fdinfo/${fd}`, 'utf8').match(/^mnt_id:\s*(\d+)$/m)?.[1];
+  if (!value) throw Object.assign(new Error('filesystem mount identity is unavailable'), { code: 'cleanup_mount_unavailable' });
+  return value;
+}
+
 function hashFile(filePath,{signal=null}={}) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -73,11 +79,20 @@ class StorageManager {
   constructor(config) {
     this.config=config;
     this.roots={datasets:config.datasetsMount,models:config.modelsMount,cache:config.cacheMount,trash:config.trashMount};
+    this.cleanupRootPins=new Map();
     if(config.datasetImportMount)this.roots.dataset_import=config.datasetImportMount;
     if(config.webodmMediaMount)this.roots.webodm=config.webodmMediaMount;
     if(config.terraImportMount)this.roots.terra_import=config.terraImportMount;
   }
-  initialize() { for(const key of ['datasets','models','cache','trash','dataset_import','terra_import']) if(this.roots[key])fs.mkdirSync(this.roots[key],{recursive:true}); }
+  initialize() {
+    for(const key of ['datasets','models','cache','trash','dataset_import','terra_import'])if(this.roots[key])fs.mkdirSync(this.roots[key],{recursive:true});
+    for(const key of ['cache','dataset_import']){
+      if(!this.roots[key]||this.cleanupRootPins.has(key))continue;
+      const realPath=fs.realpathSync.native(this.roots[key]),fd=fs.openSync(realPath,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);
+      try{const stat=fs.fstatSync(fd,{bigint:true});if(!stat.isDirectory())throw Object.assign(new Error('cleanup root is not a directory'),{code:'cleanup_root_changed'});this.cleanupRootPins.set(key,{realPath,dev:String(stat.dev),ino:String(stat.ino),mountId:descriptorMountId(fd)});}finally{fs.closeSync(fd);}
+    }
+  }
+  openCleanupRoot(rootKey){const key=physicalStorageRootKey(rootKey);if(!['cache','dataset_import'].includes(key)||key!==rootKey)throw Object.assign(new Error('cleanup root is not permitted'),{code:'invalid_cleanup_root'});const pin=this.cleanupRootPins.get(key);if(!pin)throw Object.assign(new Error('cleanup root was not pinned at startup'),{code:'cleanup_root_unpinned'});const realPath=fs.realpathSync.native(this.roots[key]);let fd;try{fd=fs.openSync(realPath,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);const stat=fs.fstatSync(fd,{bigint:true}),mountId=descriptorMountId(fd);if(!stat.isDirectory()||realPath!==pin.realPath||String(stat.dev)!==pin.dev||String(stat.ino)!==pin.ino||mountId!==pin.mountId)throw Object.assign(new Error('cleanup root changed after startup'),{code:'cleanup_root_changed'});return{fd,mountId,realPath,stat};}catch(error){if(fd!==undefined)fs.closeSync(fd);throw error;}}
   resolve(rootKey,relativePath,{mustExist=false}={}) {
     const root=this.roots[physicalStorageRootKey(rootKey)], rel=safeRelativePath(relativePath); if(!root||!rel)throw Object.assign(new Error('invalid storage location'),{code:'invalid_storage_location'});
     const resolvedRoot=fs.realpathSync.native(root), candidate=path.resolve(resolvedRoot,...rel.split('/'));
@@ -166,4 +181,4 @@ class StorageManager {
   removeExact(rootKey,relativePath){if(rootKey!=='trash')throw Object.assign(new Error('lifecycle deletion is restricted to Viewer trash'),{code:'external_reference'});const target=this.resolve(rootKey,relativePath);if(!this.pathExistsStrict(rootKey,relativePath))return false;fs.rmSync(target,{recursive:true,force:false});return true;}
 }
 
-module.exports={StorageManager,hashFile,hashFileChunks,hashTree,jpegMetadata,parseExif,physicalStorageRootKey,readHead,scopedStorageRootKey};
+module.exports={StorageManager,descriptorMountId,hashFile,hashFileChunks,hashTree,jpegMetadata,parseExif,physicalStorageRootKey,readHead,scopedStorageRootKey};

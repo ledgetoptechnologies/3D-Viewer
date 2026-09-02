@@ -1783,6 +1783,80 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 29,
+    name: 'import_cleanup_executor',
+    sql: `
+      CREATE TABLE import_cleanup_jobs_v29 (
+        id TEXT PRIMARY KEY,
+        retained_import_id TEXT NOT NULL REFERENCES retained_imports(id) ON DELETE CASCADE,
+        cleanup_type TEXT NOT NULL CHECK(cleanup_type IN ('staging_tree','source_zip')),
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        expected_byte_size INTEGER CHECK(expected_byte_size IS NULL OR expected_byte_size >= 0),
+        expected_sha256 TEXT CHECK(expected_sha256 IS NULL OR length(expected_sha256)=64),
+        expected_dev TEXT,
+        expected_ino TEXT,
+        expected_ctime_ns TEXT,
+        expected_mtime_ns TEXT,
+        status TEXT NOT NULL CHECK(status IN (
+          'pending','leased','quarantined','complete','source_changed','cleanup_skipped_cross_mount',
+          'cleanup_skipped_read_only','cleanup_skipped_hardlink','cleanup_quarantine_conflict','failed'
+        )),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        available_at TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_generation INTEGER NOT NULL DEFAULT 0 CHECK(lease_generation >= 0),
+        lease_expires_at TEXT,
+        quarantine_relative_path TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE(retained_import_id,cleanup_type),
+        CHECK(
+          (status IN ('leased','quarantined') AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+          OR (status NOT IN ('leased','quarantined') AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL)
+        )
+      );
+
+      INSERT INTO import_cleanup_jobs_v29(
+        id,retained_import_id,cleanup_type,root_key,relative_path,expected_byte_size,expected_sha256,
+        expected_dev,expected_ino,expected_ctime_ns,expected_mtime_ns,status,attempt_count,available_at,
+        lease_owner,lease_token,lease_generation,lease_expires_at,quarantine_relative_path,last_error,
+        created_at,updated_at,completed_at
+      )
+      SELECT
+        id,retained_import_id,cleanup_type,root_key,relative_path,expected_byte_size,expected_sha256,
+        expected_dev,expected_ino,expected_ctime_ns,expected_mtime_ns,
+        CASE
+          WHEN status IN ('leased','quarantined')
+            AND (lease_owner IS NULL OR lease_token IS NULL OR lease_expires_at IS NULL) THEN 'pending'
+          ELSE status
+        END,
+        attempt_count,available_at,
+        CASE WHEN status IN ('leased','quarantined')
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL
+          THEN lease_owner ELSE NULL END,
+        CASE WHEN status IN ('leased','quarantined')
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL
+          THEN lease_token ELSE NULL END,
+        lease_generation,
+        CASE WHEN status IN ('leased','quarantined')
+          AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL
+          THEN lease_expires_at ELSE NULL END,
+        quarantine_relative_path,last_error,created_at,updated_at,completed_at
+      FROM import_cleanup_jobs;
+
+      DROP TABLE import_cleanup_jobs;
+      ALTER TABLE import_cleanup_jobs_v29 RENAME TO import_cleanup_jobs;
+      CREATE INDEX import_cleanup_jobs_claim_idx
+        ON import_cleanup_jobs(status,available_at,lease_expires_at,created_at,id);
+      CREATE INDEX import_cleanup_jobs_retained_idx
+        ON import_cleanup_jobs(retained_import_id,status);
+    `,
+  },
 ];
 
 function applyMigrations(database) {
