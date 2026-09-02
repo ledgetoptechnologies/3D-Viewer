@@ -344,16 +344,26 @@ async function reserveDevToolsPort() {
   return port;
 }
 
-async function waitForDevTools(port) {
+async function waitForDevTools(port, browser) {
   const origin = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 30_000;
+  let lastState = 'connection was not accepted';
   while (Date.now() < deadline) {
+    // Edge on Windows may hand the profile to a child and let its launcher
+    // exit successfully. Only a failed exit or signal proves startup failed.
+    if ((browser.exitCode !== null && browser.exitCode !== 0) || browser.signalCode !== null) {
+      throw new Error(`browser exited before exposing DevTools (exit=${browser.exitCode}, signal=${browser.signalCode})`);
+    }
     try {
-      if ((await fetch(`${origin}/json/version`)).ok) return origin;
-    } catch {}
+      const response = await fetch(`${origin}/json/version`);
+      if (response.ok) return origin;
+      lastState = `DevTools returned HTTP ${response.status}`;
+    } catch (error) {
+      lastState = error?.message || String(error);
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error('browser did not expose DevTools');
+  throw new Error(`browser did not expose DevTools within 30 seconds: ${lastState}`);
 }
 
 function snapshotExpression() {
@@ -521,10 +531,10 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1010,10 +1020,10 @@ test('browser close view refines at the default Detail and small motion retains 
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-retention-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1155,10 +1165,10 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-camera-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1317,10 +1327,10 @@ test('browser hides the coarse root when every visible branch meets the active D
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-foreground-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1526,10 +1536,10 @@ test('browser never requests the original GLB when verified streaming tiles are 
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-streaming-only-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1595,10 +1605,10 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1780,10 +1790,10 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-view-mode-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
@@ -1834,10 +1844,10 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-ktx2-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
-      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
       '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
     ], { stdio: 'ignore' });
-    const devTools = await waitForDevTools(devToolsPort);
+    const devTools = await waitForDevTools(devToolsPort, browser);
     const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
     client = await CdpClient.connect(target.webSocketDebuggerUrl);
     await client.command('Page.enable');
