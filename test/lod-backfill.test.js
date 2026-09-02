@@ -289,7 +289,8 @@ test('ready output refuses manual in-place tile generation',async t=>{
   const base=`http://127.0.0.1:${server.address().port}`,headers={authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()};
   const listed=await fetch(`${base}/api/v1/processing/outputs`,{headers});
   assert.equal(listed.status,200);
-  assert.deepEqual((await listed.json()).outputs[0].lod,{status:'unavailable',canGenerate:false,reason:'Create a new processing attempt to generate verified KTX2 tiles.'});
+  const recoveryReason='This model has only a GLB source; verified tile generation requires its textured OBJ companion.';
+  assert.deepEqual((await listed.json()).outputs[0].lod,{status:'unavailable',canGenerate:false,reason:recoveryReason,recoveryAction:{kind:'new_version',eligible:false,sourceVersionId:item.versionId,endpoint:`/api/v1/processing/outputs/${item.versionId}/lod-recovery-attempts`,reason:recoveryReason}});
   const queued=await fetch(`${base}/api/v1/processing/outputs/${item.versionId}/derivatives/tiles`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:'{}'});
   assert.equal(queued.status,409);
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?').get(item.attempt.id).n,0);

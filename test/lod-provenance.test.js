@@ -134,8 +134,8 @@ test('controlled Obj2Tiles v3 accepts bound KTX2 texture sources while exact v2 
   });
   assert.equal(provenance.schemaVersion, 3);
   assert.deepEqual(
-    provenance.converter.arguments.slice(-7),
-    ['--texture-format', 'Ktx2', '--ktx2-quality', '192', '--local', '<source.obj>', '<output>'],
+    provenance.converter.arguments.slice(-11),
+    ['--texture-format', 'Ktx2', '--ktx2-quality', '192', '--max-parallelism', '2', '--image-parallelism', '1', '--local', '<source.obj>', '<output>'],
   );
   assert.equal((await verifyLodProvenance(outputPath, source)).verified, false,
     'the server must reject test-only converter binaries even when the controlled audit itself succeeds');

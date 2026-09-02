@@ -8,8 +8,127 @@ const { hashTree } = require('./storageManager');
 const { verifyLodProvenance } = require('./lodProvenance');
 const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
+  SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
   obj2TilesArguments,
 } = require('../lod-converter-policy.cjs');
+
+const RESOURCE_PRESSURE_PATTERN = /(?:taskschedulerexception|an exception was thrown by a taskscheduler|outofmemoryexception|insufficientmemoryexception|cannot allocate memory|resource temporarily unavailable|failed to (?:create|start).{0,24}thread|pthread_create)/i;
+const DIAGNOSTIC_PREFIX = 'OBJ2TILES_DIAGNOSTIC ';
+
+function readResourceMetric(file) {
+  try {
+    const value = fs.readFileSync(file, 'utf8').trim();
+    return /^(?:max|\d{1,32})$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function derivativeResourceSnapshot() {
+  const memory = process.memoryUsage();
+  const usage = process.resourceUsage?.() || {};
+  return {
+    schemaVersion: 1,
+    pid: process.pid,
+    cpuCount: require('node:os').availableParallelism?.() || require('node:os').cpus().length,
+    rssBytes: memory.rss,
+    heapUsedBytes: memory.heapUsed,
+    externalBytes: memory.external,
+    maxRssKilobytes: Number(usage.maxRSS) || null,
+    cgroupPidsCurrent: readResourceMetric('/sys/fs/cgroup/pids.current'),
+    cgroupPidsMax: readResourceMetric('/sys/fs/cgroup/pids.max'),
+    cgroupMemoryCurrent: readResourceMetric('/sys/fs/cgroup/memory.current'),
+    cgroupMemoryMax: readResourceMetric('/sys/fs/cgroup/memory.max'),
+  };
+}
+
+function safeDiagnosticValue(value, depth = 0) {
+  if (depth > 5 || value === null || value === undefined) return value ?? null;
+  if (typeof value === 'string') return sanitizeLogMessage(value).slice(0, 512);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 16).map((item) => safeDiagnosticValue(item, depth + 1));
+  if (typeof value !== 'object') return null;
+  const result = {};
+  for (const [key, item] of Object.entries(value).slice(0, 40)) {
+    if (/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(key)) result[key] = safeDiagnosticValue(item, depth + 1);
+  }
+  return result;
+}
+
+function obj2TilesDiagnostics(stderr) {
+  const diagnostics = [];
+  for (const line of String(stderr || '').split(/\r?\n/)) {
+    if (!line.startsWith(DIAGNOSTIC_PREFIX)) continue;
+    try {
+      const parsed = JSON.parse(line.slice(DIAGNOSTIC_PREFIX.length));
+      if (parsed?.schemaVersion === 1) diagnostics.push(safeDiagnosticValue(parsed));
+    } catch {}
+  }
+  return diagnostics.slice(-8);
+}
+
+function isExplicitResourcePressure(error) {
+  if (error?.resourcePressure === true) return true;
+  return RESOURCE_PRESSURE_PATTERN.test(String(error?.message || ''));
+}
+
+function logObj2TilesDiagnostics(result, outcome) {
+  const diagnostics = result?.converterDiagnostics || [];
+  if (!diagnostics.length && !result?.resourcePressure) return;
+  console.warn(`[derivative-resource] ${JSON.stringify({
+    schemaVersion: 1,
+    component: 'obj2tiles',
+    outcome,
+    resourcePressure: Boolean(result?.resourcePressure),
+    converterDiagnostics: diagnostics,
+    workerResources: result?.resourceDiagnostics || derivativeResourceSnapshot(),
+  })}`);
+}
+
+function remainingCommandMs(deadlineAt) {
+  const remaining = Number(deadlineAt) - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    throw Object.assign(new Error('derivative wall-clock deadline expired'), { code: 'derivative_timeout' });
+  }
+  return remaining;
+}
+
+async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, signal, clearIncomplete, runCommand = run }) {
+  let serialRetry = false;
+  try {
+    const result = await runCommand(bin, obj2TilesArguments(source, output), {
+      timeoutMs: remainingCommandMs(deadlineAt),
+      signal,
+    });
+    return { result, serialRetry };
+  } catch (error) {
+    if (!isExplicitResourcePressure(error) || signal?.aborted) throw error;
+    const resourcePressureEvidence = {
+      resourcePressure: true,
+      ...(Number.isSafeInteger(error.exitCode) ? { exitCode: error.exitCode } : {}),
+      converterDiagnostics: error.converterDiagnostics || [],
+      workerResources: error.resourceDiagnostics || derivativeResourceSnapshot(),
+    };
+    logObj2TilesDiagnostics(error, 'retrying-serial');
+    try {
+      clearIncomplete();
+      if (signal?.aborted) throw signal.reason;
+      serialRetry = true;
+      const result = await runCommand(bin, obj2TilesArguments(source, output, { serialRetry: true }), {
+        timeoutMs: remainingCommandMs(deadlineAt),
+        signal,
+      });
+      return { result, serialRetry };
+    } catch (retryError) {
+      if (retryError && typeof retryError === 'object') {
+        retryError.resourcePressureEvidence = resourcePressureEvidence;
+        retryError.serialRetryAttempted = true;
+      }
+      throw retryError;
+    }
+  }
+}
 
 function stopProcessTree(child, signal = 'SIGTERM') {
   if (!child?.pid) return;
@@ -29,13 +148,13 @@ function run(bin, args, { timeoutMs = 24 * 3600_000, signal, killGraceMs = 10_00
     let terminationError = null;
     let timer = null;
     let hardKillTimer = null;
-    const finish = (error) => {
+    const finish = (error, result = undefined) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (hardKillTimer) clearTimeout(hardKillTimer);
       signal?.removeEventListener('abort', abort);
-      error ? reject(error) : resolve();
+      error ? reject(error) : resolve(result);
     };
     const terminate = (error) => {
       if (settled || terminationError) return;
@@ -54,11 +173,20 @@ function run(bin, args, { timeoutMs = 24 * 3600_000, signal, killGraceMs = 10_00
       terminate(Object.assign(new Error('derivative command timed out'), { code: 'derivative_timeout' }));
     }, Math.max(1, Number(timeoutMs) || 1));
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-64000); });
-    child.once('error', finish);
-    child.once('exit', (code) => finish(terminationError || (code === 0 ? null : Object.assign(
-      new Error(`derivative command failed (${code}): ${sanitizeLogMessage(stderr).slice(-1000)}`),
-      { code: 'derivative_failed', exitCode: code },
-    ))));
+    child.once('error', (error) => finish(error));
+    child.once('exit', (code) => {
+      if (terminationError) return finish(terminationError);
+      const safeStderr = sanitizeLogMessage(stderr);
+      const converterDiagnostics = obj2TilesDiagnostics(stderr);
+      const resourceDiagnostics = derivativeResourceSnapshot();
+      const resourcePressure = converterDiagnostics.some((item) => item.resourcePressure === true)
+        || RESOURCE_PRESSURE_PATTERN.test(safeStderr);
+      if (code === 0) return finish(null, { converterDiagnostics, resourceDiagnostics, resourcePressure });
+      return finish(Object.assign(
+        new Error(`derivative command failed (${code}): ${safeStderr.slice(-1000)}`),
+        { code: 'derivative_failed', exitCode: code, converterDiagnostics, resourceDiagnostics, resourcePressure },
+      ));
+    });
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
   });
@@ -195,7 +323,8 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
       fs.renameSync(output, quarantine);
       throw Object.assign(new Error('an unreferenced derivative final failed re-verification'), { code: 'lod_provenance_invalid', cause: error });
     }
-    if (existing.provenance?.converter?.commandSha256 !== CONTROLLED_CONVERTER_COMMAND_SHA256) {
+    if (![CONTROLLED_CONVERTER_COMMAND_SHA256, SERIAL_RETRY_CONVERTER_COMMAND_SHA256]
+      .includes(existing.provenance?.converter?.commandSha256)) {
       throw Object.assign(new Error('existing derivative does not use the current KTX2 policy'), { code: 'lod_provenance_invalid' });
     }
     onPhase('registering');
@@ -235,7 +364,22 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
 
   try {
     onPhase('generating');
-    await run(config.obj2TilesBin, obj2TilesArguments(source, incomplete), { timeoutMs: remainingMs, signal: combinedSignal });
+    let conversion;
+    let converterSerialRetry = false;
+    try {
+      ({ result: conversion, serialRetry: converterSerialRetry } = await runObj2TilesWithResourceRetry({
+        bin: config.obj2TilesBin,
+        source,
+        output: incomplete,
+        deadlineAt: Date.parse(job.deadline_at || ''),
+        signal: combinedSignal,
+        clearIncomplete: () => fs.rmSync(incomplete, { recursive: true, force: true }),
+      }));
+      logObj2TilesDiagnostics(conversion, 'complete');
+    } catch (error) {
+      if (isExplicitResourcePressure(error)) logObj2TilesDiagnostics(error, 'failed');
+      throw error;
+    }
     if (pressure.signal.aborted) throw pressure.signal.reason;
     onPhase('auditing');
     await run(process.execPath, [
@@ -246,6 +390,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
       '--controlled-obj2tiles',
       source,
       config.obj2TilesBin,
+      ...(converterSerialRetry ? ['--converter-serial-retry'] : []),
     ], { timeoutMs: Math.max(1, Date.parse(job.deadline_at) - Date.now()), signal: combinedSignal });
     if (pressure.signal.aborted) throw pressure.signal.reason;
     onPhase('verifying');
@@ -393,7 +538,36 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     const safe = sanitizeLogMessage(error.message).slice(0, 1000);
     const errorCode = String(error.code || 'derivative_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80) || 'derivative_failed';
     console.error(`[derivative] type=${['lod_audit','mesh_tiles','ept'].includes(job.derivative_type)?job.derivative_type:'unsupported'} outcome=failed durationMs=${Math.max(0,Date.now()-startedAt)} code=${errorCode}`);
+    const pressureEvidence = error.resourcePressureEvidence || (isExplicitResourcePressure(error) ? {
+      resourcePressure: true,
+      ...(Number.isSafeInteger(error.exitCode) ? { exitCode: error.exitCode } : {}),
+      converterDiagnostics: error.converterDiagnostics || [],
+      workerResources: error.resourceDiagnostics || derivativeResourceSnapshot(),
+    } : null);
+    if (job.derivative_type === 'mesh_tiles' && error.code !== 'lease_lost' && pressureEvidence) {
+      try {
+        processing.recordProcessingEvent({
+          attemptId: attempt.id,
+          derivativeJobId: job.id,
+          eventType: 'obj2tiles.resource_pressure',
+          phase: 'generating',
+          severity: 'error',
+          errorCode: 'obj2tiles_resource_pressure',
+          message: error.serialRetryAttempted
+            ? 'Obj2Tiles encountered scheduler or memory pressure and its one serial retry did not complete.'
+            : 'Obj2Tiles encountered scheduler or memory pressure.',
+          details: { derivativeType: 'mesh_tiles', ...pressureEvidence },
+        });
+      } catch (diagnosticError) {
+        console.error(`[derivative] type=mesh_tiles outcome=diagnostic_persist_failed code=${String(diagnosticError.code || 'processing_event_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80)}`);
+      }
+    }
     if (error.code !== 'lease_lost') {
+      try {
+        processing.recordProcessingEvent({attemptId:attempt.id,derivativeJobId:job.id,eventType:'derivative.diagnostic',phase:'failed',severity:'error',errorCode,message:safe,details:{derivativeType:job.derivative_type,exitCode:pressureEvidence?.exitCode??error.exitCode,resourcePressure:Boolean(pressureEvidence?.resourcePressure||error.resourcePressure),converterDiagnostics:pressureEvidence?.converterDiagnostics||error.converterDiagnostics,workerResources:pressureEvidence?.workerResources||error.resourceDiagnostics}});
+      } catch (diagnosticError) {
+        console.error(`[derivative] type=${job.derivative_type} outcome=diagnostic_persist_failed code=${String(diagnosticError.code || 'processing_event_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80)}`);
+      }
       if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) processing.failOptionalDerivative(job.id, owner, safe, errorCode, job.lease_token);
       else processing.failDerivative(job.id, owner, safe, errorCode, job.lease_token);
     }
@@ -403,4 +577,14 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
   }
 }
 
-module.exports = { assertLodArtifactsMatchSnapshot, generateMeshTiles, processOneDerivative, run, stopProcessTree };
+module.exports = {
+  assertLodArtifactsMatchSnapshot,
+  derivativeResourceSnapshot,
+  generateMeshTiles,
+  isExplicitResourcePressure,
+  obj2TilesDiagnostics,
+  processOneDerivative,
+  run,
+  runObj2TilesWithResourceRetry,
+  stopProcessTree,
+};

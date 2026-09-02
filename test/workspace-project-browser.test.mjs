@@ -31,14 +31,14 @@ const fixtures = {
       status: 'processing', createdAt: '2026-08-19T12:00:00.000Z',
       metrics: { sourceImageCount: 48 },
       latestAttempt: {
-        id: 'attempt-johnson', providerId: 'provider-nodeodm', status: 'running',
+        id: 'attempt-johnson', attemptNumber: 2, providerId: 'provider-nodeodm', status: 'running',
         createdAt: '2026-08-19T12:00:00.000Z', startedAt: '2026-08-19T12:01:00.000Z', updatedAt: '2026-08-19T12:05:00.000Z',
       },
     },
     {
       id: 'task-quarry', projectId: 'project-quarry', datasetId: 'dataset-quarry', displayName: 'Quarry reconstruction',
       status: 'ready_for_review', createdAt: '2026-08-18T12:00:00.000Z', metrics: { sourceImageCount: 12 },
-      latestAttempt: { id: 'attempt-quarry', providerId: 'provider-nodeodm', status: 'ready_for_review', createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:05:00.000Z' },
+      latestAttempt: { id: 'attempt-quarry', attemptNumber: 1, providerId: 'provider-nodeodm', status: 'ready_for_review', createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:05:00.000Z' },
     },
   ],
   providers: [
@@ -55,7 +55,7 @@ const fixtures = {
   outputs: [{
     id: 'output-johnson', taskId: 'task-johnson', modelId: 'model-johnson', displayName: 'Johnson output',
     status: 'published', activePublished: true, byteSize: 4096, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
-    lod: { status: 'fallback', canGenerate: false, canRetry: true, jobId: 'derivative-stale-fallback', reason: 'Imported tiles did not verify.' },
+    lod: { status: 'fallback', canGenerate: false, canRetry: true, jobId: 'derivative-stale-fallback', reason: 'Imported tiles did not verify.', recoveryAction: { kind: 'new_version', eligible: true, sourceVersionId: 'output-johnson', endpoint: '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts', reason: 'Create a new immutable recovery version.' } },
     downloadUrl: '/api/v1/processing/outputs/output-johnson/assets/glb',
     reportUrl: '/api/v1/processing/outputs/output-johnson/assets/report',
     viewSessionUrl: '/api/v1/processing/outputs/output-johnson/view-sessions',
@@ -77,6 +77,10 @@ const fixtures = {
     id: 'operation-failed', type: 'webodm_task_import', subject: 'failed import', projectId: 'project-quarry',
     status: 'failed', phase: 'failed', progress: .25, source: { kind: 'server_folder', browserTransferRequired: false, transferComplete: true },
     attemptCount: 1, errorCode: 'invalid_archive', errorMessage: 'The archive could not be imported.', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z',
+  }, {
+    id: 'operation-recovery-failed', type: 'lod_recovery', subject: 'failed recovery', projectId: 'project-johnson',
+    status: 'failed', phase: 'failed', progress: .6, source: { kind: 'existing_model', browserTransferRequired: false, transferComplete: true },
+    attemptCount: 1, errorCode: 'lod_recovery_source_changed', errorMessage: 'Recovery source validation failed; the existing model remains safe.', createdAt: '2026-08-19T10:00:00.000Z', updatedAt: '2026-08-19T10:02:00.000Z',
   }],
   derivatives: [
     { id: 'derivative-running', attemptId: 'attempt-running', type: 'lod_audit', status: 'leased', optional: true, result: {}, taskId: 'task-running', taskDisplayName: 'Existing tile audit', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', heartbeatAt: '2026-08-19T13:04:00.000Z', createdAt: '2026-08-19T13:00:00.000Z', updatedAt: '2026-08-19T13:04:00.000Z' },
@@ -157,12 +161,20 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
   if (pathname === '/api/v1/processing/outputs/output-johnson' && method === 'DELETE') return json({ output: fixtures.outputs[0], trash: { id: 'trash-output-live' } });
   if (pathname === '/api/v1/processing/outputs/output-johnson-archived' && method === 'DELETE') return json({ output: fixtures.outputs[1], trash: { id: 'trash-output' } });
-  if (pathname === '/api/v1/projects/project-quarry' && method === 'DELETE') { runtime.archivedProjects.add('project-quarry'); return json({ trash: { id: 'trash-project', entityType: 'project' } }); }
+  if (pathname === '/api/v1/projects/project-quarry' && method === 'DELETE') { runtime.archivedProjects.add('project-quarry'); runtime.failNextStorage = true; return json({ trash: { id: 'trash-project', entityType: 'project' } }); }
   if (pathname === '/api/v1/tasks/task-quarry' && method === 'DELETE') { runtime.archivedTasks.add('task-quarry'); return json({ trash: { id: 'trash-task', entityType: 'task' } }); }
   if (pathname === '/api/v1/datasets/dataset-johnson' && method === 'DELETE') return json({ trash: { id: 'trash-dataset' } });
-  if (pathname === '/api/v1/storage') return url.searchParams.get('cursor')
-    ? json({ storage: {}, trash: { items: [{ id: 'trash-second-page', entityId: 'output-trash', entityType: 'output', displayName: 'Old output', byteSize: 1024 }], nextCursor: null } })
-    : json({ storage: {}, trash: { items: [{ id: 'trash-johnson', entityId: 'dataset-trash', entityType: 'dataset', displayName: 'Discarded draft', byteSize: 0 }], nextCursor: 'trash-page-two' } });
+  if (pathname === '/api/v1/storage') {
+    if (runtime.failNextStorage) { runtime.failNextStorage = false; return json({ error: 'storage_inventory_unavailable', message: 'Storage inventory is temporarily unavailable.' }, 503); }
+    return url.searchParams.get('cursor')
+      ? json({ storage: {}, trash: { items: [{ id: 'trash-second-page', entityId: 'output-trash', entityType: 'output', displayName: 'Old output', byteSize: 1024, purgeAfter: '2026-10-01T00:00:00.000Z' }], nextCursor: null } })
+      : json({ storage: {
+        datasets: { total: 10 * 1024 ** 2, available: 6 * 1024 ** 2, reserve: 1024 },
+        models: { total: 20 * 1024 ** 2, available: 12 * 1024 ** 2, reserve: 1024 },
+        cache: { total: 30 * 1024 ** 2, available: 18 * 1024 ** 2, reserve: 1024 },
+        trash: { total: 40 * 1024 ** 2, available: 24 * 1024 ** 2, reserve: 1024 },
+      }, trash: { items: [{ id: 'trash-johnson', entityId: 'dataset-trash', entityType: 'dataset', displayName: 'Discarded draft', byteSize: 0, purgeAfter: '2026-10-02T00:00:00.000Z' }], nextCursor: 'trash-page-two' } });
+  }
   if (pathname === '/api/v1/storage/mutations') return json({ mutations: [{ id: 'mutation-failed', type: 'restore', entityType: 'output', entityId: 'output-conflict', status: 'failed', errorCode: 'storage_conflict', errorMessage: 'destination conflicts with the recorded item' }], nextCursor: null });
   if (pathname === '/api/v1/storage/mutations/mutation-failed/retry' && method === 'POST') return json({ mutation: { id: 'mutation-failed', status: 'complete' } });
   if (pathname === '/api/v1/storage/trash/trash-johnson/restore' && method === 'POST') return json({ dataset: { id: 'dataset-trash', status: 'archived' } });
@@ -171,6 +183,12 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/workspace/client-grants') return json({ projects: [], associations: [], grants: [] });
   if (pathname === '/api/v1/operations' && method === 'GET') return json({ operations: runtime.operations, nextCursor: null });
   if (pathname === '/api/v1/processing/derivatives' && method === 'GET') return json({ derivatives: runtime.derivatives });
+  if (pathname === '/api/v1/diagnostics/runs' && method === 'GET') return url.searchParams.get('cursor')
+    ? json({ runs: [{ attemptId: 'attempt-global-older', attemptNumber: 1, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', status: 'succeeded', phase: 'complete', derivativeCount: 1, failedDerivativeCount: 0, createdAt: '2026-08-16T12:00:00.000Z', updatedAt: '2026-08-16T12:05:00.000Z', completedAt: '2026-08-16T12:05:00.000Z' }], nextCursor: null })
+    : json({ runs: [
+      { attemptId: 'attempt-johnson-old', attemptNumber: 1, taskId: 'task-johnson', taskDisplayName: 'Johnson reconstruction', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', status: 'failed', phase: 'obj2tiles_generate', error: { code: 'obj2tiles_exit_nonzero', message: 'Textured tile conversion failed.' }, derivativeCount: 1, failedDerivativeCount: 1, createdAt: '2026-08-17T12:00:00.000Z', updatedAt: '2026-08-17T12:04:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' },
+      { attemptId: 'attempt-global-flaky', attemptNumber: 2, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', status: 'failed', phase: 'materializing_recovery', error: { code: 'recovery_failed', message: 'Recovery diagnostics are available.' }, derivativeCount: 0, failedDerivativeCount: 0, createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:03:00.000Z', completedAt: '2026-08-18T12:03:00.000Z' },
+    ], nextCursor: 'diagnostic-page-two' });
   if (pathname === '/api/v1/processing/derivatives/derivative-failed/retry' && method === 'POST') {
     runtime.derivatives = runtime.derivatives.map(job => job.id === 'derivative-failed' ? { ...job, status: 'pending', result: {} } : job);
     return json({ derivative: runtime.derivatives.find(job => job.id === 'derivative-failed') }, 202);
@@ -183,9 +201,18 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     runtime.derivatives = [derivative, ...runtime.derivatives];
     return json({ derivative }, 202);
   }
+  if (pathname === '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts' && method === 'POST') {
+    const queued = { id: 'operation-recovery-new', type: 'lod_recovery', subject: 'ops:browser-audit', projectId: 'project-johnson', status: 'queued', phase: 'queued', progress: 0, source: { kind: 'existing_model', browserTransferRequired: false, transferComplete: true }, attemptCount: 0, heartbeatAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    runtime.operations = [{ ...queued, status: 'leased', phase: 'validating_source', progress: .25, attemptCount: 1, heartbeatAt: new Date().toISOString(), processingAttemptId: 'attempt-recovery-new' }, ...runtime.operations];
+    return json({ operation: queued }, 202);
+  }
   if (pathname === '/api/v1/operations/operation-failed/retry' && method === 'POST') {
     runtime.operations = runtime.operations.map(operation => operation.id === 'operation-failed' ? { ...operation, status: 'queued', phase: 'queued', progress: 0, heartbeatAt: null, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() } : operation);
     return json({ operation: runtime.operations.find(operation => operation.id === 'operation-failed') }, 202);
+  }
+  if (pathname === '/api/v1/operations/operation-recovery-failed/retry' && method === 'POST') {
+    runtime.operations = runtime.operations.map(operation => operation.id === 'operation-recovery-failed' ? { ...operation, status: 'queued', phase: 'queued', progress: 0, heartbeatAt: null, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() } : operation);
+    return json({ operation: runtime.operations.find(operation => operation.id === 'operation-recovery-failed') }, 202);
   }
   if (pathname === '/api/v1/processing/server-task-imports/browse' && method === 'GET') return json({ path: '', entries: [{ name: 'church-backup.zip', relativePath: 'church-backup.zip', kind: 'zip', byteSize: 4096 }], nextCursor: null });
   if (pathname === '/api/v1/processing/webodm-task-imports' && method === 'POST') {
@@ -203,7 +230,9 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/tasks/task-quarry') return json({ task: { ...fixtures.tasks[1], status: runtime.archivedTasks.has('task-quarry')?'archived':'ready_for_review', metrics: { sourceImageCount: 12, processingStatus: 'ready_for_review', outputCount: 1 }, outputs: [fixtures.outputs[2]] } });
   if (pathname === '/api/v1/tasks/task-johnson/storage') return json({ task: { totalBytes: 9437184 } });
   if (pathname === '/api/v1/tasks/task-quarry/storage') return json({ task: { totalBytes: 1048576 } });
-  if (pathname === '/api/v1/tasks/task-johnson/attempts') return json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: null });
+  if (pathname === '/api/v1/tasks/task-johnson/attempts') return url.searchParams.get('cursor')
+    ? json({ attempts: [{ id: 'attempt-johnson-old', attemptNumber: 1, providerId: 'provider-nodeodm', providerTaskId: 'nodeodm-41', status: 'failed', errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', createdAt: '2026-08-17T12:00:00.000Z', startedAt: '2026-08-17T12:01:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' }], nextCursor: null })
+    : json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: 'older-johnson-runs' });
   if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
   const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
@@ -232,11 +261,33 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `browser refresh ${sequence}` }],
     });
   }
+  if (pathname === '/api/v1/attempts/attempt-johnson-old/diagnostics') return json({ diagnostics: {
+    attempt: { id: 'attempt-johnson-old', attemptNumber: 1, status: 'failed' },
+    errorDetail: { errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', stage: 'obj2tiles_generate', diagnosticId: 'diag-browser-41' },
+    events: [
+      { stage: 'source_validate', state: 'succeeded', summary: 'Textured OBJ source verified.', createdAt: '2026-08-17T12:02:00.000Z' },
+      { stage: 'obj2tiles_generate', state: 'failed', summary: 'Obj2Tiles exited with code 1.', createdAt: '2026-08-17T12:04:00.000Z' },
+    ],
+    derivativeJobs: [{ id: 'derivative-old', type: 'mesh_tiles', status: 'failed', errorMessage: 'Tile conversion failed.' }],
+    processingJobs: [], operations: [], logs: [{ createdAt: '2026-08-17T12:04:00.000Z', level: 'error', message: 'Obj2Tiles exited with code 1 [REDACTED PATH]' }],
+    logsTruncated: false, logRetentionDays: 30,
+  } });
+  if (pathname === '/api/v1/attempts/attempt-global-flaky/diagnostics') {
+    runtime.flakyDiagnosticRequests += 1;
+    if (runtime.flakyDiagnosticRequests === 1) return json({ error: 'diagnostics_temporarily_unavailable', message: 'Run diagnostics are temporarily unavailable.' }, 503);
+    return json({ diagnostics: {
+      attempt: { id: 'attempt-global-flaky', attemptNumber: 2, status: 'failed' },
+      events: [{ eventType: 'materializing_recovery', status: 'failed', message: 'Recovery materialization failed.', createdAt: '2026-08-18T12:03:00.000Z' }],
+      derivatives: [], operation: null,
+      logs: [{ createdAt: '2026-08-18T12:03:00.000Z', level: 'error', message: 'Retained sanitized recovery output [REDACTED PATH]' }],
+      logsTruncated: false, logRetentionDays: 30,
+    } });
+  }
   return json({ error: `Unhandled fixture route: ${pathname}` }, 404);
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -249,7 +300,7 @@ function startFixtureServer() {
         const raw = Buffer.concat(chunks).toString();
         let body = {};
         if (raw) try { body = JSON.parse(raw); } catch {}
-        runtime.requests.push({ method: request.method, path: url.pathname, body });
+        runtime.requests.push({ method: request.method, path: url.pathname, body, idempotencyKey: request.headers['idempotency-key']||null });
         result = apiResponse(url, runtime, request.method, body);
       }
     } else {
@@ -379,6 +430,8 @@ async function waitForDevTools(profile) {
 async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
+  runtime.failNextStorage = false;
+  runtime.flakyDiagnosticRequests = 0;
   runtime.operations = structuredClone(fixtures.operations);
   runtime.derivatives = structuredClone(fixtures.derivatives);
   const requestStart = runtime.requests.length;
@@ -417,9 +470,9 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '3'", `${viewport.name}: background work count did not include active derivatives`);
     await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
-    await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 2", `${viewport.name}: dedicated import activity did not load`);
+    await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 3", `${viewport.name}: dedicated import and recovery activity did not load`);
     const activityText = await client.evaluate(`document.querySelector('#import-activity').textContent`);
-    for (const expected of ['Import activity', '35%', 'Server ZIP', 'Phase: adopting', 'Worker heartbeat', 'The archive could not be imported.']) assert.ok(activityText.includes(expected), `${viewport.name}: missing operation detail ${expected}`);
+    for (const expected of ['Import activity', '35%', 'Server ZIP', 'Phase: adopting', 'Worker heartbeat', 'The archive could not be imported.', 'Existing model', 'Retry recovery', 'existing model remains safe']) assert.ok(activityText.includes(expected), `${viewport.name}: missing operation detail ${expected}`);
     const derivativeText = await client.evaluate(`document.querySelector('#workspace-content').textContent`);
     for (const expected of ['Model derivatives', 'Validate imported 3D tiles', 'Generate streaming 3D tiles', 'Running', 'Queued', 'Tile conversion failed']) assert.ok(derivativeText.includes(expected), `${viewport.name}: missing derivative detail ${expected}`);
     assert.equal(await client.evaluate(`document.querySelector('[data-derivative-id="derivative-running"] progress')?.hasAttribute('value')`), false, `${viewport.name}: running derivative progress was not indeterminate`);
@@ -427,6 +480,9 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-failed/retry');
     await waitFor(client, "document.querySelector('[data-operation-id=\"operation-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed import retry did not return to queued`);
+    await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-recovery-failed"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-recovery-failed/retry');
+    await waitFor(client, "document.querySelector('[data-operation-id=\"operation-recovery-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed recovery retry did not return to queued`);
     await waitFor(client, "document.querySelector('[data-action=\"retry-derivative\"][data-id=\"derivative-failed\"]')", `${viewport.name}: failed optional derivative did not expose manual retry`);
     await client.evaluate(`document.querySelector('[data-action="retry-derivative"][data-id="derivative-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-failed/retry');
@@ -462,10 +518,29 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Retry 3D tiles', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts and DTO-backed stale derivative retry`);
-    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="retry-derivative"][data-id="derivative-stale-fallback"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-stale-fallback/retry');
-    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: stale derivative retry did not settle`);
+      ['View', 'Create recovery version', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts did not expose immutable LOD recovery`);
+    await client.evaluate(`document.querySelector('[data-task-disclosure="history"] summary').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"load-more-attempts\"]') !== null", `${viewport.name}: attempt history did not expose its pagination cursor`);
+    assert.equal(await client.evaluate(`document.querySelector('.attempt-history')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
+    await client.evaluate(`document.querySelector('[data-action="load-more-attempts"]').click()`);
+    await waitFor(client, "document.querySelector('[data-attempt-id=\"attempt-johnson-old\"]') !== null", `${viewport.name}: older run page did not append`);
+    await client.evaluate(`document.querySelector('[data-attempt-id="attempt-johnson-old"] [data-action="open-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('[data-attempt-id=\"attempt-johnson-old\"] .attempt-diagnostic')?.textContent.includes('Obj2Tiles exited with code 1')", `${viewport.name}: historical run diagnostics did not load`);
+    const runDiagnosticText = await client.evaluate(`document.querySelector('[data-attempt-id="attempt-johnson-old"] .attempt-diagnostic').textContent`);
+    for (const expected of ['obj2tiles_exit_nonzero', 'obj2tiles generate', 'diag-browser-41', '[REDACTED PATH]']) assert.equal(runDiagnosticText.toLowerCase().includes(expected.toLowerCase()), true, `${viewport.name}: missing run diagnostic ${expected}`);
+    await waitForRequest(runtime, requestStart, 'GET', '/api/v1/attempts/attempt-johnson-old/diagnostics');
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="create-lod-recovery"][data-id="output-johnson"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts');
+    const recoveryRequest = runtime.requests.findLast(item => item.method === 'POST' && item.path === '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts');
+    assert.deepEqual(recoveryRequest.body, {}, `${viewport.name}: recovery request body was not exactly empty JSON`);
+    assert.match(recoveryRequest.idempotencyKey||'', /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, `${viewport.name}: recovery request did not carry a fresh UUID idempotency key`);
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('existing model version remains safe and unchanged')", `${viewport.name}: recovery confirmation did not preserve the old-version safety message`);
+    await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
+    await waitFor(client, "document.querySelector('[data-operation-id=\"operation-recovery-new\"]')?.textContent.includes('Validating recovery source')", `${viewport.name}: queued recovery did not become visible as background activity`);
+    const recoveryActivity = await client.evaluate(`document.querySelector('[data-operation-id="operation-recovery-new"]').textContent`);
+    for (const expected of ['3D tile recovery version', 'Existing model', 'Validating recovery source']) assert.ok(recoveryActivity.includes(expected), `${viewport.name}: missing recovery activity ${expected}`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"create-lod-recovery\"]') !== null", `${viewport.name}: returning from recovery activity did not restore the new run context`);
     assert.equal(await client.evaluate(`document.querySelectorAll('button button').length`), 0, `${viewport.name}: task shortcuts were nested inside a button`);
     assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].every(button=>button.getBoundingClientRect().height>=44)`), true, `${viewport.name}: task shortcuts have sub-44px targets`);
     await client.evaluate(`history.back()`);
@@ -553,6 +628,12 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="trash-project"][data-id="project-quarry"]').click()`);
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/projects/project-quarry');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: project Delete did not settle`);
+    await waitFor(client, "document.querySelector('#workspace-toast .toast-action')?.textContent === 'View Recycle Bin'", `${viewport.name}: Delete did not expose a direct Recycle Bin action`);
+    await client.evaluate(`document.querySelector('#workspace-toast .toast-action').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('section')==='trash' && document.querySelector('[data-action=\"retry-trash-load\"]') !== null", `${viewport.name}: Recycle Bin did not distinguish a storage load failure from an empty bin`);
+    assert.equal(await client.evaluate(`document.querySelector('[role="alert"]')?.textContent.includes('Storage inventory is temporarily unavailable.')`), true, `${viewport.name}: Recycle Bin omitted the storage load error`);
+    await client.evaluate(`document.querySelector('[data-action="retry-trash-load"]').click()`);
+    await waitFor(client, "document.querySelectorAll('.trash-group').length === 2 && document.querySelectorAll('[data-action=\"restore-trash\"]').length === 2", `${viewport.name}: Recycle Bin retry did not render grouped recoverable items`);
 
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
@@ -577,14 +658,36 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: provider modal overflows horizontally`);
 
     await client.evaluate(`document.querySelector('.modal-close').click(); document.querySelector('[data-section="diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"open-trash\"]') !== null", `${viewport.name}: diagnostics did not link to the dedicated Recycle Bin`);
+    assert.deepEqual(await client.evaluate(`Object.fromEntries([...document.querySelectorAll('.metric-card')].slice(0,4).map(card=>[card.querySelector('p').textContent,{used:card.querySelector('strong').textContent,available:card.querySelector('small').textContent}]))`), {
+      datasets: { used: '4.0 MB', available: '6.0 MB available' },
+      models: { used: '8.0 MB', available: '12.0 MB available' },
+      cache: { used: '12.0 MB', available: '18.0 MB available' },
+      trash: { used: '16.0 MB', available: '24.0 MB available' },
+    }, `${viewport.name}: diagnostics did not derive used storage from total minus available`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.diagnostic-project-group>h3')].map(item=>item.textContent)`), ['Johnson Road Survey', 'Alpha Quarry'], `${viewport.name}: global diagnostic runs were not grouped by project`);
+    assert.equal(await client.evaluate(`document.querySelectorAll('.diagnostic-task-group').length`), 2, `${viewport.name}: global diagnostic runs were not grouped by task`);
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-johnson-old')?.textContent.includes('[REDACTED PATH]')", `${viewport.name}: retained sanitized diagnostics log did not render`);
+    assert.equal(await client.evaluate(`(() => { const button=document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]'); return document.getElementById(button.getAttribute('aria-controls')) !== null })()`), true, `${viewport.name}: run disclosure did not reference its stable diagnostic panel`);
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-global-flaky"] [data-action="open-global-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-global-flaky.load-error [data-action=\"retry-global-attempt-diagnostics\"]') !== null", `${viewport.name}: diagnostic load failure did not expose Retry`);
+    const flakyRequestsBeforeRetry = runtime.requests.filter(item => item.path === '/api/v1/attempts/attempt-global-flaky/diagnostics').length;
+    await client.evaluate(`document.querySelector('#global-attempt-diagnostic-attempt-global-flaky [data-action="retry-global-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-global-flaky')?.textContent.includes('Retained sanitized recovery output')", `${viewport.name}: diagnostic Retry toggled closed instead of reloading`);
+    assert.equal(runtime.requests.filter(item => item.path === '/api/v1/attempts/attempt-global-flaky/diagnostics').length, flakyRequestsBeforeRetry + 1, `${viewport.name}: diagnostic Retry did not issue a fresh request`);
+    await client.evaluate(`document.querySelector('[data-action="load-more-diagnostic-runs"]').click()`);
+    await waitFor(client, "document.querySelector('[data-diagnostic-attempt-id=\"attempt-global-older\"]') !== null", `${viewport.name}: older global diagnostic runs did not append`);
+    await client.evaluate(`document.querySelector('[data-action="retry-storage-mutation"][data-id="mutation-failed"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/mutations/mutation-failed/retry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: lifecycle retry did not settle`);
+    await client.evaluate(`document.querySelector('[data-action="open-trash"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"purge-trash\"]') !== null", `${viewport.name}: trash lifecycle controls did not render`);
+    assert.equal(await client.evaluate(`new URL(location.href).searchParams.get('section')`), 'trash', `${viewport.name}: Recycle Bin was not a top-level routed section`);
     assert.equal(await client.evaluate(`document.querySelectorAll('[data-action="restore-trash"]').length`), 2, `${viewport.name}: paginated trash was not fully rendered`);
     await client.evaluate(`document.querySelector('[data-action="restore-trash"][data-id="trash-johnson"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/trash/trash-johnson/restore');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: trash restore did not settle`);
-    await client.evaluate(`document.querySelector('[data-action="retry-storage-mutation"][data-id="mutation-failed"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/mutations/mutation-failed/retry');
-    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: lifecycle retry did not settle`);
     assert.deepEqual(await client.evaluate(`({ entityId: document.querySelector('[data-action="purge-trash"]').dataset.entityId, promptValue: window.prompt('test') })`),
       { entityId: 'dataset-trash', promptValue: 'dataset-trash' }, `${viewport.name}: trash confirmation contract`);
     await client.evaluate(`document.querySelector('[data-action="purge-trash"]').click()`);
@@ -596,6 +699,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['PATCH', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['DELETE', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['POST', '/api/v1/processing/outputs/output-johnson/view-sessions'],
+      ['POST', '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts'],
+      ['POST', '/api/v1/operations/operation-recovery-failed/retry'],
       ['DELETE', '/api/v1/processing/outputs/output-johnson'],
       ['POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles'],
       ['DELETE', '/api/v1/processing/outputs/output-johnson-archived'],

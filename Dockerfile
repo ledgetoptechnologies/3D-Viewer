@@ -29,28 +29,47 @@ RUN curl -fsSL -o potree.zip \
     && test -s /potree/libs/copc/index.js \
     && test -s /potree/libs/plasio/js/laslaz.js
 
-# Pinned official OpenDroneMap Obj2Tiles release. Release assets are verified
-# against the SHA-256 digests published by GitHub before entering the image.
-FROM debian:bookworm-slim AS obj2tiles
+# Pinned LTDS Obj2Tiles fork. The official OpenDroneMap v1.6.2 source archive
+# and the reviewable local patch are both hash-verified before a self-contained
+# binary is built. No SDK or build-time network dependency enters runtime.
+FROM mcr.microsoft.com/dotnet/sdk:10.0.203-noble@sha256:8a90a473da5205a16979de99d2fc20975e922c68304f5c79d564e666dc3982fc AS obj2tiles
 ARG TARGETARCH
 ARG OBJ2TILES_VERSION=1.6.2
+ARG OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5
+ARG OBJ2TILES_PATCH_SHA256=6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl unzip ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
+    && apt-get install -y --no-install-recommends curl ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+COPY third_party/obj2tiles/v1.6.2-bounded-concurrency.patch /tmp/obj2tiles.patch
+COPY third_party/obj2tiles/locks /tmp/obj2tiles-locks
+RUN curl -fsSL -o /tmp/obj2tiles.tar.gz \
+      "https://codeload.github.com/OpenDroneMap/Obj2Tiles/tar.gz/refs/tags/v${OBJ2TILES_VERSION}" \
+    && echo "${OBJ2TILES_SOURCE_SHA256}  /tmp/obj2tiles.tar.gz" | sha256sum -c - \
+    && echo "${OBJ2TILES_PATCH_SHA256}  /tmp/obj2tiles.patch" | sha256sum -c - \
+    && mkdir -p /src/obj2tiles \
+    && tar -xzf /tmp/obj2tiles.tar.gz --strip-components=1 -C /src/obj2tiles \
+    && cd /src/obj2tiles \
+    && git apply --check /tmp/obj2tiles.patch \
+    && git apply /tmp/obj2tiles.patch \
     && case "$TARGETARCH" in \
-      amd64) asset=Obj2Tiles-Linux64.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0; executable_digest=40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274 ;; \
-      arm64) asset=Obj2Tiles-LinuxArm64.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5; executable_digest=c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1 ;; \
+      amd64) rid=linux-x64 ;; \
+      arm64) rid=linux-arm64 ;; \
       *) echo "unsupported Obj2Tiles architecture: $TARGETARCH" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL -o /tmp/obj2tiles.zip "https://github.com/OpenDroneMap/Obj2Tiles/releases/download/v${OBJ2TILES_VERSION}/${asset}" \
-    && echo "$digest  /tmp/obj2tiles.zip" | sha256sum -c - \
-    && mkdir -p /opt/obj2tiles \
-    && unzip -q /tmp/obj2tiles.zip -d /opt/obj2tiles \
+    && for project in MeshDecimatorCore Obj2Tiles.Library Obj2Gltf Obj2Tiles; do \
+      cp "/tmp/obj2tiles-locks/$rid/$project/packages.lock.json" "$project/packages.lock.json"; \
+    done \
+    && dotnet restore Obj2Tiles/Obj2Tiles.csproj --locked-mode -r "$rid" \
+    && dotnet publish Obj2Tiles/Obj2Tiles.csproj -c Release -r "$rid" --self-contained true --no-restore \
+      -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebuggerSupport=false -o /opt/obj2tiles \
     && test -x /opt/obj2tiles/Obj2Tiles \
-    && echo "$executable_digest  /opt/obj2tiles/Obj2Tiles" | sha256sum -c - \
     && /opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "${OBJ2TILES_VERSION}" \
-    && curl -fsSL -o /opt/obj2tiles/LICENSE.md "https://raw.githubusercontent.com/OpenDroneMap/Obj2Tiles/v${OBJ2TILES_VERSION}/LICENSE.md" \
-    && echo "b46d5156399774c9ba728b3d3f93c8ebf8da20dcebd5f67b5cd813aba2ec81cc  /opt/obj2tiles/LICENSE.md" | sha256sum -c -
+    && cp LICENSE.md /opt/obj2tiles/LICENSE.md \
+    && binary_sha256="$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)" \
+    && printf '{"schemaVersion":1,"sourceVersion":"v%s","sourceSha256":"%s","patchSha256":"%s","binarySha256":"%s"}\n' \
+      "$OBJ2TILES_VERSION" "$OBJ2TILES_SOURCE_SHA256" "$OBJ2TILES_PATCH_SHA256" "$binary_sha256" \
+      > /opt/obj2tiles/build-info.json \
+    && test "$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)" = "$binary_sha256"
 
 # ---------------------------------------------------------------------------
 # Stage 2: build the Vite frontend (bundles main.js, copies public/ incl.

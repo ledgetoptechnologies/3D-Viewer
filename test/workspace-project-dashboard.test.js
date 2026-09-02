@@ -21,6 +21,8 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(css,/@media\(max-width:720px\)/);
   assert.ok(source.indexOf("['dashboard','⌂','Dashboard']")<source.indexOf("['providers','⌁','Providers & nodes']"));
   assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
+  assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['trash','♲','Recycle Bin']"));
+  assert.ok(source.indexOf("['trash','♲','Recycle Bin']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
   assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
 });
 
@@ -112,7 +114,7 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/background-work-count/);
   assert.match(source,/OPERATION_ACTIVE=new Set\(\['queued','leased','awaiting_derivatives'\]\)/);
   assert.match(source,/operation\.status==='awaiting_derivatives'\?'Waiting for required derivatives'/);
-  assert.match(source,/result\.operation\.status==='awaiting_derivatives'\?'Required derivative queued for retry':'Import queued for retry'/);
+  assert.match(source,/result\.operation\.status==='awaiting_derivatives'\?'Required derivative queued for retry':recovery\?'Recovery version queued; the existing model remains safe':'Import queued for retry'/);
   assert.match(source,/function background\(\)/);
   assert.match(source,/\/api\/v1\/operations\/\$\{encodeURIComponent\(id\)\}\/retry/);
   assert.match(source,/pagedApi\('\/api\/v1\/processing\/derivatives','derivatives'\)/);
@@ -141,6 +143,20 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/load-more-background/);
   assert.match(source,/view-all-background/);
   assert.match(source,/knownPhases=new Set/);
+  for(const phase of ['existing_model','validating_source','materializing_recovery'])assert.ok(source.includes(phase),phase);
+  assert.match(source,/operation\.type==='lod_recovery'/);
+  assert.match(source,/Retry recovery/);
+});
+
+test('eligible LOD recovery creates a new immutable version through the DTO endpoint',()=>{
+  assert.match(source,/recovery\?\.kind==='new_version'&&recovery\.eligible/);
+  assert.match(source,/Create recovery version/);
+  assert.match(source,/data-endpoint=/);
+  assert.match(source,/function createLodRecovery/);
+  assert.match(source,/endpoint!==expected/);
+  assert.match(source,/headers:\{'Idempotency-Key':crypto\.randomUUID\(\)\}/);
+  assert.match(source,/rememberOperation\(result\.operation\)/);
+  assert.match(source,/existing model version remains safe and unchanged/);
 });
 
 test('providers are master-detail and diagnostics owns storage health and trash',()=>{
@@ -159,5 +175,32 @@ test('providers are master-detail and diagnostics owns storage health and trash'
   assert.match(source,/Secrets are write-only/);
   assert.match(source,/function diagnostics/);
   assert.match(source,/Storage trash & recovery/);
+  assert.match(source,/function trash\(\)/);
+  assert.match(source,/Recycle Bin unavailable/);
+  assert.match(source,/grouped summaries|trash-summary/);
   assert.match(source,/Queue & provider health/);
+});
+
+test('diagnostic storage cards consume the authoritative space DTO safely',()=>{
+  assert.match(source,/function storageSpaceMetrics/);
+  assert.match(source,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0/);
+  assert.match(source,/available<=total\?total-available/);
+  assert.match(source,/finiteStorageNumber\(item\.available\)/);
+  assert.match(source,/bytes\(values\.usedBytes\)/);
+  assert.match(source,/bytes\(values\.availableBytes\)/);
+});
+
+test('diagnostics provides grouped paginated global runs with retained logs and accessible retry',()=>{
+  assert.match(source,/\/api\/v1\/diagnostics\/runs\?limit=20/);
+  assert.match(source,/function globalDiagnosticHistory/);
+  assert.match(source,/Processing run history/);
+  assert.match(source,/diagnostic-project-group/);
+  assert.match(source,/diagnostic-task-group/);
+  assert.match(source,/load-more-diagnostic-runs/);
+  assert.match(source,/diagnostic\.logs\|\|\[\]/);
+  assert.match(source,/retry-attempt-diagnostics/);
+  assert.match(source,/retry-global-attempt-diagnostics/);
+  assert.match(source,/aria-controls=/);
+  assert.match(source,/function loadTaskAttemptDiagnostics/);
+  assert.match(source,/function loadGlobalAttemptDiagnostics/);
 });

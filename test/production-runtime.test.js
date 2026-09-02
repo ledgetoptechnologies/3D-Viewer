@@ -15,9 +15,16 @@ const repositoryRoot = path.resolve(__dirname, '..');
 test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT constructor contract', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /ARG OBJ2TILES_VERSION=1\.6\.2/);
-  assert.match(dockerfile, /Obj2Tiles-Linux64\.zip; digest=34a576e0b8ebbd73da5e2271d238724a9b39be3ee1edc167214b5b28bed2baa0/);
-  assert.match(dockerfile, /Obj2Tiles-LinuxArm64\.zip; digest=b5252158f81a3d5659a978d1468f7c8915f3794e11359dfeb351e5eeaac48ed5/);
-  assert.match(dockerfile, /raw\.githubusercontent\.com\/OpenDroneMap\/Obj2Tiles\/v\$\{OBJ2TILES_VERSION\}\/LICENSE\.md/);
+  assert.match(dockerfile, /OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5/);
+  assert.match(dockerfile, /OBJ2TILES_PATCH_SHA256=6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b/);
+  assert.match(dockerfile, /codeload\.github\.com\/OpenDroneMap\/Obj2Tiles\/tar\.gz\/refs\/tags\/v\$\{OBJ2TILES_VERSION\}/);
+  assert.match(dockerfile, /sha256sum -c -[\s\S]*git apply --check \/tmp\/obj2tiles\.patch[\s\S]*git apply \/tmp\/obj2tiles\.patch/);
+  assert.match(dockerfile, /dotnet publish[\s\S]*--self-contained true/);
+  assert.match(dockerfile, /COPY third_party\/obj2tiles\/locks \/tmp\/obj2tiles-locks/);
+  assert.match(dockerfile, /dotnet restore Obj2Tiles\/Obj2Tiles\.csproj --locked-mode -r "\$rid"/);
+  assert.match(dockerfile, /dotnet publish[\s\S]*--no-restore/);
+  assert.doesNotMatch(dockerfile, /PublishTrimmed=true/);
+  assert.match(dockerfile, /build-info\.json/);
   assert.match(dockerfile, /COPY --from=obj2tiles \/opt\/obj2tiles \/opt\/obj2tiles/);
   assert.match(dockerfile, /COPY lod-policy\.mjs \.\/lod-policy\.mjs/);
   assert.match(dockerfile, /node scripts\/patch-potree-ept\.mjs public\/potree\/build\/potree\/potree\.js/);
@@ -38,8 +45,8 @@ test('published image executes a real Obj2Tiles conversion and provenance audit'
   assert.match(smoke, /lod-provenance\.json/);
   assert.match(smoke, /KHR_texture_basisu/);
   assert.match(smoke, /compressedTextures/);
-  assert.match(workflow, /docker run --rm "\$PUBLISHED_IMAGE" node scripts\/verify-obj2tiles-runtime\.mjs/);
-  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "29"/, 'published-image verification must match the current database schema');
+  assert.match(workflow, /docker run --rm "\$VERIFY_IMAGE" node scripts\/verify-obj2tiles-runtime\.mjs/);
+  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "30"/, 'published-image verification must match the current database schema');
 });
 
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
@@ -152,15 +159,33 @@ test('runtime image is rootless as the TrueNAS Apps service identity', () => {
 
 test('release-candidate image tags cannot move latest', () => {
   const workflow = fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'viewer-image.yml'), 'utf8');
+  const buildStart = workflow.indexOf('- name: Build isolated candidate');
+  const verifyStart = workflow.indexOf('- name: Verify exact candidate image');
+  const promoteStart = workflow.indexOf('- name: Promote verified digest to release tags');
+  const buildBlock = workflow.slice(buildStart, verifyStart);
+  const verifyBlock = workflow.slice(verifyStart, promoteStart);
 
   assert.match(workflow, /flavor:\s*\|\s*latest=false/);
   assert.match(workflow, /type=raw,value=latest,enable=\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/);
   assert.match(workflow, /type=ref,event=tag/);
   assert.match(workflow, /type=sha,prefix=sha-/);
-  assert.match(workflow, /id:\s*build[\s\S]*Verify published immutable image/);
+  assert.ok(buildStart >= 0 && buildStart < verifyStart && verifyStart < promoteStart);
+  assert.match(workflow, /candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/);
+  assert.match(buildBlock, /push: \$\{\{ github\.event_name == 'push' \}\}/);
+  assert.match(buildBlock, /load: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+  assert.match(buildBlock, /tags: \$\{\{ steps\.candidate\.outputs\.ref \}\}/);
+  assert.match(buildBlock, /provenance: \$\{\{ github\.event_name == 'push' \}\}/);
+  assert.match(buildBlock, /sbom: \$\{\{ github\.event_name == 'push' \}\}/);
+  assert.doesNotMatch(buildBlock, /steps\.meta\.outputs\.tags/);
+  assert.doesNotMatch(verifyBlock, /if: github\.event_name == 'push'/);
   assert.match(workflow, /\[\[ "\$IMAGE_DIGEST" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]/);
   assert.match(workflow, /\[\[ "\$EXPECTED_REVISION" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
-  assert.match(workflow, /docker pull "\$PUBLISHED_IMAGE"/);
+  assert.match(verifyBlock, /docker image inspect "\$VERIFY_IMAGE"/);
+  assert.match(verifyBlock, /CANDIDATE_DIGEST=.*imagetools inspect "\$CANDIDATE_IMAGE"[\s\S]*test "\$CANDIDATE_DIGEST" = "\$IMAGE_DIGEST"/);
+  assert.match(verifyBlock, /docker pull "\$VERIFY_IMAGE"/);
+  assert.match(workflow, /FINAL_TAGS: \$\{\{ steps\.meta\.outputs\.tags \}\}/);
+  assert.match(workflow, /imagetools create --tag "\$tag" "\$PUBLISHED_IMAGE"/);
+  assert.match(workflow, /PROMOTED_DIGEST=.*imagetools inspect "\$tag"[\s\S]*test "\$PROMOTED_DIGEST" = "\$IMAGE_DIGEST"/);
   assert.match(workflow, /\.Config\.User[\s\S]*568:568/);
   assert.match(workflow, /org\.opencontainers\.image\.revision/);
   assert.match(workflow, /source-commit\.txt[\s\S]*stat -c %a[\s\S]*444/);
@@ -297,7 +322,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   const ready = await waitFor(`${baseUrl}/api/v1/ready`, child, { headers: proxyHeaders });
   assert.deepEqual(await ready.json(), { ok: true, missing: [] });
   assert.equal(ready.headers.get('x-ltds-viewer-revision'), 'unavailable');
-  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '29');
+  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '30');
   assert.equal(ready.headers.get('cache-control'), 'no-store');
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`)).status, 421);
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`, { Host: 'viewer.example.test' })).status, 403);
@@ -307,7 +332,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   const health = await httpRequest(`${baseUrl}/api/v1/health`, proxyHeaders);
   assert.deepEqual(await health.json(), { ok: true });
   assert.equal(health.headers.get('x-ltds-viewer-revision'), 'unavailable');
-  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '29');
+  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '30');
   assert.equal(health.headers.get('cache-control'), 'no-store');
   const contentSecurityPolicy = health.headers.get('content-security-policy') || '';
   assert.match(

@@ -25,11 +25,17 @@ test('staff output actions keep the admin bearer on downloads and mint published
 });
 
 test('task expansion loads bounded immutable attempt history',()=>{
-  assert.match(source,/\/tasks\/\$\{encodeURIComponent\(taskId\)\}\/attempts\?limit=100/);
+  assert.match(source,/\/tasks\/\$\{encodeURIComponent\(taskId\)\}\/attempts\?limit=20/);
   assert.match(source,/function attemptHistory/);
-  assert.match(source,/Processing history \(\$\{attempts\.length\}\)/);
+  assert.match(source,/Every recorded run/);
+  assert.match(source,/load-more-attempts/);
+  assert.match(source,/\/attempts\/\$\{encodeURIComponent\(attemptId\)\}\/diagnostics\?eventLimit=100&logLimit=200/);
+  assert.match(source,/Run #\$\{available\(item\.attemptNumber/);
   assert.match(source,/\['failed','cancelled'\]\.includes\(item\.status\)/);
   assert.match(source,/state\.tasks=state\.tasks\.map\(item=>item\.id===taskId\?refreshedTask:item\)/);
+  assert.match(source,/id="\$\{esc\(panelId\)\}"/);
+  assert.match(source,/aria-controls="\$\{esc\(panelId\)\}"/);
+  assert.match(source,/retry-attempt-diagnostics/);
 });
 
 test('node administration supports metadata credential and capability-bound preset maintenance',()=>{
@@ -46,6 +52,10 @@ test('trash lifecycle keeps permanent deletion behind exact typed confirmation',
   assert.match(source,/typed!==entityId/);
   assert.match(source,/body:\{typedId:typed\}/);
   assert.match(source,/Permanent deletion cannot be undone/);
+  assert.match(source,/\['trash','♲','Recycle Bin'\]/);
+  assert.match(source,/View Recycle Bin/);
+  assert.match(source,/function trash\(\)/);
+  assert.match(source,/trashLoadError/);
 });
 
 test('project-first lifecycle exposes rename and recoverable delete without archive-first UI',()=>{
@@ -55,7 +65,7 @@ test('project-first lifecycle exposes rename and recoverable delete without arch
   assert.match(source,/function confirmedMutation/);
   assert.match(source,/function editProject/);
   assert.match(source,/function editTask/);
-  assert.match(source,/remain recoverable in trash for 14 days/);
+  assert.match(source,/remain recoverable in the Recycle Bin for 14 days/);
   assert.match(source,/restored until \$\{purgeDate\(30\)\}/);
   assert.match(source,/after that date it will be permanently purged/);
   assert.match(source,/project is archived and read-only/);

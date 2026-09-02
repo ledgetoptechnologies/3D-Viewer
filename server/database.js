@@ -1857,6 +1857,32 @@ const MIGRATIONS = [
         ON import_cleanup_jobs(retained_import_id,status);
     `,
   },
+  {
+    version: 30,
+    name: 'append_only_processing_diagnostics',
+    sql: `
+      CREATE TABLE processing_events (
+        id TEXT PRIMARY KEY,
+        attempt_id TEXT,
+        operation_id TEXT,
+        derivative_job_id TEXT,
+        event_type TEXT NOT NULL,
+        phase TEXT,
+        severity TEXT NOT NULL CHECK(severity IN ('info','warning','error')),
+        error_code TEXT,
+        message TEXT,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX processing_events_attempt_idx ON processing_events(attempt_id,created_at,id);
+      CREATE INDEX processing_events_operation_idx ON processing_events(operation_id,created_at,id);
+      CREATE INDEX processing_events_created_idx ON processing_events(created_at DESC,id DESC);
+      CREATE TRIGGER processing_events_no_update
+        BEFORE UPDATE ON processing_events BEGIN SELECT RAISE(ABORT,'processing_events are append-only'); END;
+      CREATE TRIGGER processing_events_no_delete
+        BEFORE DELETE ON processing_events BEGIN SELECT RAISE(ABORT,'processing_events are append-only'); END;
+    `,
+  },
 ];
 
 function applyMigrations(database) {

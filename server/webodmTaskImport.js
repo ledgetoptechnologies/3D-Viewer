@@ -172,4 +172,4 @@ async function importWebodmTask(operation, { processing, repository, storage, co
   return { project: processing.getProject(request.projectId), task: processing.getTask(task.id), attempt: processing.getAttempt(attempt.id), model: repository.getModelVersion(model.id, ids.versionId), import: imported, requiredDerivatives: lodDerivatives, retainedLeaseToken: retained.leaseToken, ...summary };
 }
 
-module.exports = { CAPABILITIES, capabilitySummary, copyTree, importWebodmTask, stageSource };
+module.exports = { CAPABILITIES, capabilitySummary, copyRetainedClosure, copyTree, importWebodmTask, stageSource };

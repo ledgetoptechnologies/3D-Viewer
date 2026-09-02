@@ -199,6 +199,18 @@ Three.js `KTX2Loader`. The runtime smoke test executes the pinned converter,
 requires generated `KHR_texture_basisu` / `image/ktx2` payloads, runs the
 controlled audit, and fails the image build if any stage is missing.
 
+The converter is built from the SHA-256-pinned upstream v1.6.2 source plus a
+SHA-256-pinned local scheduling patch. LOD split/write stages run sequentially
+with at most two outer workers, while ImageSharp is limited to one worker.
+Structured resource diagnostics contain only exception types/HRESULTs and
+aggregate process/cgroup counters. An explicit scheduler or memory-pressure
+failure permits one clean, serial whole-conversion retry; semantic conversion
+errors do not retry. Retry cleanup is limited to the current lease token's
+incomplete directory and remains fenced by the original abort signal and job
+deadline. Build metadata binds the source, patch, version, and binary digest;
+published-image CI checks those pinned inputs and independently hashes the
+runtime executable. The runtime image contains no SDK and needs no network.
+
 Locally generated output uses schema-v3 controlled-converter proof instead of
 weakening exact v2. V3 binds the approved architecture-specific Obj2Tiles 1.6.2
 executable digest and exact KTX2 command, the GLB and OBJ digests, every audited

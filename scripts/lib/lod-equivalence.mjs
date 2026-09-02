@@ -12,6 +12,8 @@ export const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3
 export const CONTROLLED_CONVERTER = converterPolicy.CONTROLLED_CONVERTER;
 export const CONTROLLED_CONVERTER_BINARY_SHA256 = converterPolicy.CONTROLLED_CONVERTER_BINARY_SHA256;
 export const CONTROLLED_CONVERTER_COMMAND_SHA256 = converterPolicy.CONTROLLED_CONVERTER_COMMAND_SHA256;
+export const SERIAL_RETRY_CONVERTER = converterPolicy.SERIAL_RETRY_CONVERTER;
+export const SERIAL_RETRY_CONVERTER_COMMAND_SHA256 = converterPolicy.SERIAL_RETRY_CONVERTER_COMMAND_SHA256;
 export const DEFAULT_TOLERANCE = 1e-6;
 const CONTROLLED_SAMPLE_COUNT = 16_384;
 const CONTROLLED_RELATIVE_SURFACE_TOLERANCE = 2e-5;
@@ -936,6 +938,7 @@ export async function auditControlledObj2Tiles({
   converterBinary,
   allowExternalSource = false,
   trustedConverterBinarySha256 = CONTROLLED_CONVERTER_BINARY_SHA256,
+  converterSerialRetry = false,
 }) {
   derivativeDir = path.resolve(derivativeDir);
   sourceGlb = path.resolve(sourceGlb);
@@ -972,7 +975,10 @@ export async function auditControlledObj2Tiles({
   });
   const artifacts = [...artifactMap.values()].sort((a, b) => a.uri.localeCompare(b.uri));
   const comparison = controlledSurfaceComparison(source, leaves, sourceDigest);
-  const commandSha256 = CONTROLLED_CONVERTER_COMMAND_SHA256;
+  const converterContract = converterSerialRetry ? SERIAL_RETRY_CONVERTER : CONTROLLED_CONVERTER;
+  const commandSha256 = converterSerialRetry
+    ? SERIAL_RETRY_CONVERTER_COMMAND_SHA256
+    : CONTROLLED_CONVERTER_COMMAND_SHA256;
   const surfaceEvidence = {
     sourceTriangleCount: source.length,
     leafTriangleCount: leaves.length,
@@ -998,7 +1004,7 @@ export async function auditControlledObj2Tiles({
     textures: 'controlled-atlas-material-equivalence',
     leafGeometricError: 0,
     converter: {
-      ...CONTROLLED_CONVERTER,
+      ...converterContract,
       commandSha256,
       inputAsset: path.basename(converterInput),
       inputSha256: converterInputSha256,
@@ -1006,7 +1012,7 @@ export async function auditControlledObj2Tiles({
     },
     audit: {
       algorithm: CONTROLLED_AUDIT_ALGORITHM,
-      equivalenceSha256: sha256(stable({ sourceSha256: sourceDigest, converter: CONTROLLED_CONVERTER, surfaceEvidence })),
+      equivalenceSha256: sha256(stable({ sourceSha256: sourceDigest, converter: converterContract, surfaceEvidence })),
       ...surfaceEvidence,
       artifacts,
     },
@@ -1020,12 +1026,13 @@ export async function writeLodProvenance({
   output,
   allowExternalSource = false,
   controlledObj2Tiles = false,
+  converterSerialRetry = false,
   converterInput,
   converterBinary,
   trustedConverterBinarySha256,
 }) {
   const provenance = controlledObj2Tiles
-    ? await auditControlledObj2Tiles({ derivativeDir, sourceGlb, converterInput, converterBinary, allowExternalSource, trustedConverterBinarySha256 })
+    ? await auditControlledObj2Tiles({ derivativeDir, sourceGlb, converterInput, converterBinary, allowExternalSource, trustedConverterBinarySha256, converterSerialRetry })
     : await auditLodEquivalence({ derivativeDir, sourceGlb, tolerance, allowExternalSource });
   const outputPath = path.resolve(output || path.join(derivativeDir, 'lod-provenance.json'));
   if (!inside(path.resolve(derivativeDir), outputPath)) throw new Error('provenance output must stay inside the derivative directory');

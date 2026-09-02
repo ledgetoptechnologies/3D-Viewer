@@ -108,7 +108,7 @@ test('workspace lifecycle routes enforce guarded archive, recoverable trash, res
   assert.equal(fs.existsSync(outputDirectory), false);
   response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {});
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).output.status, 'archived');
+  assert.equal((await response.json()).output.status, 'ready');
   assert.equal(fs.existsSync(outputDirectory), true);
 
   response = await context.request('DELETE', `/api/v1/processing/outputs/${versionId}`, {});
@@ -156,6 +156,28 @@ test('project Delete cascades owned storage into 30-day trash and restore/purge 
   assert.equal(context.processing.getProject(project.id), null, 'purged projects are no longer retrievable'); assert.equal(context.processing.getTask(task.id), null, 'purged tasks are no longer retrievable');
   assert.match(context.database.prepare('SELECT display_name FROM projects WHERE id=?').get(project.id).display_name, /^deleted-project-/); assert.match(context.database.prepare('SELECT display_name FROM processing_tasks WHERE id=?').get(task.id).display_name, /^deleted-task-/);
   const { purgeContainerTrash } = require('../server/containerLifecycle'); assert.equal(purgeContainerTrash(context.processing, context.storage, trash.id, 'ops:lifecycle').permanentlyDeletedAt !== null, true, 'repeat purge is idempotent');
+});
+
+test('container restore preflights every member before changing files or metadata', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Preflight project' }), dataset = finalizedDataset(context, project, 'Preflight dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Preflight task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Preflight ODM', endpoint: 'http://127.0.0.1:3002', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Preflight output'), datasetDirectory = path.join(context.config.datasetsMount, dataset.relativePath);
+  let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
+  assert.equal(trash.displayName, 'Preflight project'); assert.equal(fs.existsSync(output.directory), false); assert.equal(fs.existsSync(datasetDirectory), false);
+  fs.mkdirSync(datasetDirectory, { recursive: true }); fs.writeFileSync(path.join(datasetDirectory, 'conflict.txt'), 'do not overwrite');
+  response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {}); assert.equal(response.status, 409);
+  assert.equal(context.processing.getProject(project.id).status, 'archived'); assert.equal(context.processing.getTask(task.id).status, 'archived');
+  assert.equal(context.processing.getDataset(dataset.id).status, 'trashed'); assert.equal(context.processing.getModelOutput(output.versionId).status, 'trashed');
+  assert.equal(fs.existsSync(output.directory), false, 'an earlier member was not partially restored before the later conflict');
+  assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
+});
+
+test('restoring a formerly published output requires explicit republish', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Published restore' }), dataset = finalizedDataset(context, project, 'Published dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Published task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Published ODM', endpoint: 'http://127.0.0.1:3003', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Published output');
+  assert.ok(context.processing.publishAttemptAtomic(output.attempt.id, ['glb'], { actorId: 'ops:lifecycle' }));
+  let response = await context.request('DELETE', `/api/v1/processing/outputs/${output.versionId}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
+  response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {}); assert.equal(response.status, 200); const restored = (await response.json()).output;
+  assert.equal(restored.status, 'ready'); assert.equal(context.processing.getTask(task.id).status, 'ready_for_review'); assert.equal(context.processing.getTask(task.id).publishedModelId, null);
+  assert.equal(context.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(output.model.id).active_version_id, null);
+  assert.equal(context.database.prepare('SELECT published FROM model_assets WHERE version_id=?').get(output.versionId).published, 0);
 });
 
 test('expired task container trash automatically purges owned files once and preserves shared datasets', async t => {

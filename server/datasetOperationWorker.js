@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
 const { importWebodmTask } = require('./webodmTaskImport');
+const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
 const { processingReadyEvent } = require('./processingReadyEvent');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
@@ -128,7 +129,8 @@ async function processOneDatasetOperation(deps, owner) {
     }
     else if (operation.operation_type === 'catalog_map') {
       const payload=JSON.parse(operation.payload_json||'{}');
-      if(payload.webodmTaskImport){result=await importWebodmTask(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'webodm_task_import.completed',entityType:'dataset_operation',entityId:operation.id,details:{projectId:result.project.id,taskId:result.task.id,assetKinds:result.assetKinds}});}
+      if(payload.lodRecovery){result=await processLodRecovery(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'lod_recovery.materialized',entityType:'dataset_operation',entityId:operation.id,details:{sourceVersionId:result.recovery.sourceVersionId,targetVersionId:result.recovery.targetVersionId,recoveryRevision:result.recovery.recoveryRevision}});}
+      else if(payload.webodmTaskImport){result=await importWebodmTask(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'webodm_task_import.completed',entityType:'dataset_operation',entityId:operation.id,details:{projectId:result.project.id,taskId:result.task.id,assetKinds:result.assetKinds}});}
       else{result=await mapCatalogCandidate(operation,deps,updateProgress);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});}
     }
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
@@ -138,6 +140,7 @@ async function processOneDatasetOperation(deps, owner) {
       if(result.requiredDerivatives.length){
         if(result.attempt.status!=='ingesting')throw Object.assign(new Error('catalog import entered an unexpected derivative state'),{code:'invalid_import_state'});
         completed=deps.processing.activateImportedDerivativesForOperation(operation.id,owner,result.attempt.id,result.requiredDerivatives,result,result.retainedLeaseToken);
+        if(completed&&JSON.parse(operation.payload_json||'{}').lodRecovery)deps.processing.recordProcessingEvent({attemptId:result.attempt.id,operationId:operation.id,eventType:'lod_recovery.awaiting_derivative',phase:'awaiting_derivatives',details:{sourceVersionId:result.recovery.sourceVersionId,targetVersionId:result.recovery.targetVersionId,recoveryRevision:result.recovery.recoveryRevision}});
       }else{
         if(result.attempt.status!=='ingesting')throw Object.assign(new Error('catalog import entered an unexpected readiness state'),{code:'invalid_import_state'});
         completed=deps.processing.completeDatasetOperationWithImportReadiness(operation.id,owner,result,processingReadyEvent(deps.processing,deps.config,result.attempt),result.retainedLeaseToken);
@@ -149,7 +152,9 @@ async function processOneDatasetOperation(deps, owner) {
   } catch (error) {
     if(error?.code==='retained_import_busy'&&deps.processing.deferDatasetOperation(operation.id,owner,5_000))return true;
     if(operation.operation_type==='catalog_map'){
-      try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
+      const payload=JSON.parse(operation.payload_json||'{}');
+      if(payload.lodRecovery){try{deps.processing.rollbackLodRecoveryProvisional(operation.id,owner);cleanupLodRecoveryMaterialization(operation,deps);}catch{/* the operation remains failed and retryable with the same stable IDs */}}
+      else try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
     }
     deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
     if(operation.operation_type==='catalog_map')reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);

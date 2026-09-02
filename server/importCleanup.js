@@ -193,20 +193,33 @@ function guardedFilesystemMutation(processing, job, owner, now, mutate) {
   if (!applied) throw cleanupError('lease_lost', 'cleanup lease was lost before filesystem mutation');
 }
 
-function validatePrivateTree(directoryFd, expectedMountId, budget = { entries: 0 }, depth = 0) {
+function validatePrivateTree(directoryFd, expectedMountId, budget = { entries: 0 }, depth = 0, snapshot = [], prefix = '') {
   if (depth > MAX_CLEANUP_DEPTH) throw cleanupError('cleanup_tree_too_deep');
   const rootBefore = fs.fstatSync(directoryFd, { bigint: true });
   requireOwned(rootBefore, 'staging');
   if (descriptorMountId(directoryFd) !== expectedMountId) throw cleanupError('cleanup_cross_mount');
-  for (const entry of fs.readdirSync(`/proc/self/fd/${directoryFd}`, { withFileTypes: true })) {
+  const entries = fs.readdirSync(`/proc/self/fd/${directoryFd}`, { withFileTypes: true })
+    .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
+  for (const entry of entries) {
     budget.entries += 1;
     if (budget.entries > MAX_CLEANUP_ENTRIES) throw cleanupError('cleanup_tree_too_large');
     const entryPath = procEntry(directoryFd, entry.name);
     const before = fs.lstatSync(entryPath, { bigint: true });
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    snapshot.push({
+      path: relative,
+      dev: String(before.dev),
+      ino: String(before.ino),
+      mode: String(before.mode),
+      size: String(before.size),
+      nlink: String(before.nlink),
+      ctimeNs: String(before.ctimeNs),
+      mtimeNs: String(before.mtimeNs),
+    });
     if (before.isSymbolicLink()) throw cleanupError('cleanup_path_changed', 'cleanup tree contains a symbolic link');
     if (before.isDirectory()) {
       const opened = openDirectoryAt(directoryFd, entry.name, expectedMountId);
-      try { validatePrivateTree(opened.fd, expectedMountId, budget, depth + 1); }
+      try { validatePrivateTree(opened.fd, expectedMountId, budget, depth + 1, snapshot, relative); }
       finally { fs.closeSync(opened.fd); }
     } else if (before.isFile()) {
       let fd;
@@ -228,6 +241,7 @@ function validatePrivateTree(directoryFd, expectedMountId, budget = { entries: 0
   if (!sameEntry(rootBefore, fs.fstatSync(directoryFd, { bigint: true }))) {
     throw cleanupError('cleanup_path_changed', 'cleanup directory changed during validation');
   }
+  return snapshot;
 }
 
 function removePrivateTree(directoryFd, expectedMountId, processing, job, owner, now, budget = { entries: 0 }, depth = 0) {
@@ -375,9 +389,12 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
     } else {
       const payload = openDirectoryAt(quarantineFd, QUARANTINE_PAYLOAD, source.mountId);
       try {
-        validatePrivateTree(payload.fd, source.mountId);
+        const validatedTree = validatePrivateTree(payload.fd, source.mountId);
         hooks.afterStagingValidation?.({ job });
-        validatePrivateTree(payload.fd, source.mountId);
+        const confirmedTree = validatePrivateTree(payload.fd, source.mountId);
+        if (JSON.stringify(validatedTree) !== JSON.stringify(confirmedTree)) {
+          throw cleanupError('cleanup_path_changed', 'cleanup tree changed after validation');
+        }
         if (job.status === 'leased' && !processing.markImportCleanupQuarantined(
           job.id, owner, job.lease_token, job.lease_generation, { at: now() },
         )) throw cleanupError('lease_lost');
