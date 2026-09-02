@@ -46,7 +46,7 @@ test('published image executes a real Obj2Tiles conversion and provenance audit'
   assert.match(smoke, /KHR_texture_basisu/);
   assert.match(smoke, /compressedTextures/);
   assert.match(workflow, /docker run --rm "\$VERIFY_IMAGE" node scripts\/verify-obj2tiles-runtime\.mjs/);
-  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "30"/, 'published-image verification must match the current database schema');
+  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "31"/, 'published-image verification must match the current database schema');
 });
 
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
