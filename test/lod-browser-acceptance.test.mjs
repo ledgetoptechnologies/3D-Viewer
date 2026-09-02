@@ -1822,19 +1822,41 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     })()`);
     const canvas = await client.evaluate(`(() => { const r=document.querySelector('#three-container canvas').getBoundingClientRect();
       return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+    const findOrbitPoint = () => client.evaluate(`(() => {
+      const controls = window.__ltds.controls();
+      const tiles = window.__ltds.tiles();
+      const camera = window.__ltds.camera();
+      const r = document.querySelector('#three-container canvas').getBoundingClientRect();
+      tiles.group.updateWorldMatrix(true, true);
+      camera.updateMatrixWorld(true);
+      let mesh = null;
+      tiles.group.traverse(object => { if (!mesh && object.isMesh && object.geometry?.attributes?.position?.count >= 3) mesh = object; });
+      if (!mesh) return null;
+      const Vector3 = camera.position.constructor;
+      const position = mesh.geometry.attributes.position;
+      const center = new Vector3();
+      for (let index = 0; index < 3; index++) center.add(new Vector3().fromBufferAttribute(position, index));
+      center.multiplyScalar(1 / 3);
+      mesh.localToWorld(center);
+      center.project(camera);
+      const projected = {
+        x: r.left + (center.x + 1) * r.width / 2,
+        y: r.top + (1 - center.y) * r.height / 2,
+      };
+      if (controls.surfacePick(controls._ndcFromClient(projected.x, projected.y))) return projected;
+      for (let radius = 2; radius <= 24; radius += 2) {
+        for (const [dx, dy] of [[radius, 0], [-radius, 0], [0, radius], [0, -radius]]) {
+          const x = projected.x + dx;
+          const y = projected.y + dy;
+          if (controls.surfacePick(controls._ndcFromClient(x, y))) return { x, y };
+        }
+      }
+      return null;
+    })()`);
+    let orbitPoint = await findOrbitPoint();
+    assert.ok(orbitPoint, 'synthetic detail frontier did not expose a rendered surface for orbit testing');
     let observedActivity = false;
-    for (const pixels of [1, 2, 4, 8]) {
-      const beforeActivity = await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime`);
-      await client.command('Input.dispatchMouseEvent', {
-        type: 'mousePressed', x: canvas.x, y: canvas.y, button: 'right', buttons: 2, clickCount: 1,
-      });
-      await client.command('Input.dispatchMouseEvent', {
-        type: 'mouseMoved', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 2,
-      });
-      observedActivity ||= await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime > ${beforeActivity}`);
-      await client.command('Input.dispatchMouseEvent', {
-        type: 'mouseReleased', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 0, clickCount: 1,
-      });
+    const stableMotionSample = async (label) => {
       const motionDeadline = Date.now() + 500;
       while (Date.now() < motionDeadline) {
         const sample = await client.evaluate(`(() => {
@@ -1855,11 +1877,62 @@ test('an open authenticated workspace discovers completed LOD tiles without load
         })()`);
         assert.deepEqual(sample, {
           rootVisible: false, rootAttached: false, rootInFallback: false, attachedLeaves: 2, positiveVisible: 0,
-        }, `a ${pixels}-pixel camera gesture degraded the settled frontier: ${JSON.stringify(sample)}`);
+        }, `${label} degraded the settled frontier: ${JSON.stringify(sample)}`);
         await new Promise(resolve => setTimeout(resolve, 50));
       }
+    };
+    const cameraMatrix = () => client.evaluate(`(() => {
+      const camera = window.__ltds.camera(); camera.updateMatrixWorld(true); return Array.from(camera.matrixWorld.elements);
+    })()`);
+    const assertCameraMoved = async (before, label) => {
+      const after = await cameraMatrix();
+      assert.notDeepEqual(after, before, `${label} did not change the camera matrix`);
+    };
+    for (const pixels of [1, 2, 4, 8]) {
+      const beforeActivity = await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime`);
+      const beforeMatrix = await cameraMatrix();
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: canvas.x, y: canvas.y, button: 'right', buttons: 2, clickCount: 1,
+      });
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 2,
+      });
+      observedActivity ||= await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime > ${beforeActivity}`);
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 0, clickCount: 1,
+      });
+      await stableMotionSample(`a ${pixels}-pixel pan gesture`);
+      await assertCameraMoved(beforeMatrix, `a ${pixels}-pixel pan gesture`);
     }
-    assert.equal(observedActivity, true, 'CDP camera gestures did not reach EarthLikeControls interaction state');
+    orbitPoint = await findOrbitPoint();
+    assert.ok(orbitPoint, 'panned detail frontier did not expose a rendered surface for orbit testing');
+    for (const pixels of [1, 2, 4, 8]) {
+      const beforeActivity = await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime`);
+      const beforeMatrix = await cameraMatrix();
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: orbitPoint.x, y: orbitPoint.y, button: 'left', buttons: 1, clickCount: 1,
+      });
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: orbitPoint.x + pixels, y: orbitPoint.y, button: 'left', buttons: 1,
+      });
+      observedActivity ||= await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime > ${beforeActivity}`);
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: orbitPoint.x + pixels, y: orbitPoint.y, button: 'left', buttons: 0, clickCount: 1,
+      });
+      await stableMotionSample(`a ${pixels}-pixel orbit gesture`);
+      await assertCameraMoved(beforeMatrix, `a ${pixels}-pixel orbit gesture`);
+    }
+    for (const delta of [1, 2, 4, 8]) {
+      const beforeActivity = await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime`);
+      const beforeMatrix = await cameraMatrix();
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseWheel', x: canvas.x, y: canvas.y, button: 'none', buttons: 0, deltaX: 0, deltaY: delta,
+      });
+      observedActivity ||= await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime > ${beforeActivity}`);
+      await stableMotionSample(`a ${delta}-unit wheel-zoom gesture`);
+      await assertCameraMoved(beforeMatrix, `a ${delta}-unit wheel-zoom gesture`);
+    }
+    assert.equal(observedActivity, true, 'CDP pan, orbit, and zoom gestures did not reach EarthLikeControls interaction state');
     const afterMotion = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles(); const scenes = {};
       const visit = tile => { (tile?.children || []).forEach(visit);
