@@ -47,5 +47,5 @@ test('offline validator rejects a hand-authored legacy preservation assertion', 
   }));
   const result = run(directory, mesh);
   assert.equal(result.status, 1);
-  assert.match(result.stdout, /exact v2 or controlled Obj2Tiles v3 audit evidence/);
+  assert.match(result.stdout, /exact v2 or controlled Obj2Tiles v3\/v4 audit evidence/);
 });

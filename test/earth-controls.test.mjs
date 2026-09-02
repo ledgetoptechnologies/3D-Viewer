@@ -82,6 +82,12 @@ test('left-drag orbit starts only from a real rendered-surface hit', () => {
     controls._pointerDown(press);
     assert.equal(controls._mode, 'orbit');
     assert.deepEqual(controls._pivot.toArray(), [1, 2, 3]);
+    const interaction = controls.getInteractionState();
+    assert.deepEqual(interaction.focusNdc, [0, 0]);
+    assert.deepEqual(interaction.focusPoint, [1, 2, 3]);
+    assert.equal(interaction.activeMotion, true);
+    assert.ok(interaction.lastActivityTime > 0);
+    assert.ok(Object.isFrozen(interaction));
     controls.dispose();
   } finally {
     globalThis.document = previousDocument;

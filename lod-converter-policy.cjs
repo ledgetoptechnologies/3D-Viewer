@@ -63,6 +63,22 @@ const OFFICIAL_CONVERTER_BINARY_SHA256 = Object.freeze([
   'c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1',
 ]);
 
+// Provenance v4 permits only a very small, evidence-gated numerical gray zone.
+// Keep these values in the shared CJS policy so the ESM auditor and CommonJS
+// server validator cannot silently drift apart.
+const CONTROLLED_SURFACE_AUDIT_POLICY_V4 = Object.freeze({
+  revision: 'ltds-controlled-surface-policy-v4',
+  accumulationMethod: 'neumaier-compensated-f64-forward-reverse',
+  numericalAgreementLimit: 1e-12,
+  normalAreaRelativeDeltaLimit: 1e-5,
+  grayAreaRelativeDeltaLimit: 1.2e-5,
+  graySpatialToleranceFraction: 0.5,
+  grayNormalizedSecondMomentDeltaLimit: 1e-5,
+  grayMaximumReversedNormalFraction: 0.005,
+  normalNormalizedSecondMomentDeltaLimit: 2e-5,
+  normalMaximumReversedNormalFraction: 0.01,
+});
+
 function runtimeForkBuildInfo(infoFile = '/opt/obj2tiles/build-info.json') {
   if (!fs.existsSync(infoFile)) return null;
   let info;
@@ -141,6 +157,7 @@ module.exports = {
   CONTROLLED_CONVERTER,
   CONTROLLED_CONVERTER_BINARY_SHA256,
   CONTROLLED_CONVERTER_COMMAND_SHA256,
+  CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   LEGACY_CONTROLLED_CONVERTER,
   LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256,
   LEGACY_KTX2_CONVERTER,

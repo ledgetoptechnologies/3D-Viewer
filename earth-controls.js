@@ -90,6 +90,9 @@ export class EarthLikeControls {
     this._lastMoveTime = 0;
     this._touches = new Map();
     this._pinch = null;
+    this._focusNdc = new THREE.Vector2(0, 0);
+    this._focusPoint = null;
+    this._lastActivityTime = 0;
 
     // Pivot indicator (orange ring dot shown while orbiting)
     this.pivotIndicator = this._buildIndicator();
@@ -156,6 +159,22 @@ export class EarthLikeControls {
     return ray.origin.clone().addScaledVector(ray.direction, 50);
   }
 
+  _markInteraction(ndc = this._focusNdc, point = null) {
+    if (ndc?.isVector2) this._focusNdc.copy(ndc);
+    if (point?.isVector3) this._focusPoint = point.clone();
+    this._lastActivityTime = performance.now();
+  }
+
+  /** Read-only camera interaction state used to prioritize (never select) LOD requests. */
+  getInteractionState() {
+    return Object.freeze({
+      focusNdc: Object.freeze([this._focusNdc.x, this._focusNdc.y]),
+      focusPoint: this._focusPoint ? Object.freeze(this._focusPoint.toArray()) : null,
+      activeMotion: this._mode !== 'none' || this._inertia.active,
+      lastActivityTime: this._lastActivityTime,
+    });
+  }
+
   _pointerDown(e) {
     if (!this.enabled) return;
     this.dom.setPointerCapture?.(e.pointerId);
@@ -182,6 +201,7 @@ export class EarthLikeControls {
     this._lastPx = { x: e.clientX, y: e.clientY };
     this._moved = 0;
     const ndc = this._ndc(e);
+    this._markInteraction(ndc, this._anchor(ndc));
 
     if (e.button === 0 || e.pointerType === 'touch') {
       const surface = this.surfacePick(ndc);
@@ -249,6 +269,7 @@ export class EarthLikeControls {
     this._lastPx = { x: e.clientX, y: e.clientY };
     this._moved += Math.abs(dx) + Math.abs(dy);
     if (dx === 0 && dy === 0) return;
+    this._markInteraction(this._ndc(e));
 
     if (this._mode === 'orbit') {
       const h = this.dom.clientHeight || 800;
@@ -373,6 +394,7 @@ export class EarthLikeControls {
     e.preventDefault();
     const ndc = this._ndc(e);
     const hit = this._anchor(ndc);
+    this._markInteraction(ndc, hit);
     const s = Math.pow(0.90, -e.deltaY / 100);
     this._zoomTowards(hit, s);
   }
@@ -392,6 +414,7 @@ export class EarthLikeControls {
         this._inertia.active = false;
       } else {
         this._applyOrbit(this._pivot, this._inertia.yaw * dt, this._inertia.pitch * dt);
+        this._markInteraction(this._focusNdc, this._pivot);
       }
     }
     // fade the pivot indicator when not orbiting
@@ -416,6 +439,7 @@ export class EarthLikeControls {
     this.camera.position.copy(lookAt).add(offset);
     this.camera.lookAt(lookAt);
     this._inertia.active = false;
+    this._markInteraction(new THREE.Vector2(0, 0), lookAt);
   }
 
   dispose() {

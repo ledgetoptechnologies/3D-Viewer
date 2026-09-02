@@ -62,7 +62,19 @@ function verifiedLodProvenance(metadata, assets) {
     && provenance.converter?.inputAsset === path.posix.basename(obj.relativePath || '')
     && provenance.converter?.inputSha256 === obj.sha256
     && CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(provenance.converter?.binarySha256 || '').toLowerCase());
-  if ((!exactV2 && !controlledV3)
+  const controlledV4 = provenance.schemaVersion === 4
+    && provenance.geometry === 'controlled-bidirectional-surface-equivalence'
+    && provenance.textures === 'controlled-atlas-material-equivalence'
+    && provenance.audit?.algorithm === 'ltds-obj2tiles-surface-equivalence-v4'
+    && provenance.audit?.policyRevision === 'ltds-controlled-surface-policy-v4'
+    && provenance.converter?.name === 'OpenDroneMap/Obj2Tiles'
+    && provenance.converter?.version === '1.6.2'
+    && CONTROLLED_CONVERTER_COMMAND_SHA256_SET.has(String(provenance.converter?.commandSha256 || '').toLowerCase())
+    && Boolean(obj?.sha256)
+    && provenance.converter?.inputAsset === path.posix.basename(obj.relativePath || '')
+    && provenance.converter?.inputSha256 === obj.sha256
+    && CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(provenance.converter?.binarySha256 || '').toLowerCase());
+  if ((!exactV2 && !controlledV3 && !controlledV4)
     || provenance.sourceSha256 !== glb.sha256
     || provenance.tilesManifestSha256 !== meshAsset(assets, 'tiles')?.manifestSha256
     || provenance.sourceAsset !== path.posix.basename(glb.relativePath || '')

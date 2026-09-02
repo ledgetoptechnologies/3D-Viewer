@@ -1637,8 +1637,9 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     const browserErrors = client.events.filter((event) => event.method === 'Log.entryAdded'
       || event.method === 'Runtime.exceptionThrown' || event.method === 'Runtime.consoleAPICalled').slice(-10);
     assert.equal(refreshedRuntime.root, true, `refreshed session did not attach the LOD hierarchy: ${JSON.stringify({ refreshedRuntime, requests: fixture.requests, browserErrors })}`);
-    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 16`,
-      'refreshed session did not complete the default 13 to 16 refinement stage', 20_000);
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20
+      && window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
+      'refreshed session did not enter direct Detail 20 refinement', 20_000);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1650,13 +1651,13 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
     })`);
     assert.deepEqual({ ...balancedStartup, errorTarget: undefined, errorScale: undefined, bootstrapCoverageTarget: undefined }, {
-      slider: '16', requested: 16, active: 16, errorTarget: undefined,
+      slider: '20', requested: 20, active: 20, errorTarget: undefined,
       phase: 'requested-detail', bootstrapPhase: 'complete', errorScale: undefined,
       bootstrapCoverageTarget: undefined,
     });
-    const sessionSteadyScale = Math.max(1, balancedStartup.errorScale / 2);
-    assert.ok(Math.abs(balancedStartup.errorTarget - 15.023 * sessionSteadyScale) < 0.01,
-      `steady Detail 16 stayed at the coarse bootstrap target: ${JSON.stringify(balancedStartup)}`);
+    assert.equal(balancedStartup.errorScale, 1);
+    assert.equal(balancedStartup.errorTarget, 5.481,
+      `steady Detail 20 did not use raw SSE: ${JSON.stringify(balancedStartup)}`);
     assert.ok(balancedStartup.errorTarget < balancedStartup.bootstrapCoverageTarget, JSON.stringify(balancedStartup));
     const startupRefinementDeadline = Date.now() + 10_000;
     while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
@@ -1687,9 +1688,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
         errorTarget: window.__ltds.tiles().errorTarget,
       };
     })()`);
-    assert.deepEqual(explicitHighDetail, {
-      requested: 24, active: 16, errorTarget: balancedStartup.errorTarget,
-    });
+    assert.deepEqual(explicitHighDetail, { requested: 24, active: 24, errorTarget: 2 });
     const fallbackSampleDeadline = Date.now() + 1_000;
     let fallbackSamples = 0;
     while (Date.now() < fallbackSampleDeadline) {
@@ -1850,7 +1849,7 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
       screenWidth: 1440, screenHeight: 900,
     });
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
-    await waitFor(client, `(() => {
+    try { await waitFor(client, `(() => {
       const tiles = window.__ltds?.tiles?.();
       if (!tiles?.root || !tiles.group.children.length) return false;
       let maps = 0;
@@ -1859,7 +1858,17 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
         for (const material of materials) if (material.map?.image) maps += 1;
       });
       return maps > 0;
-    })()`, 'KTX2 tile texture did not decode and attach', 60_000);
+    })()`, 'KTX2 tile texture did not decode and attach', 60_000); } catch (error) {
+      const runtime = await client.evaluate(`({
+        status: document.querySelector('#lod-status')?.textContent,
+        diagnostics: window.__ltds?.lodDiagnostics?.(),
+        root: Boolean(window.__ltds?.tiles?.()?.root),
+        groupChildren: window.__ltds?.tiles?.()?.group?.children?.length,
+      })`);
+      const errors = client.events.filter(event => event.method === 'Log.entryAdded'
+        || event.method === 'Runtime.exceptionThrown' || event.method === 'Runtime.consoleAPICalled').slice(-20);
+      throw new Error(`${error.message}; runtime=${JSON.stringify(runtime)}; events=${JSON.stringify(errors)}`);
+    }
 
     const state = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();

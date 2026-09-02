@@ -210,6 +210,8 @@ test('credential mutation blocks every nonterminal attempt and tampering fails c
   const provider = c.processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true, credentialCiphertext: c.credentials.seal('provider-temp', TOKEN).ciphertext });
   // Bind an envelope to the actual provider ID before exercising the worker-facing resolver.
   c.processing.setProviderCredential(provider.id, c.credentials.seal(provider.id, TOKEN));
+  c.processing.updateProviderCapabilities(provider.id, { capabilities: {}, fingerprint: 'credential-test', health: 'healthy' });
+  c.processing.updateProviderMetadata(provider.id, { enabled: true });
   const project = c.processing.createProject({ displayName: 'Project' });
   const dataset = c.processing.createDataset({ projectId: project.id, displayName: 'Dataset', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
   c.processing.finalizeDataset(dataset.id, [{ relativePath: 'photo.jpg', byteSize: 0, sha256: crypto.createHash('sha256').digest('hex') }], crypto.createHash('sha256').digest('hex'));

@@ -50,6 +50,11 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  console.error(JSON.stringify({ valid: false, error: error.message }, null, 2));
+  console.error(JSON.stringify({
+    valid: false,
+    error: error.message,
+    ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+    ...(error?.details && typeof error.details === 'object' ? { details: error.details } : {}),
+  }, null, 2));
   process.exitCode = auditFailureExitCode(error);
 }

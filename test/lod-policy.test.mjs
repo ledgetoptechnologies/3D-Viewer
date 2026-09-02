@@ -13,6 +13,8 @@ import {
   inspectLodProvenance,
   inspectLodTileset,
   installLodOverviewRetention,
+  createLodFocusPriorityCallback,
+  lodFocusPriorityPenalty,
   LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET,
   LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET,
   LOD_REFINEMENT_STEP,
@@ -49,30 +51,26 @@ test('detail slider maps monotonically across a perceptible bounded SSE range', 
   assert.ok(detailToErrorTarget(12) < 512);
   assert.equal(detailToErrorTarget(-100), 512);
   assert.equal(detailToErrorTarget(100), 2);
-  assert.equal(detailToErrorTarget(undefined), 15.023, 'missing detail defaults to balanced staged view-local refinement');
+  assert.equal(detailToErrorTarget(undefined), 5.481, 'missing detail defaults to direct Detail 20 refinement');
 });
 
-test('overview bootstrap selects one complete coarse frontier before camera-scaled detail', () => {
+test('overview bootstrap computes a direct-child prefetch target without scaling steady detail', () => {
   assert.equal(LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET, 4096);
   assert.equal(LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET, 1024);
   assert.equal(lodBootstrapRootErrorTarget(1983.5), 4096);
   assert.equal(lodBootstrapRootErrorTarget(5000), 5500);
   assert.equal(lodBootstrapCoverageErrorTarget(1983.5, [418, 524, 729]), 1024);
   assert.equal(lodBootstrapCoverageErrorTarget(900, [800, 700]), 850);
-  const scale = lodErrorScaleForCoverage(1024);
-  assert.ok(Math.abs(scaledDetailToErrorTarget(16, scale) - 1024) < 1e-9);
-  assert.ok(scaledDetailToErrorTarget(24, scale) < 140);
-  assert.ok(scaledDetailToErrorTarget(2, scale) > 34000);
-  assert.equal(scaledDetailToErrorTarget(16, 0), detailToErrorTarget(16));
+  assert.equal(steadyStateLodErrorTarget(20, lodErrorScaleForCoverage(1024)), 5.481);
+  assert.equal(steadyStateLodErrorTarget(24, lodErrorScaleForCoverage(1024)), 2);
 });
 
-test('steady-state detail target advances one bounded step beyond completed coverage', () => {
+test('steady-state detail target is always the raw camera SSE', () => {
   const coverageTarget = lodBootstrapCoverageErrorTarget(1983.5, [418, 524, 729]);
   const coverageScale = lodErrorScaleForCoverage(coverageTarget);
   assert.equal(coverageTarget, 1024);
-  assert.ok(Math.abs(steadyStateLodErrorTarget(16, coverageScale) - 512) < 0.01);
+  assert.equal(steadyStateLodErrorTarget(16, coverageScale), detailToErrorTarget(16));
   assert.ok(steadyStateLodErrorTarget(16, coverageScale) < coverageTarget);
-  assert.ok(steadyStateLodErrorTarget(16, coverageScale) > detailToErrorTarget(16));
   assert.ok(steadyStateLodErrorTarget(24, coverageScale) < steadyStateLodErrorTarget(16, coverageScale));
   assert.equal(steadyStateLodErrorTarget(16), detailToErrorTarget(16));
 });
@@ -95,8 +93,8 @@ test('renderer configuration streams without pinning ancestors or siblings', () 
   assert.equal(tiles.loadAncestors, false);
   assert.equal(tiles.loadSiblings, false);
   assert.equal(tiles.loadAncestorSiblings, false);
-  assert.equal(tiles.downloadQueue.priorityCallback, screenSpaceErrorPriority);
-  assert.equal(tiles.parseQueue.priorityCallback, screenSpaceErrorPriority);
+  assert.equal(typeof tiles.downloadQueue.priorityCallback, 'function');
+  assert.equal(tiles.parseQueue.priorityCallback, tiles.downloadQueue.priorityCallback);
   assert.equal(tiles.downloadQueue.maxJobs, 6, 'foreground priority must survive the first request batch');
   assert.equal(tiles.parseQueue.maxJobs, 2, 'parsing must yield often enough to reprioritize after camera moves');
   assert.equal(tiles.maxDepth, Infinity);
@@ -117,24 +115,24 @@ test('renderer configuration streams without pinning ancestors or siblings', () 
   assert.deepEqual(lodRuntimeProfile(24, 8), {
     budget: lodCacheBudget(8),
     requestedDetail: 24,
-    activeDetail: 13,
+    activeDetail: 24,
     maximumDetail: 24,
     reduced: false,
   });
   assert.deepEqual(lodCacheBudget(8), {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    maxBytesSize: 3 * 1024 * 1024 * 1024,
     minSize: 8,
     maxSize: 1024,
     unloadPercent: 0.20,
   });
   assert.deepEqual(lodCacheBudget(16), {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    maxBytesSize: 3 * 1024 * 1024 * 1024,
     minSize: 8,
     maxSize: 1024,
     unloadPercent: 0.20,
-  }, 'normal clients keep the streaming cap until a measured overview proves more branch headroom is required');
+  }, 'normal clients reserve 1.75 GiB above the bounded fallback for focal refinement');
   assert.ok(
     lodCacheBudget(8).maxSize >= 1024,
     'item admission must not block a valid multi-branch frontier before the byte ceiling',
@@ -153,17 +151,17 @@ test('renderer configuration streams without pinning ancestors or siblings', () 
     setCamera() {}, setResolutionFromRenderer() {},
   };
   const defaultProfile = configureLodRenderer(defaultRenderer, { camera, renderer, deviceMemoryGiB: 8 });
-  assert.equal(DEFAULT_LOD_DETAIL, 16);
-  assert.equal(defaultRenderer.errorTarget, 32, 'desktop starts on the bounded Detail 13 frontier');
+  assert.equal(DEFAULT_LOD_DETAIL, 20);
+  assert.equal(defaultRenderer.errorTarget, 5.481, 'desktop starts at raw Detail 20');
   assert.deepEqual(defaultProfile, {
     budget: lodCacheBudget(8),
-    requestedDetail: 16,
-    activeDetail: 13,
+    requestedDetail: 20,
+    activeDetail: 20,
     maximumDetail: 24,
     reduced: false,
   });
   assert.deepEqual(lodRuntimeProfile(undefined, 8), defaultProfile);
-  assert.equal(lodDetailRequestPending(defaultProfile), true);
+  assert.equal(lodDetailRequestPending(defaultProfile), false);
 
   const alreadyBounded = {
     lruCache: {}, downloadQueue: { maxJobs: 4 }, parseQueue: { maxJobs: 1 },
@@ -497,63 +495,19 @@ test('memory-pressure ceiling retries only after a materially different camera v
   }), true, 'a materially different orbit retries requested refinement');
 });
 
-test('Detail changes cannot bypass an unfinished desktop warmup', () => {
+test('Detail changes apply raw SSE directly while reduced-memory clients stay capped', () => {
   const desktop = { requestedDetail: 2, activeDetail: 2, maximumDetail: 24, reduced: false };
   assert.equal(lodDetailRequestPending(desktop), false);
   assert.deepEqual(resolveLodDetailRequest(desktop, false, 2), {
-    requestedDetail: 2, activeDetail: 2, warmupComplete: false,
+    requestedDetail: 2, activeDetail: 2, warmupComplete: true,
   });
   assert.deepEqual(resolveLodDetailRequest(desktop, false, 24), {
-    requestedDetail: 24, activeDetail: 13, warmupComplete: false,
-  });
-  assert.equal(lodDetailRequestPending({ ...desktop, ...resolveLodDetailRequest(desktop, false, 24) }), true);
-  assert.deepEqual(resolveLodDetailRequest(desktop, true, 24), {
-    requestedDetail: 24, activeDetail: 13, warmupComplete: false,
-  });
-  const loweredAfterWarmup = resolveLodDetailRequest(desktop, true, 2);
-  assert.deepEqual(loweredAfterWarmup, {
-    requestedDetail: 2, activeDetail: 2, warmupComplete: false,
-  });
-  assert.deepEqual(resolveLodDetailRequest(desktop, loweredAfterWarmup.warmupComplete, 24), {
-    requestedDetail: 24, activeDetail: 13, warmupComplete: false,
-  });
-  assert.equal(resolveLodWarmupAdvance({ ...desktop, ...loweredAfterWarmup }), null);
-  const restaged = resolveLodDetailRequest(desktop, loweredAfterWarmup.warmupComplete, 24);
-  assert.deepEqual(resolveLodWarmupAdvance({ ...desktop, ...restaged }), {
-    requestedDetail: 24, activeDetail: 16, warmupComplete: true,
-  });
-  assert.deepEqual(resolveLodWarmupAdvance({ ...desktop, requestedDetail: 24, activeDetail: 16 }), {
-    requestedDetail: 24, activeDetail: 19, warmupComplete: true,
-  });
-  assert.deepEqual(resolveLodWarmupAdvance({ ...desktop, requestedDetail: 24, activeDetail: 22 }), {
     requestedDetail: 24, activeDetail: 24, warmupComplete: true,
   });
-  let dragged = { ...desktop };
-  let draggedWarmupComplete = false;
-  for (let detail = 3; detail <= 24; detail += 1) {
-    const next = resolveLodDetailRequest(dragged, draggedWarmupComplete, detail);
-    dragged = { ...dragged, ...next };
-    draggedWarmupComplete = next.warmupComplete;
-  }
-  assert.deepEqual(dragged, {
-    ...desktop, requestedDetail: 24, activeDetail: 13, warmupComplete: false,
-  }, 'rapid range input cannot bypass the frontier-settlement gate');
-  let loadingStage = { ...desktop, requestedDetail: 16, activeDetail: 16 };
-  for (let detail = 17; detail <= 24; detail += 1) {
-    loadingStage = { ...loadingStage, ...resolveLodDetailRequest(loadingStage, true, detail) };
-  }
-  assert.equal(loadingStage.activeDetail, 16, 'later slider events cannot promote a stage that is still loading');
-  assert.deepEqual(resolveLodWarmupAdvance(loadingStage), {
-    requestedDetail: 24, activeDetail: 19, warmupComplete: true,
-  });
-  assert.equal(lodDetailRequestPending({ ...desktop, requestedDetail: 24, activeDetail: 24 }), false);
+  assert.equal(lodDetailRequestPending({ ...desktop, ...resolveLodDetailRequest(desktop, false, 24) }), false);
   assert.deepEqual(resolveLodDetailRequest({ maximumDetail: 13, reduced: true }, false, 24), {
     requestedDetail: 24, activeDetail: 13, warmupComplete: true,
   });
-  assert.equal(lodWarmupSatisfiedByDetail(2), false);
-  assert.equal(lodWarmupSatisfiedByDetail(12), false);
-  assert.equal(lodWarmupSatisfiedByDetail(13), true);
-  assert.equal(lodWarmupSatisfiedByDetail(24), true);
   assert.equal(lodDetailRequestPending({ requestedDetail: 24, activeDetail: 13, maximumDetail: 13 }), false);
 });
 
@@ -591,7 +545,11 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   }, true);
   assert.deepEqual(value, {
     phase: 'requested-detail', requestedDetail: 24, activeDetail: 24, maximumDetail: 24,
-    errorTarget: 2, visible: { root: 0, lod0: 1, lod1: 0, other: 0 },
+    errorTarget: 2, rawErrorTarget: 2,
+    prefetch: { elapsedMs: null, exitReason: null, fallbackTiles: 0, fallbackMiB: null },
+    focusPriority: null,
+    visible: { root: 0, lod0: 1, lod1: 0, other: 0 },
+    visibleDepths: { 0: 1 },
     requiredLeaves: 2, attachedRequiredLeaves: 1, pendingRequiredLeaves: 1,
     requiredTiles: 2, attachedRequiredTiles: 1, pendingRequiredTiles: 1,
     queues: { download: false, parse: true, process: false },
@@ -633,6 +591,20 @@ test('LOD queue priority favors the closest in-frustum replacement work', () => 
   assert.equal(screenSpaceErrorPriority(outside, nearLeaf), -1);
   assert.equal(screenSpaceErrorPriority(farParent, malformedDistance), 1,
     'non-finite distance remains lowest priority');
+});
+
+test('focus priority penalizes only peripheral queue work and decays after idle', () => {
+  const focal = { __ltdsFocusOverlap: 1, traversal: { used: true, inFrustum: true, distanceFromCamera: 10 } };
+  const peripheral = { __ltdsFocusOverlap: 0, traversal: { used: true, inFrustum: true, distanceFromCamera: 10 } };
+  const moving = { activeMotion: true, lastActivityTime: 1_000 };
+  assert.equal(lodFocusPriorityPenalty(focal, moving, 1_000), 1);
+  assert.equal(lodFocusPriorityPenalty(peripheral, moving, 1_000), 4);
+  const idle = { activeMotion: false, lastActivityTime: 1_000 };
+  assert.equal(lodFocusPriorityPenalty(peripheral, idle, 1_250), 4);
+  assert.equal(lodFocusPriorityPenalty(peripheral, idle, 1_500), 2.5);
+  assert.equal(lodFocusPriorityPenalty(peripheral, idle, 1_750), 1);
+  const compare = createLodFocusPriorityCallback(() => moving, () => 1_000);
+  assert.ok(compare(focal, peripheral) > 0, 'focal tile must sort as higher-priority work');
 });
 
 test('overview retention pins only the captured coarse frontier in the LRU', () => {
@@ -804,6 +776,22 @@ test('controlled KTX2 provenance is accepted by the browser policy', () => {
   };
   assert.deepEqual(inspectLodProvenance(valid, '/assets/p/derivatives/model.glb'), { verified: true, errors: [] });
   assert.equal(inspectLodProvenance({ ...valid, converter: { ...valid.converter, commandSha256: 'c'.repeat(64) } }, '/assets/p/derivatives/model.glb').verified, false);
+
+  const v4 = {
+    ...valid,
+    schemaVersion: 4,
+    audit: {
+      ...valid.audit,
+      algorithm: 'ltds-obj2tiles-surface-equivalence-v4',
+      policyRevision: 'ltds-controlled-surface-policy-v4',
+      acceptance: 'gray-zone',
+      areaRelativeDelta: 10.618457348535776e-6,
+      numericalAgreement: 0,
+    },
+  };
+  assert.deepEqual(inspectLodProvenance(v4, '/assets/p/derivatives/model.glb'), { verified: true, errors: [] });
+  assert.equal(inspectLodProvenance({ ...v4, audit: { ...v4.audit, areaRelativeDelta: 1.3e-5 } }, '/assets/p/derivatives/model.glb').verified, false);
+  assert.equal(inspectLodProvenance({ ...v4, audit: { ...v4.audit, policyRevision: 'unreviewed' } }, '/assets/p/derivatives/model.glb').verified, false);
 });
 
 test('unverified LOD safely falls back to the actual full mesh', () => {

@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { auditControlledObj2Tiles, auditFailureExitCode, auditLodEquivalence } from '../scripts/lib/lod-equivalence.mjs';
+import {
+  auditControlledObj2Tiles,
+  auditFailureExitCode,
+  auditLodEquivalence,
+  CONTROLLED_SURFACE_AUDIT_POLICY_V4,
+} from '../scripts/lib/lod-equivalence.mjs';
 import { TRIANGLE_A, TRIANGLE_B, writeAuditableFixture } from './helpers/lod-fixture.mjs';
 
 const cli = path.join(import.meta.dirname, '..', 'scripts', 'audit-lod-equivalence.mjs');
@@ -15,6 +20,7 @@ test('filesystem and operating-system audit failures are retryable rather than s
     assert.equal(auditFailureExitCode(Object.assign(new Error(code), { code })), 4, code);
   }
   assert.equal(auditFailureExitCode(new Error('triangle count differs')), 3);
+  assert.equal(auditFailureExitCode(Object.assign(new Error('surface mismatch'), { code: 'lod_surface_equivalence_failed' })), 3);
 });
 
 function fixture(t, options) {
@@ -204,14 +210,72 @@ test('controlled Obj2Tiles audit accepts boundary retriangulation and texture at
   const split = [[TRIANGLE_B[0], [1, 0.5, 0], TRIANGLE_B[2]], [[1, 0.5, 0], TRIANGLE_B[1], TRIANGLE_B[2]]];
   const { directory, source } = fixture(t, { leafBTriangles: split, leafBTexture: Buffer.from('repacked-atlas') });
   const provenance = await auditControlledObj2Tiles({ derivativeDir: directory, sourceGlb: source, ...controlledInputs(directory) });
-  assert.equal(provenance.schemaVersion, 3);
-  assert.equal(provenance.audit.algorithm, 'ltds-obj2tiles-surface-equivalence-v3');
+  assert.equal(provenance.schemaVersion, 4);
+  assert.equal(provenance.audit.algorithm, 'ltds-obj2tiles-surface-equivalence-v4');
+  assert.deepEqual(provenance.audit.policy, CONTROLLED_SURFACE_AUDIT_POLICY_V4);
+  assert.equal(provenance.audit.accumulationMethod, CONTROLLED_SURFACE_AUDIT_POLICY_V4.accumulationMethod);
+  assert.equal(provenance.audit.acceptance, 'normal');
   assert.equal(provenance.audit.sourceTriangleCount, 2);
   assert.equal(provenance.audit.leafTriangleCount, 3);
   assert.equal(provenance.audit.sourceRender.uvTriangleCount, 2);
   assert.equal(provenance.audit.leafRender.texturedTriangleCount, 3);
   assert.ok(provenance.audit.sourceToLeaves.sampleCount >= 4);
   assert.ok(provenance.audit.leavesToSource.maximumDistance <= provenance.audit.surfaceTolerance);
+});
+
+function scaleTriangleForTotalAreaDelta(triangle, areaRelativeDelta) {
+  // controlledSurfaceComparison normalizes this fixture by diagonal^2 = 2.
+  const totalLeafArea = 1 + (2 * areaRelativeDelta);
+  const scale = Math.sqrt((2 * totalLeafArea) - 1);
+  const centroid = triangle.reduce((sum, point) => sum.map((value, axis) => value + point[axis] / 3), [0, 0, 0]);
+  return triangle.map((point) => point.map((value, axis) => centroid[axis] + ((value - centroid[axis]) * scale)));
+}
+
+test('controlled v4 accepts the Rome-sized gray zone only with all margin gates', async (t) => {
+  const requestedDelta = 10.618457348535776e-6;
+  const scale = Math.sqrt(1 + (2 * requestedDelta));
+  const scalePoint = (point) => point.map((value, axis) => axis < 2 ? 0.5 + ((value - 0.5) * scale) : value);
+  const { directory, source } = fixture(t, {
+    leafATriangles: [TRIANGLE_A.map(scalePoint)],
+    leafBTriangles: [TRIANGLE_B.map(scalePoint)],
+    leafBTexture: Buffer.from('repacked-atlas'),
+  });
+  const provenance = await auditControlledObj2Tiles({ derivativeDir: directory, sourceGlb: source, ...controlledInputs(directory) });
+  assert.equal(provenance.schemaVersion, 4);
+  assert.equal(provenance.audit.acceptance, 'gray-zone');
+  assert.ok(provenance.audit.areaRelativeDelta > CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalAreaRelativeDeltaLimit);
+  assert.ok(provenance.audit.areaRelativeDelta <= CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit);
+  assert.ok(provenance.audit.boundsDelta <= provenance.audit.surfaceTolerance * 0.5);
+  assert.ok(provenance.audit.centroidDelta <= provenance.audit.surfaceTolerance * 0.5);
+  assert.ok(provenance.audit.normalizedSecondMomentDelta <= CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayNormalizedSecondMomentDeltaLimit);
+  assert.ok(provenance.audit.numericalAgreement.maximumRelativeDelta <= CONTROLLED_SURFACE_AUDIT_POLICY_V4.numericalAgreementLimit);
+});
+
+test('controlled v4 never accepts surface area beyond twelve ppm', async (t) => {
+  const leafBTriangle = scaleTriangleForTotalAreaDelta(TRIANGLE_B, 13e-6);
+  const { directory, source } = fixture(t, { leafBTriangles: [leafBTriangle], leafBTexture: Buffer.from('repacked-atlas') });
+  await assert.rejects(
+    auditControlledObj2Tiles({ derivativeDir: directory, sourceGlb: source, ...controlledInputs(directory) }),
+    (error) => error.code === 'lod_surface_equivalence_failed'
+      && error.details?.metric === 'areaRelativeDelta'
+      && error.details?.grayZoneLimit === CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit,
+  );
+});
+
+test('controlled v4 rejects missing and added geometry despite valid textures', async (t) => {
+  let created = fixture(t, { leafBTriangles: [], leafBTexture: Buffer.from('repacked-atlas') });
+  await assert.rejects(
+    auditControlledObj2Tiles({ derivativeDir: created.directory, sourceGlb: created.source, ...controlledInputs(created.directory) }),
+    /controlled surface area differs|no non-degenerate surface area/,
+  );
+
+  const added = [[10, 10, 0], [11, 10, 0], [10, 11, 0]];
+  created = fixture(t, { leafBTriangles: [TRIANGLE_B, added], leafBTexture: Buffer.from('repacked-atlas') });
+  await assert.rejects(
+    auditControlledObj2Tiles({ derivativeDir: created.directory, sourceGlb: created.source, ...controlledInputs(created.directory) }),
+    (error) => error.code === 'lod_surface_equivalence_failed'
+      && error.details?.metric === 'areaRelativeDelta',
+  );
 });
 
 test('controlled Obj2Tiles audit rejects shifted or missing surface patches', async (t) => {

@@ -468,7 +468,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
 
-    await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '3'", `${viewport.name}: background work count did not include active derivatives`);
+    await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '4'", `${viewport.name}: background work count did not include active processing, imports, and derivatives`);
     await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
     await waitFor(client, "document.querySelectorAll('#import-activity .operation-row').length === 3", `${viewport.name}: dedicated import and recovery activity did not load`);
     const activityText = await client.evaluate(`document.querySelector('#import-activity').textContent`);

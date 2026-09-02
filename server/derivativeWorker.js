@@ -7,6 +7,11 @@ const { sanitizeLogMessage } = require('./processingSecurity');
 const { hashTree } = require('./storageManager');
 const { verifyLodProvenance } = require('./lodProvenance');
 const {
+  discoverMeshDerivativeInput,
+  discoverPointDerivativeInput,
+  verifyDerivativeInputSnapshot,
+} = require('./derivativeInputSnapshot');
+const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
   obj2TilesArguments,
@@ -66,6 +71,16 @@ function obj2TilesDiagnostics(stderr) {
     } catch {}
   }
   return diagnostics.slice(-8);
+}
+
+function structuredCommandFailure(stderr) {
+  try {
+    const value = JSON.parse(String(stderr || '').trim());
+    if (value?.valid !== false || typeof value.error !== 'string') return null;
+    return { code: typeof value.code === 'string' ? value.code : null, error: sanitizeLogMessage(value.error).slice(0, 1000), details: safeDiagnosticValue(value.details) };
+  } catch {
+    return null;
+  }
 }
 
 function isExplicitResourcePressure(error) {
@@ -182,9 +197,10 @@ function run(bin, args, { timeoutMs = 24 * 3600_000, signal, killGraceMs = 10_00
       const resourcePressure = converterDiagnostics.some((item) => item.resourcePressure === true)
         || RESOURCE_PRESSURE_PATTERN.test(safeStderr);
       if (code === 0) return finish(null, { converterDiagnostics, resourceDiagnostics, resourcePressure });
+      const structuredFailure = structuredCommandFailure(stderr);
       return finish(Object.assign(
-        new Error(`derivative command failed (${code}): ${safeStderr.slice(-1000)}`),
-        { code: 'derivative_failed', exitCode: code, converterDiagnostics, resourceDiagnostics, resourcePressure },
+        new Error(structuredFailure?.error || `derivative command failed (${code}): ${safeStderr.slice(-1000)}`),
+        { code: code === 3 && structuredFailure?.code === 'lod_surface_equivalence_failed' ? 'lod_surface_equivalence_failed' : 'derivative_failed', exitCode: code, auditEvidence: structuredFailure?.details || null, converterDiagnostics, resourceDiagnostics, resourcePressure },
       ));
     });
     if (signal?.aborted) abort();
@@ -273,7 +289,7 @@ function previousManagedTilesDirectory(storage, base, asset) {
   }
 }
 
-async function generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, previousTiles = null, audit, signal, onPhase = () => {} }) {
+async function generateMeshTiles({ processing, storage, config, attempt, job, owner, task, obj, glb, inputSnapshot, previousTiles = null, audit, signal, onPhase = () => {} }) {
   if (!config.meshDerivativesEnabled) throw Object.assign(new Error('mesh derivative fallback is disabled'), { code: 'derivative_unavailable' });
   if (!obj || !glb) throw Object.assign(new Error('verified Obj2Tiles generation requires both OBJ and GLB mesh sources'), { code: 'unsupported_mesh_derivative_source' });
   const workId = String(job.id || ''), leaseToken = String(job.lease_token || '');
@@ -295,10 +311,8 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     : 0;
   const source = storage.resolve(obj.root_key, obj.relative_path, { mustExist: true });
   const auditSource = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
-  const outputRecord = processing.getModelOutput(attempt.resultModelVersionId);
-  const sourceBytes = Math.max(Number(outputRecord?.byteSize) || 0, (Number(obj.byte_size) || 0) + (Number(glb.byte_size) || 0));
   const reservation=processing.derivativeStorageReservation(job.id);
-  const admission = storage.requireDerivativeSpace('models', { sourceBytes, expectedFiles: 10_000, reservedBytes: reservation?.accountedByteSize || 0, otherReservedBytes: processing.activeDerivativeReservationBytes(job.id), reservedDatasetBytes: processing.activeProcessingReservationBytes(attempt.id) });
+  const admission = storage.requireDerivativeSpace('models', { sourceBytes: inputSnapshot.totalByteSize, expectedFiles: 10_000, reservedBytes: reservation?.accountedByteSize || 0, otherReservedBytes: processing.activeDerivativeReservationBytes(job.id), reservedDatasetBytes: processing.activeProcessingReservationBytes(attempt.id) });
   const assetInput = (directory) => ({
     versionId: attempt.resultModelVersionId,
     rootKey: 'models',
@@ -447,8 +461,17 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     const task = processing.getTask(attempt.taskId);
     const obj = assets.find((asset) => asset.kind === 'obj');
     const glb = assets.find((asset) => asset.kind === 'glb');
+    const point = assets.find((asset) => asset.kind === 'pointCloud');
     const previousTiles = assets.find((asset) => asset.kind === 'tiles') || null;
     const audit = lodAuditScript || path.join(__dirname, '..', 'scripts', 'audit-lod-equivalence.mjs');
+    let inputSnapshot = processing.derivativeInputSnapshot(job.id);
+    if (!inputSnapshot) {
+      const discovered = job.derivative_type === 'ept'
+        ? await discoverPointDerivativeInput(storage, point, { signal: controller.signal })
+        : await discoverMeshDerivativeInput(storage, obj, glb, { signal: controller.signal });
+      inputSnapshot = processing.persistDerivativeInputSnapshot(job.id, job.derivative_type, discovered.files);
+    }
+    await verifyDerivativeInputSnapshot(storage, inputSnapshot, { signal: controller.signal });
     let derivativeResult;
 
     if (job.derivative_type === 'lod_audit') {
@@ -487,7 +510,6 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       }
     } else if (job.derivative_type === 'ept') {
       if (!config.localDerivativesEnabled) throw Object.assign(new Error('local point-cloud derivative fallback is disabled'), { code: 'derivative_unavailable' });
-      const point = assets.find((asset) => asset.kind === 'pointCloud');
       if (!point) throw new Error('point cloud source is missing');
       const source = storage.resolve(point.root_key, point.relative_path, { mustExist: true });
       const base = storage.resolve('models', `${task.id}/${attempt.id}`);
@@ -504,7 +526,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
           derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(output);derivativePhase(processing,job,owner,'registering');if(!processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token}))throw Object.assign(new Error('derivative lease was lost before verified EPT registration'),{code:'lease_lost'});derivativeResult={verified:true,resumed:true,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};
         }else{
           fs.rmSync(incomplete,{recursive:true,force:true});fs.rmSync(complete,{recursive:true,force:true});
-          const outputRecord=processing.getModelOutput(attempt.resultModelVersionId),reservation=processing.derivativeStorageReservation(job.id);storage.requireDerivativeSpace('models',{sourceBytes:Math.max(Number(outputRecord?.byteSize)||0,Number(point.byte_size)||0),expectedFiles:100000,reservedBytes:reservation?.accountedByteSize||0,otherReservedBytes:processing.activeDerivativeReservationBytes(job.id),reservedDatasetBytes:processing.activeProcessingReservationBytes(attempt.id)});
+          const reservation=processing.derivativeStorageReservation(job.id);storage.requireDerivativeSpace('models',{sourceBytes:inputSnapshot.totalByteSize,expectedFiles:100000,reservedBytes:reservation?.accountedByteSize||0,otherReservedBytes:processing.activeDerivativeReservationBytes(job.id),reservedDatasetBytes:processing.activeProcessingReservationBytes(attempt.id)});
           derivativePhase(processing, job, owner, 'indexing');
           await run(config.entwineBin, ['build', '-i', source, '-o', incomplete], { signal: controller.signal });
           derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(incomplete);fs.renameSync(incomplete,complete);derivativePhase(processing,job,owner,'registering');
@@ -516,7 +538,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
         throw error;
       }
     } else if (job.derivative_type === 'mesh_tiles') {
-      const generation = await generateMeshTilesImpl({ processing, storage, config, attempt, job, owner, task, obj, glb, previousTiles, audit, signal: controller.signal, onPhase: (phase) => derivativePhase(processing, job, owner, phase) });
+      const generation = await generateMeshTilesImpl({ processing, storage, config, attempt, job, owner, task, obj, glb, inputSnapshot, previousTiles, audit, signal: controller.signal, onPhase: (phase) => derivativePhase(processing, job, owner, phase) });
       derivativeResult = { verified: true, reused: false, ...generation };
     } else throw new Error('unsupported derivative type');
 
@@ -564,12 +586,12 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     }
     if (error.code !== 'lease_lost') {
       try {
-        processing.recordProcessingEvent({attemptId:attempt.id,derivativeJobId:job.id,eventType:'derivative.diagnostic',phase:'failed',severity:'error',errorCode,message:safe,details:{derivativeType:job.derivative_type,exitCode:pressureEvidence?.exitCode??error.exitCode,resourcePressure:Boolean(pressureEvidence?.resourcePressure||error.resourcePressure),converterDiagnostics:pressureEvidence?.converterDiagnostics||error.converterDiagnostics,workerResources:pressureEvidence?.workerResources||error.resourceDiagnostics}});
+        processing.recordProcessingEvent({attemptId:attempt.id,derivativeJobId:job.id,eventType:'derivative.diagnostic',phase:'failed',severity:'error',errorCode,message:safe,details:{derivativeType:job.derivative_type,exitCode:pressureEvidence?.exitCode??error.exitCode,resourcePressure:Boolean(pressureEvidence?.resourcePressure||error.resourcePressure),metric:error.auditEvidence?.metric,observed:error.auditEvidence?.observed,limit:error.auditEvidence?.limit,grayZoneLimit:error.auditEvidence?.grayZoneLimit,converterDiagnostics:pressureEvidence?.converterDiagnostics||error.converterDiagnostics,workerResources:pressureEvidence?.workerResources||error.resourceDiagnostics}});
       } catch (diagnosticError) {
         console.error(`[derivative] type=${job.derivative_type} outcome=diagnostic_persist_failed code=${String(diagnosticError.code || 'processing_event_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80)}`);
       }
       if (request.optional && ['ready_for_review', 'published'].includes(attempt.status)) processing.failOptionalDerivative(job.id, owner, safe, errorCode, job.lease_token);
-      else processing.failDerivative(job.id, owner, safe, errorCode, job.lease_token);
+      else processing.failDerivative(job.id, owner, safe, errorCode, job.lease_token, error.auditEvidence);
     }
     return true;
   } finally {
@@ -583,6 +605,7 @@ module.exports = {
   generateMeshTiles,
   isExplicitResourcePressure,
   obj2TilesDiagnostics,
+  structuredCommandFailure,
   processOneDerivative,
   run,
   runObj2TilesWithResourceRetry,

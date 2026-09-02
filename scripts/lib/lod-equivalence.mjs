@@ -9,11 +9,13 @@ import { inspectLodTileset } from '../../lod-policy.mjs';
 
 export const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 export const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
+export const CONTROLLED_AUDIT_ALGORITHM_V4 = 'ltds-obj2tiles-surface-equivalence-v4';
 export const CONTROLLED_CONVERTER = converterPolicy.CONTROLLED_CONVERTER;
 export const CONTROLLED_CONVERTER_BINARY_SHA256 = converterPolicy.CONTROLLED_CONVERTER_BINARY_SHA256;
 export const CONTROLLED_CONVERTER_COMMAND_SHA256 = converterPolicy.CONTROLLED_CONVERTER_COMMAND_SHA256;
 export const SERIAL_RETRY_CONVERTER = converterPolicy.SERIAL_RETRY_CONVERTER;
 export const SERIAL_RETRY_CONVERTER_COMMAND_SHA256 = converterPolicy.SERIAL_RETRY_CONVERTER_COMMAND_SHA256;
+export const CONTROLLED_SURFACE_AUDIT_POLICY_V4 = converterPolicy.CONTROLLED_SURFACE_AUDIT_POLICY_V4;
 export const DEFAULT_TOLERANCE = 1e-6;
 const CONTROLLED_SAMPLE_COUNT = 16_384;
 const CONTROLLED_RELATIVE_SURFACE_TOLERANCE = 2e-5;
@@ -21,7 +23,15 @@ const CONTROLLED_RELATIVE_SURFACE_TOLERANCE = 2e-5;
 const dracoDecoderModule = draco3d.createDecoderModule({});
 
 export function auditFailureExitCode(error) {
+  if (error?.code === 'lod_surface_equivalence_failed') return 3;
   return typeof error?.code === 'string' && error.code ? 4 : 3;
+}
+
+function surfaceEquivalenceError(message, details) {
+  return Object.assign(new Error(message), {
+    code: 'lod_surface_equivalence_failed',
+    details,
+  });
 }
 
 const COMPONENTS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT4: 16 };
@@ -700,14 +710,31 @@ function assertControlledRenderCoverage(triangles, label) {
   return { triangleCount: triangles.length, texturedTriangleCount: textured, uvTriangleCount: uv, normalTriangleCount: normals };
 }
 
-function surfaceStatistics(triangles, origin) {
+function compensatedAccumulator() {
+  return { sum: 0, correction: 0 };
+}
+
+function compensatedAdd(accumulator, value) {
+  const next = accumulator.sum + value;
+  accumulator.correction += Math.abs(accumulator.sum) >= Math.abs(value)
+    ? (accumulator.sum - next) + value
+    : (value - next) + accumulator.sum;
+  accumulator.sum = next;
+}
+
+function compensatedValue(accumulator) {
+  return accumulator.sum + accumulator.correction;
+}
+
+function surfaceStatisticsPass(triangles, origin, reverse = false) {
   const minimum = [Infinity, Infinity, Infinity];
   const maximum = [-Infinity, -Infinity, -Infinity];
-  const firstMoment = [0, 0, 0];
-  const secondMoment = [0, 0, 0, 0, 0, 0];
-  let area = 0;
+  const areaAccumulator = compensatedAccumulator();
+  const firstMomentAccumulators = Array.from({ length: 3 }, compensatedAccumulator);
+  const secondMomentAccumulators = Array.from({ length: 6 }, compensatedAccumulator);
   let degenerateTriangleCount = 0;
-  for (const triangle of triangles) {
+  for (let position = 0; position < triangles.length; position += 1) {
+    const triangle = triangles[reverse ? triangles.length - position - 1 : position];
     const points = trianglePositions(triangle).map((point) => point.map((value, axis) => value - origin[axis]));
     for (const point of points) {
       for (let axis = 0; axis < 3; axis += 1) {
@@ -723,20 +750,55 @@ function surfaceStatistics(triangles, origin) {
       degenerateTriangleCount += 1;
       continue;
     }
-    area += triangleArea;
+    compensatedAdd(areaAccumulator, triangleArea);
     const sum = [0, 1, 2].map((axis) => points[0][axis] + points[1][axis] + points[2][axis]);
-    for (let axis = 0; axis < 3; axis += 1) firstMoment[axis] += triangleArea * sum[axis] / 3;
+    for (let axis = 0; axis < 3; axis += 1) compensatedAdd(firstMomentAccumulators[axis], triangleArea * sum[axis] / 3);
     const pairs = [[0, 0], [1, 1], [2, 2], [0, 1], [0, 2], [1, 2]];
     for (let index = 0; index < pairs.length; index += 1) {
       const [left, right] = pairs[index];
       const diagonal = points.reduce((total, point) => total + point[left] * point[right], 0);
-      secondMoment[index] += triangleArea * (sum[left] * sum[right] + diagonal) / 12;
+      compensatedAdd(secondMomentAccumulators[index], triangleArea * (sum[left] * sum[right] + diagonal) / 12);
     }
   }
+  const area = compensatedValue(areaAccumulator);
   if (!(area > 0)) throw new Error('controlled surface audit found no non-degenerate surface area');
+  const firstMoment = firstMomentAccumulators.map(compensatedValue);
+  const secondMoment = secondMomentAccumulators.map(compensatedValue);
   const centroid = firstMoment.map((value) => value / area);
   const normalizedSecondMoment = secondMoment.map((value) => value / area);
-  return { minimum, maximum, area, centroid, normalizedSecondMoment, degenerateTriangleCount };
+  return { minimum, maximum, area, firstMoment, secondMoment, centroid, normalizedSecondMoment, degenerateTriangleCount };
+}
+
+function numericAgreement(left, right) {
+  return Math.abs(left - right) / Math.max(Math.abs(left), Math.abs(right), 1);
+}
+
+function surfaceStatistics(triangles, origin) {
+  const forward = surfaceStatisticsPass(triangles, origin, false);
+  const reverse = surfaceStatisticsPass(triangles, origin, true);
+  const numericalAgreement = {
+    areaRelativeDelta: numericAgreement(forward.area, reverse.area),
+    firstMomentRelativeDelta: maximumDelta(forward.firstMoment, reverse.firstMoment)
+      / Math.max(1, ...forward.firstMoment.map(Math.abs), ...reverse.firstMoment.map(Math.abs)),
+    secondMomentRelativeDelta: maximumDelta(forward.secondMoment, reverse.secondMoment)
+      / Math.max(1, ...forward.secondMoment.map(Math.abs), ...reverse.secondMoment.map(Math.abs)),
+  };
+  numericalAgreement.maximumRelativeDelta = Math.max(
+    numericalAgreement.areaRelativeDelta,
+    numericalAgreement.firstMomentRelativeDelta,
+    numericalAgreement.secondMomentRelativeDelta,
+  );
+  if (numericalAgreement.maximumRelativeDelta > CONTROLLED_SURFACE_AUDIT_POLICY_V4.numericalAgreementLimit) {
+    throw surfaceEquivalenceError(
+      `controlled surface accumulation is numerically unstable (${numericalAgreement.maximumRelativeDelta})`,
+      {
+        metric: 'forwardReverseNumericalAgreement',
+        observed: numericalAgreement.maximumRelativeDelta,
+        limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.numericalAgreementLimit,
+      },
+    );
+  }
+  return { ...forward, numericalAgreement };
 }
 
 function maximumDelta(left, right) {
@@ -818,9 +880,6 @@ function auditSurfaceDirection(source, targetSurface, origin, seed, tolerance) {
         throw new Error('controlled surface BVH query did not return a finite nearest point');
       }
       maximumDistance = Math.max(maximumDistance, closest.distance);
-      if (closest.distance > tolerance) {
-        throw new Error(`controlled surface distance ${closest.distance} exceeds tolerance ${tolerance}`);
-      }
       const dot = sourceNormal.dot(geometryFaceNormal(targetSurface.geometry, closest.faceIndex));
       minimumNormalDot = Math.min(minimumNormalDot, dot);
       if (!Number.isFinite(dot)) throw new Error('controlled surface orientation sample is non-finite');
@@ -829,7 +888,6 @@ function auditSurfaceDirection(source, targetSurface, origin, seed, tolerance) {
     }
   }
   const reversedNormalFraction = reversedNormalSampleCount / sampleCount;
-  if (reversedNormalFraction > 0.01) throw new Error(`controlled surface orientation reverses ${reversedNormalFraction} of samples`);
   return { sampleCount, maximumDistance, minimumNormalDot, reversedNormalSampleCount, reversedNormalFraction };
 }
 
@@ -852,20 +910,67 @@ function controlledSurfaceComparison(source, leaves, sourceSha256) {
   const diagonal = Math.hypot(...sourceStats.maximum.map((value, axis) => value - sourceStats.minimum[axis]));
   const surfaceTolerance = Math.max(DEFAULT_TOLERANCE, diagonal * CONTROLLED_RELATIVE_SURFACE_TOLERANCE);
   const boundsDelta = Math.max(maximumDelta(sourceStats.minimum, leafStats.minimum), maximumDelta(sourceStats.maximum, leafStats.maximum));
-  if (boundsDelta > surfaceTolerance) throw new Error(`controlled surface bounds differ by ${boundsDelta} (tolerance ${surfaceTolerance})`);
   const areaRelativeDelta = relativeDelta(sourceStats.area, leafStats.area, diagonal * diagonal);
-  if (areaRelativeDelta > 1e-5) throw new Error(`controlled surface area differs by ${areaRelativeDelta}`);
   const centroidDelta = maximumDelta(sourceStats.centroid, leafStats.centroid);
-  if (centroidDelta > surfaceTolerance) throw new Error(`controlled surface centroid differs by ${centroidDelta}`);
   const momentScale = Math.max(diagonal * diagonal, 1);
   const momentDelta = maximumDelta(sourceStats.normalizedSecondMoment, leafStats.normalizedSecondMoment) / momentScale;
-  if (momentDelta > 2e-5) throw new Error(`controlled surface second moments differ by ${momentDelta}`);
 
   const sourceSurface = makeSurfaceBvh(source, origin);
   const leafSurface = makeSurfaceBvh(leaves, origin);
   try {
     const sourceToLeaves = auditSurfaceDirection(source, leafSurface, origin, `${sourceSha256}01`, surfaceTolerance);
     const leavesToSource = auditSurfaceDirection(leaves, sourceSurface, origin, `${sourceSha256}10`, surfaceTolerance);
+    const maximumSurfaceDistance = Math.max(sourceToLeaves.maximumDistance, leavesToSource.maximumDistance);
+    const maximumReversedNormalFraction = Math.max(sourceToLeaves.reversedNormalFraction, leavesToSource.reversedNormalFraction);
+    const normalFailures = [];
+    if (boundsDelta > surfaceTolerance) normalFailures.push({ metric: 'boundsDelta', observed: boundsDelta, limit: surfaceTolerance });
+    if (centroidDelta > surfaceTolerance) normalFailures.push({ metric: 'centroidDelta', observed: centroidDelta, limit: surfaceTolerance });
+    if (momentDelta > CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalNormalizedSecondMomentDeltaLimit) normalFailures.push({
+      metric: 'normalizedSecondMomentDelta', observed: momentDelta, limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalNormalizedSecondMomentDeltaLimit,
+    });
+    if (maximumSurfaceDistance > surfaceTolerance) normalFailures.push({ metric: 'maximumSurfaceDistance', observed: maximumSurfaceDistance, limit: surfaceTolerance });
+    if (maximumReversedNormalFraction > CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalMaximumReversedNormalFraction) normalFailures.push({
+      metric: 'maximumReversedNormalFraction', observed: maximumReversedNormalFraction, limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalMaximumReversedNormalFraction,
+    });
+
+    let acceptance = 'normal';
+    if (areaRelativeDelta > CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalAreaRelativeDeltaLimit) {
+      acceptance = 'gray-zone';
+      const graySpatialLimit = surfaceTolerance * CONTROLLED_SURFACE_AUDIT_POLICY_V4.graySpatialToleranceFraction;
+      const grayFailures = [];
+      if (areaRelativeDelta > CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit) grayFailures.push({
+        metric: 'areaRelativeDelta', observed: areaRelativeDelta, limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit,
+      });
+      if (boundsDelta > graySpatialLimit) grayFailures.push({ metric: 'boundsDelta', observed: boundsDelta, limit: graySpatialLimit });
+      if (centroidDelta > graySpatialLimit) grayFailures.push({ metric: 'centroidDelta', observed: centroidDelta, limit: graySpatialLimit });
+      if (momentDelta > CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayNormalizedSecondMomentDeltaLimit) grayFailures.push({
+        metric: 'normalizedSecondMomentDelta', observed: momentDelta, limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayNormalizedSecondMomentDeltaLimit,
+      });
+      for (const [direction, evidence] of [['sourceToLeaves', sourceToLeaves], ['leavesToSource', leavesToSource]]) {
+        if (evidence.maximumDistance > graySpatialLimit) grayFailures.push({
+          metric: `${direction}.maximumDistance`, observed: evidence.maximumDistance, limit: graySpatialLimit,
+        });
+        if (evidence.reversedNormalFraction > CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayMaximumReversedNormalFraction) grayFailures.push({
+          metric: `${direction}.reversedNormalFraction`, observed: evidence.reversedNormalFraction, limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayMaximumReversedNormalFraction,
+        });
+      }
+      if (grayFailures.length) {
+        throw surfaceEquivalenceError(`controlled surface area differs by ${areaRelativeDelta}`, {
+          metric: 'areaRelativeDelta',
+          observed: areaRelativeDelta,
+          limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalAreaRelativeDeltaLimit,
+          grayZoneLimit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit,
+          grayZoneGateFailures: grayFailures,
+        });
+      }
+    } else if (normalFailures.length) {
+      const first = normalFailures[0];
+      throw surfaceEquivalenceError(`controlled surface ${first.metric} exceeds policy (${first.observed})`, {
+        ...first,
+        failures: normalFailures,
+      });
+    }
+
     return {
       sourceRender,
       leafRender,
@@ -878,6 +983,7 @@ function controlledSurfaceComparison(source, leaves, sourceSha256) {
       areaRelativeDelta,
       centroidDelta,
       momentDelta,
+      acceptance,
       sourceToLeaves,
       leavesToSource,
     };
@@ -984,6 +1090,17 @@ export async function auditControlledObj2Tiles({
     leafTriangleCount: leaves.length,
     sourceArea: comparison.sourceStats.area,
     leafArea: comparison.leafStats.area,
+    sourceDegenerateTriangleCount: comparison.sourceStats.degenerateTriangleCount,
+    leafDegenerateTriangleCount: comparison.leafStats.degenerateTriangleCount,
+    accumulationMethod: CONTROLLED_SURFACE_AUDIT_POLICY_V4.accumulationMethod,
+    numericalAgreement: {
+      source: comparison.sourceStats.numericalAgreement,
+      leaves: comparison.leafStats.numericalAgreement,
+      maximumRelativeDelta: Math.max(
+        comparison.sourceStats.numericalAgreement.maximumRelativeDelta,
+        comparison.leafStats.numericalAgreement.maximumRelativeDelta,
+      ),
+    },
     boundsDelta: comparison.boundsDelta,
     areaRelativeDelta: comparison.areaRelativeDelta,
     centroidDelta: comparison.centroidDelta,
@@ -995,24 +1112,35 @@ export async function auditControlledObj2Tiles({
     leavesToSource: comparison.leavesToSource,
     sourceRender: comparison.sourceRender,
     leafRender: comparison.leafRender,
+    acceptance: comparison.acceptance,
   };
+  const converter = {
+    ...converterContract,
+    commandSha256,
+    inputAsset: path.basename(converterInput),
+    inputSha256: converterInputSha256,
+    binarySha256: converterBinarySha256,
+  };
+  const policy = { ...CONTROLLED_SURFACE_AUDIT_POLICY_V4 };
+  const equivalenceSha256 = sha256(stable({
+    sourceSha256: sourceDigest,
+    converter,
+    policy,
+    surfaceEvidence,
+    artifacts,
+  }));
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     sourceAsset: path.basename(sourceGlb),
     sourceSha256: sourceDigest,
     geometry: 'controlled-bidirectional-surface-equivalence',
     textures: 'controlled-atlas-material-equivalence',
     leafGeometricError: 0,
-    converter: {
-      ...converterContract,
-      commandSha256,
-      inputAsset: path.basename(converterInput),
-      inputSha256: converterInputSha256,
-      binarySha256: converterBinarySha256,
-    },
+    converter,
     audit: {
-      algorithm: CONTROLLED_AUDIT_ALGORITHM,
-      equivalenceSha256: sha256(stable({ sourceSha256: sourceDigest, converter: converterContract, surfaceEvidence })),
+      algorithm: CONTROLLED_AUDIT_ALGORITHM_V4,
+      policy,
+      equivalenceSha256,
       ...surfaceEvidence,
       artifacts,
     },

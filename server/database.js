@@ -1883,6 +1883,51 @@ const MIGRATIONS = [
         BEFORE DELETE ON processing_events BEGIN SELECT RAISE(ABORT,'processing_events are append-only'); END;
     `,
   },
+  {
+    version: 31,
+    name: 'immutable_derivative_input_snapshots',
+    sql: `
+      CREATE TABLE derivative_input_snapshots (
+        job_id TEXT PRIMARY KEY REFERENCES derivative_jobs(id) ON DELETE CASCADE,
+        derivative_type TEXT NOT NULL CHECK(derivative_type IN ('ept','mesh_tiles','lod_audit')),
+        schema_version INTEGER NOT NULL DEFAULT 1 CHECK(schema_version=1),
+        manifest_sha256 TEXT NOT NULL CHECK(length(manifest_sha256)=64),
+        file_count INTEGER NOT NULL CHECK(file_count>0 AND file_count<=10000),
+        total_byte_size INTEGER NOT NULL CHECK(total_byte_size>=0),
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE derivative_input_files (
+        job_id TEXT NOT NULL REFERENCES derivative_input_snapshots(job_id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+        role TEXT NOT NULL CHECK(role IN ('mesh_obj','mesh_mtl','mesh_texture','mesh_glb','point_cloud_source')),
+        root_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size>=0),
+        sha256 TEXT NOT NULL CHECK(length(sha256)=64),
+        PRIMARY KEY(job_id,ordinal),
+        UNIQUE(job_id,root_key,relative_path)
+      );
+      CREATE INDEX derivative_input_files_job_role_idx ON derivative_input_files(job_id,role,ordinal);
+
+      CREATE TRIGGER derivative_input_snapshots_no_update
+        BEFORE UPDATE ON derivative_input_snapshots BEGIN SELECT RAISE(ABORT,'derivative input snapshots are immutable'); END;
+      CREATE TRIGGER derivative_input_files_no_update
+        BEFORE UPDATE ON derivative_input_files BEGIN SELECT RAISE(ABORT,'derivative input files are immutable'); END;
+      CREATE TRIGGER processing_jobs_submit_requires_provider_insert
+        BEFORE INSERT ON processing_jobs
+        WHEN NEW.job_type='submit' AND NOT EXISTS (
+          SELECT 1 FROM processing_attempts WHERE id=NEW.attempt_id AND provider_id IS NOT NULL
+        ) BEGIN SELECT RAISE(ABORT,'submit jobs require a provider-backed attempt'); END;
+      CREATE TRIGGER processing_jobs_submit_requires_provider_update
+        BEFORE UPDATE OF attempt_id,job_type,status ON processing_jobs
+        WHEN NEW.job_type='submit' AND NEW.status IN ('pending','leased') AND NOT EXISTS (
+          SELECT 1 FROM processing_attempts WHERE id=NEW.attempt_id AND provider_id IS NOT NULL
+        ) BEGIN SELECT RAISE(ABORT,'submit jobs require a provider-backed attempt'); END;
+      CREATE UNIQUE INDEX processing_jobs_one_active_type_idx
+        ON processing_jobs(attempt_id,job_type) WHERE status IN ('pending','leased');
+    `,
+  },
 ];
 
 function applyMigrations(database) {

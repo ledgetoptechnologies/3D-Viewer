@@ -164,7 +164,10 @@ try {
     allowExternalSource: true,
   });
   fs.writeFileSync(path.join(output, 'lod-provenance.json'), `${JSON.stringify(provenance, null, 2)}\n`);
-  if (provenance.schemaVersion !== 3 || provenance.audit?.sourceTriangleCount !== 2
+  if (provenance.schemaVersion !== 4
+    || provenance.audit?.algorithm !== 'ltds-obj2tiles-surface-equivalence-v4'
+    || provenance.audit?.policy?.revision !== 'ltds-controlled-surface-policy-v4'
+    || provenance.audit?.sourceTriangleCount !== 2
     || !Array.isArray(provenance.audit?.artifacts) || provenance.audit.artifacts.length < 2) {
     throw new Error('Obj2Tiles smoke provenance was incomplete');
   }

@@ -1,13 +1,20 @@
+import * as THREE from 'three';
+
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
 export const LOD_WARMUP_DETAIL = 13;
-export const DEFAULT_LOD_DETAIL = 16;
+export const DEFAULT_LOD_DETAIL = 20;
 export const LOD_REFINEMENT_STEP = 3;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 export const LOD_ADMISSION_RECOVERY_SAMPLES = 2;
 export const LOD_PRESSURE_FALLBACK_SAMPLES = 4;
 export const LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET = 4096;
 export const LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET = 1024;
+export const LOD_PREFETCH_MAX_MS = 3_000;
+export const LOD_PREFETCH_MAX_DEPTH = 2;
+export const LOD_FALLBACK_MAX_BYTES = 1.25 * 1024 * 1024 * 1024;
+export const LOD_FOCUS_IDLE_MS = 250;
+export const LOD_FOCUS_DECAY_MS = 500;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 const CONTROLLED_CONVERTER_COMMAND_SHA256 = new Set([
   '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',
@@ -65,11 +72,60 @@ export function scaledDetailToErrorTarget(detail, scale = 1) {
 // leaves coarse mode. Half the measured scale preserves the captured fallback
 // while allowing nearby descendants to complete as the camera approaches.
 export function steadyStateLodErrorTarget(detail, coverageScale = 1) {
-  const parsedScale = Number(coverageScale);
-  const refinementScale = Number.isFinite(parsedScale) && parsedScale > 2
-    ? parsedScale / 2
-    : 1;
-  return scaledDetailToErrorTarget(detail, refinementScale);
+  return detailToErrorTarget(detail);
+}
+
+export function lodFocusPriorityPenalty(tile, interactionState, now = performance.now()) {
+  const age = Math.max(0, Number(now) - (Number(interactionState?.lastActivityTime) || 0));
+  let strength = interactionState?.activeMotion ? 1 : 0;
+  if (!interactionState?.activeMotion && age > LOD_FOCUS_IDLE_MS) {
+    strength = Math.max(0, 1 - (age - LOD_FOCUS_IDLE_MS) / LOD_FOCUS_DECAY_MS);
+  } else if (!interactionState?.activeMotion && age <= LOD_FOCUS_IDLE_MS) {
+    strength = 1;
+  }
+  const overlap = Math.min(1, Math.max(0, Number(tile?.__ltdsFocusOverlap) || 0));
+  return 1 + 3 * strength * (1 - overlap);
+}
+
+export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
+  const sphere = new THREE.Sphere();
+  const centerNdc = new THREE.Vector3();
+  return {
+    name: 'LTDS_FOCUS_REQUEST_PRIORITY',
+    calculateTileViewError(tile) {
+      let overlap = 0;
+      const state = interactionStateProvider?.();
+      const focus = state?.focusNdc;
+      const volume = tile?.engineData?.boundingVolume;
+      if (camera && Array.isArray(focus) && focus.length === 2 && volume?.getSphere) {
+        volume.getSphere(sphere);
+        centerNdc.copy(sphere.center).project(camera);
+        const distance = Math.hypot(centerNdc.x - Number(focus[0]), centerNdc.y - Number(focus[1]));
+        // A broad center cone protects the user's focal branch. This metadata
+        // is consumed only by queue ordering and never changes traversal SSE.
+        overlap = Math.max(0, 1 - distance / 0.65);
+      }
+      tile.__ltdsFocusOverlap = overlap;
+      return false;
+    },
+  };
+}
+
+export function createLodFocusPriorityCallback(interactionStateProvider, nowProvider = () => performance.now()) {
+  return (a, b) => {
+    const base = screenSpaceErrorPriority(a, b);
+    const at = a?.traversal;
+    const bt = b?.traversal;
+    if (!at || !bt || at.inFrustum !== bt.inFrustum || at.used !== bt.used) return base;
+    const state = interactionStateProvider?.();
+    const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
+    const bDistance = Number.isFinite(bt.distanceFromCamera) ? bt.distanceFromCamera : Infinity;
+    const now = nowProvider();
+    const aScore = aDistance * lodFocusPriorityPenalty(a, state, now);
+    const bScore = bDistance * lodFocusPriorityPenalty(b, state, now);
+    if (aScore !== bScore) return aScore > bScore ? -1 : 1;
+    return base;
+  };
 }
 
 // With loadAncestors disabled, selected zero-error leaves are the actual
@@ -162,7 +218,9 @@ export function lodCacheBudget(deviceMemoryGiB) {
 
   return {
     minBytesSize: 0.4 * 1024 * 1024 * 1024,
-    maxBytesSize: 1.75 * 1024 * 1024 * 1024,
+    // Retain at most 1.25 GiB of root/direct-child fallback while preserving
+    // 1.75 GiB for the actively selected focal REPLACE frontier.
+    maxBytesSize: 3 * 1024 * 1024 * 1024,
     minSize: 8,
     // Item count is not a memory budget. A valid camera-selected frontier can
     // contain dozens of fine leaves plus their branch parents while remaining
@@ -289,7 +347,7 @@ export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
   return {
     budget: lodCacheBudget(deviceMemoryGiB),
     requestedDetail: requested,
-    activeDetail: Math.min(cappedRequest, LOD_WARMUP_DETAIL),
+    activeDetail: cappedRequest,
     maximumDetail,
     reduced,
   };
@@ -324,34 +382,7 @@ export function resolveLodDetailRequest(profile, warmupComplete, requestedDetail
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, Number(profile.maximumDetail)))
     : MAX_LOD_DETAIL;
   const targetDetail = Math.min(requested, maximumDetail);
-  const parsedActive = Number.parseInt(profile?.activeDetail, 10);
-  const activeDetail = Number.isFinite(parsedActive)
-    ? Math.min(maximumDetail, Math.max(MIN_LOD_DETAIL, parsedActive))
-    : MIN_LOD_DETAIL;
-  if (profile?.reduced) {
-    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: true };
-  }
-  if (targetDetail <= activeDetail) {
-    return {
-      requestedDetail: requested,
-      activeDetail: targetDetail,
-      warmupComplete: targetDetail >= LOD_WARMUP_DETAIL && Boolean(warmupComplete),
-    };
-  }
-  if (targetDetail < LOD_WARMUP_DETAIL) {
-    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: false };
-  }
-  if (targetDetail === LOD_WARMUP_DETAIL) {
-    return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: Boolean(warmupComplete) };
-  }
-  if (activeDetail < LOD_WARMUP_DETAIL) {
-    return { requestedDetail: requested, activeDetail: LOD_WARMUP_DETAIL, warmupComplete: false };
-  }
-  return {
-    requestedDetail: requested,
-    activeDetail,
-    warmupComplete: Boolean(warmupComplete),
-  };
+  return { requestedDetail: requested, activeDetail: targetDetail, warmupComplete: true };
 }
 
 export function resolveLodWarmupAdvance(profile) {
@@ -378,6 +409,7 @@ export function configureLodRenderer(tilesRenderer, {
   renderer,
   detail = DEFAULT_LOD_DETAIL,
   deviceMemoryGiB,
+  interactionStateProvider,
 } = {}) {
   tilesRenderer.setCamera(camera);
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
@@ -391,13 +423,16 @@ export function configureLodRenderer(tilesRenderer, {
   tilesRenderer.loadSiblings = false;
   tilesRenderer.loadAncestorSiblings = false;
   tilesRenderer.maxDepth = Infinity;
+  const focusPriorityCallback = createLodFocusPriorityCallback(interactionStateProvider);
+  const focusPriorityPlugin = createLodFocusPriorityPlugin(camera, interactionStateProvider);
+  tilesRenderer.registerPlugin?.(focusPriorityPlugin);
   if (tilesRenderer.downloadQueue) {
-    tilesRenderer.downloadQueue.priorityCallback = screenSpaceErrorPriority;
+    tilesRenderer.downloadQueue.priorityCallback = focusPriorityCallback;
     const current = Number(tilesRenderer.downloadQueue.maxJobs);
     tilesRenderer.downloadQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 6) : 6;
   }
   if (tilesRenderer.parseQueue) {
-    tilesRenderer.parseQueue.priorityCallback = screenSpaceErrorPriority;
+    tilesRenderer.parseQueue.priorityCallback = focusPriorityCallback;
     const current = Number(tilesRenderer.parseQueue.maxJobs);
     tilesRenderer.parseQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 2) : 2;
   }
@@ -538,17 +573,19 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
 
   const exactV2 = provenance.schemaVersion === 2 && provenance.audit?.algorithm === 'ltds-glb-leaf-equivalence-v2';
   const controlledV3 = provenance.schemaVersion === 3 && provenance.audit?.algorithm === 'ltds-obj2tiles-surface-equivalence-v3';
-  if (!exactV2 && !controlledV3) errors.push('recognized exact v2 or controlled Obj2Tiles v3 audit evidence is required');
+  const controlledV4 = provenance.schemaVersion === 4 && provenance.audit?.algorithm === 'ltds-obj2tiles-surface-equivalence-v4';
+  const controlled = controlledV3 || controlledV4;
+  if (!exactV2 && !controlled) errors.push('recognized exact v2 or controlled Obj2Tiles v3/v4 audit evidence is required');
   if (!/^[a-f0-9]{64}$/i.test(String(provenance.sourceSha256 || ''))) {
     errors.push('sourceSha256 must be a SHA-256 digest');
   }
-  const expectedGeometry = controlledV3 ? 'controlled-bidirectional-surface-equivalence' : 'bounded-triangle-equivalence';
-  const expectedTextures = controlledV3 ? 'controlled-atlas-material-equivalence' : 'byte-identical-material-equivalence';
+  const expectedGeometry = controlled ? 'controlled-bidirectional-surface-equivalence' : 'bounded-triangle-equivalence';
+  const expectedTextures = controlled ? 'controlled-atlas-material-equivalence' : 'byte-identical-material-equivalence';
   if (provenance.geometry !== expectedGeometry) errors.push(`geometry must be ${expectedGeometry}`);
   if (provenance.textures !== expectedTextures) errors.push(`textures must be ${expectedTextures}`);
   if (provenance.leafGeometricError !== 0) errors.push('leafGeometricError must be 0');
   if (exactV2 && (!Number.isInteger(provenance.audit?.triangleCount) || provenance.audit.triangleCount < 1)) errors.push('audit triangleCount must be a positive integer');
-  if (controlledV3 && (!Number.isInteger(provenance.audit?.sourceTriangleCount) || provenance.audit.sourceTriangleCount < 1 || !Number.isInteger(provenance.audit?.leafTriangleCount) || provenance.audit.leafTriangleCount < 1)) errors.push('controlled audit triangle counts must be positive integers');
+  if (controlled && (!Number.isInteger(provenance.audit?.sourceTriangleCount) || provenance.audit.sourceTriangleCount < 1 || !Number.isInteger(provenance.audit?.leafTriangleCount) || provenance.audit.leafTriangleCount < 1)) errors.push('controlled audit triangle counts must be positive integers');
   if (!/^[a-f0-9]{64}$/i.test(String(provenance.audit?.equivalenceSha256 || ''))) {
     errors.push('audit equivalenceSha256 must be a SHA-256 digest');
   }
@@ -558,9 +595,16 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
     if (!Number.isFinite(tolerance) || tolerance < 0 || tolerance > 1e-3) errors.push('audit coordinateTolerance must be between 0 and 0.001');
     if (!Number.isFinite(maxDelta) || maxDelta < 0 || maxDelta > tolerance) errors.push('audit maxNumericDelta must not exceed coordinateTolerance');
   }
-  if (controlledV3) {
+  if (controlled) {
     if (provenance.converter?.name !== 'OpenDroneMap/Obj2Tiles' || provenance.converter?.version !== '1.6.2' || !CONTROLLED_CONVERTER_COMMAND_SHA256.has(String(provenance.converter?.commandSha256||'').toLowerCase()) || !CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256||'').toLowerCase())) errors.push('controlled audit converter contract is invalid');
     if (!Number.isFinite(provenance.audit?.surfaceTolerance) || provenance.audit.surfaceTolerance <= 0 || !Number.isFinite(provenance.audit?.maximumSurfaceDistance) || provenance.audit.maximumSurfaceDistance < 0 || provenance.audit.maximumSurfaceDistance > provenance.audit.surfaceTolerance || !Number.isFinite(provenance.audit?.minimumNormalDot) || !Number.isFinite(provenance.audit?.maximumReversedNormalFraction) || provenance.audit.maximumReversedNormalFraction < 0 || provenance.audit.maximumReversedNormalFraction > 0.01) errors.push('controlled audit surface evidence is invalid');
+    if (controlledV4 && (provenance.audit?.policyRevision !== 'ltds-controlled-surface-policy-v4'
+      || !['normal', 'gray-zone'].includes(provenance.audit?.acceptance)
+      || !Number.isFinite(provenance.audit?.areaRelativeDelta)
+      || provenance.audit.areaRelativeDelta < 0
+      || provenance.audit.areaRelativeDelta > 1.2e-5
+      || (provenance.audit.acceptance === 'normal' && provenance.audit.areaRelativeDelta > 1e-5)
+      || (provenance.audit.acceptance === 'gray-zone' && provenance.audit.areaRelativeDelta <= 1e-5))) errors.push('controlled v4 audit policy summary is invalid');
   }
   if (!Number.isInteger(provenance.audit?.artifactCount) || provenance.audit.artifactCount < 2) {
     errors.push('audit artifactCount must bind the tileset and leaf artifacts');
@@ -685,6 +729,7 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   const root = tilesRenderer?.root;
   const attachedScenes = tilesRenderer?.group?.children || [];
   const visible = { root: 0, lod0: 0, lod1: 0, other: 0 };
+  const visibleDepths = {};
   let requiredLeaves = 0;
   let attachedRequiredLeaves = 0;
   let pendingRequiredLeaves = 0;
@@ -702,6 +747,8 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
     for (const child of children) visit(child);
     const label = safeLabel(tile);
     if (tile?.traversal?.visible === true) {
+      const depth = String(Number(tile?.internal?.depth) || 0);
+      visibleDepths[depth] = (visibleDepths[depth] || 0) + 1;
       if (tile === root) visible.root += 1;
       else if (/^LOD-0\//i.test(label)) visible.lod0 += 1;
       else if (/^LOD-1\//i.test(label)) visible.lod1 += 1;
@@ -742,8 +789,8 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   return {
     phase: bootstrapPhase === 'root'
       ? 'overview'
-      : bootstrapPhase === 'coverage'
-        ? 'coverage'
+      : bootstrapPhase === 'prefetch'
+        ? 'prefetch'
         : memoryLimited
       ? 'memory-limited'
       : runtimeProfile?.reduced ? 'reduced-memory' : detailPending ? 'warmup' : 'requested-detail',
@@ -751,7 +798,16 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
     activeDetail: Number(runtimeProfile?.activeDetail) || null,
     maximumDetail: Number(runtimeProfile?.maximumDetail) || null,
     errorTarget: Number.isFinite(Number(tilesRenderer?.errorTarget)) ? Number(tilesRenderer.errorTarget) : null,
+    rawErrorTarget: detailToErrorTarget(runtimeProfile?.activeDetail),
+    prefetch: {
+      elapsedMs: Number.isFinite(Number(runtimeProfile?.prefetchElapsedMs)) ? Number(runtimeProfile.prefetchElapsedMs) : null,
+      exitReason: runtimeProfile?.prefetchExitReason || null,
+      fallbackTiles: Number(runtimeProfile?.fallbackTileCount) || 0,
+      fallbackMiB: toMiB(runtimeProfile?.fallbackBytes),
+    },
+    focusPriority: runtimeProfile?.focusPriority || null,
     visible,
+    visibleDepths,
     requiredLeaves,
     attachedRequiredLeaves,
     pendingRequiredLeaves,

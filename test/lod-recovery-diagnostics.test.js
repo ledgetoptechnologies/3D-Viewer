@@ -11,7 +11,7 @@ const auth = require('../server/auth');
 const { config } = require('../server/config');
 const { openDatabase } = require('../server/database');
 const { createProcessingApi } = require('../server/processingApi');
-const { processOneDerivative } = require('../server/derivativeWorker');
+const { processOneDerivative, structuredCommandFailure } = require('../server/derivativeWorker');
 const { processLodRecovery } = require('../server/lodRecovery');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
@@ -29,6 +29,20 @@ function fixture(t) {
 }
 
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+
+test('surface-audit stderr preserves structured v4 failure evidence', () => {
+  assert.deepEqual(structuredCommandFailure(JSON.stringify({
+    valid: false,
+    code: 'lod_surface_equivalence_failed',
+    error: 'controlled surface area differs',
+    details: { metric: 'areaRelativeDelta', observed: 0.000013, limit: 0.00001, grayZoneLimit: 0.000012 },
+  })), {
+    code: 'lod_surface_equivalence_failed',
+    error: 'controlled surface area differs',
+    details: { metric: 'areaRelativeDelta', observed: 0.000013, limit: 0.00001, grayZoneLimit: 0.000012 },
+  });
+  assert.equal(structuredCommandFailure('plain converter output'), null);
+});
 
 function readyMeshSource(context, label = 'Recovery source', { provider = 'ltds-processing', providerModelId = null, modelMetadata = {} } = {}) {
   const { processing, repository, database } = context;
@@ -128,6 +142,14 @@ test('terminal Obj2Tiles pressure preserves initial retry evidence in attempt di
   const context = fixture(t);
   const source = readyMeshSource(context, 'Obj2Tiles pressure');
   const jobId = context.processing.enqueueDerivative(source.attempt.id, 'mesh_tiles', { optional: false });
+  const storage = modelStorage(context), sourceDirectory = storage.resolve('models', source.relativePath);
+  fs.mkdirSync(sourceDirectory, { recursive: true });
+  fs.writeFileSync(path.join(sourceDirectory, 'model.obj'), source.obj);
+  fs.writeFileSync(path.join(sourceDirectory, 'model.glb'), source.glb);
+  context.processing.persistDerivativeInputSnapshot(jobId, 'mesh_tiles', [
+    { role: 'mesh_obj', rootKey: 'models', relativePath: `${source.relativePath}/model.obj`, byteSize: source.obj.length, sha256: digest(source.obj) },
+    { role: 'mesh_glb', rootKey: 'models', relativePath: `${source.relativePath}/model.glb`, byteSize: source.glb.length, sha256: digest(source.glb) },
+  ]);
   const finalError = Object.assign(new Error('semantic retry failure at C:\\private\\model.obj?token=must-not-leak'), {
     code: 'derivative_failed',
     serialRetryAttempted: true,
@@ -146,7 +168,7 @@ test('terminal Obj2Tiles pressure preserves initial retry evidence in attempt di
   });
   await processOneDerivative({
     processing: context.processing,
-    storage: {},
+    storage,
     config: {},
     generateMeshTilesImpl: async () => { throw finalError; },
   }, 'derivative-worker:pressure-test');
