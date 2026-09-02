@@ -13,7 +13,10 @@ import {
   inspectLodProvenance,
   inspectLodTileset,
   installLodOverviewRetention,
+  classifyLodQuality,
   createLodFocusPriorityCallback,
+  lodBranchBlockerCut,
+  lodFallbackShellPlan,
   lodFocusPriorityPenalty,
   LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET,
   LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET,
@@ -177,6 +180,109 @@ test('full-detail queue settlement includes lazy hierarchy preprocessing', () =>
   assert.equal(lodQueuesSettled({ downloadQueue: { running: true }, parseQueue: {}, processNodeQueue: {} }), false);
   assert.equal(lodQueuesSettled({ downloadQueue: {}, parseQueue: { running: true }, processNodeQueue: {} }), false);
   assert.equal(lodQueuesSettled({ downloadQueue: {}, parseQueue: {}, processNodeQueue: { running: true } }), false);
+});
+
+test('desktop fallback promotion requires a complete bounded direct-child shell and excludes the root', () => {
+  const root = { name: 'root', internal: { hasRenderableContent: true }, children: [] };
+  const first = { name: 'first', internal: { hasRenderableContent: true } };
+  const second = { name: 'second', content: { uri: 'second.b3dm' }, internal: {} };
+  const external = { name: 'external', content: { uri: 'nested.json' }, internal: { hasUnrenderableContent: true } };
+  root.children = [first, second, external];
+  const attached = new Set([first]);
+  const bytes = new Map([[first, 300], [second, 400], [root, 900]]);
+  const options = {
+    isReady: tile => attached.has(tile),
+    getBytes: tile => bytes.get(tile),
+    maxBytes: 1_000,
+  };
+
+  assert.deepEqual(lodFallbackShellPlan(root, options), {
+    shell: [first, second],
+    ready: [first],
+    bytes: 700,
+    complete: false,
+    overBudget: false,
+    unsupported: true,
+    pending: 1,
+  });
+
+  attached.add(second);
+  const complete = lodFallbackShellPlan(root, options);
+  assert.equal(complete.complete, false,
+    'a mixed external/contentless root child must fail closed rather than leave a spatial hole');
+  assert.deepEqual(complete.shell, [first, second]);
+  assert.equal(complete.shell.includes(root), false, 'whole-model root must never enter the steady fallback set');
+  assert.equal(complete.shell.includes(external), false, 'delegating children are not renderable fallback content');
+
+  root.children = [first, second];
+  const supported = lodFallbackShellPlan(root, options);
+  assert.equal(supported.complete, true);
+  assert.equal(supported.unsupported, false);
+
+  const overBudget = lodFallbackShellPlan(root, { ...options, maxBytes: 699 });
+  assert.equal(overBudget.complete, false);
+  assert.equal(overBudget.overBudget, true);
+});
+
+test('full-detail status requires a stable attached frontier with no pending replacement work', () => {
+  const settled = {
+    requiredTiles: 8,
+    attachedRequiredTiles: 8,
+    attachedVisibleTiles: 8,
+    pendingRequiredTiles: 0,
+    pendingHierarchyNodes: 0,
+    positiveErrorFallbackTiles: 0,
+    queueCounts: {
+      download: { queued: 0, running: 0 },
+      parse: { queued: 0, running: 0 },
+      process: { queued: 0, running: 0 },
+    },
+  };
+  const profile = { requestedDetail: 20, activeDetail: 20 };
+  const frontier = { fullDetail: true, visibleCount: 8, maximumGeometricError: 0 };
+  const classify = overrides => classifyLodQuality({
+    bootstrapPhase: 'complete',
+    runtimeProfile: profile,
+    snapshot: settled,
+    frontier,
+    queuesSettled: true,
+    targetSatisfied: true,
+    stableFrames: 2,
+    ...overrides,
+  });
+
+  assert.deepEqual(classify().reasons, []);
+  assert.equal(classify().fullDetail, true);
+  assert.ok(classify({ snapshot: { ...settled, pendingRequiredTiles: 1 } }).reasons.includes('required-content-pending'));
+  assert.ok(classify({ snapshot: { ...settled, requiredTiles: 0, attachedRequiredTiles: 0 } }).reasons.includes('no-required-content'));
+  assert.ok(classify({ snapshot: { ...settled, attachedRequiredTiles: 7 } }).reasons.includes('required-content-detached'));
+  assert.ok(classify({ snapshot: { ...settled, attachedVisibleTiles: 7 } }).reasons.includes('visible-content-detached'));
+  assert.ok(classify({ snapshot: { ...settled, pendingHierarchyNodes: 1 } }).reasons.includes('hierarchy-pending'));
+  assert.ok(classify({ snapshot: { ...settled, positiveErrorFallbackTiles: 1 } }).reasons.includes('fallback-visible'));
+  assert.ok(classify({
+    snapshot: {
+      ...settled,
+      queueCounts: { ...settled.queueCounts, download: { queued: 1, running: 0 } },
+    },
+  }).reasons.includes('queues-active'));
+  assert.ok(classify({ stableFrames: 1 }).reasons.includes('not-stable'));
+  assert.ok(classify({ bootstrapPhase: 'root-only' }).reasons.includes('bootstrap'));
+});
+
+test('branch-blocker cut finds cold children for any visible positive-error REPLACE fallback', () => {
+  const ready = { internal: { hasRenderableContent: true }, traversal: { used: true, inFrustum: true } };
+  const cold = { content: { uri: 'cold.b3dm' }, internal: {}, traversal: { used: true, inFrustum: true } };
+  const outside = { content: { uri: 'outside.b3dm' }, internal: {}, traversal: { used: true, inFrustum: false } };
+  const wrappedCold = { content: { uri: 'wrapped.b3dm' }, internal: {}, traversal: { used: true, inFrustum: true } };
+  const wrapper = {
+    internal: { hasUnrenderableContent: true }, traversal: { used: true, inFrustum: true }, children: [wrappedCold],
+  };
+  const deepFallback = {
+    refine: 'REPLACE', geometricError: 4, children: [ready, cold, outside, wrapper],
+  };
+  const unrelated = { refine: 'REPLACE', geometricError: 0, children: [cold] };
+  assert.deepEqual(lodBranchBlockerCut([deepFallback, unrelated], { isReady: tile => tile === ready }),
+    [wrappedCold, cold]);
 });
 
 test('LOD warmup advances only after the visible REPLACE frontier satisfies its target', () => {
@@ -552,7 +658,13 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
     visibleDepths: { 0: 1 },
     requiredLeaves: 2, attachedRequiredLeaves: 1, pendingRequiredLeaves: 1,
     requiredTiles: 2, attachedRequiredTiles: 1, pendingRequiredTiles: 1,
+    attachedVisibleTiles: 1, positiveErrorFallbackTiles: 0, pendingHierarchyNodes: 0,
     queues: { download: false, parse: true, process: false },
+    queueCounts: {
+      download: { queued: 0, running: 0 },
+      parse: { queued: 0, running: 0 },
+      process: { queued: 0, running: 0 },
+    },
     cache: {
       usedMiB: 1536, maxMiB: 3072, full: false,
       fullByBytes: false, fullByItems: false,
@@ -605,6 +717,11 @@ test('focus priority penalizes only peripheral queue work and decays after idle'
   assert.equal(lodFocusPriorityPenalty(peripheral, idle, 1_750), 1);
   const compare = createLodFocusPriorityCallback(() => moving, () => 1_000);
   assert.ok(compare(focal, peripheral) > 0, 'focal tile must sort as higher-priority work');
+
+  const blocker = { ...peripheral, __ltdsBranchBlocker: true };
+  assert.ok(compare(blocker, focal) > 0,
+    'a child blocking a visible REPLACE parent must outrank even focal work');
+  assert.ok(compare(focal, blocker) < 0);
 });
 
 test('overview retention pins only the captured coarse frontier in the LRU', () => {

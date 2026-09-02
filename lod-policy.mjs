@@ -15,6 +15,7 @@ export const LOD_PREFETCH_MAX_DEPTH = 2;
 export const LOD_FALLBACK_MAX_BYTES = 1.25 * 1024 * 1024 * 1024;
 export const LOD_FOCUS_IDLE_MS = 250;
 export const LOD_FOCUS_DECAY_MS = 500;
+export const LOD_QUALITY_STABLE_FRAMES = 2;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 const CONTROLLED_CONVERTER_COMMAND_SHA256 = new Set([
   '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',
@@ -75,6 +76,63 @@ export function steadyStateLodErrorTarget(detail, coverageScale = 1) {
   return detailToErrorTarget(detail);
 }
 
+// A renderable root covers the whole model, so it cannot remain a permanent
+// REPLACE fallback after detail streaming begins: one cold child would make it
+// hide every ready descendant. Promotion is safe only after the complete
+// spatial shell immediately below the root is attached and fits the reserved
+// fallback budget. The caller may still retain the root briefly in the LRU,
+// but it must not include it in the steady-state fallback set.
+export function lodFallbackShellPlan(root, {
+  isReady = () => false,
+  getBytes = () => 0,
+  maxBytes = LOD_FALLBACK_MAX_BYTES,
+} = {}) {
+  const children = Array.isArray(root?.children) ? root.children : [];
+  const unsupported = children.some((tile) => tile?.internal?.hasUnrenderableContent === true
+    || (tile?.internal?.hasRenderableContent !== true && !Boolean(contentUri(tile))));
+  const shell = children.filter((tile) => tile?.internal?.hasUnrenderableContent !== true
+    && (tile?.internal?.hasRenderableContent === true || Boolean(contentUri(tile))));
+  const bytes = shell.reduce((total, tile) => total + Math.max(0, Number(getBytes(tile)) || 0), 0);
+  // Off-frustum sibling content is decoded but deliberately not attached by
+  // the renderer. A ready scene can be attached synchronously when selected,
+  // so scene readiness—not current visibility—is the safe promotion gate.
+  const ready = shell.filter(tile => isReady(tile));
+  const budget = Number(maxBytes);
+  const overBudget = Number.isFinite(budget) && budget >= 0 && bytes > budget;
+  return {
+    shell,
+    ready,
+    bytes,
+    complete: shell.length > 0 && ready.length === shell.length && !overBudget && !unsupported,
+    overBudget,
+    unsupported,
+    pending: Math.max(0, shell.length - ready.length),
+  };
+}
+
+export function lodBranchBlockerCut(visibleTiles, { isReady = () => false } = {}) {
+  const blockers = [];
+  for (const fallback of visibleTiles || []) {
+    if (String(fallback?.refine || '').toUpperCase() !== 'REPLACE'
+      || Number(fallback?.geometricError) <= 0) continue;
+    const stack = [...(fallback.children || [])];
+    while (stack.length) {
+      const tile = stack.pop();
+      if (!tile?.traversal?.used || !tile?.traversal?.inFrustum) continue;
+      if (tile.internal?.hasUnrenderableContent === true) {
+        stack.push(...(tile.children || []));
+        continue;
+      }
+      if (tile.internal?.hasRenderableContent || contentUri(tile)) {
+        if (!isReady(tile)) blockers.push(tile);
+        continue;
+      }
+      stack.push(...(tile.children || []));
+    }
+  }
+  return blockers;
+}
+
 export function lodFocusPriorityPenalty(tile, interactionState, now = performance.now()) {
   const age = Math.max(0, Number(now) - (Number(interactionState?.lastActivityTime) || 0));
   let strength = interactionState?.activeMotion ? 1 : 0;
@@ -117,12 +175,18 @@ export function createLodFocusPriorityCallback(interactionStateProvider, nowProv
     const at = a?.traversal;
     const bt = b?.traversal;
     if (!at || !bt || at.inFrustum !== bt.inFrustum || at.used !== bt.used) return base;
+    const aBlocker = a?.__ltdsBranchBlocker === true;
+    const bBlocker = b?.__ltdsBranchBlocker === true;
+    if (aBlocker !== bBlocker) return aBlocker ? 1 : -1;
     const state = interactionStateProvider?.();
     const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
     const bDistance = Number.isFinite(bt.distanceFromCamera) ? bt.distanceFromCamera : Infinity;
     const now = nowProvider();
-    const aScore = aDistance * lodFocusPriorityPenalty(a, state, now);
-    const bScore = bDistance * lodFocusPriorityPenalty(b, state, now);
+    // Every blocker must arrive before its coarse REPLACE parent can retire;
+    // applying a peripheral focus penalty to one of them delays the entire
+    // branch, including already-loaded focal descendants.
+    const aScore = aDistance * (aBlocker ? 1 : lodFocusPriorityPenalty(a, state, now));
+    const bScore = bDistance * (bBlocker ? 1 : lodFocusPriorityPenalty(b, state, now));
     if (aScore !== bScore) return aScore > bScore ? -1 : 1;
     return base;
   };
@@ -736,6 +800,9 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   let requiredTiles = 0;
   let attachedRequiredTiles = 0;
   let pendingRequiredTiles = 0;
+  let attachedVisibleTiles = 0;
+  let positiveErrorFallbackTiles = 0;
+  let pendingHierarchyNodes = 0;
   const safeLabel = (tile) => {
     const raw = String(contentUri(tile) || '').split(/[?#]/, 1)[0].replace(/\\/g, '/');
     const match = raw.match(/(?:^|\/)(LOD-\d+\/[A-Za-z0-9._-]+\.b3dm)$/i);
@@ -753,7 +820,13 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
       else if (/^LOD-0\//i.test(label)) visible.lod0 += 1;
       else if (/^LOD-1\//i.test(label)) visible.lod1 += 1;
       else visible.other += 1;
+      if (tile?.engineData?.scene && attachedScenes.includes?.(tile.engineData.scene)) attachedVisibleTiles += 1;
+      if (Number.isFinite(Number(tile?.geometricError)) && Number(tile.geometricError) > 0) {
+        positiveErrorFallbackTiles += 1;
+      }
     }
+    if (tile?.traversal?.used === true && tile?.traversal?.inFrustum === true
+      && children.some(child => !child?.traversal)) pendingHierarchyNodes += 1;
     const isRequiredTile = tile?.traversal?.used === true
       && tile?.traversal?.inFrustum === true
       && tile?.traversal?.isLeaf === true
@@ -791,6 +864,8 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
       ? 'overview'
       : bootstrapPhase === 'prefetch'
         ? 'prefetch'
+        : bootstrapPhase === 'root-only'
+          ? 'root-only'
         : memoryLimited
       ? 'memory-limited'
       : runtimeProfile?.reduced ? 'reduced-memory' : detailPending ? 'warmup' : 'requested-detail',
@@ -814,10 +889,27 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
     requiredTiles,
     attachedRequiredTiles,
     pendingRequiredTiles,
+    attachedVisibleTiles,
+    positiveErrorFallbackTiles,
+    pendingHierarchyNodes,
     queues: {
       download: Boolean(tilesRenderer?.downloadQueue?.running),
       parse: Boolean(tilesRenderer?.parseQueue?.running),
       process: Boolean(tilesRenderer?.processNodeQueue?.running),
+    },
+    queueCounts: {
+      download: {
+        queued: Number(tilesRenderer?.downloadQueue?.items?.length) || 0,
+        running: Number(tilesRenderer?.downloadQueue?.currJobs) || 0,
+      },
+      parse: {
+        queued: Number(tilesRenderer?.parseQueue?.items?.length) || 0,
+        running: Number(tilesRenderer?.parseQueue?.currJobs) || 0,
+      },
+      process: {
+        queued: Number(tilesRenderer?.processNodeQueue?.items?.length) || 0,
+        running: Number(tilesRenderer?.processNodeQueue?.currJobs) || 0,
+      },
     },
     cache: {
       usedMiB: toMiB(cachedBytes),
@@ -827,6 +919,42 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
       fullByItems: Number.isFinite(itemCount) && Number.isFinite(maxSize) && itemCount >= maxSize,
     },
   };
+}
+
+export function classifyLodQuality({
+  bootstrapPhase,
+  runtimeProfile,
+  snapshot,
+  frontier,
+  queuesSettled = false,
+  targetSatisfied = false,
+  stableFrames = 0,
+} = {}) {
+  const requestedDetail = Number(runtimeProfile?.requestedDetail);
+  const activeDetail = Number(runtimeProfile?.activeDetail);
+  const queueCounts = snapshot?.queueCounts || {};
+  const queuedWork = ['download', 'parse', 'process'].some((name) => (
+    (Number(queueCounts?.[name]?.queued) || 0) > 0
+    || (Number(queueCounts?.[name]?.running) || 0) > 0
+  ));
+  const reasons = [];
+  if (bootstrapPhase !== 'complete') reasons.push('bootstrap');
+  if (!Number.isFinite(requestedDetail) || !Number.isFinite(activeDetail) || activeDetail < requestedDetail) reasons.push('detail-pending');
+  if ((Number(snapshot?.pendingRequiredTiles) || 0) > 0) reasons.push('required-content-pending');
+  if ((Number(snapshot?.requiredTiles) || 0) === 0) reasons.push('no-required-content');
+  if ((Number(snapshot?.attachedRequiredTiles) || 0) !== (Number(snapshot?.requiredTiles) || 0)) {
+    reasons.push('required-content-detached');
+  }
+  if ((Number(snapshot?.pendingHierarchyNodes) || 0) > 0) reasons.push('hierarchy-pending');
+  if ((Number(snapshot?.positiveErrorFallbackTiles) || 0) > 0) reasons.push('fallback-visible');
+  if ((Number(snapshot?.attachedVisibleTiles) || 0) !== (Number(frontier?.visibleCount) || 0)) {
+    reasons.push('visible-content-detached');
+  }
+  if (!queuesSettled || queuedWork) reasons.push('queues-active');
+  if (!targetSatisfied) reasons.push('target-unsatisfied');
+  if (!frontier?.fullDetail) reasons.push('frontier-coarse');
+  if ((Number(stableFrames) || 0) < LOD_QUALITY_STABLE_FRAMES) reasons.push('not-stable');
+  return { fullDetail: reasons.length === 0, reasons };
 }
 
 export function visibleLodFrontier(root) {

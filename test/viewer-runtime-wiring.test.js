@@ -66,11 +66,19 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.match(main, /tilesRenderer\.maxDepth = LOD_PREFETCH_MAX_DEPTH/);
   assert.match(main, /elapsed >= LOD_PREFETCH_MAX_MS/);
   assert.match(main, /lodPrefetchReadyFrames >= 2/);
-  assert.match(main, /cameraMoved \? 'camera-input'/);
-  assert.match(main, /cachePressure \? 'cache-pressure'/);
+  assert.doesNotMatch(main, /cameraMoved \? 'camera-input'/,
+    'camera input must not promote an incomplete whole-model fallback shell');
+  assert.match(main, /captured\.overBudget[\s\S]*?enterLodRootOnly\('shell-over-budget'\)/);
+  assert.match(main, /cachePressure[\s\S]*?recoverLodCacheAdmission\(tilesRenderer\.lruCache, lodRuntimeProfileState\.budget\)/,
+    'transient startup pressure must recover without latching root-only');
+  assert.match(main, /elapsed >= LOD_PREFETCH_MAX_MS[\s\S]*?lodPrefetchExitReason = 'shell-building'/,
+    'the startup deadline is an honest telemetry milestone, not unsafe partial promotion');
   assert.match(main, /tilesRenderer\.maxDepth = Infinity/);
-  assert.match(main, /lodOverviewTiles = captured\.fallback/);
+  assert.match(main, /lodOverviewTiles = captured\.shell/);
   assert.match(main, /tilesRenderer\.lodFallbackTiles = new Set\(lodOverviewTiles\)/);
+  assert.match(main, /function lodTileSceneReady\(tile\)/);
+  assert.match(main, /isReady: lodTileSceneReady/,
+    'off-frustum decoded shell tiles must count as ready without being rendered');
   assert.match(main, /restoreLodOverviewRetention = installLodOverviewRetention\(/);
   assert.match(main, /if \(restoreLodOverviewRetention\) restoreLodOverviewRetention\(\);\s*restoreLodOverviewRetention = null;/);
   assert.doesNotMatch(main, /rendererInstance\.lruCache\.scheduleUnload =/);
@@ -175,13 +183,14 @@ test('LOD starts close-responsive, stages explicit high-detail requests, and cap
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
   assert.match(main, /lodRuntimeProfileState\.requestedDetail = next\.requestedDetail/);
   assert.match(main, /lodRuntimeProfileState\.activeDetail = next\.activeDetail/);
-  assert.match(main, /const detailPending = lodDetailRequestPending\(lodRuntimeProfileState\)/);
+  assert.match(main, /const quality = classifyLodQuality\(/);
   assert.match(main, /tilesRenderer\.errorTarget = lodTargetForDetail\(next\.activeDetail\)/);
   assert.match(main, /visibleLodTargetSatisfied\(tilesRenderer\.root, tilesRenderer\.errorTarget\)/);
   assert.match(main, /!lodDetailRequestPending\(lodRuntimeProfileState\)\) return false/);
   assert.match(main, /const queuesSettled = lodQueuesSettled\(tilesRenderer\)/);
   assert.match(main, /reduced-memory Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
-  assert.match(main, /queuesSettled \? `Detail \$\{lodRuntimeProfileState\?\.activeDetail \?\? 2\}` : `streaming Detail/);
+  assert.match(main, /else if \(quality\.fullDetail\) label = 'full-detail'/);
+  assert.match(main, /pendingRequiredTiles > 0 \|\| snapshot\.pendingHierarchyNodes > 0/);
   assert.doesNotMatch(main, /releaseStaleLodDetails|transientRootBackdropEnabled|syncTransientRootLodBackdrop/);
 });
 
@@ -230,7 +239,7 @@ test('LOD memory pressure preserves camera-driven quality and resets on explicit
   assert.match(statsBlock, /tilesRenderer\.lruCache\.minBytesSize = lodCacheRetentionMinBytes\(lodRuntimeProfileState\.budget, false\)/);
   assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);
   assert.match(statsBlock, /tilesRenderer\.errorTarget = lodTargetForDetail\(pressure\.profile\.activeDetail\)/);
-  assert.match(statsBlock, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
+  assert.match(main, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
   assert.match(main, /function retryLodForChangedView\(\)/);
   assert.match(main, /lodViewChangeRequiresRetry\(lodPressureView, currentView\)/);
   const loadModelStart = loadBlock.indexOf("addEventListener('load-model'");
@@ -249,9 +258,10 @@ test('LOD console telemetry is deduplicated sanitized and manually callable', ()
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /lodDebugSnapshot/);
   assert.match(main, /function emitLodDebugSnapshot\(reason = 'status', force = false\)/);
-  assert.match(main, /console\.info\('\[LTDS LOD\]', reason, snapshot\)/);
+  assert.match(main, /console\.info\('\[LTDS LOD\]', reason, JSON\.stringify\(snapshot\)\)/);
   assert.match(main, /emitLodDebugSnapshot\('status'\)/);
   assert.match(main, /lodDiagnostics: \(\) => emitLodDebugSnapshot\('manual', true\)/);
+  assert.match(main, /lodTrace: \(\) => lodTraceEntries\.map\(entry => structuredClone\(entry\)\)/);
   assert.match(main, /tile load failed; run window\.__ltds\.lodDiagnostics\(\)/);
   assert.doesNotMatch(main, /console\.error\('Tiles load error', ev\)/);
 });

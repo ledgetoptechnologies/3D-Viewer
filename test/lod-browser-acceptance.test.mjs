@@ -1593,14 +1593,22 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     leafBTexture: validPng,
   });
   writeFileSync(path.join(tileRoot, 'coarse.glb'), makeGlb([TRIANGLE_A], validPng));
+  writeFileSync(path.join(tileRoot, 'mid-a.glb'), makeGlb([TRIANGLE_A], validPng));
+  writeFileSync(path.join(tileRoot, 'mid-b.glb'), makeGlb([TRIANGLE_A], validPng));
   const sessionTilesetPath = path.join(tileRoot, 'tileset.json');
   const sessionTileset = JSON.parse(readFileSync(sessionTilesetPath, 'utf8'));
   sessionTileset.root.content = { uri: 'coarse.glb' };
+  sessionTileset.root.children = sessionTileset.root.children.map((leaf, index) => ({
+    geometricError: 4,
+    boundingVolume: leaf.boundingVolume,
+    content: { uri: `mid-${index === 0 ? 'a' : 'b'}.glb` },
+    children: [leaf],
+  }));
   writeFileSync(sessionTilesetPath, JSON.stringify(sessionTileset));
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client, fixture;
   try {
-    fixture = await startSessionRefreshFixture(tileRoot, { fineTileDelayMs: 1_500 });
+    fixture = await startSessionRefreshFixture(tileRoot, { fineTileDelayMs: 3_000 });
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
@@ -1669,6 +1677,25 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     assert.equal(balancedStartup.errorTarget, 5.481,
       `steady Detail 20 did not use raw SSE: ${JSON.stringify(balancedStartup)}`);
     assert.ok(balancedStartup.errorTarget < balancedStartup.bootstrapCoverageTarget, JSON.stringify(balancedStartup));
+    const promotedShell = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      return {
+        rootInFallback: tiles.lodFallbackTiles?.has(tiles.root) === true,
+        rootVisible: tiles.root?.traversal?.visible === true,
+        rootAttached: Boolean(tiles.root?.engineData?.scene && tiles.group.children.includes(tiles.root.engineData.scene)),
+        fallbackUris: [...(tiles.lodFallbackTiles || [])].map(tile => tile.content?.uri || tile.content?.url || ''),
+        status: document.querySelector('#lod-status')?.textContent || '',
+      };
+    })()`);
+    assert.equal(promotedShell.rootInFallback, false,
+      `whole-model root remained a permanent fallback after shell promotion: ${JSON.stringify(promotedShell)}`);
+    assert.equal(promotedShell.rootVisible, false,
+      `whole-model root reactivated while direct shell coverage was available: ${JSON.stringify(promotedShell)}`);
+    assert.equal(promotedShell.rootAttached, false,
+      `whole-model root remained attached after complete shell promotion: ${JSON.stringify(promotedShell)}`);
+    assert.deepEqual(promotedShell.fallbackUris.sort(), ['mid-a.glb', 'mid-b.glb']);
+    assert.doesNotMatch(promotedShell.status, /full-detail/,
+      `pending deep replacement work was mislabeled full-detail: ${JSON.stringify(promotedShell)}`);
     const startupRefinementDeadline = Date.now() + 10_000;
     while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-a.b3dm')
       || requestPath.endsWith('/leaf-b.glb')) && Date.now() < startupRefinementDeadline) {
@@ -1745,8 +1772,13 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 24`, 'explicit high-detail request did not complete its staged warmup');
     await waitFor(client, `(() => {
       const tiles = window.__ltds.tiles();
-      return tiles.root?.traversal?.visible === false
-        && tiles.root.children.some((child) => child.traversal?.visible === true);
+      let descendantVisible = false;
+      const visit = tile => { for (const child of (tile?.children || [])) {
+        if (child.traversal?.visible === true) descendantVisible = true;
+        visit(child);
+      }};
+      visit(tiles.root);
+      return tiles.root?.traversal?.visible === false && descendantVisible;
     })()`, 'settled fine frontier did not replace the coarse fallback');
     const fineTileDeadline = Date.now() + 10_000;
     while (!fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-b.glb')) && Date.now() < fineTileDeadline) {
@@ -1754,6 +1786,105 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     }
     assert.equal(fixture.requests.some((requestPath) => requestPath.endsWith('/leaf-b.glb')), true,
       'explicit Detail 24 did not refine into the fine child tile');
+
+    await waitFor(client, `(() => {
+      const tiles = window.__ltds.tiles();
+      const leaves = [];
+      const visit = tile => { (tile?.children || []).forEach(visit);
+        if (!(tile?.children || []).length && Number(tile?.geometricError) === 0) leaves.push(tile);
+      };
+      visit(tiles.root);
+      return leaves.length === 2 && leaves.every(tile => tile.engineData?.scene
+        && tiles.group.children.includes(tile.engineData.scene))
+        && !tiles.downloadQueue?.running && !tiles.parseQueue?.running && !tiles.processNodeQueue?.running;
+    })()`, 'synthetic multi-branch fixture did not reach its full leaf frontier', 20_000);
+    await waitFor(client, `document.querySelector('#lod-status')?.textContent?.includes('full-detail')`,
+      'settled zero-error frontier was never reported as full-detail', 5_000);
+
+    const motionRequestIndex = client.events.length;
+    const beforeMotion = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles(); const scenes = {};
+      const visit = tile => { (tile?.children || []).forEach(visit);
+        const uri = tile?.content?.uri || tile?.content?.url || '';
+        if (!(tile?.children || []).length && Number(tile?.geometricError) === 0) {
+          let mesh = null;
+          tile.engineData?.scene?.traverse?.(object => { if (!mesh && object.isMesh) mesh = object; });
+          const material = Array.isArray(mesh?.material) ? mesh.material[0] : mesh?.material;
+          scenes[uri] = {
+            scene: tile.engineData?.scene?.uuid || null,
+            geometry: mesh?.geometry?.uuid || null,
+            material: material?.uuid || null,
+            texture: material?.map?.uuid || null,
+          };
+        }
+      };
+      visit(tiles.root); return scenes;
+    })()`);
+    const canvas = await client.evaluate(`(() => { const r=document.querySelector('#three-container canvas').getBoundingClientRect();
+      return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+    let observedActivity = false;
+    for (const pixels of [1, 2, 4, 8]) {
+      const beforeActivity = await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime`);
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: canvas.x, y: canvas.y, button: 'right', buttons: 2, clickCount: 1,
+      });
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 2,
+      });
+      observedActivity ||= await client.evaluate(`window.__ltds.controls().getInteractionState().lastActivityTime > ${beforeActivity}`);
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 0, clickCount: 1,
+      });
+      const motionDeadline = Date.now() + 500;
+      while (Date.now() < motionDeadline) {
+        const sample = await client.evaluate(`(() => {
+          const tiles = window.__ltds.tiles(); let attachedLeaves=0; let positiveVisible=0;
+          const visit = tile => { (tile?.children || []).forEach(visit);
+            if (tile?.traversal?.visible === true && Number(tile?.geometricError) > 0) positiveVisible++;
+            if (!(tile?.children || []).length && Number(tile?.geometricError) === 0
+              && tile.engineData?.scene && tiles.group.children.includes(tile.engineData.scene)) attachedLeaves++;
+          };
+          visit(tiles.root);
+          return {
+            rootVisible: tiles.root?.traversal?.visible === true,
+            rootAttached: Boolean(tiles.root?.engineData?.scene && tiles.group.children.includes(tiles.root.engineData.scene)),
+            rootInFallback: tiles.lodFallbackTiles?.has(tiles.root) === true,
+            attachedLeaves,
+            positiveVisible,
+          };
+        })()`);
+        assert.deepEqual(sample, {
+          rootVisible: false, rootAttached: false, rootInFallback: false, attachedLeaves: 2, positiveVisible: 0,
+        }, `a ${pixels}-pixel camera gesture degraded the settled frontier: ${JSON.stringify(sample)}`);
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    assert.equal(observedActivity, true, 'CDP camera gestures did not reach EarthLikeControls interaction state');
+    const afterMotion = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles(); const scenes = {};
+      const visit = tile => { (tile?.children || []).forEach(visit);
+        const uri = tile?.content?.uri || tile?.content?.url || '';
+        if (!(tile?.children || []).length && Number(tile?.geometricError) === 0) {
+          let mesh = null;
+          tile.engineData?.scene?.traverse?.(object => { if (!mesh && object.isMesh) mesh = object; });
+          const material = Array.isArray(mesh?.material) ? mesh.material[0] : mesh?.material;
+          scenes[uri] = {
+            scene: tile.engineData?.scene?.uuid || null,
+            geometry: mesh?.geometry?.uuid || null,
+            material: material?.uuid || null,
+            texture: material?.map?.uuid || null,
+          };
+        }
+      };
+      visit(tiles.root); return scenes;
+    })()`);
+    assert.deepEqual(afterMotion, beforeMotion, 'tiny camera motion discarded already-decoded leaf scenes');
+    const duplicateMotionRequests = client.events.slice(motionRequestIndex)
+      .filter(event => event.method === 'Network.requestWillBeSent'
+        && /\/leaf-(?:a\.b3dm|b\.glb)$/i.test(new URL(event.params.request.url).pathname))
+      .map(event => new URL(event.params.request.url).pathname);
+    assert.deepEqual(duplicateMotionRequests, [],
+      `tiny camera motion re-requested cached leaf content: ${JSON.stringify(duplicateMotionRequests)}`);
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});
