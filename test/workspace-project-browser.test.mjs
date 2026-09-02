@@ -111,11 +111,11 @@ async function removeBrowserProfile(profile, t) {
       return;
     } catch (error) {
       lastError = error;
-      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+      if (!['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(error?.code)) throw error;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
-  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(lastError?.code)) {
+  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(lastError?.code)) {
     t.diagnostic(`Windows retained a lock on temporary browser profile ${resolved}; functional browser assertions completed.`);
     return;
   }
@@ -188,7 +188,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     return json({ operation: runtime.operations.find(operation => operation.id === 'operation-failed') }, 202);
   }
   if (pathname === '/api/v1/processing/server-task-imports/browse' && method === 'GET') return json({ path: '', entries: [{ name: 'church-backup.zip', relativePath: 'church-backup.zip', kind: 'zip', byteSize: 4096 }], nextCursor: null });
-  if (pathname === '/api/v1/processing/server-task-imports' && method === 'POST') {
+  if (pathname === '/api/v1/processing/webodm-task-imports' && method === 'POST') {
     const operation = { id: 'operation-new', type: 'webodm_task_import', subject: body.taskDisplayName, projectId: body.projectId, status: 'queued', phase: 'queued', progress: 0, source: { kind: 'server_zip', browserTransferRequired: false, transferComplete: true }, attemptCount: 0, heartbeatAt: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     runtime.operations = [operation, ...runtime.operations];
     return json({ operation }, 202);
@@ -430,6 +430,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('[data-action=\"retry-derivative\"][data-id=\"derivative-failed\"]')", `${viewport.name}: failed optional derivative did not expose manual retry`);
     await client.evaluate(`document.querySelector('[data-action="retry-derivative"][data-id="derivative-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-failed/retry');
+    await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: failed derivative retry did not settle`);
     await client.evaluate(`document.querySelector('[data-section="dashboard"]').click()`);
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
@@ -453,7 +454,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('[data-select-path=\"church-backup.zip\"]') !== null", `${viewport.name}: server import browser did not load`);
     await client.evaluate(`document.querySelector('[data-select-path="church-backup.zip"]').click()`);
     await client.evaluate(`document.querySelector('#server-import-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/server-task-imports');
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/webodm-task-imports');
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && Number(document.querySelector('#background-work-count')?.textContent) >= 1", `${viewport.name}: modal import did not update the background work count`);
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);

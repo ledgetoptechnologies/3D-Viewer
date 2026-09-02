@@ -37,11 +37,11 @@ async function removeBrowserProfile(profile, t) {
       return;
     } catch (error) {
       lastError = error;
-      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+      if (!['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(error?.code)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
-  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(lastError?.code)) {
+  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(lastError?.code)) {
     t.diagnostic(`Windows retained a lock on temporary browser profile ${resolved}; functional browser assertions completed.`);
     return;
   }

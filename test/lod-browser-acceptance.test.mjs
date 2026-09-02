@@ -14,16 +14,24 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
 const GiB = 1024 * 1024 * 1024;
 
-function removeBrowserProfile(profile) {
+async function removeBrowserProfile(profile) {
   if (!profile) return;
-  try {
-    rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
-  } catch (error) {
-    // Edge can retain a Windows file handle briefly after its process exits.
-    // The isolated OS temp profile is non-authoritative test scratch; cleanup
-    // must never strand the cross-process browser lock or mask UI assertions.
-    if (process.platform !== 'win32' || !['EPERM', 'EBUSY'].includes(error.code)) throw error;
+  let lastError;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(error?.code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
   }
+  // Edge can retain a Windows file handle briefly after its process exits.
+  // The isolated OS temp profile is non-authoritative test scratch; cleanup
+  // must never strand the cross-process browser lock or mask UI assertions.
+  if (process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'].includes(lastError?.code)) return;
+  throw lastError;
 }
 
 function browserPath() {
@@ -982,7 +990,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1127,7 +1135,7 @@ test('browser close view refines at the default Detail and small motion retains 
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1289,7 +1297,7 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1499,7 +1507,7 @@ test('browser hides the coarse root when every visible branch meets the active D
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1557,7 +1565,7 @@ test('browser never requests the original GLB when verified streaming tiles are 
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1751,7 +1759,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     if (vite) await vite.close();
     rmSync(tileRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1808,7 +1816,7 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
 
@@ -1890,6 +1898,6 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
     if (server) await new Promise((resolve) => server.close(resolve));
     if (vite) await vite.close();
     releaseLock();
-    removeBrowserProfile(profile);
+    await removeBrowserProfile(profile);
   }
 });
