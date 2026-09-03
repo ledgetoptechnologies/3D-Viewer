@@ -101,6 +101,15 @@ patchExact(
 );
 
 const rendererSourceFile = path.join(packageRoot, 'src', 'core', 'renderer', 'tiles', 'TilesRendererBase.js');
+// A bounded optional regional cover is acquired before exposing its first fine
+// cut. Stop only at its loaded REPLACE owner; the coordinator explicitly loads
+// the cover and clears this flag on completion, refusal, timeout, or disposal.
+patchExact(
+  sourceFile,
+  `function canTraverse( tile, renderer ) {\n\n\t// If we've met`,
+  `function canTraverse( tile, renderer ) {\n\n\tif ( tile.__ltdsRegionalCoverPreparing === true && tile.refine === 'REPLACE' && tile.internal.loadingState === LOADED ) return false;\n\n\t// If we've met`,
+  '3d-tiles-renderer source bounded regional preparation',
+);
 // A re-requested tile can carry its last decoded estimate before the new parse
 // starts. LRUCache.add checks only current residency, so registering that known
 // allocation immediately afterward can cross maxBytesSize by one complete tile.
@@ -265,7 +274,7 @@ for (const name of chunks) {
   }
 
   const foveatedUpstream = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*), ([A-Za-z_$][\w$]*)\) \{\s*return !\(\2\.traversal\.error <= \3\.errorTarget && !([A-Za-z_$][\w$]*)\(\2\) \|\|/g;
-  const foveatedPatched = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*), ([A-Za-z_$][\w$]*)\) \{\s*let ([A-Za-z_$][\w$]*) = Number\.isFinite\(\2\.__ltdsPeripheralErrorTarget\) \? Math\.max\(\3\.errorTarget, \2\.__ltdsPeripheralErrorTarget\) : \3\.errorTarget;\s*return !\(\2\.traversal\.error <= \4 && !([A-Za-z_$][\w$]*)\(\2\) \|\|/g;
+  const foveatedPatched = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*), ([A-Za-z_$][\w$]*)\) \{\s*let ([A-Za-z_$][\w$]*) = Number\.isFinite\(\2\.__ltdsPeripheralErrorTarget\) \? Math\.max\(\3\.errorTarget, \2\.__ltdsPeripheralErrorTarget\) : \3\.errorTarget;\s*(?:if \(\2\.__ltdsRegionalCoverPreparing === true && \2\.refine === "REPLACE" && \2\.internal\.loadingState === 4\) return false;\s*)?return !\(\2\.traversal\.error <= \4 && !([A-Za-z_$][\w$]*)\(\2\) \|\|/g;
   const foveatedUpstreamMatches = [...source.matchAll(foveatedUpstream)];
   const foveatedPatchedMatches = [...source.matchAll(foveatedPatched)];
   if (foveatedPatchedMatches.length === 1 && foveatedUpstreamMatches.length === 0) {
@@ -277,6 +286,15 @@ for (const name of chunks) {
     foveatedTraversalChunks += 1;
   } else if (foveatedUpstreamMatches.length || foveatedPatchedMatches.length) {
     throw new Error(`${name}: ambiguous built foveated-traversal block`);
+  }
+  // LOADED is the pinned renderer's public constant (4), checked by tests.
+  const regionalMatches = [...source.matchAll(foveatedPatched)];
+  if (regionalMatches.length === 1) {
+    const [match, , tileVariable] = regionalMatches[0];
+    const gate = `if (${tileVariable}.__ltdsRegionalCoverPreparing === true && ${tileVariable}.refine === "REPLACE" && ${tileVariable}.internal.loadingState === 4) return false;`;
+    if (!match.includes(gate)) {
+      source = source.replace(match, match.replace('return !(', `${gate}\n\treturn !(`));
+    }
   }
 
   const requestFunction = /requestTileContents\(([A-Za-z_$][\w$]*)\) \{/g;

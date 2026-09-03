@@ -211,6 +211,99 @@ function foregroundAcceptanceFixture({
   };
 }
 
+// Unlike the flat acceptance grid, these are actual depth-stacked surfaces.
+// The near wall stays in view while a pitch reveals a tall, cold rear wall.
+// gltfUpAxis=Z keeps content and bounds in the same authored frame; the inverse
+// pi-X coordinates below account for the Viewer's tilesParent transform.
+function depthStackedAcceptanceFixture({ sameOwner = false } = {}) {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const local = ([x, y, z]) => [x, -y, -z];
+  const rectangle = (left, right, bottom, top, z) => [
+    [[left, bottom, z], [right, bottom, z], [left, top, z]].map(local),
+    [[right, bottom, z], [right, top, z], [left, top, z]].map(local),
+  ];
+  const bounds = (left, right, bottom, top, front, back = front) => ({ box: [
+    (left + right) / 2, -(bottom + top) / 2, -(front + back) / 2,
+    (right - left) / 2, 0, 0,
+    0, (top - bottom) / 2, 0,
+    0, 0, Math.max(0.05, Math.abs(front - back) / 2),
+  ] });
+  const assetBodies = {};
+  const logicalMiB = {};
+  const addContent = (uri, triangles, miB) => {
+    assetBodies[uri] = makeB3dm(makeGlb(triangles, png));
+    logicalMiB[uri] = miB;
+    return { uri };
+  };
+  const nearTriangles = rectangle(-6, 6, -3, 3, 0);
+  const near = {
+    boundingVolume: bounds(-6, 6, -3, 3, 0),
+    geometricError: 0.5,
+    refine: 'REPLACE',
+    content: addContent('near/region.b3dm', nearTriangles, sameOwner ? 32 : 64),
+    children: Array.from({ length: 4 }, (_, index) => {
+      const left = -6 + index * 3;
+      return {
+        boundingVolume: bounds(left, left + 3, -3, 3, 0),
+        geometricError: 0,
+        refine: 'REPLACE',
+        content: addContent(`near/fine-${index}.b3dm`, rectangle(left, left + 3, -3, 3, 0), 160),
+      };
+    }),
+  };
+  const rearTriangles = [];
+  const rear = [55, 67].flatMap((centerY, row) => [-12, -6, 0, 6, 12].map((centerX, column) => {
+    const name = `rear-${row}-${column}`;
+    const left = centerX - 3;
+    const bottom = centerY - 5;
+    const triangles = rectangle(left, left + 6, bottom, bottom + 10, -60);
+    rearTriangles.push(...triangles);
+    return {
+      boundingVolume: bounds(left, left + 6, bottom, bottom + 10, -60),
+      geometricError: 1,
+      refine: 'REPLACE',
+      content: addContent(`${name}/region.b3dm`, triangles, sameOwner ? 32 : 100),
+      children: Array.from({ length: 4 }, (_, index) => {
+        const leafLeft = left + index * 1.5;
+        return {
+          boundingVolume: bounds(leafLeft, leafLeft + 1.5, bottom, bottom + 10, -60),
+          geometricError: 0,
+          refine: 'REPLACE',
+          content: addContent(`${name}/fine-${index}.b3dm`, rectangle(leafLeft, leafLeft + 1.5, bottom, bottom + 10, -60), 96),
+        };
+      }),
+    };
+  }));
+  const allTriangles = [...nearTriangles, ...rearTriangles];
+  const regions = [near, ...rear];
+  return {
+    assetBodies,
+    logicalMiB,
+    nearUris: near.children.map(tile => tile.content.uri),
+    rearPoints: [55, 67].flatMap(y => [-12, -6, 0, 6, 12].map(x => [x, y, -60])),
+    tilesetJson: {
+      asset: { version: '1.0', gltfUpAxis: 'Z' },
+      geometricError: 128,
+      root: {
+        boundingVolume: bounds(-15, 15, -3, 72, 0, -60),
+        geometricError: 128,
+        refine: 'REPLACE',
+        content: addContent('coarse/root.b3dm', allTriangles, 32),
+        children: sameOwner ? [{
+          boundingVolume: bounds(-15, 15, -3, 72, 0, -60),
+          geometricError: 64,
+          refine: 'REPLACE',
+          content: addContent('combined/owner.b3dm', allTriangles, 512),
+          children: regions,
+        }] : regions,
+      },
+    },
+    configureConfig(config) {
+      config.georef.bboxCenter = { x: 0, y: 0, z: 0 };
+    },
+  };
+}
+
 function contentType(file) {
   if (file.endsWith('.json')) return 'application/json; charset=utf-8';
   if (file.endsWith('.b3dm')) return 'application/octet-stream';
@@ -2983,6 +3076,401 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
     await removeBrowserProfile(profile);
   }
 });
+
+test('depth-stacked strict REPLACE requires regional content to isolate a cold same-parent sibling', async () => {
+  // Exercise the real traversal, without renderer policy or network timing.
+  // A leaf-only parent cannot simultaneously cover a cold sibling and retain
+  // a visible fine child without overlap; merely retaining its cache is not
+  // sufficient. An authored intermediate proxy makes that cut possible.
+  const { runTraversal } = await import('3d-tiles-renderer/src/core/renderer/tiles/traverseFunctions.js');
+  const makeTile = (name, error, loaded = true, inView = true, children = []) => {
+    const tile = {
+      name, geometricError: error, refine: 'REPLACE', children, inView,
+      internal: { hasContent: true, hasRenderableContent: true, hasUnrenderableContent: false,
+        loadingState: loaded ? 4 : 0, depth: 0 },
+      traversal: { lastFrameVisited: -1, active: false, visible: false, used: false },
+    };
+    for (const child of children) child.parent = tile;
+    return tile;
+  };
+  const createRenderer = fallbacks => ({
+    frameCount: 0, errorTarget: 5.481, maxDepth: Infinity,
+    loadAncestors: false, loadSiblings: false, lodFallbackTiles: new Set(fallbacks),
+    stats: { active: 0, visible: 0, used: 0, inFrustum: 0 },
+    ensureChildrenArePreprocessed() {}, markTileUsed() {}, queueTileForDownload() {},
+    invokeOnePlugin() {},
+    calculateTileViewErrorWithPlugin(tile, target) {
+      target.inView = tile.inView;
+      target.error = tile.geometricError * 100;
+      target.distanceFromCamera = 20;
+    },
+  });
+  const step = (tile, renderer) => { renderer.frameCount++; runTraversal(tile, renderer); };
+  const near = makeTile('near fine', 0);
+  const rear = makeTile('rear fine', 0, false, false);
+  const unsplit = makeTile('whole owner', 64, true, true, [near, rear]);
+  const unsplitRenderer = createRenderer([unsplit]);
+  step(unsplit, unsplitRenderer);
+  assert.equal(near.traversal.visible, true);
+  assert.equal(unsplit.traversal.visible, false);
+  rear.inView = true;
+  step(unsplit, unsplitRenderer);
+  assert.equal(near.internal.loadingState, 4, 'near fine remains decoded');
+  assert.equal(near.traversal.visible, false, 'cold direct sibling forces the only complete parent fallback');
+  assert.equal(unsplit.traversal.visible, true);
+  rear.internal.loadingState = 4;
+  step(unsplit, unsplitRenderer);
+  assert.equal(near.traversal.visible && rear.traversal.visible, true);
+  assert.equal(unsplit.traversal.visible, false);
+
+  const localNear = makeTile('near fine', 0);
+  const localRear = makeTile('rear fine', 0, false, false);
+  const nearRegion = makeTile('near proxy', 1, true, true, [localNear]);
+  const rearRegion = makeTile('rear proxy', 1, true, false, [localRear]);
+  const regional = makeTile('whole owner', 64, true, true, [nearRegion, rearRegion]);
+  const regionalRenderer = createRenderer([regional, nearRegion, rearRegion]);
+  step(regional, regionalRenderer);
+  assert.equal(localNear.traversal.visible, true);
+  rearRegion.inView = localRear.inView = true;
+  step(regional, regionalRenderer);
+  assert.equal(localNear.traversal.visible, true, 'regional rear coverage leaves the near fine cut intact');
+  assert.equal(rearRegion.traversal.visible, true, 'the cold rear region has its own complete fallback');
+  assert.equal(regional.traversal.visible || nearRegion.traversal.visible || localRear.traversal.visible, false,
+    'no REPLACE ancestor overlaps a rendered descendant');
+});
+
+test('depth-stacked cross-owner cached regional fallback preserves A foreground after focus moves to B', async () => {
+  const { runTraversal } = await import('3d-tiles-renderer/src/core/renderer/tiles/traverseFunctions.js');
+  const { createLodRegionalFallbackCoordinator } = await import('../lod-regional-fallback.mjs');
+  const cache = new Map(), marked = new Set(), requests = [], listeners = new Map();
+  const makeTile = (name, error, loaded = true, inView = true, children = []) => {
+    const tile = {
+      content: { uri: name }, geometricError: error, refine: 'REPLACE', children, inView,
+      internal: { hasContent: true, hasRenderableContent: true, hasUnrenderableContent: false,
+        loadingState: loaded ? 4 : 0, depth: 0 },
+      traversal: { lastFrameVisited: -1, active: false, visible: false, used: false },
+      engineData: { boundingVolume: {}, scene: loaded ? { identity: name } : null },
+    };
+    for (const child of children) child.parent = tile;
+    if (loaded) cache.set(tile, 64 * 1024 * 1024);
+    return tile;
+  };
+  const owner = name => {
+    const near = makeTile(`${name}/near-fine`, 0);
+    const rear = makeTile(`${name}/rear-fine`, 0, false, false);
+    const nearProxy = makeTile(`${name}/near-proxy`, 1, true, true, [near]);
+    const rearProxy = makeTile(`${name}/rear-proxy`, 1, true, false, [rear]);
+    const base = makeTile(`${name}/owner`, 64, true, true, [nearProxy, rearProxy]);
+    return { base, near, rear, nearProxy, rearProxy };
+  };
+  const a = owner('a'), b = owner('b');
+  const rootTile = makeTile('root', 128, true, true, [a.base, b.base]);
+  const renderer = {
+    root: rootTile, frameCount: 0, errorTarget: 5.481, maxDepth: Infinity,
+    loadAncestors: false, loadSiblings: false, lodFallbackTiles: new Set([a.base, b.base]),
+    stats: { active: 0, visible: 0, used: 0, inFrustum: 0 },
+    lruCache: {
+      maxBytesSize: 3 * GiB, has: tile => cache.has(tile), getMemoryUsage: tile => cache.get(tile) || 0,
+      get cachedBytes() { return [...cache.values()].reduce((sum, bytes) => sum + bytes, 0); },
+      isFull() { return this.cachedBytes >= this.maxBytesSize; },
+    },
+    ensureChildrenArePreprocessed() {}, markTileUsed(tile) { marked.add(tile); },
+    queueTileForDownload() {}, invokeOnePlugin() {}, removeUnusedPendingTiles() {},
+    getBytesUsed: tile => cache.get(tile) || 0,
+    requestTileContents(tile) { requests.push(tile); },
+    addEventListener: (name, handler) => listeners.set(name, handler),
+    removeEventListener: name => listeners.delete(name),
+    calculateTileViewErrorWithPlugin(tile, target) {
+      target.inView = tile.inView;
+      target.error = tile.geometricError * 100;
+      target.distanceFromCamera = 20;
+    },
+  };
+  const coordinator = createLodRegionalFallbackCoordinator(renderer);
+  const update = (candidateOwner, now) => coordinator.update({
+    enabled: true, baseTiles: [a.base, b.base], candidateOwner, now, maxBytes: 256 * 1024 * 1024,
+  });
+  const step = () => { renderer.frameCount++; runTraversal(rootTile, renderer); };
+  try {
+    b.base.inView = false;
+    assert.equal(update(a.base, 0).phase, 'ready');
+    step();
+    const nearScene = a.near.engineData.scene;
+    assert.equal(a.near.traversal.visible, true);
+    b.base.inView = true;
+    update(b.base, 100);
+    step();
+    marked.clear();
+    assert.equal(update(b.base, 2_101).phase, 'ready');
+    step();
+    assert.deepEqual(coordinator.retainedTiles(), [b.nearProxy, b.rearProxy],
+      'historical A coverage must not consume a second pin budget');
+    assert.equal(marked.has(a.rearProxy), false, 'off-screen historical A proxy is not pinned');
+    assert.equal(renderer.lodFallbackTiles.has(a.rearProxy), true,
+      'naturally cached complete A coverage must retain fallback eligibility');
+    assert.equal(requests.length, 0, 'metadata-only owner switching must not re-request cached proxies');
+
+    // B remains focused for over two seconds while the same A foreground is
+    // still visible. Newly revealed A background is cold but its proxy is not.
+    a.rearProxy.inView = a.rear.inView = true;
+    update(b.base, 2_201);
+    step();
+    assert.equal(a.near.traversal.visible && a.rearProxy.traversal.visible && b.near.traversal.visible, true);
+    assert.equal(a.near.engineData.scene, nearScene);
+    assert.equal(cache.has(a.near), true);
+    assert.equal(a.base.traversal.visible || a.nearProxy.traversal.visible || a.rear.traversal.visible, false,
+      'A regional fallback must not overlap its fine foreground or cold leaf');
+    assert.ok(renderer.lruCache.cachedBytes <= renderer.lruCache.maxBytesSize);
+
+    // A real cache eviction is different from a focus change. A partial old
+    // cover must lose eligibility and may legitimately return to its parent.
+    cache.delete(a.rearProxy);
+    a.rearProxy.internal.loadingState = 0;
+    a.rearProxy.engineData.scene = null;
+    listeners.get('dispose-model')?.({ tile: a.rearProxy });
+    assert.equal(renderer.lodFallbackTiles.has(a.nearProxy) || renderer.lodFallbackTiles.has(a.rearProxy), false);
+    update(b.base, 2_301);
+    step();
+    assert.equal(a.base.traversal.visible, true, 'real regional eviction retains complete parent coverage');
+    assert.equal(a.near.traversal.visible || a.nearProxy.traversal.visible || a.rear.traversal.visible, false);
+    assert.equal(b.near.traversal.visible, true, 'A eviction must not collapse focused B');
+    assert.equal(requests.length, 0, 'historical eviction must not trigger optional reloads');
+  } finally {
+    coordinator.dispose();
+  }
+});
+
+for (const sameOwner of [false, true]) {
+  test(`depth-stacked ${sameOwner ? 'same-owner regional' : 'different-owner'} LOD preserves the near fine surface through sustained pitch and orbit`, { timeout: 180_000 }, async (t) => {
+    const executable = browserPath();
+    if (!executable) {
+      t.skip('Chrome or Edge is required for depth-stacked LOD acceptance.');
+      return;
+    }
+    const releaseLock = await acquireBrowserHarnessLock({ root });
+    let browser, profile, server, vite, client;
+    try {
+      const data = depthStackedAcceptanceFixture({ sameOwner });
+      const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'), {
+        ...data,
+        forceOptimizeDeps: true,
+        assetDelayMs: uri => uri === 'coarse/root.b3dm' ? 1_500
+          : /^rear-.*\/region\.b3dm$/.test(uri) ? 150
+            : /^rear-.*\/fine-/.test(uri) ? 1_200 : 50,
+      });
+      ({ server, vite } = fixture);
+      profile = mkdtempSync(path.join(tmpdir(), 'ltds-depth-stacked-browser-'));
+      const devToolsPort = await reserveDevToolsPort();
+      browser = spawn(executable, [
+        '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+        '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+      ], { stdio: 'ignore' });
+      const devTools = await waitForDevTools(devToolsPort, browser);
+      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      client = await CdpClient.connect(target.webSocketDebuggerUrl);
+      for (const method of ['Page.enable', 'Runtime.enable', 'Network.enable', 'Log.enable']) await client.command(method);
+      await client.command('Page.addScriptToEvaluateOnNewDocument', {
+        source: 'Object.defineProperty(navigator, "deviceMemory", { configurable: true, get: () => 8 });',
+      });
+      await client.command('Emulation.setDeviceMetricsOverride', {
+        width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+        screenWidth: 1440, screenHeight: 900,
+      });
+      await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model` });
+      await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.children?.length)', 'depth-stacked hierarchy did not initialize', 20_000);
+      await setView(client, [0, 0, 20], [0, 0, 0]);
+      await client.evaluate(`(() => {
+        const tiles = window.__ltds.tiles();
+        const weights = ${JSON.stringify(data.logicalMiB)};
+        const originalGetBytesUsed = tiles.getBytesUsed;
+        const decoded = new WeakSet();
+        const uri = tile => String(tile?.content?.uri || tile?.content?.url || '').split(/[?#]/, 1)[0];
+        tiles.getBytesUsed = function(tile) {
+          if (tile?.engineData?.scene) decoded.add(tile);
+          return decoded.has(tile) && Object.hasOwn(weights, uri(tile))
+            ? weights[uri(tile)] * 1024 * 1024 : originalGetBytesUsed.call(this, tile);
+        };
+        window.__depthPressureEvents = 0;
+        window.__depthEvents = { pressure: {}, downloads: {}, loads: {}, disposals: {} };
+        const count = (name, key) => {
+          const counts = window.__depthEvents[name]; counts[key] = (counts[key] || 0) + 1;
+        };
+        tiles.addEventListener('tile-memory-pressure', event => {
+          window.__depthPressureEvents++;
+          count('pressure', uri(event.tile) + '|state=' + event.tile?.internal?.loadingState);
+        });
+        for (const [eventName, counter] of [['tile-download-start', 'downloads'], ['load-model', 'loads'], ['dispose-model', 'disposals']]) {
+          tiles.addEventListener(eventName, event => count(counter, uri(event.tile)));
+        }
+        return true;
+      })()`);
+      await waitFor(client, `(() => {
+        const tiles = window.__ltds.tiles(), expected = ${JSON.stringify(data.nearUris)};
+        let fine = 0;
+        const visit = tile => {
+          if (expected.includes(tile.content?.uri || tile.content?.url || '') && tile.traversal?.visible
+            && tile.engineData?.scene && tiles.group.children.includes(tile.engineData.scene)) fine++;
+          (tile.children || []).forEach(visit);
+        };
+        visit(tiles.root);
+        return fine === expected.length && window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete';
+      })()`, 'near wall never acquired its complete fine frontier', 30_000);
+      assert.equal(fixture.requests.some(uri => /\/rear-.*\/fine-/.test(uri)), false,
+        'fixture failed to keep the rear fine frontier cold before the pitch');
+
+      const sampleExpression = `(() => {
+        const tiles = window.__ltds.tiles(), camera = window.__ltds.camera();
+        const expected = ${JSON.stringify(data.nearUris)};
+        const uri = tile => tile?.content?.uri || tile?.content?.url || '';
+        const visible = tile => Boolean(tile?.traversal?.visible && tile.engineData?.scene?.visible !== false
+          && tiles.group.children.includes(tile.engineData.scene));
+        const near = [], overlaps = [], rows = [], visibleScenes = [];
+        const visit = (tile, renderedAncestor = null) => {
+          const rendered = visible(tile);
+          if (rendered && renderedAncestor) overlaps.push([renderedAncestor, uri(tile)]);
+          if (rendered) visibleScenes.push(tile.engineData.scene);
+          if (expected.includes(uri(tile))) near.push({
+            uri: uri(tile), visible: rendered, cached: tiles.lruCache.has(tile),
+            scene: tile.engineData?.scene?.uuid || null,
+            inFrustum: tile.traversal?.inFrustum === true,
+            effectiveTarget: tile.__ltdsPeripheralErrorTarget,
+          });
+          rows.push({ uri: uri(tile), visible: rendered, used: tile.traversal?.used === true,
+            inFrustum: tile.traversal?.inFrustum === true, loading: tile.internal?.loadingState,
+            rawError: tile.traversal?.error, effectiveTarget: tile.__ltdsPeripheralErrorTarget,
+            focal: tile.__ltdsFocalOwnerLocked === true });
+          (tile.children || []).forEach(child => visit(child, rendered ? uri(tile) : renderedAncestor));
+        };
+        visit(tiles.root);
+        camera.updateMatrixWorld(true);
+        tiles.group.updateWorldMatrix(true, true);
+        const Vector3 = camera.position.constructor;
+        const Raycaster = window.__ltds.controls()._raycaster.constructor;
+        const raycaster = new Raycaster(); raycaster.firstHitOnly = true;
+        const points = [-4.5, -1.5, 1.5, 4.5].map(x => {
+          const ndc = new Vector3(x, 0, 0).project(camera);
+          const onScreen = Math.abs(ndc.x) < 0.98 && Math.abs(ndc.y) < 0.98 && Math.abs(ndc.z) < 1;
+          raycaster.setFromCamera({ x: ndc.x, y: ndc.y }, camera);
+          const hit = raycaster.intersectObjects(visibleScenes, true)[0];
+          let scene = hit?.object || null;
+          while (scene && !tiles.group.children.includes(scene)) scene = scene.parent;
+          const fineHit = near.some(row => row.visible && row.scene === scene?.uuid);
+          return { x, onScreen, fineHit, ndc: [ndc.x, ndc.y] };
+        });
+        const rearPoints = ${JSON.stringify(data.rearPoints)}.map(position => {
+          const ndc = new Vector3(...position).project(camera);
+          const onScreen = Math.abs(ndc.x) < 0.95 && Math.abs(ndc.y) < 0.95 && Math.abs(ndc.z) < 1;
+          raycaster.setFromCamera({ x: ndc.x, y: ndc.y }, camera);
+          return { position, onScreen, covered: Boolean(raycaster.intersectObjects(visibleScenes, true)[0]) };
+        });
+        return {
+          near, overlaps, points, rearPoints, rows, diagnostics: window.__ltds.lodDiagnostics(),
+          fallbackUris: [...(tiles.lodFallbackTiles || [])].map(uri),
+          cacheBytes: tiles.lruCache.cachedBytes, hardBytes: tiles.lruCache.maxBytesSize,
+          pressureEvents: window.__depthPressureEvents,
+        };
+      })()`;
+      const baseline = await client.evaluate(sampleExpression);
+      assert.equal(baseline.points.every(point => point.onScreen && point.fineHit), true,
+        `depth fixture has no real near-surface coverage: ${JSON.stringify(baseline)}`);
+      const baselineScenes = Object.fromEntries(baseline.near.map(row => [row.uri, row.scene]));
+      const requestCounts = new Map(data.nearUris.map(uri => [uri,
+        fixture.requests.filter(request => request.endsWith(`/${uri}`)).length]));
+      const samples = [];
+      const sample = async label => {
+        const value = await client.evaluate(sampleExpression);
+        samples.push({ label, ...value });
+        return value;
+      };
+      // Hold a real orbit gesture while exact public camera poses isolate
+      // projection changes from pointer sensitivity. Both active-motion and
+      // settling paths run, and all near test points stay on screen. This
+      // continuous gesture exceeds the old two-second recent-cut TTL.
+      const gesture = await client.evaluate(`(() => {
+        const bounds = window.__ltds.controls().dom.getBoundingClientRect();
+        return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+      })()`);
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mousePressed', ...gesture, button: 'left', buttons: 1, clickCount: 1,
+      });
+      assert.equal(await client.evaluate('window.__ltds.controls().getInteractionState().activeMotion'), true,
+        'near-surface orbit gesture did not activate');
+      const motionStart = Date.now();
+      for (let step = 0; step <= 30; step++) {
+        const pitch = (5 + step * 0.5) * Math.PI / 180;
+        await setView(client, [0, 0, 20], [0, Math.tan(pitch) * 20, 0]);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        await sample(`pitch-${5 + step * 0.5}`);
+      }
+      for (let step = 0; step <= 30; step++) {
+        const yaw = (5 + step * 0.5) * Math.PI / 180;
+        await setView(client, [Math.sin(yaw) * 20, 0, Math.cos(yaw) * 20], [0, Math.tan(20 * Math.PI / 180) * 20, 0]);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        await sample(`orbit-${5 + step * 0.5}`);
+      }
+      assert.ok(Date.now() - motionStart > 2_000, 'motion did not cross the old recent-cut TTL');
+      assert.equal(samples.every(value => value.diagnostics.focusPriority.activeMotion), true,
+        'continuous depth movement unexpectedly ended its active gesture');
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', ...gesture, button: 'left', buttons: 0, clickCount: 1,
+      });
+      const convergenceDeadline = Date.now() + 30_000;
+      let final = null, stable = 0;
+      while (Date.now() < convergenceDeadline) {
+        final = await sample('settling');
+        const d = final.diagnostics;
+        stable = d.pendingRequiredTiles === 0 && d.pendingHierarchyNodes === 0
+          && !d.queues.download && !d.queues.parse && !d.queues.process ? stable + 1 : 0;
+        if (stable >= 5) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      const summarize = value => ({ label: value.label, near: value.near, points: value.points, rearPoints: value.rearPoints,
+        diagnostics: value.diagnostics, visible: value.rows.filter(row => row.visible), overlaps: value.overlaps });
+      const badCoverage = samples.find(value => value.near.length !== data.nearUris.length
+        || value.near.some(row => !row.visible || !row.cached || row.scene !== baselineScenes[row.uri])
+        || value.points.some(point => !point.onScreen || !point.fineHit));
+      const badOverlap = samples.find(value => value.overlaps.length);
+      const rearGap = samples.find(value => value.rearPoints.some(point => point.onScreen && !point.covered));
+      const badCap = samples.find(value => value.cacheBytes > value.hardBytes);
+      const peakMiB = Math.max(...samples.map(value => value.cacheBytes)) / 1024 / 1024;
+      const pressureEvents = Math.max(...samples.map(value => value.pressureEvents));
+      const eventCounts = await client.evaluate('window.__depthEvents');
+      const fetchCounts = Object.fromEntries([...new Set(fixture.requests.filter(uri => uri.endsWith('.b3dm')))]
+        .map(uri => [uri, fixture.requests.filter(request => request === uri).length]));
+      t.diagnostic(JSON.stringify({ sameOwner, samples: samples.length, peakMiB, pressureEvents, eventCounts, fetchCounts,
+        firstCoverageFailure: badCoverage ? summarize(badCoverage) : null,
+        final: final ? summarize(final) : null }));
+      assert.ok(!badOverlap, `depth motion rendered a REPLACE ancestor and descendant together: ${JSON.stringify(badOverlap && summarize(badOverlap))}`);
+      assert.ok(!rearGap, `depth motion uncovered a newly visible background region: ${JSON.stringify(rearGap && summarize(rearGap))}`);
+      assert.ok(!badCap, `depth motion exceeded the hard cache cap: ${JSON.stringify(badCap && summarize(badCap))}`);
+      assert.ok(!badCoverage, `depth motion discarded the still-visible near fine surface: ${JSON.stringify(badCoverage && summarize(badCoverage))}`);
+      for (const [uri, before] of requestCounts) {
+        assert.equal(fixture.requests.filter(request => request.endsWith(`/${uri}`)).length, before,
+          `sustained depth motion re-fetched the still-visible ${uri}`);
+      }
+      assert.ok(peakMiB >= 2_500 || pressureEvents > 0,
+        `weighted depth test never exercised substantial residency or admission pressure: ${peakMiB} MiB`);
+      assert.ok(stable >= 5, `depth-stacked selected frontier did not converge: ${JSON.stringify(final && summarize(final))}`);
+      const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown'
+        && !event.params.exceptionDetails?.url?.includes('/@vite/client'));
+      assert.deepEqual(exceptions, []);
+    } finally {
+      if (client) {
+        await client.command('Page.close', {}, 2_000).catch(() => {});
+        client.close();
+      }
+      if (browser) {
+        const exited = new Promise(resolve => browser.once('exit', resolve));
+        browser.kill();
+        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+      }
+      if (server) await new Promise(resolve => server.close(resolve));
+      if (vite) await vite.close();
+      releaseLock();
+      await removeBrowserProfile(profile);
+    }
+  });
+}
 
 test('browser defaults to orthophoto when LOD is unavailable and tears down point-cloud runtime across history navigation', { timeout: 60_000 }, async (t) => {
   const executable = browserPath();

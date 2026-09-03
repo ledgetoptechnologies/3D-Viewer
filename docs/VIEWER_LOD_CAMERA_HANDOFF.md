@@ -1,5 +1,12 @@
 # Viewer LOD and camera investigation handoff
 
+## 2026-09-03 depth-overlap follow-up
+
+See [Depth-overlap and movement LOD repair](LOD_DEPTH_STABILITY_REPAIR.md) for the
+independently reproduced residual defects, new regional fallback/quality policy,
+regression evidence, and production retest limitations. Earlier entries below
+are historical findings, not a claim that every subsequent Church pose passed.
+
 ## 2026-09-02 remaining angle-cut and derivative-trust repair
 
 The final reproducible visual defect was not bandwidth and was no longer the

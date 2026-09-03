@@ -240,6 +240,27 @@ export function lodTileInLockedFocalOwner(tile) {
   return false;
 }
 
+function lodTileInLockedQualityOwner(tile) {
+  let current = tile;
+  let child = null;
+  // A complete, resident regional cover separates the coarse owner's quality
+  // dependency into independent child regions. Preserve its acquired near cut
+  // (including when it moves off center), but do not make every distant region
+  // raw merely because their shared coarse ancestor still owns queue priority.
+  for (let depth = 0; current && depth < 256; depth += 1) {
+    if (child && current.__ltdsRegionalCoverReady === true
+      && current.__ltdsRegionalFocusRegion !== child) return false;
+    if (current.__ltdsFocalOwnerLocked === true) return true;
+    child = current;
+    current = current.parent;
+  }
+  const assignedOwner = tile?.__ltdsFallbackOwner;
+  // Historical assignments without a linked ancestor retain the legacy lock,
+  // unless that owner has explicitly split its quality dependency by region.
+  return assignedOwner?.__ltdsFocalOwnerLocked === true
+    && assignedOwner.__ltdsRegionalCoverReady !== true;
+}
+
 // A visible positive-error REPLACE tile is the spatial fallback owner for the
 // cold cut immediately below it. Treating every cold tile as one global queue
 // caused wide views to spread cache admission across every fallback branch,
@@ -463,9 +484,8 @@ export function lodBranchBlockerCut(visibleTiles, options = {}) {
 }
 
 export function lodFocusPriorityPenalty(tile, interactionState, now = performance.now()) {
-  // The locked owner and every descendant in its replacement cut keep the raw
-  // requested SSE. Foveation may defer peripheral work, but it must never
-  // coarsen the exact spatial branch the user is waiting to see sharpen.
+  // Keep the acquired owner's scheduling priority. Quality locking is scoped
+  // separately when a complete regional cover makes its children independent.
   if (lodTileInLockedFocalOwner(tile)) return 1;
   const age = Math.max(0, Number(now) - (Number(interactionState?.lastActivityTime) || 0));
   const focalCutPending = interactionState?.focusPending === true
@@ -495,12 +515,10 @@ export function lodPeripheralErrorTarget(
 ) {
   const rawTarget = Number(errorTarget);
   if (!Number.isFinite(rawTarget) || rawTarget <= 0) return errorTarget;
-  if (lodTileInLockedFocalOwner(tile)) return rawTarget;
-  // Descendant focus is propagated from the preceding traversal. For the one
-  // frame after a camera or hierarchy change that propagation is intentionally
-  // invalid, so internal tiles retain raw SSE while the renderer visits the
-  // new cut and rebuilds camera-centered ancestor markers. Leaves cannot block
-  // a known descendant and remain eligible for ordinary pressure relaxation.
+  if (lodTileInLockedQualityOwner(tile)) return rawTarget;
+  // Only a branch with still-unclassified descendant bounds needs conservative
+  // raw SSE. Camera motion itself must not expand every peripheral branch: the
+  // current-frame relevance pass classifies known descendants before traversal.
   if (tile?.__ltdsConservativeRawSse === true) return rawTarget;
   const pressure = Math.min(
     LOD_MAX_PERIPHERAL_PRESSURE_SCALE,
@@ -510,11 +528,9 @@ export function lodPeripheralErrorTarget(
     1,
     Math.max(0, Number(tile?.__ltdsForegroundOverlap) || 0),
   );
-  // Foreground membership is binary for selection. Internal tiles consume the
-  // preceding visited cut's narrow descendant marker rather than their own
-  // often-loose bound. The conservative change frame above discovers the new
-  // cut before any parent can relax, while the wider focus overlap remains
-  // available independently for smooth queue ordering.
+  // Foreground membership is binary for selection. Internal tiles consume
+  // current-frame descendant relevance rather than their own often-loose bound.
+  // Wider focus overlap remains independent, for smooth queue ordering only.
   if (overlap > 0) return rawTarget;
   // Persistent cache pressure may keep the periphery coarse even after the
   // motion delay expires. The camera-centered focal branch remains exactly at
@@ -639,17 +655,53 @@ function lodCameraProjectionSnapshot(camera, scratch, frameCount, tilesRenderer)
   };
 }
 
-function lodCameraProjectionChanged(previous, current) {
-  if (!previous || !current) return true;
-  for (const key of ['position', 'forward', 'projection', 'groupWorld']) {
-    const left = previous[key];
-    const right = current[key];
-    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return true;
-    for (let index = 0; index < left.length; index += 1) {
-      if (Math.abs(left[index] - right[index]) > 1e-10) return true;
+function tileForegroundRelevance(camera, tile, sphere, scratch) {
+  const cache = scratch.tileRelevanceCache;
+  if (cache.has(tile)) return cache.get(tile);
+
+  // Classify the known hierarchy bottom-up before its ancestor chooses an SSE.
+  // Memoization makes this linear in the known nodes, not a subtree scan for
+  // every ancestor. Use an explicit stack for deep authored trees. Stop at the
+  // lazy preprocessing frontier: never preprocess nodes or request content here.
+  const pending = [{ tile, visited: false }];
+  const visiting = new Set();
+  while (pending.length) {
+    const entry = pending.pop();
+    const current = entry.tile;
+    if (cache.has(current)) continue;
+    if (!entry.visited) {
+      if (visiting.has(current)
+        || typeof current?.engineData?.boundingVolume?.getSphere !== 'function') {
+        cache.set(current, { foreground: 0, unknown: true });
+        continue;
+      }
+      const direct = projectedTileFocusOverlaps(camera, current, sphere, scratch);
+      const children = Array.isArray(current.children) ? current.children : [];
+      if (children.length === 0) {
+        cache.set(current, { foreground: direct.foreground, unknown: false });
+        continue;
+      }
+      visiting.add(current);
+      pending.push({ tile: current, visited: true });
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child && typeof child === 'object' && !cache.has(child)) {
+          pending.push({ tile: child, visited: false });
+        }
+      }
+    } else {
+      let foreground = 0;
+      let unknown = false;
+      for (const child of current.children) {
+        const relevance = child && typeof child === 'object' ? cache.get(child) : null;
+        if (relevance?.foreground > 0) foreground = 1;
+        if (!relevance || relevance.unknown) unknown = true;
+      }
+      cache.set(current, { foreground, unknown });
+      visiting.delete(current);
     }
   }
-  return false;
+  return cache.get(tile);
 }
 
 export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
@@ -665,14 +717,7 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
     groupWorldMatrix: new THREE.Matrix4(),
     tileOverlapCache: new WeakMap(),
     tileOverlapCacheFrame: null,
-    propagatedFocusFrame: new WeakMap(),
-    frameToken: 0,
-    previousFrameToken: null,
-    cameraSnapshot: null,
-    hierarchyEpoch: 0,
-    frameHierarchyEpoch: -1,
-    hierarchyDirty: true,
-    forceRawFrame: true,
+    tileRelevanceCache: new WeakMap(),
   };
   let tilesRenderer = null;
   return {
@@ -681,22 +726,22 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
       tilesRenderer = tiles;
       focusScratch.tileOverlapCache = new WeakMap();
       focusScratch.tileOverlapCacheFrame = null;
-      focusScratch.propagatedFocusFrame = new WeakMap();
-      focusScratch.frameToken = 0;
-      focusScratch.previousFrameToken = null;
-      focusScratch.cameraSnapshot = null;
-      focusScratch.hierarchyEpoch = 0;
-      focusScratch.frameHierarchyEpoch = -1;
-      focusScratch.hierarchyDirty = true;
-      focusScratch.forceRawFrame = true;
+      focusScratch.tileRelevanceCache = new WeakMap();
     },
-    preprocessNode() {
-      // External tilesets can append multiple nodes during one renderer frame.
-      // Record every mutation, but batch its conservative invalidation in
-      // calculateTileViewError so a later preprocess cannot age an earlier
-      // focused-descendant marker by several logical frame tokens.
-      focusScratch.hierarchyEpoch += 1;
-      focusScratch.hierarchyDirty = true;
+    preprocessNode(tile, _tilesetDir, parentTile = null) {
+      // The engine installs this node's transformed bounds after this hook.
+      // Invalidate only the changed ancestor path; other same-frame branches
+      // retain their memoized classification and never become globally raw.
+      if (!tile || typeof tile !== 'object') return;
+      focusScratch.tileOverlapCache.delete(tile);
+      focusScratch.tileRelevanceCache.delete(tile);
+      const seen = new Set();
+      let ancestor = parentTile || tile.parent;
+      while (ancestor && !seen.has(ancestor)) {
+        seen.add(ancestor);
+        focusScratch.tileRelevanceCache.delete(ancestor);
+        ancestor = ancestor.parent;
+      }
     },
     calculateTileViewError(tile) {
       let overlap = 0;
@@ -706,8 +751,6 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
         const frameChanged = !Number.isFinite(frameCount)
           ? focusScratch.tileOverlapCacheFrame === null
           : frameCount !== focusScratch.tileOverlapCacheFrame;
-        const hierarchyChanged = focusScratch.hierarchyDirty
-          || focusScratch.hierarchyEpoch !== focusScratch.frameHierarchyEpoch;
         if (frameChanged) {
           const cameraSnapshot = lodCameraProjectionSnapshot(
             camera,
@@ -715,17 +758,11 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
             frameCount,
             tilesRenderer,
           );
-          focusScratch.previousFrameToken = focusScratch.frameToken || null;
-          focusScratch.frameToken += 1;
           focusScratch.tileOverlapCache = new WeakMap();
+          focusScratch.tileRelevanceCache = new WeakMap();
           focusScratch.tileOverlapCacheFrame = Number.isFinite(frameCount)
             ? frameCount
             : 0;
-          focusScratch.forceRawFrame = hierarchyChanged
-            || lodCameraProjectionChanged(focusScratch.cameraSnapshot, cameraSnapshot);
-          focusScratch.cameraSnapshot = cameraSnapshot;
-          focusScratch.frameHierarchyEpoch = focusScratch.hierarchyEpoch;
-          focusScratch.hierarchyDirty = false;
           const focusState = tilesRenderer?.__ltdsFocusOwnerState;
           if (focusState && typeof focusState === 'object') {
             focusState.currentView = {
@@ -734,39 +771,13 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
               forward: [...cameraSnapshot.forward],
             };
           }
-        } else if (hierarchyChanged) {
-          // The renderer may interleave preprocess and traversal callbacks for
-          // many lazy branches in one physical frame. Keep the current marker
-          // token and projection memo, but retain conservative raw SSE through
-          // the remainder of this frame while the enlarged cut is discovered.
-          focusScratch.forceRawFrame = true;
-          focusScratch.frameHierarchyEpoch = focusScratch.hierarchyEpoch;
         }
         const directOverlaps = projectedTileFocusOverlaps(camera, tile, sphere, focusScratch);
-        const directOverlap = directOverlaps.priority;
-        const directForegroundOverlap = directOverlaps.foreground;
-        const propagatedToken = focusScratch.propagatedFocusFrame.get(tile);
-        const descendantForeground = propagatedToken === focusScratch.previousFrameToken
-          || propagatedToken === focusScratch.frameToken;
-        overlap = Math.max(directOverlap, descendantForeground ? 1 : 0);
+        const relevance = tileForegroundRelevance(camera, tile, sphere, focusScratch);
         const internal = Array.isArray(tile?.children) && tile.children.length > 0;
-        tile.__ltdsConservativeRawSse = focusScratch.forceRawFrame && internal;
-        tile.__ltdsForegroundOverlap = internal
-          ? (descendantForeground ? 1 : 0)
-          : directForegroundOverlap;
-
-        // A positive direct projection marks its ancestor chain for the next
-        // traversal. Stop at the first already-marked ancestor, making the
-        // propagation cost linear in the union of focused ancestor paths rather
-        // than in every known descendant of every visited root.
-        if (directForegroundOverlap > 0) {
-          let ancestor = tile?.parent;
-          for (let depth = 0; ancestor && depth < 256; depth += 1) {
-            if (focusScratch.propagatedFocusFrame.get(ancestor) === focusScratch.frameToken) break;
-            focusScratch.propagatedFocusFrame.set(ancestor, focusScratch.frameToken);
-            ancestor = ancestor.parent;
-          }
-        }
+        overlap = Math.max(directOverlaps.priority, internal && relevance.foreground > 0 ? 1 : 0);
+        tile.__ltdsConservativeRawSse = relevance.unknown;
+        tile.__ltdsForegroundOverlap = relevance.foreground;
       }
       tile.__ltdsFocusOverlap = overlap;
       tile.__ltdsFocusActivityTime = Number(state?.lastActivityTime) || 0;
@@ -897,6 +908,7 @@ export function selectLodRecentFrontier(entries, {
   maxTiles = Infinity,
   maxBytes = Infinity,
   getBytes = () => 0,
+  reservedTiles = null,
 } = {}) {
   const tileLimit = Number.isFinite(Number(maxTiles))
     ? Math.max(0, Number(maxTiles))
@@ -907,7 +919,10 @@ export function selectLodRecentFrontier(entries, {
   const groups = new Map();
   for (const entry of entries || []) {
     const [tile, expiresAt] = entry || [];
-    if (!tile || Number(expiresAt) <= Number(now)) continue;
+    // Regional/base fallback residency has already been subtracted from this
+    // budget by the caller. Do not count historical proxy entries a second
+    // time or let them make an otherwise complete fine cut appear oversized.
+    if (!tile || reservedTiles?.has(tile) || Number(expiresAt) <= Number(now)) continue;
     const owner = lodRecentFrontierOwner(tile);
     let group = groups.get(owner);
     if (!group) {

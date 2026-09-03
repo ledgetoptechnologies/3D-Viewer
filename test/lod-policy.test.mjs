@@ -112,6 +112,31 @@ test('oversize focused REPLACE cut is skipped instead of partially pinned', () =
   assert.equal(peripheral.every(tile => selected.has(tile)), true);
 });
 
+test('newly reserved regional proxies do not double-count the remaining recent fine-cut budget', () => {
+  const MiB = 1024 ** 2;
+  const owner = { __ltdsFocalOwnerLocked: true, __ltdsFocusOverlap: 1 };
+  const proxy = { __ltdsFallbackOwner: owner, bytes: 64 * MiB };
+  const fine = Array.from({ length: 4 }, () => ({ __ltdsFallbackOwner: owner, bytes: 32 * MiB }));
+  const history = new Map([proxy, ...fine].map(tile => [tile, 2_000]));
+  const budget = { now: 1_000, maxTiles: 4, maxBytes: 128 * MiB, getBytes: tile => tile.bytes };
+  assert.equal(selectLodRecentFrontier(history, budget).size, 0,
+    'without the separate reservation the whole historical group is genuinely oversized');
+
+  const selected = selectLodRecentFrontier(history, {
+    ...budget,
+    reservedTiles: new Set([proxy]),
+    getBytes(tile) {
+      assert.notEqual(tile, proxy, 'the already-reserved proxy must be excluded before grouping/accounting');
+      return tile.bytes;
+    },
+  });
+  assert.equal(selected.size, 4);
+  assert.equal(fine.every(tile => selected.has(tile)), true,
+    'the complete fine cut fits the budget left after regional reservation');
+  assert.equal(selected.has(proxy), false);
+  assert.equal(history.has(proxy), true, 'selection does not mutate caller history');
+});
+
 test('detail slider maps monotonically across a perceptible bounded SSE range', () => {
   assert.equal(detailToErrorTarget(2), 512);
   assert.equal(detailToErrorTarget(24), 2);
@@ -1341,14 +1366,16 @@ test('a known foreground descendant prevents a fringe parent from relaxing trave
   plugin.init(renderer);
 
   assert.equal(plugin.calculateTileViewError(fringeParent), false);
-  assert.equal(fringeParent.__ltdsFocusOverlap, 0);
+  assert.equal(fringeParent.__ltdsFocusOverlap, 1);
   assert.equal(fringeParent.__ltdsPeripheralErrorTarget, 5.481,
-    'the first traversal after initialization conservatively keeps internal parents at raw SSE');
+    'the first traversal discovers the known foreground child before relaxing its parent');
+  assert.equal(fringeParent.__ltdsConservativeRawSse, false,
+    'known current-view relevance needs no conservative discovery frame');
   plugin.calculateTileViewError(foregroundChild);
   renderer.frameCount += 1;
   assert.equal(plugin.calculateTileViewError(fringeParent), false);
   assert.ok(fringeParent.__ltdsFocusOverlap > 0,
-    'the preceding visited cut propagates camera-centered focus to its parent');
+    'current camera-centered descendant relevance keeps its parent focal');
   assert.equal(fringeParent.__ltdsPeripheralErrorTarget, 5.481,
     'a peripheral parent cannot block a foreground descendant with a relaxed SSE');
   plugin.dispose();
@@ -1390,7 +1417,150 @@ test('a loose parent bound keeps broad queue priority without exempting backgrou
   plugin.dispose();
 });
 
-test('multiple lazy preprocess callbacks in one renderer frame preserve earlier foreground markers', () => {
+test('continuous camera motion never expands a known peripheral subtree to raw SSE under pressure', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const tile = (x, radius = 0.1, children = []) => ({
+    refine: 'REPLACE', geometricError: children.length ? 10 : 0, children,
+    engineData: {
+      boundingVolume: {
+        getSphere: target => target.set(new Vector3(x, 0, -10), radius),
+      },
+    },
+  });
+  const peripheralLeaf = tile(5);
+  const peripheralBranch = tile(5, 0.2, [peripheralLeaf]);
+  const foregroundLeaf = tile(0);
+  const fringeForegroundParent = tile(9, 0.2, [foregroundLeaf]);
+  const root = tile(0, 12, [peripheralBranch, fringeForegroundParent]);
+  for (const parent of [root, peripheralBranch, fringeForegroundParent]) {
+    for (const child of parent.children) child.parent = parent;
+  }
+  const state = { activeMotion: false, lastActivityTime: 0, focusNdc: [0, 0] };
+  const renderer = { errorTarget: 5.481, __ltdsPeripheralPressureScale: 4, frameCount: 0 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => state);
+  plugin.init(renderer);
+
+  for (let frame = 0; frame < 180; frame += 1) {
+    renderer.frameCount += 1;
+    state.activeMotion = frame > 0;
+    state.lastActivityTime = frame * 16;
+    state.focusNdc = [Math.sin(frame), Math.cos(frame)];
+    camera.rotation.set(Math.cos(frame / 10) * 0.01, Math.sin(frame / 10) * 0.02, 0);
+    camera.position.x = frame * 0.0001;
+    camera.updateMatrixWorld(true);
+    assert.equal(plugin.calculateTileViewError(root), false);
+    // Ancestors are evaluated before children, as in the actual traversal.
+    plugin.calculateTileViewError(peripheralBranch);
+    plugin.calculateTileViewError(fringeForegroundParent);
+    assert.equal(peripheralBranch.__ltdsForegroundOverlap, 0);
+    assert.equal(peripheralBranch.__ltdsConservativeRawSse, false);
+    assert.equal(peripheralBranch.__ltdsPeripheralErrorTarget, 21.924,
+      `moving frame ${frame} must not change a peripheral branch's selection target`);
+    assert.equal(fringeForegroundParent.__ltdsPeripheralErrorTarget, 5.481,
+      'known foreground descendants remain discoverable without a raw global frame');
+    assert.equal(root.__ltdsPeripheralErrorTarget, 5.481);
+    assert.equal(renderer.errorTarget, 5.481);
+    assert.equal(root.refine, 'REPLACE');
+  }
+  renderer.frameCount += 1;
+  state.activeMotion = false;
+  plugin.calculateTileViewError(peripheralBranch);
+  assert.equal(peripheralBranch.__ltdsPeripheralErrorTarget, 21.924,
+    'stopping the camera must not contract a motion-expanded background cut');
+  plugin.dispose();
+});
+
+test('current camera movement discovers a newly centered descendant before visiting that descendant', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const child = {
+    children: [],
+    engineData: { boundingVolume: { getSphere: target => target.set(new Vector3(5, 0, -10), 0.1) } },
+  };
+  const parent = {
+    children: [child],
+    engineData: { boundingVolume: { getSphere: target => target.set(new Vector3(9, 0, -10), 0.1) } },
+  };
+  child.parent = parent;
+  const renderer = { errorTarget: 5.481, __ltdsPeripheralPressureScale: 4, frameCount: 1 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({ activeMotion: true }));
+  plugin.init(renderer);
+  plugin.calculateTileViewError(parent);
+  assert.equal(parent.__ltdsPeripheralErrorTarget, 21.924);
+
+  camera.lookAt(5, 0, -10);
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(parent);
+  assert.equal(parent.__ltdsForegroundOverlap, 1);
+  assert.equal(parent.__ltdsConservativeRawSse, false);
+  assert.equal(parent.__ltdsPeripheralErrorTarget, 5.481,
+    'a formerly unvisited child in the new centered view must defeat parent pressure immediately');
+  plugin.dispose();
+});
+
+test('lazy unknown bounds protect only their ancestor path and same-frame growth refreshes that path', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  let hiddenProjectionCount = 0;
+  const bound = x => ({ getSphere: target => target.set(new Vector3(x, 0, -10), 0.1) });
+  const hiddenChild = {
+    children: [],
+    engineData: {
+      boundingVolume: {
+        getSphere(target) {
+          hiddenProjectionCount += 1;
+          return target.set(new Vector3(0, 0, -10), 0.1);
+        },
+      },
+    },
+  };
+  const unknown = { children: [hiddenChild] };
+  hiddenChild.parent = unknown;
+  const incompleteParent = { children: [unknown], engineData: { boundingVolume: bound(8) } };
+  unknown.parent = incompleteParent;
+  const unrelatedLeaf = { children: [], engineData: { boundingVolume: bound(5) } };
+  const unrelated = { children: [unrelatedLeaf], engineData: { boundingVolume: bound(5) } };
+  unrelatedLeaf.parent = unrelated;
+  const renderer = { errorTarget: 5.481, __ltdsPeripheralPressureScale: 4, frameCount: 1 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => null);
+  plugin.init(renderer);
+  plugin.calculateTileViewError(incompleteParent);
+  plugin.calculateTileViewError(unrelated);
+  assert.equal(incompleteParent.__ltdsConservativeRawSse, true);
+  assert.equal(incompleteParent.__ltdsPeripheralErrorTarget, 5.481);
+  assert.equal(unrelated.__ltdsPeripheralErrorTarget, 21.924);
+  assert.equal(hiddenProjectionCount, 0,
+    'the read-only prepass stops at unknown metadata instead of forcing lazy preprocessing');
+
+  // The real renderer calls the plugin before installing the new engine bounds.
+  plugin.preprocessNode(unknown, '', incompleteParent);
+  unknown.engineData = { boundingVolume: bound(8) };
+  plugin.calculateTileViewError(incompleteParent);
+  plugin.calculateTileViewError(unrelated);
+  assert.equal(incompleteParent.__ltdsConservativeRawSse, false);
+  assert.equal(incompleteParent.__ltdsForegroundOverlap, 1);
+  assert.equal(incompleteParent.__ltdsPeripheralErrorTarget, 5.481);
+  assert.equal(hiddenProjectionCount, 1);
+  assert.equal(unrelated.__ltdsConservativeRawSse, false);
+  assert.equal(unrelated.__ltdsPeripheralErrorTarget, 21.924,
+    'preprocessing another branch cannot give unrelated background tiles raw SSE');
+
+  const newChild = { children: [], engineData: { boundingVolume: bound(0) }, parent: unrelated };
+  unrelated.children.push(newChild);
+  plugin.preprocessNode(newChild, '', unrelated);
+  plugin.calculateTileViewError(unrelated);
+  assert.equal(unrelated.__ltdsForegroundOverlap, 1);
+  assert.equal(unrelated.__ltdsPeripheralErrorTarget, 5.481,
+    'a newly appended foreground child invalidates its already-classified parent in the same frame');
+  plugin.dispose();
+});
+
+test('multiple lazy preprocess callbacks preserve known focus without making unrelated branches raw', () => {
   const camera = new PerspectiveCamera(90, 1, 0.1, 100);
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld(true);
@@ -1432,17 +1602,18 @@ test('multiple lazy preprocess callbacks in one renderer frame preserve earlier 
   renderer.frameCount += 1;
   plugin.calculateTileViewError(focusedParent);
   assert.equal(focusedParent.__ltdsForegroundOverlap, 1,
-    'same-frame preprocess callbacks must not age the earlier marker by multiple frame tokens');
+    'same-frame preprocess callbacks must not invalidate an unrelated foreground branch');
   assert.equal(focusedParent.__ltdsPeripheralErrorTarget, 5.481,
-    'the preserved marker prevents a later branch from relaxing its foreground ancestor');
+    'known foreground descendants retain raw quality');
   plugin.calculateTileViewError(lazyBranches[1]);
-  assert.equal(lazyBranches[1].__ltdsConservativeRawSse, true,
-    'the next complete renderer frame remains conservative after mid-frame hierarchy growth');
+  assert.equal(lazyBranches[1].__ltdsConservativeRawSse, false,
+    'known peripheral descendants do not need a global conservative frame after preprocessing');
+  assert.equal(lazyBranches[1].__ltdsPeripheralErrorTarget, 21.924);
   renderer.frameCount += 1;
   plugin.calculateTileViewError(lazyBranches[1]);
   assert.equal(lazyBranches[1].__ltdsConservativeRawSse, false);
   assert.equal(lazyBranches[1].__ltdsPeripheralErrorTarget, 21.924,
-    'the background branch relaxes after its conservative discovery frame');
+    'the background branch keeps a stable pressure target across renderer frames');
   plugin.dispose();
 });
 
@@ -1469,6 +1640,9 @@ test('focus projection transforms tile-root bounds through a non-identity viewer
   // world -Z (in front of the camera), while local -Z is behind the camera.
   const localFront = tile(new Vector3(0, 2, 1));
   const localBehind = tile(new Vector3(0, 2, -1));
+  const fringeParent = tile(new Vector3(3, 2, 1));
+  fringeParent.children.push(localFront);
+  localFront.parent = fringeParent;
   const renderer = {
     errorTarget: 5.481,
     frameCount: 1,
@@ -1477,16 +1651,27 @@ test('focus projection transforms tile-root bounds through a non-identity viewer
   };
   const plugin = createLodFocusPriorityPlugin(camera, () => null);
   plugin.init(renderer);
+  plugin.calculateTileViewError(fringeParent);
   plugin.calculateTileViewError(localFront);
   plugin.calculateTileViewError(localBehind);
   assert.equal(localFront.__ltdsFocusOverlap, 1,
     'a locally behind-looking sphere is centered after the viewer frame transform');
   assert.equal(localBehind.__ltdsFocusOverlap, 0,
     'a locally forward-looking sphere transformed behind the world camera is rejected');
+  assert.equal(fringeParent.__ltdsForegroundOverlap, 1,
+    'the ancestor prepass uses the same world transform when discovering a focused descendant');
+  assert.equal(fringeParent.__ltdsPeripheralErrorTarget, 5.481);
+
+  parent.position.x = 10;
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(fringeParent);
+  assert.equal(fringeParent.__ltdsForegroundOverlap, 0,
+    'a changed viewer frame refreshes descendant relevance without a stale foreground marker');
+  assert.equal(fringeParent.__ltdsPeripheralErrorTarget, 21.924);
   plugin.dispose();
 });
 
-test('descendant focus propagation projects each bounding volume once per renderer frame', () => {
+test('current-view descendant relevance projects each known bound only once per renderer frame', () => {
   const camera = new PerspectiveCamera(90, 1, 0.1, 100);
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld(true);
@@ -1518,16 +1703,16 @@ test('descendant focus propagation projects each bounding volume once per render
   }));
   plugin.init(renderer);
   plugin.calculateTileViewError(tiles[0]);
-  assert.equal(projectionCalls, 1,
-    'visiting a root projects only that root instead of scanning all known descendants');
+  assert.equal(projectionCalls, tileCount,
+    'the prepass classifies the known descendants before choosing the root target');
   for (const tile of tiles) plugin.calculateTileViewError(tile);
   assert.equal(projectionCalls, tileCount,
     'a deep chain remains linear instead of re-projecting every descendant per ancestor');
 
   renderer.frameCount += 1;
   plugin.calculateTileViewError(tiles[0]);
-  assert.equal(projectionCalls, tileCount + 1,
-    'the next root visit remains bounded to the renderer-visited cut');
+  assert.equal(projectionCalls, tileCount * 2,
+    'the next frame refreshes the linear prepass without recursion depth limits');
   for (const tile of tiles) plugin.calculateTileViewError(tile);
   assert.equal(projectionCalls, tileCount * 2,
     'the memoized projection is refreshed exactly once per tile on the next frame');
@@ -1583,14 +1768,14 @@ test('focus projection memo invalidates for camera frames hierarchy growth and p
   plugin.preprocessNode(centeredChild, '', parent);
   renderer.frameCount += 1;
   plugin.calculateTileViewError(parent);
-  assert.equal(parent.__ltdsFocusOverlap, 0);
+  assert.equal(parent.__ltdsFocusOverlap, 1);
   assert.equal(parent.__ltdsPeripheralErrorTarget, 5.481,
-    'a hierarchy mutation conservatively keeps the parent at raw SSE without scanning its subtree');
+    'newly known foreground descendants are classified before their parent can relax');
   plugin.calculateTileViewError(centeredChild);
   renderer.frameCount += 1;
   plugin.calculateTileViewError(parent);
   assert.equal(parent.__ltdsFocusOverlap, 1,
-    'a preprocessed child contributes to the following frame ancestor marker');
+    'current-frame classification preserves the foreground ancestor on the next frame');
 
   const beforeReinit = projectionCalls;
   camera.rotation.set(0, Math.PI, 0);
@@ -1639,6 +1824,80 @@ test('locked focal owner and all descendants retain raw requested SSE metadata',
   assert.equal(lodTileInLockedFocalOwner(grandchild), false);
   assert.ok(lodPeripheralErrorTarget(5.481, grandchild, state, 1_000, 4) > 5.481,
     'active memory-pressure policy resumes once the owner replacement cut attaches');
+  plugin.dispose();
+});
+
+test('ready regional cover scopes an ancestor quality lock to its acquired near region', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const tile = (center, children = []) => ({
+    refine: 'REPLACE', children, geometricError: children.length ? 10 : 0,
+    engineData: {
+      boundingVolume: { getSphere: target => target.set(new Vector3(...center), 0.1) },
+    },
+  });
+  // This near surface remains onscreen at NDC y=-0.63 after the user tilts
+  // upward. It is outside the narrow focus cone, but must retain its acquired
+  // regional lock instead of coarsening when the distant skyline enters view.
+  const nearLeaf = tile([0, -6.3, -10]);
+  const nearRegion = tile([0, -6.3, -10], [nearLeaf]);
+  const farLeaf = tile([15, 0, -30]);
+  const farRegion = tile([15, 0, -30], [farLeaf]);
+  const centeredLeaf = tile([0, 0, -30]);
+  const centeredRegion = tile([15, 0, -30], [centeredLeaf]);
+  const unknownRegion = tile([15, 0, -30], [{ children: [] }]);
+  const owner = tile([0, 0, -20], [nearRegion, farRegion, centeredRegion, unknownRegion]);
+  owner.__ltdsFocalOwnerLocked = true;
+  owner.__ltdsFocalOwnerPending = true;
+  for (const parent of [owner, ...owner.children]) {
+    for (const child of parent.children) {
+      child.parent = parent;
+      child.__ltdsFallbackOwner = owner;
+    }
+  }
+  const renderer = { frameCount: 1, errorTarget: 5.481, __ltdsPeripheralPressureScale: 4 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({ activeMotion: true }));
+  plugin.init(renderer);
+
+  for (const current of [owner, nearRegion, nearLeaf, farRegion, farLeaf]) {
+    plugin.calculateTileViewError(current);
+    assert.equal(current.__ltdsPeripheralErrorTarget, 5.481,
+      'an incomplete/unsplit cover preserves the original whole-owner safety lock');
+  }
+  owner.__ltdsRegionalCoverReady = true;
+  owner.__ltdsRegionalFocusRegion = nearRegion;
+  renderer.frameCount += 1;
+  for (const current of [owner, ...owner.children, nearLeaf, farLeaf, centeredLeaf]) {
+    plugin.calculateTileViewError(current);
+  }
+  assert.equal(nearRegion.__ltdsForegroundOverlap, 0);
+  assert.equal(nearRegion.__ltdsPeripheralErrorTarget, 5.481);
+  assert.equal(nearLeaf.__ltdsPeripheralErrorTarget, 5.481,
+    'the acquired near cut remains raw even outside the narrow centered cone');
+  assert.equal(farRegion.__ltdsForegroundOverlap, 0);
+  assert.equal(farRegion.__ltdsPeripheralErrorTarget, 21.924);
+  assert.equal(farLeaf.__ltdsPeripheralErrorTarget, 21.924,
+    'a historical broad fallback assignment cannot bypass the regional quality boundary');
+  assert.equal(centeredRegion.__ltdsPeripheralErrorTarget, 5.481,
+    'current foreground descendant discovery remains an independent raw-SSE safeguard');
+  assert.equal(unknownRegion.__ltdsConservativeRawSse, true);
+  assert.equal(unknownRegion.__ltdsPeripheralErrorTarget, 5.481,
+    'unknown regional descendants retain conservative discovery protection');
+  assert.equal(owner.__ltdsPeripheralErrorTarget, 5.481);
+  assert.equal(lodTileInLockedFocalOwner(farLeaf), true,
+    'the existing queue-ownership contract remains unchanged');
+  assert.equal(lodFocusPriorityPenalty(farLeaf, { activeMotion: true }), 1);
+
+  farRegion.__ltdsFocalOwnerLocked = true;
+  plugin.calculateTileViewError(farLeaf);
+  assert.equal(farLeaf.__ltdsPeripheralErrorTarget, 5.481,
+    'an independently locked child region still protects its own cut');
+  farRegion.__ltdsFocalOwnerLocked = false;
+  owner.__ltdsRegionalCoverReady = false;
+  plugin.calculateTileViewError(farLeaf);
+  assert.equal(farLeaf.__ltdsPeripheralErrorTarget, 5.481,
+    'losing complete cover immediately restores the original ancestor safety lock');
   plugin.dispose();
 });
 

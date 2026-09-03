@@ -9,6 +9,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { openDatabase } = require('../server/database');
+const { readRuntimeRevision } = require('../server/runtimeIdentity');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 
@@ -93,7 +94,8 @@ test('production readiness verifies the live policy and signed catalog without e
   assert.deepEqual(output, {
     ok: true,
     host: 'viewer.example.test',
-    build: { revision: 'unavailable', schemaVersion: 31 },
+    // Source-tree runs have no attestation file; an exact runtime image does.
+    build: { revision: readRuntimeRevision() || 'unavailable', schemaVersion: 31 },
     webodmMount: '',
     derivativesMount: null,
     models: 0,

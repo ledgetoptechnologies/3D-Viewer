@@ -78,6 +78,34 @@ function nextFrame(renderer) {
   Object.assign(renderer.stats, { used: 0, inFrustum: 0, active: 0, visible: 0 });
 }
 
+test('bounded regional preparation holds a loaded owner then promotes strict regional replacement', () => {
+  assert.equal(LOADED, 4, 'built traversal patch pins the public LOADED constant');
+  const near = makeTile({ name: 'near', error: 0, loadingState: LOADED, depth: 3 });
+  const cold = makeTile({ name: 'cold', error: 0, loadingState: UNLOADED, depth: 3 });
+  const nearRegion = makeTile({ name: 'near-region', error: 80, loadingState: LOADED, depth: 2, children: [near] });
+  const farRegion = makeTile({ name: 'far-region', error: 80, loadingState: LOADED, depth: 2, children: [cold] });
+  const owner = makeTile({ name: 'owner', error: 100, loadingState: LOADED, depth: 1, children: [nearRegion, farRegion] });
+  const root = makeTile({ name: 'root', error: 200, loadingState: LOADED, depth: 0, children: [owner] });
+  const renderer = makeRenderer(new Map([[root, 200], [owner, 100], [nearRegion, 80], [farRegion, 80], [near, 0], [cold, 0]]));
+  renderer.loadAncestors = false;
+  renderer.lodFallbackTiles = new Set([owner]);
+  owner.__ltdsRegionalCoverPreparing = true;
+  runTraversal(root, renderer);
+  assert.equal(owner.traversal.visible, true);
+  assert.equal(near.traversal.visible, false);
+  assert.equal(renderer.queued.has(cold), false, 'preparation does not demand fine descendants');
+  delete owner.__ltdsRegionalCoverPreparing;
+  renderer.lodFallbackTiles.add(nearRegion);
+  renderer.lodFallbackTiles.add(farRegion);
+  nextFrame(renderer);
+  runTraversal(root, renderer);
+  assert.equal(near.traversal.visible, true);
+  assert.equal(farRegion.traversal.visible, true);
+  assert.equal(owner.traversal.visible, false);
+  assert.equal(nearRegion.traversal.visible, false);
+  assert.equal(cold.traversal.visible, false);
+});
+
 test('REPLACE traversal refines ready branches while a pending branch retains its own parent', () => {
   const detailA1 = makeTile({ name: 'detail-a-1', error: 20, loadingState: LOADED, depth: 2 });
   const detailA2 = makeTile({ name: 'detail-a-2', error: 20, loadingState: LOADED, depth: 2 });

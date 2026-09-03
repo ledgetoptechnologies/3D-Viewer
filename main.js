@@ -8,6 +8,9 @@ import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { installLodKtx2Support } from './lod-ktx2.mjs';
+import { createLodOwnerDiagnostics } from './lod-owner-diagnostics.mjs';
+import { createLodRegionalFallbackCoordinator } from './lod-regional-fallback.mjs';
+import { installLodAdmissionThrottle } from './lod-admission-throttle.mjs';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import {
   advanceLodMemoryPressure,
@@ -198,6 +201,9 @@ let lodLastInteractionSequence = 0;
 let lodTraceEntries = [];
 let lodRecentFrontier = new Map();
 let lodBranchBlockers = new Set();
+let lodOwnerDebug = null;
+let lodRegionalFallback = null;
+let lodAdmissionThrottle = null;
 const LOD_RECENT_FRONTIER_TTL_MS = 2_000;
 const LOD_RECENT_FRONTIER_MAX_TILES = 128;
 const LOD_RECENT_FRONTIER_MAX_BYTES = 384 * 1024 * 1024;
@@ -930,6 +936,11 @@ function loadTiles() {
   tilesRenderer = rendererInstance;
   lodKtx2Support = installLodKtx2Support(rendererInstance, renderer);
   const detailSlider = document.getElementById('lod-detail');
+  lodOwnerDebug?.dispose();
+  lodOwnerDebug = createLodOwnerDiagnostics(rendererInstance, {
+    camera,
+    retentionProvider: () => ({ overview: new Set(lodOverviewTiles), recent: lodRecentFrontier }),
+  });
   const currentDetail = Number.parseInt(detailSlider?.value, 10);
   if (detailSlider && (!Number.isFinite(currentDetail)
     || currentDetail < Number(detailSlider.min)
@@ -953,6 +964,10 @@ function loadTiles() {
     interactionStateProvider: () => controls?.getInteractionState?.() || null,
   });
   lodRuntimeProfileState.peripheralPressureScale = 1;
+  lodAdmissionThrottle?.dispose();
+  lodAdmissionThrottle = installLodAdmissionThrottle(rendererInstance);
+  lodRegionalFallback?.dispose();
+  lodRegionalFallback = createLodRegionalFallbackCoordinator(rendererInstance);
   if (restoreLodOverviewRetention) restoreLodOverviewRetention();
   restoreLodOverviewRetention = installLodOverviewRetention(
     rendererInstance,
@@ -1102,6 +1117,12 @@ function loadTiles() {
 // Free up to 3 GiB of decoded tile textures/geometry. Needed before a large
 // Draco decode: cache + decode together OOM'd the renderer (heap hit 2.7GB).
 function disposeTiles() {
+  lodRegionalFallback?.dispose();
+  lodRegionalFallback = null;
+  lodAdmissionThrottle?.dispose();
+  lodAdmissionThrottle = null;
+  lodOwnerDebug?.dispose();
+  lodOwnerDebug = null;
   for (const tile of lodBranchBlockers) tile.__ltdsBranchBlocker = false;
   lodBranchBlockers = new Set();
   lodBootstrapPhase = 'inactive';
@@ -3958,6 +3979,8 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
     }
     : null;
   const snapshot = lodDebugSnapshot(tilesRenderer, runtimeProfile, lodWarmupComplete);
+  snapshot.regionalFallback = lodRegionalFallback?.snapshot() ?? null;
+  snapshot.admission = lodAdmissionThrottle?.snapshot() ?? null;
   const signature = JSON.stringify(snapshot);
   if (!force && signature === lodDebugSignature) return snapshot;
   lodDebugSignature = signature;
@@ -4046,6 +4069,7 @@ function lodTileSceneReady(tile) {
 
 function retainedLodTiles(now = performance.now()) {
   const retained = [...lodOverviewTiles];
+  retained.push(...(lodRegionalFallback?.retainedTiles() || []));
   for (const [tile, expiresAt] of lodRecentFrontier) {
     if (expiresAt <= now || !tilesRenderer?.lruCache?.has?.(tile)) {
       lodRecentFrontier.delete(tile);
@@ -4058,9 +4082,37 @@ function retainedLodTiles(now = performance.now()) {
 
 function lodRecentFrontierMaxBytes() {
   const configured = Number(lodRuntimeProfileState?.memoryProfile?.recentFrontierBytes);
-  return Number.isFinite(configured) && configured >= 0
+  const transitionBudget = Number.isFinite(configured) && configured >= 0
     ? configured
     : LOD_RECENT_FRONTIER_MAX_BYTES;
+  // Regional proxy coverage and recent fine cuts share one allowance. Adding
+  // regional fallbacks must not silently increase permanently retained bytes.
+  return Math.max(0, transitionBudget - (lodRegionalFallback?.snapshot().residentBytes || 0));
+}
+
+function updateLodRegionalFallback(now = performance.now()) {
+  if (!tilesRenderer || !lodRegionalFallback) return;
+  const bases = new Set(lodOverviewTiles);
+  let candidate = tilesRenderer.__ltdsFocusOwnerState?.owner || null;
+  for (let depth = 0; candidate && !bases.has(candidate) && depth < 256; depth += 1) {
+    candidate = candidate.parent;
+  }
+  const inCurrentView = tile => tile?.traversal?.lastFrameVisited === tilesRenderer.frameCount
+    && tile.traversal.used === true && tile.traversal.inFrustum === true;
+  if (!bases.has(candidate) || !inCurrentView(candidate)) {
+    candidate = lodOverviewTiles.filter(inCurrentView).sort((a, b) => (
+      (Number(b.__ltdsFocusOverlap) || 0) - (Number(a.__ltdsFocusOverlap) || 0)
+      || (Number(a.traversal.distanceFromCamera) || 0) - (Number(b.traversal.distanceFromCamera) || 0)
+    ))[0] || null;
+  }
+  const configured = Number(lodRuntimeProfileState?.memoryProfile?.recentFrontierBytes);
+  lodRegionalFallback.update({
+    enabled: lodBootstrapPhase === 'complete' && lodRuntimeProfileState?.reduced !== true,
+    baseTiles: lodOverviewTiles,
+    candidateOwner: candidate,
+    maxBytes: Number.isFinite(configured) ? configured : LOD_RECENT_FRONTIER_MAX_BYTES,
+    now,
+  });
 }
 
 function lodShellRetentionMaxBytes() {
@@ -4093,6 +4145,7 @@ function updateLodRecentFrontier(now = performance.now()) {
       now,
       maxTiles: LOD_RECENT_FRONTIER_MAX_TILES,
       maxBytes: lodRecentFrontierMaxBytes(),
+      reservedTiles: new Set([...(fallback || []), ...(lodRegionalFallback?.retainedTiles() || [])]),
       getBytes: tile => Number(cache?.bytesMap?.get?.(tile)) || 0,
     },
   );
@@ -4356,6 +4409,7 @@ function startLoop() {
         tilesRenderer.update();
         if (!maybeAdvanceLodBootstrap()) maybeAdvanceLodWarmup();
         updateLodBranchBlockers();
+        updateLodRegionalFallback();
         updateLodRecentFrontier();
         updateLodQualityStatus(performance.now());
       }
@@ -4474,6 +4528,8 @@ window.__ltds = { scene: () => scene, camera: () => camera, controls: () => cont
   tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon,
   lodDiagnostics: () => emitLodDebugSnapshot('manual', true),
   lodTrace: () => lodTraceEntries.map(entry => structuredClone(entry)),
+  lodOwnerDiagnostics: (options) => lodOwnerDebug?.snapshot(options) ?? null,
+  lodTileEvents: () => lodOwnerDebug?.trace() ?? [],
   cameraWorldPositions: () => camWorldPos ? Array.from(camWorldPos) : [],
   // Georeferencing self-test: latlon -> UTM -> source px -> linear window -> UTM -> latlon roundtrip.
   // Expect maxRoundtripM to be tiny (sub-mm); large values mean the warp mapping drifted.
