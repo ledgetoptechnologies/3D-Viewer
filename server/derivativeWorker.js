@@ -13,6 +13,7 @@ const {
 } = require('./derivativeInputSnapshot');
 const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
+  CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
   obj2TilesArguments,
 } = require('../lod-converter-policy.cjs');
@@ -272,6 +273,27 @@ async function verifiedLodAsset(input, directory, fullMeshPath) {
   };
 }
 
+function successfulLodAuditEvidence(provenance) {
+  const audit = provenance?.audit;
+  if (provenance?.schemaVersion !== 4
+    || audit?.algorithm !== 'ltds-obj2tiles-surface-equivalence-v4'
+    || audit.policyRevision !== CONTROLLED_SURFACE_AUDIT_POLICY_V4.revision
+    || !['normal', 'gray-zone'].includes(audit.acceptance)
+    || !Number.isFinite(audit.areaRelativeDelta)
+    || !Number.isFinite(audit.numericalAgreement?.maximumRelativeDelta)
+    || !/^[a-f0-9]{64}$/i.test(String(audit.equivalenceSha256 || ''))) return null;
+  return {
+    policyRevision: audit.policyRevision,
+    acceptance: audit.acceptance,
+    metric: 'areaRelativeDelta',
+    observed: audit.areaRelativeDelta,
+    limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalAreaRelativeDeltaLimit,
+    grayZoneLimit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit,
+    numericalAgreement: audit.numericalAgreement?.maximumRelativeDelta,
+    equivalenceSha256: audit.equivalenceSha256,
+  };
+}
+
 function manifestTreeBytes(files) {
   return (files || []).reduce((sum, file) => sum + Math.max(0, Number(file.byteSize) || 0), 0);
 }
@@ -343,12 +365,14 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     }
     onPhase('registering');
     if (!register(existing)) throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
+    const auditEvidence = successfulLodAuditEvidence(existing.provenance);
     return {
       retainedBytes: manifestTreeBytes(existing.asset.manifestFiles),
       fileCount: existing.asset.manifestFiles.length,
       priorTreeBytes: previousBytes,
       replacedBytes: 0,
       resumed: true,
+      ...(auditEvidence ? { auditEvidence } : {}),
     };
   }
 
@@ -418,12 +442,14 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
       fs.renameSync(complete, output);
     });
     if (!registered) throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
+    const auditEvidence = successfulLodAuditEvidence(verified.provenance);
     return {
       retainedBytes: manifestTreeBytes(verified.asset.manifestFiles),
       fileCount: verified.asset.manifestFiles.length,
       priorTreeBytes: previousBytes,
       replacedBytes: 0,
       resumed: false,
+      ...(auditEvidence ? { auditEvidence } : {}),
     };
   } catch (error) {
     fs.rmSync(incomplete, { recursive: true, force: true });
@@ -498,7 +524,8 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
           if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance, { leaseToken: job.lease_token })) {
             throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });
           }
-          derivativeResult = { verified: true, reused: true };
+          const auditEvidence = successfulLodAuditEvidence(verified.provenance);
+          derivativeResult = { verified: true, reused: true, ...(auditEvidence ? { auditEvidence } : {}) };
         } catch (error) {
           if (error.code === 'lease_lost') throw error;
           if (error.exitCode !== 3) throw error;
@@ -606,6 +633,7 @@ module.exports = {
   isExplicitResourcePressure,
   obj2TilesDiagnostics,
   structuredCommandFailure,
+  successfulLodAuditEvidence,
   processOneDerivative,
   run,
   runObj2TilesWithResourceRetry,

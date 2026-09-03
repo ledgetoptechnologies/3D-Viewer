@@ -1,5 +1,49 @@
 # Viewer LOD and camera investigation handoff
 
+## 2026-09-02 remaining angle-cut and derivative-trust repair
+
+The final reproducible visual defect was not bandwidth and was no longer the
+ancestor-loading deadlock. At two nearly identical Church poses, a stable bad
+cut stayed coarse indefinitely while a tiny up-left move selected a sharp cut.
+The focus plugin was projecting `tile.engineData.boundingVolume.getSphere()`
+directly against the world camera. Those bounds already contain authored tile
+transforms but remain in `TilesRenderer.group` root space; the Viewer parents
+that group under a translated, pi-X-rotated frame. The mixed coordinate spaces
+therefore ranked a deterministic but wrong foreground owner depending on angle.
+
+The release candidate now:
+
+- transforms each visited bounding sphere through the current renderer-group
+  world matrix before camera projection;
+- uses a positive bound-derived translation scale when the camera lies inside
+  a broad owner, where renderer surface distance is zero;
+- holds a completed focal owner across 1/2/4/8-pixel motion and releases it
+  after a cumulative 3-degree turn or 5% translation;
+- propagates descendant focus through only the current/previous visited
+  ancestor paths, keeping traversal linear instead of scanning the full known
+  hierarchy per tile;
+- retains recent content as complete REPLACE cuts, so a partial warm cut cannot
+  flash its coarse parent; and
+- verifies A→B→A owner reacquisition in the real-browser fixture.
+
+The Viewer now starts at raw Detail 20 (`errorTarget = 5.481`) after root-first,
+complete direct-shell promotion. Detail 24 remains exactly 2. Auto/Balanced/High
+memory profiles use bounded decoded-tile caches, and persistent pressure may
+coarsen only the camera periphery; the locked foreground branch retains raw
+requested SSE.
+
+Two non-traversal failures were also separated from LOD behavior. A durable
+server verifier receipt lets current sessions trust an exact previously
+registered v3/v4 derivative without exposing its private OBJ proof or relying
+on a stale browser converter-hash allowlist. Rome Dam's 10.618-ppm candidate
+remains rejected by v3 but is eligible for the evidence-gated v4 recovery path;
+use **Retry recovery**, never delete/re-import or loosen the 12-ppm ceiling.
+
+Provider ingestion now requires the complete OBJ + referenced MTL/textures +
+companion GLB closure before registration or cleanup. Native ODM mesh tiles are
+not treated as a substitute for the Viewer's locally generated, audited KTX2
+tree. Operations services and APIs remain out of scope and unchanged.
+
 ## 2026-08-30 authenticated complete-coverage fix
 
 The authenticated church hierarchy proved the remaining blank-space problem was

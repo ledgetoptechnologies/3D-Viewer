@@ -124,10 +124,9 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(pointCloudShell, /viewer\.addEventListener\('update', \(\) => pointCloudCameraLayer\.updateView\(\)\)/);
   assert.match(cameraRuntime, /let drawToSource = \[\]/);
   assert.match(cameraRuntime, /const visibleSources = selectCameraMarkerRepresentatives\(candidates/);
-  for (const mesh of ['orangeMesh', 'whiteMesh', 'yellowMesh']) {
-    assert.match(cameraRuntime, new RegExp(`${mesh}\\.count = visibleSources\\.length`));
-  }
-  assert.match(cameraRuntime, /for \(const mesh of \[orangeMesh, whiteMesh, yellowMesh\]\)[\s\S]*if \(mesh\.instanceColor\) mesh\.instanceColor\.needsUpdate = true/);
+  assert.match(cameraRuntime, /const CAMERA_MARKER_COMPONENTS = Object\.freeze\(\['body', 'face', 'cue', 'tab'\]\)/);
+  assert.match(cameraRuntime, /for \(const mesh of componentMeshes\) \{\s*mesh\.count = visibleSources\.length/);
+  assert.match(cameraRuntime, /if \(mesh\.instanceColor\) mesh\.instanceColor\.needsUpdate = true/);
   assert.match(cameraRuntime, /new THREE\.MeshBasicMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide[^}]*depthTest: false[^}]*depthWrite: false/);
   assert.match(mainSource, /new THREE\.MeshStandardMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
   assert.match(cameraRuntime, /return drawToSource\[hit\.instanceId\]/);
@@ -146,7 +145,10 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(mainSource, /api\.setCameras\(cameraPayload\)/);
   assert.match(mainSource, /api\.setCameraVisibility\(state\.camerasVisible\)/);
   assert.match(mainSource, /message\.type === 'camera-open'[\s\S]*openPhoto\(message\.index\)/);
-  assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC\)/);
+  assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC \|\| mode === 'ortho'\)/);
+  assert.match(mainSource, /async function loadCameras\(\) \{\s*if \(state\.camerasLoaded \|\| state\.camerasLoading \|\| !SHOTS_URL \|\| !SHARE_PERMISSIONS\.cameras\) return;/);
+  assert.match(mainSource, /const visible = state\.activeMode === 'ortho' && state\.camerasVisible\s*&& state\.camerasLoaded && SHARE_PERMISSIONS\.cameras/);
+  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*state\.activeMode === 'ortho'[\s\S]*cameraFeatureMapPosition[\s\S]*selectCameraMarkerRepresentatives[\s\S]*openPhoto\(source\)/);
   assert.match(mainSource, /function localCameraRendererActive\(\)[\s\S]*state\.activeMode === 'model'[\s\S]*state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
   assert.match(mainSource, /function onPointerUp\(e\) \{\s*if \(!localCameraRendererActive\(\)\) return;/);
   assert.match(mainSource, /if \(state\.activeTool !== 'none'\) \{\s*if \(state\.activeMode !== 'model'\) return;/);

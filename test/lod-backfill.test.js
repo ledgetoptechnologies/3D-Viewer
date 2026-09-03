@@ -202,7 +202,9 @@ test('review and publish authority omit tiles whose v2 provenance is missing or 
   const c=fixture(t),item=readyModel(c,{assets:['glb']}),token='lod-publish-token-000000000000000000';
   c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
   c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{schemaVersion:2,sourceAsset:'model.glb',sourceSha256:'e'.repeat(64),tilesManifestSha256:'d'.repeat(64),geometry:'bounded-triangle-equivalence',textures:'byte-identical-material-equivalence',leafGeometricError:0,audit:{algorithm:'ltds-glb-leaf-equivalence-v2',artifactCount:2}}}),item.versionId);
-  assert.equal(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.tiles,null);
+  const rejectedViewer=toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId));
+  assert.equal(rejectedViewer.assets.tiles,null);
+  assert.equal(rejectedViewer.lodProvenanceVerified,false);
   assert.equal(c.processing.publishAttemptAtomic(item.attempt.id,['tiles'],{actorId:'ops:test'}),null);
   c.processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:publish',permissions:['viewer.processing.read','viewer.processing.publish'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
   const app=express();app.use(express.json());app.use(createProcessingApi({repository:c.repository,processing:c.processing,storage:c.storage}));
@@ -217,21 +219,25 @@ test('review and publish authority omit tiles whose v2 provenance is missing or 
   assert.equal((await publish.json()).code,'published_asset_unavailable');
 });
 
-test('verified tiles can only be published with their exact GLB proof source',t=>{
+test('hand-written v2 provenance remains publishable but has no server verification authority',t=>{
   const c=fixture(t),item=readyModel(c,{assets:['glb']});
   c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
   c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:{schemaVersion:2,sourceAsset:'model.glb',sourceSha256:'b'.repeat(64),tilesManifestSha256:'d'.repeat(64),geometry:'bounded-triangle-equivalence',textures:'byte-identical-material-equivalence',leafGeometricError:0,audit:{algorithm:'ltds-glb-leaf-equivalence-v2',artifactCount:2}}}),item.versionId);
-  assert.ok(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.tiles);
+  const verifiedViewer=toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId));
+  assert.ok(verifiedViewer.assets.tiles);
+  assert.equal(verifiedViewer.lodProvenanceVerified,false);
   assert.equal(c.processing.publishAttemptAtomic(item.attempt.id,['tiles'],{actorId:'ops:test'}),null);
   assert.ok(c.processing.publishAttemptAtomic(item.attempt.id,['glb','tiles'],{actorId:'ops:test'}));
 });
 
-test('controlled Obj2Tiles v3 provenance is publishable only with its pinned converter, exact OBJ input, and bounded surface evidence',t=>{
+test('hand-written controlled Obj2Tiles v3 provenance is publishable but has no server verification authority',t=>{
   const c=fixture(t),item=readyModel(c);
   c.processing.addModelAsset({versionId:item.versionId,kind:'tiles',rootKey:'models',relativePath:'legacy/tiles/tileset.json',format:'3dtiles',contentType:'application/json',byteSize:2,attemptId:item.attempt.id,sha256:'c'.repeat(64),manifestSha256:'d'.repeat(64),manifestFiles:[{relativePath:'tileset.json',byteSize:2,sha256:'c'.repeat(64)}]});
   const provenance={schemaVersion:3,sourceAsset:'model.glb',sourceSha256:'b'.repeat(64),tilesManifestSha256:'d'.repeat(64),geometry:'controlled-bidirectional-surface-equivalence',textures:'controlled-atlas-material-equivalence',leafGeometricError:0,converter:{name:'OpenDroneMap/Obj2Tiles',version:'1.6.2',commandSha256:'7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',inputAsset:'model.obj',inputSha256:'b'.repeat(64),binarySha256:'40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274'},audit:{algorithm:'ltds-obj2tiles-surface-equivalence-v3',sourceTriangleCount:100,leafTriangleCount:110,surfaceTolerance:0.001,maximumSurfaceDistance:0.0005,minimumNormalDot:-0.9,maximumReversedNormalFraction:0.001,equivalenceSha256:'a'.repeat(64),artifactCount:2}};
   c.db.prepare('UPDATE model_versions SET metadata_json=? WHERE id=?').run(JSON.stringify({lodProvenance:provenance}),item.versionId);
-  assert.ok(toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId)).assets.tiles);
+  const controlledViewer=toViewerConfig(c.repository.getModelVersion(item.model.id,item.versionId));
+  assert.ok(controlledViewer.assets.tiles);
+  assert.equal(controlledViewer.lodProvenanceVerified,false);
   assert.ok(c.processing.publishAttemptAtomic(item.attempt.id,['glb','tiles'],{actorId:'ops:test'}));
 
   const next=readyModel(c);

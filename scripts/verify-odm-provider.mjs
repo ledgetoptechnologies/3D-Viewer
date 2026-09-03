@@ -8,7 +8,7 @@ import { NodeOdmProvider } from '../server/nodeOdmProvider.js';
 import processingWorker from '../server/processingWorker.js';
 import safeZip from '../server/safeZip.js';
 
-const { discoverOutputs } = processingWorker;
+const { discoverOutputs, verifyProviderMeshClosure } = processingWorker;
 const { extractZipStream } = safeZip;
 
 const CONFIRMATION = 'I_UNDERSTAND_PROVIDER_TASKS_WILL_BE_CREATED_AND_REMOVED';
@@ -175,8 +175,12 @@ if (args.has('--destructive')) {
       { maxEntries:100000, maxBytes:MAX_OUTPUT_BYTES, signal:deadlineSignal(deadline, 'provider archive inspection') },
     );
     if (!outputBytes) throw new Error('all.zip was empty');
-    const outputKinds = [...new Set(discoverOutputs(extractedOutput).map((output) => output.kind))].sort();
-    const requiredKinds = ['glb', 'ept', 'nativeTiles'];
+    const discoveredOutputs = discoverOutputs(extractedOutput);
+    const meshInput = await verifyProviderMeshClosure(
+      extractedOutput, discoveredOutputs, { signal:deadlineSignal(deadline, 'provider mesh input inspection') },
+    );
+    const outputKinds = [...new Set(discoveredOutputs.map((output) => output.kind))].sort();
+    const requiredKinds = ['glb', 'obj', 'ept', 'nativeTiles'];
     if (requiredKinds.some((kind) => !outputKinds.includes(kind))) throw new Error('provider archive is missing one or more required native outputs');
 
     cancelMayExist = true;
@@ -203,6 +207,7 @@ if (args.has('--destructive')) {
       corpus:{fileCount:corpus.fileCount,totalBytes:corpus.totalBytes,manifestSha256:corpus.manifestSha256},
       taskStatus:finalStatus.status, downloadBytes:outputBytes, downloadSha256:outputHash.digest('hex'),
       archiveEntries:extraction.entries, expandedBytes:extraction.bytes, outputKinds,
+      meshInput:{fileCount:meshInput.files.length,totalBytes:meshInput.files.reduce((sum,file)=>sum+file.byteSize,0),manifestSha256:meshInput.manifestSha256},
       cancelStatus:cancelStatus.status,
     };
   } catch (error) { operationError = error; }

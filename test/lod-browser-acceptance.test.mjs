@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
+import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
@@ -89,13 +90,141 @@ function fixtureConfig() {
   };
 }
 
+function focusOwnerTilesetFixture() {
+  const translation = x => [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    x, 0, 0, 1,
+  ];
+  const box = halfWidth => [
+    0, 0, 0,
+    halfWidth, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+  ];
+  const branch = (name, x) => ({
+    transform: translation(x),
+    boundingVolume: { box: box(1) },
+    geometricError: 32,
+    refine: 'REPLACE',
+    content: { uri: `${name}/root.b3dm` },
+    children: [{
+      boundingVolume: { box: box(1) },
+      geometricError: 0,
+      refine: 'REPLACE',
+      content: { uri: `${name}/leaf.b3dm` },
+    }],
+  });
+  return {
+    asset: { version: '1.0' },
+    geometricError: 128,
+    root: {
+      boundingVolume: { box: box(6) },
+      geometricError: 128,
+      refine: 'REPLACE',
+      content: { uri: 'root.b3dm' },
+      children: [branch('a', -4), branch('b', 4)],
+    },
+  };
+}
+
+function foregroundAcceptanceFixture({
+  worldCenterY = 18,
+  boundaryGrid = false,
+  alternateBranches = false,
+} = {}) {
+  const scaleAndTranslate = (scale, x, y) => [
+    scale, 0, 0, 0,
+    0, scale, 0, 0,
+    0, 0, scale, 0,
+    x, y, 0, 1,
+  ];
+  const unitBox = [
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 0.2,
+  ];
+  const validPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const tileBytes = makeB3dm(makeGlb([
+    [[-1, -1, 0], [1, -1, 0], [-1, 1, 0]],
+    [[1, -1, 0], [1, 1, 0], [-1, 1, 0]],
+  ], validPng));
+  const assetBodies = {
+    'coarse/root.b3dm': tileBytes,
+  };
+  const xs = boundaryGrid ? [-48, -16, 16, 48] : [-36, -12, 12, 36];
+  const ys = [-24, -8, 8, 24];
+  const tileScale = boundaryGrid ? 8 : 10;
+  const positions = ys.flatMap(y => xs.map(x => [x, y]));
+  if (alternateBranches) positions.push([-88, -16], [-88, 16], [88, -16], [88, 16]);
+  const children = [];
+  let index = 0;
+  for (const [x, y] of positions) {
+    const suffix = String(index).padStart(2, '0');
+    const shellUri = `shell-${suffix}/root.b3dm`;
+    const leafUri = `LOD-0/Mesh-${suffix}.b3dm`;
+    assetBodies[shellUri] = tileBytes;
+    assetBodies[leafUri] = tileBytes;
+    children.push({
+      transform: scaleAndTranslate(tileScale, x, y),
+      boundingVolume: { box: unitBox },
+      geometricError: 0.75,
+      refine: 'REPLACE',
+      content: { uri: shellUri },
+      children: [{
+        boundingVolume: { box: unitBox },
+        geometricError: 0,
+        refine: 'REPLACE',
+        content: { uri: leafUri },
+      }],
+    });
+    index += 1;
+  }
+  return {
+    tilesetJson: {
+      asset: { version: '1.0' },
+      geometricError: 64,
+      root: {
+        boundingVolume: {
+          box: [
+            0, 0, 0,
+            alternateBranches ? 98 : boundaryGrid ? 58 : 50, 0, 0,
+            0, 36, 0,
+            0, 0, 2,
+          ],
+        },
+        geometricError: 64,
+        refine: 'REPLACE',
+        content: { uri: 'coarse/root.b3dm' },
+        children,
+      },
+    },
+    assetBodies,
+    configureConfig(config) {
+      // The generated hierarchy is centered at local (0, 0, 0). Pick the
+      // georeference offset that maps it to the test's documented world-space
+      // model center after the renderer and tilesParent axis corrections.
+      config.georef.bboxCenter = { x: 0, y: 0, z: -worldCenterY };
+    },
+  };
+}
+
 function contentType(file) {
   if (file.endsWith('.json')) return 'application/json; charset=utf-8';
   if (file.endsWith('.b3dm')) return 'application/octet-stream';
   return 'application/octet-stream';
 }
 
-async function startFixture(tileRoot, { assetDelayMs = () => 0, forceOptimizeDeps = false } = {}) {
+async function startFixture(tileRoot, {
+  assetDelayMs = () => 0,
+  forceOptimizeDeps = false,
+  tilesetJson = null,
+  assetAliases = {},
+  assetBodies = {},
+  configureConfig = null,
+} = {}) {
   const vite = await createViteServer({
     root,
     appType: 'spa',
@@ -105,6 +234,7 @@ async function startFixture(tileRoot, { assetDelayMs = () => 0, forceOptimizeDep
   });
   const assetPrefix = `/assets/${fixtureId}/derivatives/`;
   const config = fixtureConfig();
+  configureConfig?.(config);
   const requests = [];
   config.assets.ortho = '/fixtures/orthophoto.tif';
   const server = createServer((request, reply) => {
@@ -157,7 +287,29 @@ async function startFixture(tileRoot, { assetDelayMs = () => 0, forceOptimizeDep
     }
     if (url.pathname.startsWith(assetPrefix)) {
       const relative = decodeURIComponent(url.pathname.slice(assetPrefix.length));
-      const file = path.resolve(tileRoot, relative);
+      if (relative === 'tileset.json' && tilesetJson) {
+        const body = Buffer.from(JSON.stringify(tilesetJson));
+        reply.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Length': body.length,
+        });
+        reply.end(body);
+        return;
+      }
+      if (Object.hasOwn(assetBodies, relative)) {
+        const body = Buffer.from(assetBodies[relative]);
+        const sendAsset = () => {
+          if (reply.destroyed) return;
+          reply.writeHead(200, { 'Content-Type': contentType(relative), 'Content-Length': body.length });
+          reply.end(body);
+        };
+        const delayMs = Math.max(0, Number(assetDelayMs(relative)) || 0);
+        if (delayMs > 0) setTimeout(sendAsset, delayMs);
+        else sendAsset();
+        return;
+      }
+      const sourceRelative = assetAliases[relative] || relative;
+      const file = path.resolve(tileRoot, sourceRelative);
       if (!file.startsWith(`${tileRoot}${path.sep}`) || !existsSync(file) || !statSync(file).isFile()) {
         reply.writeHead(404);
         reply.end('not found');
@@ -460,6 +612,38 @@ function snapshotExpression() {
   })()`;
 }
 
+function focusOwnerExpression() {
+  return `(() => {
+    const tiles = window.__ltds.tiles();
+    const owner = tiles?.__ltdsFocusOwnerState?.owner;
+    if (!owner) return null;
+    const path = [];
+    let cursor = owner;
+    while (cursor && cursor !== tiles.root && cursor.parent) {
+      path.unshift((cursor.parent.children || []).indexOf(cursor));
+      cursor = cursor.parent;
+    }
+    const uri = owner.content?.uri || owner.content?.url || null;
+    let overlap = Number(owner.__ltdsFocusOverlap) || 0;
+    const visit = tile => {
+      if (tile?.__ltdsFallbackOwner === owner) {
+        overlap = Math.max(overlap, Number(tile.__ltdsFocusOverlap) || 0);
+      }
+      (tile?.children || []).forEach(visit);
+    };
+    visit(tiles.root);
+    return {
+      key: (path.length ? path.join('.') : 'root') + '|' + (uri || ''),
+      uri,
+      path,
+      locked: owner.__ltdsFocalOwnerLocked === true,
+      overlap,
+      ownerView: tiles.__ltdsFocusOwnerState?.ownerView || null,
+      currentView: tiles.__ltdsFocusOwnerState?.currentView || null,
+    };
+  })()`;
+}
+
 function foregroundCoverageExpression() {
   return `(() => {
     const tiles = window.__ltds.tiles();
@@ -535,6 +719,147 @@ function assertHonestReplacement(snapshot, label) {
   }
 }
 
+test('browser camera-centered focal owner reacquires A across A -> B -> A views', { timeout: 180_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for focal-owner browser acceptance.');
+    return;
+  }
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    const tileRoot = path.join(root, 'test', 'fixtures', 'ktx2-tiles');
+    const fixture = await startFixture(tileRoot, {
+      tilesetJson: focusOwnerTilesetFixture(),
+      assetAliases: {
+        'a/root.b3dm': 'root.b3dm',
+        'a/leaf.b3dm': 'LOD-0/Mesh.b3dm',
+        'b/root.b3dm': 'root.b3dm',
+        'b/leaf.b3dm': 'LOD-0/Mesh.b3dm',
+      },
+    });
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-focus-owner-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort, browser);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Network.enable');
+    await client.command('Log.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', {
+      width: 1200, height: 800, deviceScaleFactor: 1, mobile: false,
+      screenWidth: 1200, screenHeight: 800,
+    });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await waitFor(client, `window.__ltds?.tiles?.()?.root?.children?.length === 2`,
+      'two-owner fixture hierarchy did not load');
+    await client.evaluate(`(() => {
+      const slider = document.querySelector('#lod-detail');
+      slider.value = '24';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+
+    const views = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const Vector3 = window.__ltds.camera().position.constructor;
+      tiles.group.updateWorldMatrix(true, false);
+      return tiles.root.children.map(tile => {
+        const volume = tile.engineData?.boundingVolume;
+        const obb = volume?.obb || volume?.regionObb;
+        let center = null;
+        if (obb?.box && obb?.transform) center = obb.box.getCenter(new Vector3()).applyMatrix4(obb.transform);
+        else if (volume?.sphere?.center) center = volume.sphere.center.clone();
+        if (!center) return null;
+        center.applyMatrix4(tiles.group.matrixWorld);
+        return {
+          lookAt: center.toArray(),
+          position: center.clone().add(new Vector3(0, 2.5, 3.5)).toArray(),
+        };
+      });
+    })()`);
+    assert.equal(views.length, 2);
+    assert.ok(views.every(Boolean), JSON.stringify(views));
+    assert.ok(Math.hypot(...views[0].lookAt.map((value, index) => value - views[1].lookAt[index])) > 4,
+      `fixture owners are not spatially distinct: ${JSON.stringify(views)}`);
+
+    const observeView = async (index, label) => {
+      await setView(client, views[index].position, views[index].lookAt);
+      await waitFor(client, `(() => {
+        const tiles=window.__ltds.tiles();
+        const leaf=tiles.root?.children?.[${index}]?.children?.[0];
+        if (!leaf?.engineData?.scene || !tiles.group.children.includes(leaf.engineData.scene)) return false;
+        let rendered=false;
+        leaf.engineData.scene.traverse(object=>{
+          if (!object.isMesh || !object.material) return;
+          for (const material of (Array.isArray(object.material)?object.material:[object.material])) {
+            if (material.visible !== false) rendered=true;
+          }
+        });
+        return rendered;
+      })()`, `${label} did not attach its zero-error replacement leaf`, 60_000);
+      await waitFor(client, `(() => {
+        const owner=(${focusOwnerExpression()});
+        return Boolean(owner?.locked && owner.overlap > 0 && owner.path?.[0] === ${index});
+      })()`, `${label} did not acquire its camera-centered focal owner`, 30_000);
+      const owner = await client.evaluate(focusOwnerExpression());
+      const branch = await client.evaluate(`(() => {
+        const tiles=window.__ltds.tiles();
+        const owner=tiles.root.children[${index}],leaf=owner.children[0];
+        const rendered=tile=>{
+          if (!tile?.engineData?.scene || !tiles.group.children.includes(tile.engineData.scene)) return false;
+          let visible=false;
+          tile.engineData.scene.traverse(object=>{
+            if (!object.isMesh || !object.material) return;
+            for (const material of (Array.isArray(object.material)?object.material:[object.material])) {
+              if (material.visible !== false) visible=true;
+            }
+          });
+          return visible;
+        };
+        return { ownerRendered:rendered(owner), leafRendered:rendered(leaf) };
+      })()`);
+      assert.equal(branch.leafRendered, true, `${label} leaf is not rendered`);
+      assert.equal(branch.ownerRendered, false, `${label} violated strict REPLACE rendering`);
+      return owner;
+    };
+
+    const ownerA = await observeView(0, 'camera view A');
+    const ownerB = await observeView(1, 'camera view B');
+    assert.notEqual(ownerB.key, ownerA.key, 'camera view B retained A as focal owner');
+    const returnedA = await observeView(0, 'returned camera view A');
+    assert.equal(returnedA.key, ownerA.key, 'returning to A did not reacquire A');
+
+    const failures = client.events.filter(event => event.method === 'Network.responseReceived'
+      && event.params.response.status >= 400);
+    const errors = client.events.filter(event => event.method === 'Runtime.exceptionThrown'
+      && !event.params.exceptionDetails?.url?.includes('/@vite/client'));
+    assert.deepEqual(failures, []);
+    assert.deepEqual(errors, []);
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise(resolve => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise(resolve => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock();
+    await removeBrowserProfile(profile);
+  }
+});
+
 test('browser LOD stream hides the coarse root after complete top-down foreground coverage', { timeout: 580_000 }, async (t) => {
   const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
   const executable = browserPath();
@@ -546,7 +871,10 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client, origin;
   try {
-    ({ server, vite, origin } = await startFixture(path.resolve(tileRoot)));
+    ({ server, vite, origin } = await startFixture(
+      path.resolve(tileRoot),
+      foregroundAcceptanceFixture({ alternateBranches: true }),
+    ));
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
@@ -746,7 +1074,8 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(visibleInitialMaterials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.root.materials.every((item) => item.depthWrite === true && item.polygonOffset === false && item.renderOrder === 0));
     assert.ok(initial.attachedMaterials.every((item) => item.hasMap && item.imageReady), 'attached full-detail B3DM textures were not decoded and bound');
-    assert.deepEqual(initial.cache, { minBytesSize: 0.4 * GiB, maxBytesSize: 1.75 * GiB, minSize: 8, maxSize: 1024, unloadPercent: 0.20 });
+    assert.equal(initial.profile.memoryProfile.policyKey, 'roomy');
+    assert.deepEqual(initial.cache, { minBytesSize: 0.5 * GiB, maxBytesSize: 3.75 * GiB, minSize: 8, maxSize: 1024, unloadPercent: 0.20 });
 
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     await waitFor(client, 'window.__ltdsCams === 3', 'camera positions did not load');
@@ -766,14 +1095,14 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       return { totalInstances: meshes.reduce((sum, item) => sum + item.count, 0), meshes, drawn: window.__ltdsCamDrawn, drawToSource: window.__ltdsCamDrawToSource };
     })()`);
     assert.ok(visibleCameras.drawn > 0 && visibleCameras.drawn <= 3, JSON.stringify(visibleCameras));
-    assert.equal(visibleCameras.totalInstances, visibleCameras.drawn * 3, 'each selected camera renders orange, white, and yellow frustum sections');
-    assert.deepEqual(visibleCameras.meshes.map(item => item.count).sort((a, b) => a - b), [visibleCameras.drawn, visibleCameras.drawn, visibleCameras.drawn]);
+    assert.equal(visibleCameras.totalInstances, visibleCameras.drawn * 4, 'each selected camera renders body, face, amber cue, and orange image-up tab');
+    assert.deepEqual(visibleCameras.meshes.map(item => item.count).sort((a, b) => a - b), [visibleCameras.drawn, visibleCameras.drawn, visibleCameras.drawn, visibleCameras.drawn]);
     assert.equal(visibleCameras.drawToSource.length, visibleCameras.drawn);
-    assert.deepEqual(visibleCameras.meshes.map(item => item.color).sort((a, b) => a - b), [0xEE5007, 0xFFFFFF, 0xFFA200].sort((a, b) => a - b));
+    assert.deepEqual(visibleCameras.meshes.map(item => item.color).sort((a, b) => a - b), [0x6F7782, 0xD8DEE6, 0xF8CB2E, 0xEE5007].sort((a, b) => a - b));
     const cameraClick = await client.evaluate(`(() => {
       const meshes = [];
       window.__ltds.scene().traverse((object) => { if (object.isInstancedMesh && object.count === window.__ltdsCamDrawn && object.parent?.parent?.visible) meshes.push(object); });
-      if (meshes.length !== 3) return null;
+      if (meshes.length !== 4) return null;
       const M = meshes[0].matrixWorld.constructor, V = window.__ltds.camera().position.constructor;
       const instance = new M();
       meshes[0].getMatrixAt(0, instance);
@@ -799,19 +1128,52 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(cameraClick && !cameraClick.missed && Number.isFinite(cameraClick.x) && Number.isFinite(cameraClick.y), `no raycastable camera marker pixel: ${JSON.stringify(cameraClick)}`);
     await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
     await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 0, clickCount: 1 });
-    await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'camera marker did not open its photo modal');
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'camera marker did not open its docked photo preview');
     const photoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
     assert.match(photoUrl, new RegExp(`/camera-photos/photo-${visibleCameras.drawToSource[0]}\\.jpg$`));
     assert.doesNotMatch(photoUrl, /storage|mnt|dataset/i);
     await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1`, 'capability-scoped camera image did not decode');
+    const dockedPhoto = await client.evaluate(`(() => {
+      const modal=document.querySelector('#photo-modal'),frame=document.querySelector('#photo-frame'),wrap=document.querySelector('#photo-imgwrap');
+      const fr=frame.getBoundingClientRect(),wr=wrap.getBoundingClientRect();
+      return {presentation:modal.dataset.presentation,modalPointer:getComputedStyle(modal).pointerEvents,framePointer:getComputedStyle(frame).pointerEvents,right:innerWidth-fr.right,top:fr.top,aspect:wr.width/wr.height};
+    })()`);
+    assert.equal(dockedPhoto.presentation, 'docked');
+    assert.equal(dockedPhoto.modalPointer, 'none', 'docked host must not intercept model navigation outside the photo');
+    assert.equal(dockedPhoto.framePointer, 'auto');
+    assert.ok(dockedPhoto.right >= 0 && dockedPhoto.right <= 20 && dockedPhoto.top > 50, JSON.stringify(dockedPhoto));
+    assert.ok(Math.abs(dockedPhoto.aspect - 1) < 0.02, 'natural square photo aspect was not preserved');
+    await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo click did not open the expanded inspector');
+    const expandedCenter = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseWheel', x: expandedCenter.x, y: expandedCenter.y, deltaX: 0, deltaY: -420 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: expandedCenter.x, y: expandedCenter.y, button: 'left', buttons: 1, clickCount: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'left', buttons: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1 });
+    const clampedPhoto = await client.evaluate(`(() => { const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect(); return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom},transform:getComputedStyle(document.querySelector('#photo-img')).transform}; })()`);
+    assert.notEqual(clampedPhoto.transform, 'none', 'expanded wheel did not zoom the camera photo');
+    assert.ok(clampedPhoto.image.l <= clampedPhoto.wrap.l + 2 && clampedPhoto.image.t <= clampedPhoto.wrap.t + 2
+      && clampedPhoto.image.r >= clampedPhoto.wrap.r - 2 && clampedPhoto.image.b >= clampedPhoto.wrap.b - 2,
+    `expanded pan exposed empty frame background: ${JSON.stringify(clampedPhoto)}`);
     await client.evaluate(`document.querySelector('#photo-close').click()`);
     await client.evaluate(`(() => { window.__ltds.state.activeMode='cloud'; window.__ltds.state.cloudMode='direct'; return true; })()`);
     await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
     await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 0, clickCount: 1 });
-    await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'direct LAZ/PLY camera marker did not open its photo modal');
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'direct LAZ/PLY camera marker did not open its docked photo preview');
     const directPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
     assert.equal(directPhotoUrl, photoUrl, 'Model and direct Point Cloud markers did not use the same scoped photo URL');
     await client.evaluate(`(() => { document.querySelector('#photo-close').click(); window.__ltds.state.activeMode='model'; window.__ltds.state.cloudMode='none'; return true; })()`);
+    await client.evaluate(`document.querySelector('#tab-ortho').click()`);
+    await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
+    const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
+    assert.ok(mapCamera.drawn > 0 && mapCamera.drawn <= 1200, JSON.stringify(mapCamera));
+    assert.equal(mapCamera.icons, mapCamera.drawn);
+    await client.evaluate(`document.querySelector('.map-camera-marker').click()`);
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'orthophoto camera did not open the shared photo preview');
+    const mapPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
+    assert.match(mapPhotoUrl, new RegExp(`/camera-photos/photo-${mapCamera.sources[0]}\\.jpg$`));
+    await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-model').click()`);
+    await waitFor(client, `document.querySelector('#tab-model').classList.contains('active')`, 'model did not resume after orthophoto camera verification');
     await client.evaluate(`document.querySelector('#btn-reset-float').click()`);
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
 
@@ -845,7 +1207,20 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       };
     })()`);
     assert.ok(transferred.beforeRootError < 1e-5, `point-cloud view was not transferred before LOD startup: ${JSON.stringify(transferred)}`);
-    await waitFor(client, 'Boolean(window.__ltds.tiles()?.root && window.__ltds.tiles().group.children.length)', 'reloaded LOD view did not attach a tile after point-cloud transfer');
+    try {
+      await waitFor(client, 'Boolean(window.__ltds.tiles()?.root && window.__ltds.tiles().group.children.length)', 'reloaded LOD view did not attach a tile after point-cloud transfer', 15_000);
+    } catch (error) {
+      const transferDiagnostics = await client.evaluate(`(() => ({
+        activeMode:window.__ltds.state?.activeMode,meshSource:window.__ltds.state?.meshSource,
+        tabModel:document.querySelector('#tab-model')?.classList.contains('active'),
+        error:getComputedStyle(document.querySelector('#error-panel')).display,
+        errorText:document.querySelector('#error-panel')?.textContent,
+        profile:window.__ltds.state?.lodRuntimeProfile,
+        root:Boolean(window.__ltds.tiles()?.root),children:window.__ltds.tiles()?.group?.children?.length ?? null,
+        queues:window.__ltds.tiles()?{download:window.__ltds.tiles().downloadQueue?.running,parse:window.__ltds.tiles().parseQueue?.running,process:window.__ltds.tiles().processNodeQueue?.running}:null,
+      }))()`);
+      throw new Error(`${error.message}; diagnostics=${JSON.stringify(transferDiagnostics)}`);
+    }
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); const root=t?.root; return Boolean(root?.engineData?.scene && t.group.children.includes(root.engineData.scene) && document.querySelector('#loading-overlay')?.classList.contains('hidden')); })()`, 'reloaded LOD view exposed the canvas before its root fallback attached', 90_000);
     const transferAfterRoot = await client.evaluate(`(() => {
       const expected = ${JSON.stringify([35, 75, 95])};
@@ -902,7 +1277,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       parseJobs: window.__ltds.tiles().parseQueue.maxJobs,
     })`);
     assert.equal(defaultDetail.slider, '24');
-    assert.equal(defaultDetail.downloadJobs, 6);
+    assert.equal(defaultDetail.downloadJobs, 8);
     assert.equal(defaultDetail.parseJobs, 2);
     assert.ok(Math.abs(defaultDetail.errorTarget - 2 * Math.max(1, defaultDetail.errorScale / 2)) < 0.01,
       JSON.stringify(defaultDetail));
@@ -934,9 +1309,9 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await waitFor(client, `(() => { const r=window.__ltds.tiles().root; let n=0; const f=(tile)=>{(tile?.children||[]).forEach(f);if(!(tile?.children||[]).length&&Number(tile?.geometricError)===0&&tile.engineData?.scene&&window.__ltds.tiles().group.children.includes(tile.engineData.scene))n++;};f(r);return n===0; })()`, 'far view kept LOD-0 leaves');
     const far = await client.evaluate(snapshotExpression());
     assert.equal(far.visibleLeaves.length, 0);
-    assert.equal(far.root.rendered, true);
     assert.ok(far.attachedTiles.length > 0, JSON.stringify(far));
-    assert.ok(far.attachedTiles.some((tile) => tile.error > 0), JSON.stringify(far.attachedTiles));
+    assert.ok(far.renderedTiles.some((tile) => tile.error > 0),
+      `far view rendered no positive-error coarse/fallback tile: ${JSON.stringify(far)}`);
 
     const closeSet = new Set(close.visibleLeaves);
     const candidates = await client.evaluate(`(() => {
@@ -962,6 +1337,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       return rows;
     })()`);
     assert.ok(candidates.length > 0, 'tile hierarchy exposed no alternate full-detail view');
+
     let panned = null;
     const panSamples = [];
     for (const candidate of candidates) {
@@ -989,20 +1365,24 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assertHonestReplacement(returned, 'returned close view');
 
     const failures = client.events.filter((event) => event.method === 'Network.responseReceived' && event.params.response.status >= 400);
-    // Middleware-mode Vite has no HMR WebSocket endpoint. Its injected client
-    // emits a URL-attributed error for that absent test-only socket; every
-    // application or tile error still fails this assertion.
-    const isViteHmrEvent = (event) => {
+    // Middleware-mode Vite has no HMR WebSocket endpoint, and the sandboxed
+    // browser cannot fetch the production site's decorative branding image.
+    // Ignore only those exact harness-only URLs; every application or tile
+    // error still fails this assertion.
+    const isHarnessOnlyEvent = (event) => {
       const url = event.method === 'Log.entryAdded'
         ? event.params.entry.url
         : event.method === 'Runtime.exceptionThrown'
           ? event.params.exceptionDetails.url
           : null;
-      return typeof url === 'string' && url.includes('/@vite/client');
+      return typeof url === 'string' && (
+        url.includes('/@vite/client')
+        || url === 'https://ledgetopdroneservices.com/images/DroneLogo01.webp'
+      );
     };
     const errors = client.events.filter((event) => (
       event.method === 'Runtime.exceptionThrown' || (event.method === 'Log.entryAdded' && event.params.entry.level === 'error')
-    ) && !isViteHmrEvent(event));
+    ) && !isHarnessOnlyEvent(event));
     assert.deepEqual(failures, []);
     assert.deepEqual(errors, []);
   } finally {
@@ -1033,7 +1413,10 @@ test('browser close view refines at the default Detail and small motion retains 
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client;
   try {
-    const fixture = await startFixture(path.resolve(tileRoot));
+    const fixture = await startFixture(
+      path.resolve(tileRoot),
+      foregroundAcceptanceFixture({ boundaryGrid: true }),
+    );
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-lod-retention-browser-'));
     const devToolsPort = await reserveDevToolsPort();
@@ -1054,8 +1437,11 @@ test('browser close view refines at the default Detail and small motion retains 
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
 
-    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20`,
-      'default Detail did not enter direct Detail 20 refinement', 180_000);
+    await waitFor(client, `(() => {
+      const profile=window.__ltds.state.lodRuntimeProfile;
+      return profile?.activeDetail===20 && profile?.bootstrapPhase==='complete'
+        && Math.abs(window.__ltds.tiles().errorTarget-5.481)<0.01;
+    })()`, 'default Detail did not finish bounded prefetch and enter raw Detail 20 refinement', 180_000);
     const defaultState = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1098,6 +1484,7 @@ test('browser close view refines at the default Detail and small motion retains 
     assert.ok(Object.keys(baseline.scenes).length > 0, JSON.stringify(baseline));
 
     let boundary = null;
+    const motionSamples = [];
     for (const offset of [1, 2, 4, 8]) {
       await setView(client,
         [basePosition[0] + offset, basePosition[1], basePosition[2]],
@@ -1108,7 +1495,10 @@ test('browser close view refines at the default Detail and small motion retains 
         window.__ltds.controls()._applyOrbit(new V(${baseTarget.join(',')}), 0.018, 0.006);
         return true;
       })()`);
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      // Sample inside the documented two-second recent-frontier window. The
+      // purpose of this motion gate is to prove a newly detached scene remains
+      // decoded for an immediate return, not to wait until retention expires.
+      await new Promise((resolve) => setTimeout(resolve, 100));
       const sample = await client.evaluate(`(() => {
         const t=window.__ltds.tiles(); const baseline=window.__ltdsRetentionBaseline||{};
         const rows=[]; const visit=(tile)=>{(tile?.children||[]).forEach(visit);const uri=tile?.content?.uri||tile?.content?.url||'';
@@ -1117,12 +1507,13 @@ test('browser close view refines at the default Detail and small motion retains 
             attached:Boolean(tile?.engineData?.scene&&t.group.children.includes(tile.engineData.scene))});};
         visit(t.root); return {rows,cachedBytes:t.lruCache.cachedBytes,phase:window.__ltds.lodDiagnostics().phase};
       })()`);
-      if (sample.rows.some((row) => row.scene && row.cacheUsed === false && row.attached === false)) {
+      motionSamples.push({ offset, sample });
+      if (sample.rows.some((row) => row.scene && row.cacheUsed === true && row.attached === false)) {
         boundary = { offset, sample };
         break;
       }
     }
-    assert.ok(boundary, 'an 8-meter pan plus one-degree orbit did not make a decoded baseline tile LRU-unused and detached');
+    assert.ok(boundary, `an 8-meter pan plus one-degree orbit did not detach a decoded baseline tile inside bounded recent-frontier retention: ${JSON.stringify(motionSamples)}`);
     assert.notEqual(boundary.sample.phase, 'memory-limited', JSON.stringify(boundary));
 
     await setView(client, basePosition, baseTarget);
@@ -1195,10 +1586,12 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
+      'camera-layer fixture did not finish bounded LOD prefetch');
     const lodDiagnostics = await client.evaluate(`window.__ltds.lodDiagnostics()`);
     assert.ok(['overview', 'coverage', 'warmup', 'requested-detail', 'reduced-memory', 'memory-limited'].includes(lodDiagnostics.phase), JSON.stringify(lodDiagnostics));
     assert.ok(Number.isInteger(lodDiagnostics.pendingRequiredLeaves) && lodDiagnostics.pendingRequiredLeaves >= 0, JSON.stringify(lodDiagnostics));
-    assert.ok([768, 1792, 3072].includes(lodDiagnostics.cache.maxMiB), JSON.stringify(lodDiagnostics));
+    assert.ok([768, 1792, 3072, 3840].includes(lodDiagnostics.cache.maxMiB), JSON.stringify(lodDiagnostics));
     assert.doesNotMatch(JSON.stringify(lodDiagnostics), /https?:|token|secret|storage|mnt/i);
     await client.evaluate(`document.querySelector('#layer-cameras').click()`);
     try {
@@ -1233,10 +1626,10 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     })()`);
     assert.equal(state.source, 3);
     assert.ok(state.drawn >= 0 && state.drawn <= 3, JSON.stringify(state));
-    assert.deepEqual(state.meshes.map((mesh) => mesh.count), [state.drawn, state.drawn, state.drawn]);
-    assert.deepEqual(state.meshes.map((mesh) => mesh.color), [0xEE5007, 0xFFFFFF, 0xFFA200]);
-    assert.deepEqual(state.meshes.map((mesh) => mesh.opacity), [0.7, 0.7, 0.7]);
-    assert.deepEqual(state.meshes.map((mesh) => mesh.renderOrder), [0, 1, 2]);
+    assert.deepEqual(state.meshes.map((mesh) => mesh.count), [state.drawn, state.drawn, state.drawn, state.drawn]);
+    assert.deepEqual(state.meshes.map((mesh) => mesh.color), [0x6F7782, 0xD8DEE6, 0xF8CB2E, 0xEE5007]);
+    assert.deepEqual(state.meshes.map((mesh) => mesh.opacity), [0.82, 0.82, 0.82, 0.82]);
+    assert.deepEqual(state.meshes.map((mesh) => mesh.renderOrder), [0, 1, 2, 3]);
 
     const readScale = async (source = null) => client.evaluate(`(() => {
       const source = ${source === null ? 'window.__ltdsCamDrawToSource[0]' : Number(source)};
@@ -1306,10 +1699,42 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     assert.ok(extremeClick.nearestDistance <= 12, JSON.stringify(extremeClick));
     await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: extremeClick.x, y: extremeClick.y, button: 'left', buttons: 1, clickCount: 1 });
     await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: extremeClick.x, y: extremeClick.y, button: 'left', buttons: 0, clickCount: 1 });
-    await waitFor(client, `document.querySelector('#photo-modal').style.display === 'flex'`, 'screen-space fallback did not pick a sub-pixel distant camera');
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'screen-space fallback did not pick a sub-pixel distant camera');
     const extremePhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
     assert.match(extremePhotoUrl, new RegExp(`/camera-photos/photo-${extremeClick.expectedSource}\\.jpg$`));
-    await client.evaluate(`document.querySelector('#photo-close').click()`);
+    await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1`, 'camera photo did not decode in the docked preview');
+    const dockedPhoto = await client.evaluate(`(() => {
+      const modal=document.querySelector('#photo-modal'),frame=document.querySelector('#photo-frame'),wrap=document.querySelector('#photo-imgwrap');
+      const fr=frame.getBoundingClientRect(),wr=wrap.getBoundingClientRect();
+      return {presentation:modal.dataset.presentation,modalPointer:getComputedStyle(modal).pointerEvents,framePointer:getComputedStyle(frame).pointerEvents,right:innerWidth-fr.right,top:fr.top,aspect:wr.width/wr.height};
+    })()`);
+    assert.equal(dockedPhoto.modalPointer, 'none', 'docked host must not intercept viewer navigation outside the photo');
+    assert.equal(dockedPhoto.framePointer, 'auto');
+    assert.ok(dockedPhoto.right >= 0 && dockedPhoto.right <= 20 && dockedPhoto.top > 50, JSON.stringify(dockedPhoto));
+    assert.ok(Math.abs(dockedPhoto.aspect - 1) < 0.02, 'docked preview did not preserve the photo natural aspect ratio');
+    await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo click did not open the expanded inspector');
+    const expandedCenter = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseWheel', x: expandedCenter.x, y: expandedCenter.y, deltaX: 0, deltaY: -420 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: expandedCenter.x, y: expandedCenter.y, button: 'left', buttons: 1, clickCount: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'left', buttons: 1 });
+    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1 });
+    const clampedPhoto = await client.evaluate(`(() => { const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect(); return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom},transform:getComputedStyle(document.querySelector('#photo-img')).transform}; })()`);
+    assert.notEqual(clampedPhoto.transform, 'none', 'expanded wheel did not zoom the camera photo');
+    assert.ok(clampedPhoto.image.l <= clampedPhoto.wrap.l + 2 && clampedPhoto.image.t <= clampedPhoto.wrap.t + 2
+      && clampedPhoto.image.r >= clampedPhoto.wrap.r - 2 && clampedPhoto.image.b >= clampedPhoto.wrap.b - 2,
+    `expanded pan exposed empty frame background: ${JSON.stringify(clampedPhoto)}`);
+    await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-ortho').click()`);
+    await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
+    const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
+    assert.ok(mapCamera.drawn > 0 && mapCamera.drawn <= 1200, JSON.stringify(mapCamera));
+    assert.equal(mapCamera.icons, mapCamera.drawn);
+    await client.evaluate(`document.querySelector('.map-camera-marker').click()`);
+    await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'orthophoto camera did not open the shared photo preview');
+    const mapPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
+    assert.match(mapPhotoUrl, new RegExp(`/camera-photos/photo-${mapCamera.sources[0]}\\.jpg$`));
+    await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-model').click()`);
+    await waitFor(client, `document.querySelector('#tab-model').classList.contains('active')`, 'model did not resume after orthophoto camera verification');
 
 
   } finally {
@@ -1340,7 +1765,10 @@ test('browser hides the coarse root when every visible branch meets the active D
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client;
   try {
-    const fixture = await startFixture(path.resolve(tileRoot));
+    const fixture = await startFixture(
+      path.resolve(tileRoot),
+      foregroundAcceptanceFixture({ worldCenterY: 0 }),
+    );
     ({ server, vite } = fixture);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-foreground-browser-'));
     const devToolsPort = await reserveDevToolsPort();
@@ -1358,6 +1786,8 @@ test('browser hides the coarse root when every visible branch meets the active D
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
+      '16-leaf fixture did not finish its initial bounded prefetch', 180_000);
     const cacheOverrideGiB = Number(process.env.LTDS_LOD_TEST_CACHE_GIB);
     if (Number.isFinite(cacheOverrideGiB) && cacheOverrideGiB > 0) {
       await client.evaluate(`window.__ltds.tiles().lruCache.maxBytesSize = ${cacheOverrideGiB} * 2 ** 30`);
@@ -1374,8 +1804,8 @@ test('browser hides the coarse root when every visible branch meets the active D
         errorScale:window.__ltds.state.lodRuntimeProfile?.errorScale};
     })()`);
     assert.equal(stagedRequest.requested, 24);
-    assert.equal(stagedRequest.active, 13);
-    assert.ok(Math.abs(stagedRequest.errorTarget - 32 * Math.max(1, stagedRequest.errorScale / 2)) < 0.01,
+    assert.equal(stagedRequest.active, 24);
+    assert.ok(Math.abs(stagedRequest.errorTarget - 2 * Math.max(1, stagedRequest.errorScale / 2)) < 0.01,
       JSON.stringify(stagedRequest));
     try {
       await waitFor(client, `(() => {
@@ -1440,7 +1870,7 @@ test('browser hides the coarse root when every visible branch meets the active D
       visitStrict(root);
       for (const child of (root.children || [])) visitCoverage(child);
       const rootMaterials = [];
-      root.engineData.scene.traverse((object) => {
+      root.engineData.scene?.traverse((object) => {
         if (!object.isMesh || !object.material) return;
         for (const material of (Array.isArray(object.material) ? object.material : [object.material])) {
           rootMaterials.push({ visible: material.visible !== false, transparent: material.transparent, opacity: material.opacity,
@@ -1499,7 +1929,8 @@ test('browser hides the coarse root when every visible branch meets the active D
     })()`);
     assert.deepEqual(farRetention.rows.filter((row) => row.before !== row.after), [], `far view discarded the recent decoded frontier below the hard cap: ${JSON.stringify(farRetention)}`);
     assert.ok(farRetention.rows.every((row) => row.attached === false), JSON.stringify(farRetention));
-    assert.ok(farRetention.rows.every((row) => row.cacheUsed === false), JSON.stringify(farRetention));
+    assert.ok(farRetention.rows.every((row) => row.cacheUsed === true),
+      `bounded recent-frontier retention did not protect the detached decoded cut: ${JSON.stringify(farRetention)}`);
     await setView(client, sustainedAllLeaves ? [4.964815557187116, 124.12038892967789, 0] : [0, 44, 52], sustainedAllLeaves ? [0, 0, 0] : [0, 18, 0]);
     await waitFor(client, `(() => {
       const t=window.__ltds.tiles(); const expected=new Set(${JSON.stringify(closeUris)});
@@ -2239,8 +2670,9 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
 
     const ownerDeadline = Date.now() + 15_000;
     let focalOwner = null;
+    let lastFocalOwner = null;
     while (Date.now() < ownerDeadline && !focalOwner) {
-      focalOwner = await client.evaluate(`(() => {
+      const candidate = await client.evaluate(`(() => {
         const tiles = window.__ltds.tiles();
         const owner = tiles.root.children.find(tile => tile.__ltdsFocalOwnerLocked === true);
         if (!owner) return null;
@@ -2253,9 +2685,16 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
           childTargets: owner.children.map(tile => tile.__ltdsPeripheralErrorTarget),
         };
       })()`);
+      lastFocalOwner = candidate || lastFocalOwner;
+      focalOwner = candidate?.effectiveTarget === 5.481
+        && candidate.blockers >= 1
+        && candidate.childTargets.filter(Number.isFinite).every(value => value === 5.481)
+        ? candidate
+        : null;
       if (!focalOwner) await new Promise(resolve => setTimeout(resolve, 25));
     }
-    assert.ok(focalOwner, 'no focal REPLACE owner was locked while its cut was cold');
+    assert.ok(focalOwner,
+      `no focal REPLACE owner reached raw Detail 20 while its cut was cold: ${JSON.stringify(lastFocalOwner)}`);
     assert.equal(focalOwner.uri, `shell-${String(centerShellIndex).padStart(2, '0')}.glb`, JSON.stringify(focalOwner));
     assert.equal(focalOwner.overlap, focalOwner.maximumOverlap,
       `the locked owner was not the most camera-centered fallback: ${JSON.stringify(focalOwner)}`);
@@ -2349,6 +2788,13 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
           .map(tile => tile.content?.uri || tile.content?.url || ''),
         selectedFine: leaves.filter(tile => tile.traversal?.used === true && tile.traversal?.inFrustum === true).length,
         centerRows,
+        ownerRows: tiles.root.children.map(owner => ({
+          uri: owner.content?.uri || owner.content?.url || '',
+          overlap: owner.__ltdsFocusOverlap,
+          locked: owner.__ltdsFocalOwnerLocked === true,
+          conservative: owner.__ltdsConservativeRawSse === true,
+          childOverlaps: owner.children.map(tile => Number(tile.__ltdsFocusOverlap) || 0),
+        })),
         peripheralTargets: tiles.root.children.map(tile => tile.__ltdsPeripheralErrorTarget).filter(Number.isFinite),
         admissionTrace: [...(window.__weightedAdmissionTrace || [])],
         cacheBreakdown: {
@@ -2371,6 +2817,7 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
     };
 
     let pressureSample = null;
+    let lastPressureSample = null;
     let peakCacheMiB = 0;
     let deadlockStartedAt = null;
     let maximumBlockedMs = 0;
@@ -2389,6 +2836,7 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
     const pressureDeadline = Date.now() + 45_000;
     while (Date.now() < pressureDeadline) {
       const sample = await sampleRuntime();
+      lastPressureSample = sample;
       assertStrictCoverage(sample, 'broad-view admission');
       updateDeadlockWindow(sample);
       // The pressure scalar and the renderer's per-owner targets are applied
@@ -2402,7 +2850,18 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
       }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    assert.ok(pressureSample, 'production-weighted broad view never activated adaptive peripheral pressure');
+    assert.ok(pressureSample, `production-weighted broad view never activated adaptive peripheral pressure: ${JSON.stringify({
+      diagnostics: lastPressureSample?.diagnostics,
+      attachedFine: lastPressureSample?.attachedFine,
+      cachedFine: lastPressureSample?.cachedFine,
+      selectedFine: lastPressureSample?.selectedFine,
+      peripheralTargets: lastPressureSample?.peripheralTargets,
+      ownerRows: lastPressureSample?.ownerRows,
+      cacheBreakdown: lastPressureSample?.cacheBreakdown,
+      admissionTrace: lastPressureSample?.admissionTrace,
+      peakCacheMiB,
+      maximumBlockedMs,
+    })}`);
     assert.equal(pressureSample.diagnostics.rawErrorTarget, 5.481);
     assert.equal(pressureSample.diagnostics.errorTarget, 5.481,
       'memory pressure mutated the global requested SSE');

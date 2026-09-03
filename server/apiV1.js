@@ -7,7 +7,7 @@ const { config } = require('./config');
 const { requireService } = require('./serviceAuth');
 const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
-const { verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
+const { receiptVerifiedLodProvenance, verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
 
 const VIEWER_COOKIE = 'ltds_viewer';
 
@@ -22,12 +22,23 @@ function encodedAssetUrl(modelId, asset, assetToken = null) {
 
 function toViewerConfig(model, { assetToken = null, assetFilter = null, sessionMode = 'published' } = {}) {
   if (!model || !model.activeVersion) return null;
-  const eligibleAssets = viewerEligibleAssets(model.activeVersion.metadata, model.activeVersion.assets);
+  const verificationAssets = model.activeVersion.lodVerificationAssets || model.activeVersion.assets;
+  const verifiedAssets = viewerEligibleAssets(model.activeVersion.metadata, verificationAssets);
+  const verifiedAssetIds = new Set(verifiedAssets.map((asset) => asset.id));
+  const eligibleAssets = verificationAssets === model.activeVersion.assets
+    ? verifiedAssets
+    : model.activeVersion.assets.filter((asset) => verifiedAssetIds.has(asset.id));
   // Validate the complete private asset set before review-session filtering.
   // Schema-v3 provenance binds the private OBJ proof asset, which must never
   // be exposed in the browser configuration but is still required to prove the
   // already-eligible tiles are authentic.
-  const lodProvenance = verifiedLodProvenance(model.activeVersion.metadata, eligibleAssets);
+  const lodProvenance = verifiedLodProvenance(model.activeVersion.metadata, verifiedAssets);
+  const serverVerifiedLodProvenance = receiptVerifiedLodProvenance(
+    model.activeVersion.metadata,
+    verifiedAssets,
+    model.activeVersion.lodVerifierReceipt,
+    model.activeVersion.id,
+  );
   const visibleAssets = typeof assetFilter === 'function'
     ? eligibleAssets.filter(assetFilter)
     : eligibleAssets;
@@ -46,6 +57,13 @@ function toViewerConfig(model, { assetToken = null, assetFilter = null, sessionM
     georef: model.activeVersion.georef || {},
     pointCount: model.activeVersion.pointCount ?? null,
     lodProvenance,
+    // The browser must not maintain a second, stale allowlist of converter
+    // command or binary hashes. This marker is emitted only after the server
+    // has validated the provenance against the exact registered GLB, OBJ and
+    // tiles-manifest digests above. Legacy catalog responses do not receive
+    // this authority marker and therefore retain the browser's fail-closed
+    // validation path.
+    lodProvenanceVerified: Boolean(serverVerifiedLodProvenance),
     assets: {
       glb: encodedAssetUrl(model.id, byKind.glb, assetToken),
       tiles: encodedAssetUrl(model.id, byKind.tiles, assetToken),

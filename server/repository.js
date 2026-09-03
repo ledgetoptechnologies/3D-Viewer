@@ -41,8 +41,53 @@ function sourceAuthorizationValues(value) {
   return [value.type, value.id, value.version];
 }
 
-function asModel(row, version, assets = []) {
+function asModelAsset(asset) {
+  return {
+    id: asset.id,
+    kind: asset.kind,
+    rootKey: asset.root_key,
+    relativePath: asset.relative_path,
+    format: asset.format,
+    contentType: asset.content_type,
+    byteSize: asset.byte_size,
+    sha256: asset.sha256,
+    manifestSha256: asset.manifest_sha256,
+    storageMode: asset.storage_mode,
+    published: Boolean(asset.published),
+  };
+}
+
+function asModel(row, version, assets = [], lodVerifierReceipt = null, lodVerificationAssets = assets) {
   if (!row) return null;
+  const activeVersion = version ? {
+    id: version.id,
+    providerVersionId: version.provider_version_id,
+    sourceLocator: parseJson(version.source_locator_json, {}),
+    status: version.status,
+    metadata: parseJson(version.metadata_json, {}),
+    georef: parseJson(version.georef_json, {}),
+    pointCount: version.point_count,
+    createdAt: version.created_at,
+    updatedAt: version.updated_at,
+    assets: assets.map(asModelAsset),
+  } : null;
+  if (activeVersion) {
+    // The durable receipt is server-only authority. Keep it accessible to the
+    // Viewer serializer without allowing generic repository responses to emit
+    // audit-event identifiers or receipt contents.
+    Object.defineProperty(activeVersion, 'lodVerifierReceipt', {
+      value: lodVerifierReceipt,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+    Object.defineProperty(activeVersion, 'lodVerificationAssets', {
+      value: lodVerificationAssets === assets ? activeVersion.assets : lodVerificationAssets.map(asModelAsset),
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
   return {
     id: row.id,
     provider: row.provider,
@@ -54,30 +99,7 @@ function asModel(row, version, assets = []) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     unregisteredAt: row.unregistered_at,
-    activeVersion: version ? {
-      id: version.id,
-      providerVersionId: version.provider_version_id,
-      sourceLocator: parseJson(version.source_locator_json, {}),
-      status: version.status,
-      metadata: parseJson(version.metadata_json, {}),
-      georef: parseJson(version.georef_json, {}),
-      pointCount: version.point_count,
-      createdAt: version.created_at,
-      updatedAt: version.updated_at,
-      assets: assets.map((asset) => ({
-        id: asset.id,
-        kind: asset.kind,
-        rootKey: asset.root_key,
-        relativePath: asset.relative_path,
-        format: asset.format,
-        contentType: asset.content_type,
-        byteSize: asset.byte_size,
-        sha256: asset.sha256,
-        manifestSha256: asset.manifest_sha256,
-        storageMode: asset.storage_mode,
-        published: Boolean(asset.published),
-      })),
-    } : null,
+    activeVersion,
   };
 }
 
@@ -109,6 +131,38 @@ class ViewerRepository {
     ).run(key, String(value), now());
   }
 
+  lodVerifierReceipt(versionId) {
+    const row = this.database.prepare(`SELECT e.id,e.entity_id,e.details_json,e.created_at
+      FROM audit_events e
+      JOIN derivative_jobs j ON j.id=e.entity_id
+      JOIN processing_attempts a ON a.id=j.attempt_id
+      WHERE e.action='derivative.tiles_verified'
+        AND e.entity_type='derivative_job'
+        AND e.actor_type='system'
+        AND e.actor_id IS NULL
+        AND j.derivative_type IN ('lod_audit','mesh_tiles')
+        AND j.status='complete'
+        AND j.completed_at IS NOT NULL
+        AND json_valid(j.result_json)
+        AND json_extract(j.result_json,'$.verified')=1
+        AND a.result_model_version_id=?
+        AND json_valid(e.details_json)
+        AND json_extract(e.details_json,'$.versionId')=?
+        AND json_extract(e.details_json,'$.attemptId')=j.attempt_id
+        AND (json_type(e.details_json,'$.receiptVersion') IS NULL
+          OR json_extract(e.details_json,'$.leaseToken')=j.lease_token)
+        AND e.created_at>=j.created_at
+        AND e.created_at<=j.completed_at
+      ORDER BY e.created_at DESC,e.id DESC LIMIT 1`).get(versionId, versionId);
+    if (!row) return null;
+    return {
+      eventId: row.id,
+      derivativeJobId: row.entity_id,
+      details: parseJson(row.details_json, null),
+      verifiedAt: row.created_at,
+    };
+  }
+
   rateLimited(bucket,max,windowMs,{blockMs=windowMs,at=Date.now()}={}){
     const key=crypto.createHash('sha256').update(String(bucket).normalize('NFKC')).digest('hex'),timestamp=new Date(at).toISOString();
     return this.transaction(()=>{const row=this.database.prepare('SELECT * FROM abuse_windows WHERE bucket_key=?').get(key);if(row?.blocked_until&&Date.parse(row.blocked_until)>at)return true;const reset=!row||Date.parse(row.window_started_at)+windowMs<=at;if(reset){this.database.prepare(`INSERT INTO abuse_windows(bucket_key,window_started_at,hit_count,blocked_until,updated_at) VALUES (?,?,1,NULL,?) ON CONFLICT(bucket_key) DO UPDATE SET window_started_at=excluded.window_started_at,hit_count=1,blocked_until=NULL,updated_at=excluded.updated_at`).run(key,timestamp,timestamp);return false;}const hits=Number(row.hit_count)+1,blocked=hits>max?new Date(at+blockMs).toISOString():null;this.database.prepare('UPDATE abuse_windows SET hit_count=?,blocked_until=COALESCE(?,blocked_until),updated_at=? WHERE bucket_key=?').run(hits,blocked,timestamp,key);return Boolean(blocked);});
@@ -131,10 +185,11 @@ class ViewerRepository {
     const version = row.active_version_id
       ? this.database.prepare('SELECT * FROM model_versions WHERE id=? AND model_id=?').get(row.active_version_id, row.id)
       : null;
-    const assets = version
-      ? this.database.prepare('SELECT * FROM model_assets WHERE version_id=? AND published=1 ORDER BY kind').all(version.id)
+    const lodVerificationAssets = version
+      ? this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(version.id)
       : [];
-    return asModel(row, version, assets);
+    const assets = lodVerificationAssets.filter((asset) => Boolean(asset.published));
+    return asModel(row, version, assets, version ? this.lodVerifierReceipt(version.id) : null, lodVerificationAssets);
   }
 
   listModels({ includeUnregistered = false } = {}) {
@@ -149,7 +204,7 @@ class ViewerRepository {
     const version = this.database.prepare('SELECT * FROM model_versions WHERE id=? AND model_id=?').get(versionId, modelId);
     if (!model || !version) return null;
     const assets = this.database.prepare('SELECT * FROM model_assets WHERE version_id=? ORDER BY kind').all(versionId);
-    return asModel(model, version, assets);
+    return asModel(model, version, assets, this.lodVerifierReceipt(version.id));
   }
 
   listMissingOdmGeorefCandidates(limit = 5, reconciliationRevision = 1) {

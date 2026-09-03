@@ -60,4 +60,41 @@ export function normalizeCameraFeatureCollection(document, options = {}) {
   return normalized;
 }
 
+export function cameraFeatureMapPosition(feature, { projectedToLatLon } = {}) {
+  const coordinates = feature?.geometry?.type === 'Point'
+    ? finiteTriplet(feature.geometry.coordinates)
+    : null;
+  if (coordinates && Math.abs(coordinates[0]) <= 180 && Math.abs(coordinates[1]) <= 90) {
+    return [coordinates[1], coordinates[0]];
+  }
+  const translation = finiteTriplet(feature?.properties?.translation);
+  if (!translation || typeof projectedToLatLon !== 'function') return null;
+  const converted = projectedToLatLon(translation[0], translation[1]);
+  const latitude = Array.isArray(converted) ? Number(converted[0]) : Number(converted?.lat);
+  const longitude = Array.isArray(converted) ? Number(converted[1]) : Number(converted?.lon ?? converted?.lng);
+  return Number.isFinite(latitude) && Number.isFinite(longitude)
+    && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
+    ? [latitude, longitude]
+    : null;
+}
+
+export function cameraFeatureImageUpBearing(feature) {
+  const rotation = finiteTriplet(feature?.properties?.rotation);
+  if (!rotation) return 0;
+  const angle = Math.hypot(rotation[0], rotation[1], rotation[2]);
+  if (angle <= 1e-12) return 0;
+  // The 3D viewers apply the inverse WebODM angle-axis vector. Apply that
+  // same rotation to local +Y, whose marker tab represents image-up.
+  const kx = -rotation[0] / angle;
+  const ky = -rotation[1] / angle;
+  const kz = -rotation[2] / angle;
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const east = -kz * sine + kx * ky * (1 - cosine);
+  const north = cosine + ky * ky * (1 - cosine);
+  if (Math.hypot(east, north) <= 1e-9) return 0;
+  const degrees = Math.atan2(east, north) * 180 / Math.PI;
+  return (degrees + 360) % 360;
+}
+
 export { MAX_PHOTO_KEY_BYTES };

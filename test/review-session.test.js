@@ -133,6 +133,7 @@ test('admin review sessions expose only an exact review-ready derived version an
   assert.ok(session.model.assets.tiles, 'verified tiles survive the private OBJ review filter');
   assert.equal(session.model.assets.obj, null, 'the private OBJ proof input is not exposed to review sessions');
   assert.equal(session.model.lodProvenance?.schemaVersion, 3, 'review configuration retains verified LOD provenance after hiding its private OBJ proof asset');
+  assert.equal(session.model.lodProvenanceVerified, false, 'hand-written summary metadata does not create server verification authority');
   assert.equal(session.model.assets.pointCloud, null, 'raw point-cloud processing input is not review-shareable');
   const assetResponse = await fetch(`${base}${session.model.assets.glb}`, { headers: { range: 'bytes=0-6' } });
   assert.equal(assetResponse.status, 206);

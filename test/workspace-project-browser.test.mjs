@@ -79,6 +79,7 @@ const fixtures = {
     attemptCount: 1, errorCode: 'invalid_archive', errorMessage: 'The archive could not be imported.', createdAt: '2026-08-19T11:00:00.000Z', updatedAt: '2026-08-19T11:02:00.000Z',
   }, {
     id: 'operation-recovery-failed', type: 'lod_recovery', subject: 'failed recovery', projectId: 'project-johnson',
+    sourceOutputId: 'output-johnson',
     status: 'failed', phase: 'failed', progress: .6, source: { kind: 'existing_model', browserTransferRequired: false, transferComplete: true },
     attemptCount: 1, errorCode: 'lod_recovery_source_changed', errorMessage: 'Recovery source validation failed; the existing model remains safe.', createdAt: '2026-08-19T10:00:00.000Z', updatedAt: '2026-08-19T10:02:00.000Z',
   }],
@@ -283,6 +284,15 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       logsTruncated: false, logRetentionDays: 30,
     } });
   }
+  if (pathname === '/api/v1/attempts/attempt-global-older/diagnostics') return json({ diagnostics: {
+    attempt: { id: 'attempt-global-older', attemptNumber: 1, status: 'ready_for_review' },
+    events: [{ eventType: 'processing.ready_for_review', status: 'succeeded', message: 'Verified derivative registered.', createdAt: '2026-08-16T12:05:00.000Z' }],
+    derivativeJobs: [{
+      id: 'derivative-rome-v4', type: 'mesh_tiles', status: 'complete', summary: 'Verified derivative registered and ready for the Viewer.',
+      auditEvidence: { policyRevision: 'ltds-controlled-surface-policy-v4', acceptance: 'gray-zone', metric: 'areaRelativeDelta', observed: 0.000010618457348535776, limit: 0.00001, grayZoneLimit: 0.000012, numericalAgreement: 0, equivalenceSha256: 'e'.repeat(64) },
+    }],
+    processingJobs: [], operations: [], logs: [], logsTruncated: false, logRetentionDays: 30,
+  } });
   return json({ error: `Unhandled fixture route: ${pathname}` }, 404);
 }
 
@@ -480,9 +490,6 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-failed/retry');
     await waitFor(client, "document.querySelector('[data-operation-id=\"operation-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed import retry did not return to queued`);
-    await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-recovery-failed"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-recovery-failed/retry');
-    await waitFor(client, "document.querySelector('[data-operation-id=\"operation-recovery-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed recovery retry did not return to queued`);
     await waitFor(client, "document.querySelector('[data-action=\"retry-derivative\"][data-id=\"derivative-failed\"]')", `${viewport.name}: failed optional derivative did not expose manual retry`);
     await client.evaluate(`document.querySelector('[data-action="retry-derivative"][data-id="derivative-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/derivatives/derivative-failed/retry');
@@ -518,7 +525,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Create recovery version', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts did not expose immutable LOD recovery`);
+      ['View', 'Retry recovery', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts did not route the existing failed recovery in place`);
     await client.evaluate(`document.querySelector('[data-task-disclosure="history"] summary').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"load-more-attempts\"]') !== null", `${viewport.name}: attempt history did not expose its pagination cursor`);
     assert.equal(await client.evaluate(`document.querySelector('.attempt-history')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -529,18 +536,17 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     const runDiagnosticText = await client.evaluate(`document.querySelector('[data-attempt-id="attempt-johnson-old"] .attempt-diagnostic').textContent`);
     for (const expected of ['obj2tiles_exit_nonzero', 'obj2tiles generate', 'diag-browser-41', '[REDACTED PATH]']) assert.equal(runDiagnosticText.toLowerCase().includes(expected.toLowerCase()), true, `${viewport.name}: missing run diagnostic ${expected}`);
     await waitForRequest(runtime, requestStart, 'GET', '/api/v1/attempts/attempt-johnson-old/diagnostics');
-    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="create-lod-recovery"][data-id="output-johnson"]').click()`);
-    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts');
-    const recoveryRequest = runtime.requests.findLast(item => item.method === 'POST' && item.path === '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts');
-    assert.deepEqual(recoveryRequest.body, {}, `${viewport.name}: recovery request body was not exactly empty JSON`);
-    assert.match(recoveryRequest.idempotencyKey||'', /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, `${viewport.name}: recovery request did not carry a fresh UUID idempotency key`);
-    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('existing model version remains safe and unchanged')", `${viewport.name}: recovery confirmation did not preserve the old-version safety message`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="retry-operation"][data-id="operation-recovery-failed"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-recovery-failed/retry');
+    assert.equal(runtime.requests.some(item => item.method === 'POST' && item.path === '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts'), false,
+      `${viewport.name}: failed recovery quick action created a second immutable version instead of retrying in place`);
+    await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('existing model remains safe')", `${viewport.name}: recovery retry confirmation did not preserve the old-version safety message`);
     await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
-    await waitFor(client, "document.querySelector('[data-operation-id=\"operation-recovery-new\"]')?.textContent.includes('Validating recovery source')", `${viewport.name}: queued recovery did not become visible as background activity`);
-    const recoveryActivity = await client.evaluate(`document.querySelector('[data-operation-id="operation-recovery-new"]').textContent`);
-    for (const expected of ['3D tile recovery version', 'Existing model', 'Validating recovery source']) assert.ok(recoveryActivity.includes(expected), `${viewport.name}: missing recovery activity ${expected}`);
+    await waitFor(client, "document.querySelector('[data-operation-id=\"operation-recovery-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed recovery retry did not return to queued`);
+    const recoveryActivity = await client.evaluate(`document.querySelector('[data-operation-id="operation-recovery-failed"]').textContent`);
+    for (const expected of ['3D tile recovery version', 'Existing model', 'queued']) assert.ok(recoveryActivity.includes(expected), `${viewport.name}: missing recovery activity ${expected}`);
     await client.evaluate(`history.back()`);
-    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"create-lod-recovery\"]') !== null", `${viewport.name}: returning from recovery activity did not restore the new run context`);
+    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"derivative-status\"]')?.textContent.includes('Recovery queued')", `${viewport.name}: returning from recovery activity did not restore the queued recovery context`);
     assert.equal(await client.evaluate(`document.querySelectorAll('button button').length`), 0, `${viewport.name}: task shortcuts were nested inside a button`);
     assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].every(button=>button.getBoundingClientRect().height>=44)`), true, `${viewport.name}: task shortcuts have sub-44px targets`);
     await client.evaluate(`history.back()`);
@@ -678,6 +684,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(runtime.requests.filter(item => item.path === '/api/v1/attempts/attempt-global-flaky/diagnostics').length, flakyRequestsBeforeRetry + 1, `${viewport.name}: diagnostic Retry did not issue a fresh request`);
     await client.evaluate(`document.querySelector('[data-action="load-more-diagnostic-runs"]').click()`);
     await waitFor(client, "document.querySelector('[data-diagnostic-attempt-id=\"attempt-global-older\"]') !== null", `${viewport.name}: older global diagnostic runs did not append`);
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-global-older"] [data-action="open-global-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-global-older')?.textContent.includes('Audit acceptance: gray-zone')", `${viewport.name}: successful v4 gray-zone audit acceptance was not exposed`);
+    const acceptedAuditText = await client.evaluate(`document.querySelector('#global-attempt-diagnostic-attempt-global-older').textContent`);
+    for (const expected of ['areaRelativeDelta', '0.000010618457348535776', 'ltds-controlled-surface-policy-v4']) assert.ok(acceptedAuditText.includes(expected), `${viewport.name}: successful v4 diagnostics omitted ${expected}`);
     await client.evaluate(`document.querySelector('[data-action="retry-storage-mutation"][data-id="mutation-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/mutations/mutation-failed/retry');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: lifecycle retry did not settle`);
@@ -699,7 +709,6 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       ['PATCH', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['DELETE', '/api/v1/gcp-correspondences/gcp-mark-1'],
       ['POST', '/api/v1/processing/outputs/output-johnson/view-sessions'],
-      ['POST', '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts'],
       ['POST', '/api/v1/operations/operation-recovery-failed/retry'],
       ['DELETE', '/api/v1/processing/outputs/output-johnson'],
       ['POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles'],

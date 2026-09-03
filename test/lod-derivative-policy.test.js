@@ -1,7 +1,7 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),test=require('node:test'),{spawnSync}=require('node:child_process');
 const{lodDerivativeSpecs,verifiedLodProvenance}=require('../server/lodDerivativePolicy');
-const{CONTROLLED_CONVERTER,SERIAL_RETRY_CONVERTER,obj2TilesArguments}=require('../lod-converter-policy.cjs');
+const{CONTROLLED_CONVERTER,CONTROLLED_CONVERTER_COMMAND_SHA256,SERIAL_RETRY_CONVERTER,SERIAL_RETRY_CONVERTER_COMMAND_SHA256,obj2TilesArguments}=require('../lod-converter-policy.cjs');
 test('native tiles are audited at their storage root',()=>{assert.deepEqual(lodDerivativeSpecs([{kind:'tiles',rootKey:'datasets',relativePath:'import/3d_tiles/model/tileset.json'},{kind:'glb',rootKey:'datasets',relativePath:'import/model.glb'},{kind:'obj',rootKey:'datasets',relativePath:'import/model.obj'}],{meshDerivativesEnabled:true}),[{type:'lod_audit',request:{tilesRootKey:'datasets',tilesRelativePath:'import/3d_tiles/model',optional:true}}]);});
 test('native tile audits remain active while automatic generation is disabled',()=>{assert.deepEqual(lodDerivativeSpecs([{kind:'tiles',rootKey:'datasets',relativePath:'import/3d_tiles/model/tileset.json'},{kind:'glb',rootKey:'datasets',relativePath:'import/model.glb'},{kind:'obj',rootKey:'datasets',relativePath:'import/model.obj'}],{meshDerivativesEnabled:false}),[{type:'lod_audit',request:{tilesRootKey:'datasets',tilesRelativePath:'import/3d_tiles/model',optional:true}}]);});
 test('missing tiles queue Obj2Tiles only with OBJ plus an auditable GLB fallback',()=>{assert.deepEqual(lodDerivativeSpecs([{kind:'obj',relativePath:'model.obj'},{kind:'glb',relativePath:'model.glb'}],{meshDerivativesEnabled:true}),[{type:'mesh_tiles',request:{optional:true}}]);assert.deepEqual(lodDerivativeSpecs([{kind:'obj',relativePath:'model.obj'}],{meshDerivativesEnabled:true}),[]);assert.deepEqual(lodDerivativeSpecs([{kind:'glb',relativePath:'model.glb'}],{meshDerivativesEnabled:true}),[]);assert.deepEqual(lodDerivativeSpecs([{kind:'obj',relativePath:'model.obj'},{kind:'glb',relativePath:'model.glb'}],{meshDerivativesEnabled:false}),[]);});
@@ -17,6 +17,10 @@ test('server derivative eligibility accepts verified controlled v4 summaries whi
   const v4={...base,schemaVersion:4,audit:{...base.audit,algorithm:'ltds-obj2tiles-surface-equivalence-v4',policyRevision:'ltds-controlled-surface-policy-v4'}};
   assert.equal(verifiedLodProvenance({lodProvenance:v3},assets),v3);
   assert.equal(verifiedLodProvenance({lodProvenance:v4},assets),v4);
+  for(const commandSha256 of[CONTROLLED_CONVERTER_COMMAND_SHA256,SERIAL_RETRY_CONVERTER_COMMAND_SHA256]){
+    const current={...v4,converter:{...v4.converter,commandSha256}};
+    assert.equal(verifiedLodProvenance({lodProvenance:current},assets),current,'the server authority accepts every current controlled execution contract');
+  }
   assert.equal(verifiedLodProvenance({lodProvenance:{...v4,audit:{...v4.audit,policyRevision:'other'}}},assets),null);
 });
 test('runtime builds the pinned Obj2Tiles fork and invokes its bounded texture-atlas contracts',()=>{

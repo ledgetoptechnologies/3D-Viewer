@@ -1,18 +1,19 @@
 export const CAMERA_MARKER_COLORS = Object.freeze({
-  orange: 0xEE5007,
-  white: 0xFFFFFF,
-  yellow: 0xFFA200,
+  body: 0x6F7782,
+  face: 0xD8DEE6,
+  cue: 0xF8CB2E,
+  tab: 0xEE5007,
 });
 
 export const CAMERA_MARKER_OPACITY = Object.freeze({
-  normal: 0.7,
+  normal: 0.82,
   hover: 1,
 });
 
 export const DEFAULT_CAMERA_MARKER_SCALE = 0.5;
 
 export const CAMERA_MARKER_STYLE = Object.freeze({
-  width: Math.hypot(1.64, 1.12, 0.76),
+  width: Math.hypot(1.48, 1.13, 0.41),
   maxPixels: 10,
   cellPixels: 18,
   maxVisible: 4000,
@@ -113,24 +114,39 @@ function pushFrustumShell(target, {
   }
 }
 
+function pushDisc(target, centerX, centerY, z, radius, segments = 20) {
+  for (let index = 0; index < segments; index += 1) {
+    const angle0 = index / segments * Math.PI * 2;
+    const angle1 = (index + 1) / segments * Math.PI * 2;
+    pushTriangle(target,
+      [centerX, centerY, z],
+      [centerX + Math.cos(angle0) * radius, centerY + Math.sin(angle0) * radius, z],
+      [centerX + Math.cos(angle1) * radius, centerY + Math.sin(angle1) * radius, z]);
+  }
+}
+
 export function cameraMarkerGeometryData() {
-  // Independently drawn camera-view glyph. The orange rear housing marks the
-  // shot position, the translucent white bevel reads as a camera frustum, and
-  // the yellow tapered lens makes the +Z viewing direction unmistakable.
-  const orange = [];
-  pushBox(orange, -0.72, 0.72, -0.46, 0.46, -0.28, 0.02);
-
-  const white = [];
-  pushFrustumShell(white, {
-    backX: 0.82, backY: 0.56, backZ: -0.02,
-    frontX: 0.44, frontY: 0.30, frontZ: 0.25,
+  // WebODM-inspired camera-view glyph, rebuilt from primitives. The shallow
+  // neutral body and light face make front/back obvious, amber face samples
+  // mark +Z, and the LTDS-orange tab identifies local +Y (image-up).
+  const body = [];
+  pushFrustumShell(body, {
+    backX: 0.74, backY: 0.48, backZ: -0.26,
+    frontX: 0.58, frontY: 0.40, frontZ: 0.12,
   });
+  pushQuad(body,
+    [-0.74, -0.48, -0.26], [-0.74, 0.48, -0.26],
+    [0.74, 0.48, -0.26], [0.74, -0.48, -0.26]);
 
-  const yellow = [];
-  pushFrustumShell(yellow, {
-    backX: 0.34, backY: 0.23, backZ: 0.20,
-    frontX: 0.19, frontY: 0.13, frontZ: 0.48,
-    caps: true,
-  });
-  return { orange, white, yellow };
+  const face = [];
+  pushQuad(face,
+    [-0.56, -0.38, 0.13], [0.56, -0.38, 0.13],
+    [0.56, 0.38, 0.13], [-0.56, 0.38, 0.13]);
+
+  const cue = [];
+  for (const centerX of [-0.16, 0, 0.16]) pushDisc(cue, centerX, 0, 0.15, 0.055);
+
+  const tab = [];
+  pushBox(tab, -0.13, 0.13, 0.38, 0.65, -0.04, 0.10);
+  return { body, face, cue, tab };
 }

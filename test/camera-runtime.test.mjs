@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from '../camera-runtime.mjs';
+import { cameraFeatureImageUpBearing, cameraFeatureMapPosition, normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from '../camera-runtime.mjs';
 import {
   CAMERA_MARKER_COLORS,
   CAMERA_MARKER_OPACITY,
@@ -44,34 +44,35 @@ test('camera photo keys allow exact nested JPEG paths without allowing traversal
   }
 });
 
-test('camera markers use an independent WebODM-like orange white and yellow frustum', () => {
+test('camera markers use a shared WebODM-inspired body, front cue, and LTDS image-up tab', () => {
   const geometry = cameraMarkerGeometryData();
   const bounds = (positions) => {
     const axes = [[], [], []];
     positions.forEach((value, index) => axes[index % 3].push(value));
     return axes.map((axis) => ({ min: Math.min(...axis), max: Math.max(...axis) }));
   };
-  for (const key of ['orange', 'white', 'yellow']) {
-    assert.ok(geometry[key].length >= 36 && geometry[key].length % 9 === 0, `${key} primitive is triangulated`);
+  for (const key of ['body', 'face', 'cue', 'tab']) {
+    assert.ok(geometry[key].length >= 18 && geometry[key].length % 9 === 0, `${key} primitive is triangulated`);
   }
-  assert.equal(geometry.body, undefined, 'the prior solid camera housing is removed');
-  assert.equal(geometry.lens, undefined, 'the prior cylinder lens is removed');
-  const [orangeX, orangeY, orangeZ] = bounds(geometry.orange);
-  const [whiteX, whiteY, whiteZ] = bounds(geometry.white);
-  const [yellowX, yellowY, yellowZ] = bounds(geometry.yellow);
-  assert.ok(orangeZ.min < 0 && orangeZ.max >= 0, 'orange rear housing contains the camera position');
-  assert.ok(whiteZ.min <= orangeZ.max && whiteZ.max > orangeZ.max, 'white frustum bridges housing to lens');
-  assert.ok(yellowZ.max > whiteZ.min, 'yellow forward primitive makes view direction legible');
-  assert.ok(yellowX.min > whiteX.min && yellowX.max < whiteX.max);
-  assert.ok(yellowY.min > whiteY.min && yellowY.max < whiteY.max);
-  assert.equal(CAMERA_MARKER_COLORS.orange, 0xEE5007);
-  assert.equal(CAMERA_MARKER_COLORS.white, 0xFFFFFF);
-  assert.equal(CAMERA_MARKER_COLORS.yellow, 0xFFA200);
-  assert.deepEqual(CAMERA_MARKER_OPACITY, { normal: 0.7, hover: 1 });
+  const [bodyX, bodyY, bodyZ] = bounds(geometry.body);
+  const [faceX, faceY, faceZ] = bounds(geometry.face);
+  const [cueX, cueY, cueZ] = bounds(geometry.cue);
+  const [tabX, tabY, tabZ] = bounds(geometry.tab);
+  assert.ok(bodyZ.min < 0 && bodyZ.max > 0, 'shallow body contains the camera position');
+  assert.ok(faceZ.min > bodyZ.max, 'light face marks local +Z/front');
+  assert.ok(cueZ.min > faceZ.max, 'amber samples sit visibly in front of the face');
+  assert.ok(cueX.min > faceX.min && cueX.max < faceX.max);
+  assert.ok(cueY.min > faceY.min && cueY.max < faceY.max);
+  assert.ok(tabY.max > bodyY.max && tabY.min >= faceY.max, 'orange tab protrudes along local +Y/image-up');
+  assert.ok(tabX.min > bodyX.min && tabX.max < bodyX.max);
+  assert.ok(tabZ.min >= bodyZ.min && tabZ.max <= faceZ.max);
+  assert.deepEqual(CAMERA_MARKER_COLORS, { body: 0x6F7782, face: 0xD8DEE6, cue: 0xF8CB2E, tab: 0xEE5007 });
+  assert.deepEqual(CAMERA_MARKER_OPACITY, { normal: 0.82, hover: 1 });
   assert.equal(DEFAULT_CAMERA_MARKER_SCALE, 0.5);
-  const allX = { min: Math.min(orangeX.min, whiteX.min, yellowX.min), max: Math.max(orangeX.max, whiteX.max, yellowX.max) };
-  const allY = { min: Math.min(orangeY.min, whiteY.min, yellowY.min), max: Math.max(orangeY.max, whiteY.max, yellowY.max) };
-  const allZ = { min: Math.min(orangeZ.min, whiteZ.min, yellowZ.min), max: Math.max(orangeZ.max, whiteZ.max, yellowZ.max) };
+  const componentBounds = [geometry.body, geometry.face, geometry.cue, geometry.tab].map(bounds);
+  const allX = { min: Math.min(...componentBounds.map(value => value[0].min)), max: Math.max(...componentBounds.map(value => value[0].max)) };
+  const allY = { min: Math.min(...componentBounds.map(value => value[1].min)), max: Math.max(...componentBounds.map(value => value[1].max)) };
+  const allZ = { min: Math.min(...componentBounds.map(value => value[2].min)), max: Math.max(...componentBounds.map(value => value[2].max)) };
   const markerDiameter = Math.hypot(
     allX.max - allX.min,
     allY.max - allY.min,
@@ -84,6 +85,16 @@ test('camera markers use an independent WebODM-like orange white and yellow frus
     maxVisible: 4000,
     pickRadius: 12,
   });
+});
+
+test('orthophoto camera placement prefers geographic geometry and otherwise uses the active projection', () => {
+  const geographic = { geometry: { type: 'Point', coordinates: [-88.25, 43.1, 220] }, properties: { translation: [500000, 4800000, 220], rotation: [0, 0, 0] } };
+  assert.deepEqual(cameraFeatureMapPosition(geographic, { projectedToLatLon: () => [1, 2] }), [43.1, -88.25]);
+  const projected = { geometry: { type: 'Point', coordinates: [500000, 4800000, 220] }, properties: { translation: [500000, 4800000, 220], rotation: [0, 0, Math.PI / 2] } };
+  assert.deepEqual(cameraFeatureMapPosition(projected, { projectedToLatLon: (e, n) => [n / 100000, e / 100000] }), [48, 5]);
+  assert.equal(cameraFeatureMapPosition({ properties: {} }, { projectedToLatLon: () => [0, 0] }), null);
+  assert.equal(cameraFeatureImageUpBearing(geographic), 0);
+  assert.ok(Math.abs(cameraFeatureImageUpBearing(projected) - 90) < 1e-9, 'map tab follows the same inverse angle-axis transform as 3D');
 });
 
 test('camera marker scale remains fixed in world space across zoom and depth', () => {

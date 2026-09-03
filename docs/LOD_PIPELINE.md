@@ -45,54 +45,64 @@ manually toggle cached scene visibility or tile active/visible state.
 
 A renderable-root hierarchy bootstraps complete coverage before normal detail:
 
-1. Select and display the root overview.
-2. Select a coarse frontier whose target is above every direct-child SSE but
-   below the root SSE. Keep the root visible until the frontier is attached and
-   all queues settle.
-3. Capture that complete coarse frontier and only then enable camera-driven
-   refinement. Detail 16 starts one bounded refinement step beyond the completed
-   frontier instead of staying equal to the bootstrap target or immediately
-   selecting the entire zero-error hierarchy. On the church hierarchy the
-   temporary target is 1,024 and the steady Detail 16 target is 512.
+1. Select and display the whole-model root.
+2. Limit traversal to depth 2 and prefetch the renderable direct-child shell.
+   Off-frustum direct siblings may be requested during this bounded phase, but
+   grandchildren and deeper content may not be requested.
+3. Require every renderable direct child to be decoded for two consecutive
+   frames and require the complete shell to fit its derived fallback budget.
+4. Promote the complete shell as the only scoped `REPLACE` fallback, retire the
+   root from steady fallback retention, restore unlimited traversal depth, and
+   apply the raw requested camera SSE immediately.
 
-The captured coarse frontier alone is retained in the LRU and registered as a
-scoped `REPLACE` fallback. Returning to Home can therefore display a captured
-coarse branch that was not active in the previous close frame while its newly
-selected descendants continue loading. This does not enable ancestor loading,
-retain unrelated intermediate/fine paths, or render an overlapping root
-backdrop. The renderer uses a shared LRU, so the narrow retention wrapper is
-restored on every tile renderer disposal before another model can load. Clients
-reporting 4 GiB or less settle on the complete renderable root, remain capped at
-Detail 13, and keep the separate 768 MiB reduced-memory profile; the church's
-roughly 1.27 GiB coarse frontier cannot safely replace that root on this budget.
+The three-second prefetch time is a diagnostic milestone, not permission to
+promote a partial shell. An incomplete direct shell would allow a later camera
+angle to reactivate the whole-model root and hide every ready descendant. A
+structurally unsupported, empty, or over-budget shell therefore stays honestly
+root-only. Clients reporting 4 GiB or less also stay on the root, remain capped
+at Detail 13, and use the constrained 768 MiB soft / 1 GiB hard profile.
 
-The ordinary desktop cache retains 0.4 GiB below a 1.75 GiB maximum, with 8
-warm entries and a 1,024-item failsafe. The byte ceiling is the real memory
-guard. A low 48-item ceiling is invalid because a camera-selected frontier can
-contain more than 48 small leaves and branch parents while using almost none of
-the byte budget. When a measured complete overview is at least 0.75 GiB and
-already consumes most of the ordinary ceiling, the runtime grants bounded
-branch-completion headroom equal to overview bytes plus 1.75 GiB, capped at
-3 GiB. Small models stay at 1.75 GiB and reduced-memory clients never expand.
+The direct shell is bounded independently from focal detail. Its preferred
+retention is profile-specific, its absolute ceiling is 1.5 GiB, and promotion
+must leave at least 1.625 GiB for the selected focal branch. The item-count cap
+is only a 1,024-item failsafe; decoded bytes are the real admission guard.
+Recently visible detail is retained as complete fallback-owner cuts rather than
+individual tiles, so a partial warm cut cannot force a brief coarse-parent
+rollback after a tiny camera move.
 
-The reduced profile retains 640 MiB below 768 MiB, with 256 warm and 512
-maximum entries. Both profiles unload 20 percent per eviction pass once unused
-content exceeds their warm floors. Two consecutive one-second full-cache,
-idle-queue samples with a selected in-frustum tile still pending request bounded
-cache-admission recovery. Cache pressure never lowers `activeDetail`, changes
-the requested screen-space-error target, or latches a global quality ceiling.
+Detail `2..24` maps exponentially from SSE 512 down to 2. Detail 20 is `5.481`
+and Detail 24 is exactly `2`, independent of the bootstrap hierarchy. A
+camera-centered focus plugin transforms each tile bounding sphere from the
+tileset-root frame through `TilesRenderer.group.matrixWorld` before projecting
+it. This is required because the Viewer parents the renderer under a rotated
+and translated model frame. Mixed coordinate spaces produce deterministic but
+wrong, angle-dependent foreground selection.
 
-The generated browser fixtures verify complete coarse startup, descendant
-refinement, scoped fallback on camera return, stable tiny movement, and shared
-LRU lifecycle cleanup. The authenticated church hierarchy verifies the
-large-model path: 16/16 coarse tiles attached before refinement; all 48 sampled
-bootstrap, close, orbit, and return frames retained structural coverage; steady
-Detail 16 moved from target 1,024 to 512; and 12 fine leaves rendered in the
-unchanged close view within 30 seconds. Return immediately recovered complete
-coverage with captured coarse fallbacks while selected intermediate work kept
-streaming. No runtime exceptions occurred. A forced 4 GiB run kept complete root
-coverage across all sampled frames and honestly remained root-only because the
-required church replacement frontier exceeded its 768 MiB cache.
+Focus affects request/parse priority while moving, never authored visibility or
+the raw selection target. Peripheral queue work receives a 1–4× penalty that
+starts decaying after 250 ms idle and reaches neutral after another 500 ms. A
+focused replacement owner and its descendants keep raw SSE until the completed
+camera cut moves by a cumulative 3-degree view turn or 5% of the positive
+camera-to-owner reference scale. The reference remains positive when the camera
+is inside a large bounding volume. Under persistent cache pressure only tiles
+fully outside the center region may receive a temporary SSE relaxation; the
+focused branch is never coarsened.
+
+Memory modes resolve as follows:
+
+| Mode | Soft cache | Hard cache | Notes |
+| --- | ---: | ---: | --- |
+| Auto, capable desktop | 3 GiB | 3.75 GiB | Browser hint is at least 8 GiB. |
+| Auto, unknown / Balanced | 2.5 GiB | 3.125 GiB | Safe fallback when no hint exists. |
+| High | 4 GiB | 5 GiB | Explicit capable-desktop choice. |
+| Constrained | 768 MiB | 1 GiB | Forced for a known ≤4-GiB client. |
+
+The generated browser fixtures verify root-first startup, bounded direct-shell
+promotion, descendant refinement, A→B→A focus reacquisition, 1/2/4/8-pixel
+movement stability, complete-cut retention, strict hard admission, and shared
+LRU lifecycle cleanup. Unit tests also cover a non-identity Viewer parent frame,
+camera-inside-volume pan hysteresis, and linear visited-cut ancestor propagation
+without scanning the entire known hierarchy for every tile.
 
 See [`VIEWER_LOD_CAMERA_HANDOFF.md`](VIEWER_LOD_CAMERA_HANDOFF.md) for historical
 measurements, superseded approaches, and diagnostic commands.
@@ -211,16 +221,33 @@ deadline. Build metadata binds the source, patch, version, and binary digest;
 published-image CI checks those pinned inputs and independently hashes the
 runtime executable. The runtime image contains no SDK and needs no network.
 
-Locally generated output uses schema-v3 controlled-converter proof instead of
-weakening exact v2. V3 binds the approved architecture-specific Obj2Tiles 1.6.2
-executable digest and exact KTX2 command, the GLB and OBJ digests, every audited
+Locally generated output uses controlled-converter schema v3 or v4 instead of
+weakening exact v2. Both bind the approved architecture-specific Obj2Tiles
+1.6.2 executable and exact KTX2 command, GLB and OBJ digests, every audited
 artifact, a valid zero-error frontier, full-detail bounds/area/centroid/second
 moments, deterministic bidirectional BVH samples in rebased coordinates, and
-all-triangle opaque textured base-color/TEXCOORD_0 coverage. The controlled
-path accepts bound `KHR_texture_basisu` sources while imported exact-v2 audits
-continue to reject alternate compressed sources unless their exact texture
-identity can be proved. Shifted or missing patches, unapproved executables,
-missing UVs, and untextured materials fail closed.
+all-triangle opaque textured base-color/TEXCOORD_0 coverage. V3 preserves its
+original `1e-5` surface-area limit. V4 adds compensated forward/reverse
+accumulation and may accept the narrow `(1e-5, 1.2e-5]` gray zone only when the
+stricter spatial, moment, bidirectional-distance, normal, UV/texture, converter,
+and artifact evidence all pass. Missing or added geometry still fails, and the
+policy is never widened automatically.
+
+At atomic registration the server stores a durable verifier receipt that binds
+the attempt, version, source, canonical manifest, policy/schema/equivalence
+evidence, and complete canonical provenance digest. Session configuration may
+assets still validate. This lets the current server authorize a valid converter
+contract that an older deployed browser bundle does not yet recognize, without
+making browser startup depend on a duplicate hash list. It does not bypass the
+server's converter policy, audit structure, source binding, artifact
+hashes, or manifest integrity. The unpublished OBJ remains available only to
+server verification; published and client sessions expose no private proof
+asset.
+
+The controlled path accepts bound `KHR_texture_basisu` sources while imported
+exact-v2 audits continue to reject alternate compressed sources unless their
+exact texture identity can be proved. Shifted or missing patches, unapproved
+executables, missing UVs, and untextured materials fail closed.
 The server enables the worker stage when an older deployment omits the variable.
 Setting `MESH_DERIVATIVES_ENABLED=false` makes eligible required OBJ+GLB work
 fail closed; it does not bypass KTX2 readiness. Verified imported tiles may
@@ -235,14 +262,15 @@ with an eligible OBJ+GLB mesh stays in `derivatives` until the required KTX2 tre
 verifies, even when the source bundle includes legacy JPEG tiles. A terminal
 failure is reported as a failed job rather than a misleading ready result.
 
-Successful ready and published versions are immutable. The worker does not run
-legacy LOD discovery/recovery, does not switch an active asset row in place, and
-does not expose manual in-place generation or retry. Existing verified JPEG
-provenance remains readable. Upgrading an existing model requires a new
-processing attempt/model version, which is reviewed before explicit publication.
+Successful ready and published versions are immutable. Existing verified JPEG
+provenance remains readable. A failed local derivative may be retried through
+its durable dataset recovery operation, which reuses the retained source
+closure and produces a new candidate version; it never mutates or silently
+switches a published asset tree. While that recovery is retryable, its source
+and target outputs and their parent task/project are protected from deletion.
 Imported/native tiles stay on exact v2; only the trusted local generation call
-site may request controlled v3. Do not manually change provenance or derivative
-state.
+site may request controlled v3/v4. Do not manually change provenance or
+derivative state.
 
 ## Validate before deployment
 

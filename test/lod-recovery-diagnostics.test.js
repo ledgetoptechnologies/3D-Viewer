@@ -9,12 +9,20 @@ const path = require('node:path');
 const test = require('node:test');
 const auth = require('../server/auth');
 const { config } = require('../server/config');
+const { trashOutput, trashTaskTree, trashProjectTree } = require('../server/containerLifecycle');
 const { openDatabase } = require('../server/database');
 const { createProcessingApi } = require('../server/processingApi');
-const { processOneDerivative, structuredCommandFailure } = require('../server/derivativeWorker');
+const { processOneDerivative, structuredCommandFailure, successfulLodAuditEvidence } = require('../server/derivativeWorker');
+const { viewerEligibleAssets } = require('../server/lodDerivativePolicy');
 const { processLodRecovery } = require('../server/lodRecovery');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
+const {
+  CONTROLLED_CONVERTER,
+  CONTROLLED_CONVERTER_COMMAND_SHA256,
+  CONTROLLED_SURFACE_AUDIT_POLICY_V4,
+  OFFICIAL_CONVERTER_BINARY_SHA256,
+} = require('../lod-converter-policy.cjs');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-lod-recovery-'));
@@ -96,6 +104,54 @@ function recoveryManifest(source) {
     { relativePath: 'model.obj', sourceRelativePath: 'model.obj', role: 'mesh_obj', byteSize: source.obj.length, sha256: digest(source.obj) },
   ];
   return { files, manifestSha256: digest(JSON.stringify(files)) };
+}
+
+function romeV4Provenance(source) {
+  const numericalAgreement = {
+    source: { areaRelativeDelta: 0, firstMomentRelativeDelta: 0, secondMomentRelativeDelta: 0, maximumRelativeDelta: 0 },
+    leaves: { areaRelativeDelta: 0, firstMomentRelativeDelta: 0, secondMomentRelativeDelta: 0, maximumRelativeDelta: 0 },
+    maximumRelativeDelta: 0,
+  };
+  const direction = { sampleCount: 100, maximumDistance: 0, minimumNormalDot: 1, reversedNormalSampleCount: 0, reversedNormalFraction: 0 };
+  return {
+    schemaVersion: 4,
+    sourceAsset: 'model.glb',
+    sourceSha256: digest(source.glb),
+    geometry: 'controlled-bidirectional-surface-equivalence',
+    textures: 'controlled-atlas-material-equivalence',
+    leafGeometricError: 0,
+    converter: {
+      name: CONTROLLED_CONVERTER.name,
+      version: CONTROLLED_CONVERTER.version,
+      commandSha256: CONTROLLED_CONVERTER_COMMAND_SHA256,
+      inputAsset: 'model.obj',
+      inputSha256: digest(source.obj),
+      binarySha256: OFFICIAL_CONVERTER_BINARY_SHA256[0],
+    },
+    audit: {
+      algorithm: 'ltds-obj2tiles-surface-equivalence-v4',
+      policyRevision: CONTROLLED_SURFACE_AUDIT_POLICY_V4.revision,
+      policy: { ...CONTROLLED_SURFACE_AUDIT_POLICY_V4 },
+      accumulationMethod: CONTROLLED_SURFACE_AUDIT_POLICY_V4.accumulationMethod,
+      sourceTriangleCount: 10_000,
+      leafTriangleCount: 10_000,
+      surfaceTolerance: 0.001,
+      areaRelativeDelta: 0.000010618457348535776,
+      boundsDelta: 0,
+      centroidDelta: 0,
+      normalizedSecondMomentDelta: 0,
+      sourceArea: 1,
+      leafArea: 1.0000106184573485,
+      sourceDegenerateTriangleCount: 0,
+      leafDegenerateTriangleCount: 0,
+      numericalAgreement,
+      sourceToLeaves: { ...direction },
+      leavesToSource: { ...direction },
+      acceptance: 'gray-zone',
+      equivalenceSha256: 'e'.repeat(64),
+      artifactCount: 2,
+    },
+  };
 }
 
 test('schema v30 processing events are append-only and diagnostics expose only allowlisted sanitized data', (t) => {
@@ -221,6 +277,7 @@ test('LOD recovery is idempotent, creates stable replacement identities, preserv
     outputId: source.versionId, subject: 'ops:recovery', sessionId: 'session-one', manifest, auditActorId: 'ops:recovery',
   });
   assert.equal(created.type, 'lod_recovery');
+  assert.equal(created.sourceOutputId, source.versionId);
   const replay = context.processing.createLodRecoveryOperation({
     outputId: source.versionId, subject: 'ops:recovery', sessionId: 'session-one', manifest, auditActorId: 'ops:recovery',
   });
@@ -277,6 +334,18 @@ test('LOD recovery is idempotent, creates stable replacement identities, preserv
   assert.equal(context.processing.getModelOutput(source.versionId).status, 'ready');
   assert.equal(context.database.prepare('SELECT status FROM model_versions WHERE id=?').get(source.versionId).status, 'ready');
   assert.equal(context.processing.getAttempt(source.attempt.id).status, 'ready_for_review');
+  assert.equal(context.processing.archiveModelOutput(source.versionId, 'ops:recovery'), null,
+    'the retained source cannot be deleted while its failed recovery remains retryable');
+  assert.equal(context.processing.archiveModelOutput(payload.ids.versionId, 'ops:recovery'), null,
+    'the failed replacement cannot be deleted out from under an in-place recovery retry');
+  assert.equal(trashOutput(context.processing, {}, payload.ids.versionId, 'ops:recovery'), null,
+    'the delete path is blocked before any storage move can strand the retry');
+  assert.throws(() => trashTaskTree(context.processing, {}, source.task.id, 'ops:recovery'), { code: 'task_not_trashable' },
+    'deleting the parent task cannot bypass the failed-recovery output guard');
+  assert.throws(() => trashProjectTree(context.processing, {}, source.project.id, 'ops:recovery'), { code: 'project_not_trashable' },
+    'deleting the parent project cannot bypass the failed-recovery output guard');
+  assert.equal(context.processing.getTask(source.task.id).status, 'failed');
+  assert.equal(context.processing.getProject(source.project.id).status, 'active');
 
   const retried = context.processing.retryDatasetOperation(created.id, 'ops:recovery', 'ops:recovery');
   assert.equal(retried.status, 'awaiting_derivatives');
@@ -286,6 +355,55 @@ test('LOD recovery is idempotent, creates stable replacement identities, preserv
   assert.equal(JSON.parse(retryJob.request_json).manualRetryCount, 1);
   assert.equal(context.processing.retryOptionalDerivative(job.id, 'ops:recovery', { meshDerivativesEnabled: true }), null,
     'required mesh recovery must be retried through its durable operation, never the optional derivative endpoint');
+  const retryOwner = 'derivative-worker:manual-retry';
+  const exhaustedJob = context.processing.claimDerivative(retryOwner);
+  assert.equal(exhaustedJob.id, job.id);
+  assert.equal(context.processing.failDerivative(exhaustedJob.id, retryOwner,
+    'manual recovery retry failed', 'lod_surface_equivalence_failed', exhaustedJob.lease_token), true);
+  const exhausted = context.processing.getDatasetOperation(created.id, 'ops:recovery');
+  assert.equal(exhausted.status, 'failed');
+  assert.equal(exhausted.retryable, false, 'the one documented manual recovery retry is terminal when it fails');
+  assert.equal(context.processing.retryDatasetOperation(created.id, 'ops:recovery', 'ops:recovery'), null,
+    'a second manual retry cannot reset the retry allowance');
+  assert.equal(JSON.parse(context.database.prepare('SELECT request_json FROM derivative_jobs WHERE id=?').get(job.id).request_json).manualRetryCount, 1);
+  assert.throws(() => context.processing.createLodRecoveryOperation({
+    outputId:source.versionId, subject:'ops:recovery', sessionId:'session-one', manifest, auditActorId:'ops:recovery',
+  }), (error) => error.code === 'lod_recovery_retry_exhausted' && error.operationId === created.id,
+  'an exhausted operation cannot be replaced with a fresh immutable recovery attempt');
+  assert.equal(context.database.prepare("SELECT COUNT(*) n FROM dataset_operations WHERE json_extract(payload_json,'$.lodRecovery')=1").get().n, 1);
+  assert.equal(context.processing.archiveModelOutput(source.versionId, 'ops:recovery').status, 'archived',
+    'terminal recovery failure releases the retained source output');
+  assert.equal(context.processing.archiveModelOutput(payload.ids.versionId, 'ops:recovery').status, 'archived',
+    'terminal recovery failure releases the failed replacement output');
+  assert.ok(context.processing.trashTask(source.task.id, 'ops:recovery'),
+    'terminal recovery failure releases the task lifecycle guard');
+  assert.ok(context.processing.trashProject(source.project.id, 'ops:recovery'),
+    'terminal recovery failure releases the project lifecycle guard');
+});
+
+test('Rome recovery worker failure has one operation retry before terminal source release', (t) => {
+  const context = fixture(t);
+  const source = readyMeshSource(context, 'Rome worker retry');
+  const operation = context.processing.createLodRecoveryOperation({
+    outputId:source.versionId, subject:'ops:rome-worker', sessionId:'rome-worker-session',
+    manifest:recoveryManifest(source), auditActorId:'ops:rome-worker',
+  });
+  const firstOwner = 'dataset-worker:rome-first';
+  assert.equal(context.processing.claimDatasetOperation(firstOwner).id, operation.id);
+  assert.equal(context.processing.failDatasetOperation(operation.id, firstOwner, 'fault_injected', 'first Rome recovery failed'), true);
+  assert.equal(context.processing.getDatasetOperation(operation.id, 'ops:rome-worker').retryable, true);
+  assert.equal(context.processing.archiveModelOutput(source.versionId, 'ops:rome-worker'), null,
+    'the source remains retained while the one operation retry is available');
+  assert.equal(context.processing.retryDatasetOperation(operation.id, 'ops:rome-worker', 'ops:rome-worker').status, 'queued');
+  const secondOwner = 'dataset-worker:rome-second';
+  assert.equal(context.processing.claimDatasetOperation(secondOwner).id, operation.id);
+  assert.equal(context.processing.failDatasetOperation(operation.id, secondOwner, 'fault_injected', 'manual Rome recovery retry failed'), true);
+  const exhausted = context.processing.getDatasetOperation(operation.id, 'ops:rome-worker');
+  assert.equal(exhausted.attemptCount, 2);
+  assert.equal(exhausted.retryable, false);
+  assert.equal(context.processing.retryDatasetOperation(operation.id, 'ops:rome-worker', 'ops:rome-worker'), null);
+  assert.equal(context.processing.archiveModelOutput(source.versionId, 'ops:rome-worker').status, 'archived',
+    'the terminal worker-stage failure releases its retained source');
 });
 
 test('LOD recovery preserves imported provider identity and model metadata', { skip: process.platform === 'win32' }, async (t) => {
@@ -381,12 +499,121 @@ test('ready output with a failed legacy mesh derivative starts an immutable reco
   assert.equal(response.status, 202);
   const { operation } = await response.json();
   assert.equal(operation.type, 'lod_recovery');
+  assert.equal(operation.sourceOutputId, source.versionId);
   const payload = JSON.parse(context.database.prepare('SELECT payload_json FROM dataset_operations WHERE id=?').get(operation.id).payload_json);
   assert.notEqual(payload.ids.attemptId, source.attempt.id);
   assert.notEqual(payload.ids.versionId, source.versionId);
   assert.equal(context.processing.getAttempt(source.attempt.id).status, 'ready_for_review');
   assert.equal(context.processing.getModelOutput(source.versionId).status, 'ready');
   assert.equal(context.database.prepare('SELECT status FROM model_versions WHERE id=?').get(source.versionId).status, 'ready');
+
+  const leased = context.processing.claimDatasetOperation('api-recovery-failure-worker');
+  assert.equal(leased.id, operation.id);
+  assert.equal(context.processing.failDatasetOperation(operation.id, 'api-recovery-failure-worker', 'lod_surface_equivalence_failed', 'controlled surface area differs'), true);
+  const duplicate = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/processing/outputs/${source.versionId}/lod-recovery-attempts`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': 'api-recovery-failed-must-retry' }, body: '{}',
+  });
+  assert.equal(duplicate.status, 409);
+  assert.deepEqual(await duplicate.json(), {
+    error: 'Retry the existing failed recovery operation.',
+    code: 'lod_recovery_retry_required',
+    details: { operationId: operation.id },
+  });
+  assert.equal(context.database.prepare("SELECT COUNT(*) n FROM dataset_operations WHERE json_extract(payload_json,'$.lodRecovery')=1").get().n, 1,
+    'a failed recovery must never create a second immutable version');
+});
+
+test('Rome v3 surface failure retries under v4 and atomically exposes the verified 3D Model', (t) => {
+  const context = fixture(t);
+  const source = readyMeshSource(context, 'Rome Dam recovery');
+  const operation = context.processing.createLodRecoveryOperation({
+    outputId: source.versionId, subject: 'ops:rome', sessionId: 'rome-session', manifest: recoveryManifest(source), auditActorId: 'ops:rome',
+  });
+  const payload = JSON.parse(context.database.prepare('SELECT payload_json FROM dataset_operations WHERE id=?').get(operation.id).payload_json);
+  const operationOwner = 'dataset-worker:rome';
+  assert.equal(context.processing.claimDatasetOperation(operationOwner).id, operation.id);
+  const replacementAttempt = context.processing.createImportedAttempt({
+    id: payload.ids.attemptId, taskId: source.task.id, datasetId: source.dataset.id,
+    providerTaskId: `lod-recovery:${operation.id}`, createdBy: 'ops:rome', staged: true,
+  });
+  context.repository.upsertModelVersion({
+    modelId: source.model.id, versionId: payload.ids.versionId, provider: 'ltds-processing', providerModelId: source.task.id,
+    providerVersionId: `lod-recovery:${operation.id}`, displayName: source.task.displayName, status: 'importing', makeActive: false,
+    assets: [
+      { kind: 'obj', rootKey: 'models', relativePath: `${payload.targetRelativePath}/model.obj`, byteSize: source.obj.length, sha256: digest(source.obj), published: false },
+      { kind: 'glb', rootKey: 'models', relativePath: `${payload.targetRelativePath}/model.glb`, byteSize: source.glb.length, sha256: digest(source.glb), published: false },
+    ],
+  });
+  context.processing.setAttemptResult(replacementAttempt.id, source.model.id, payload.ids.versionId);
+  context.processing.registerModelOutput({
+    versionId: payload.ids.versionId, modelId: source.model.id, taskId: source.task.id, attemptId: replacementAttempt.id,
+    projectId: source.project.id, rootKey: 'models', relativePath: payload.targetRelativePath, status: 'staged',
+    byteSize: source.obj.length + source.glb.length, assetCount: 2,
+  });
+  context.processing.activateImportedDerivativesForOperation(operation.id, operationOwner, replacementAttempt.id,
+    [{ type: 'mesh_tiles', request: { optional: false } }], { attempt: replacementAttempt, requiredDerivatives: [] });
+
+  const firstOwner = 'derivative-worker:rome-v3';
+  const firstJob = context.processing.claimDerivative(firstOwner);
+  const observed = 0.000010618457348535776;
+  assert.equal(context.processing.failDerivative(firstJob.id, firstOwner,
+    'controlled surface area differs by 0.000010618457348535776', 'lod_surface_equivalence_failed', firstJob.lease_token,
+    { metric: 'areaRelativeDelta', observed, limit: 1e-5, grayZoneLimit: 1.2e-5 }), true);
+  assert.equal(context.processing.getDatasetOperation(operation.id, 'ops:rome').status, 'failed');
+  assert.equal(context.processing.getModelOutput(payload.ids.versionId).status, 'failed');
+  assert.equal(context.processing.getModelOutput(source.versionId).status, 'ready', 'the original Rome model remains unchanged');
+
+  const retried = context.processing.retryDatasetOperation(operation.id, 'ops:rome', 'ops:rome');
+  assert.equal(retried.status, 'awaiting_derivatives');
+  assert.equal(retried.processingAttemptId, replacementAttempt.id);
+  const secondOwner = 'derivative-worker:rome-v4';
+  const secondJob = context.processing.claimDerivative(secondOwner);
+  assert.equal(secondJob.id, firstJob.id, 'retry reuses the derivative job and immutable replacement version');
+  const tileset = Buffer.from('{"asset":{"version":"1.1"}}');
+  const tile = Buffer.from('deterministic-b3dm');
+  const manifestFiles = [
+    { relativePath: 'content/0.b3dm', byteSize: tile.length, sha256: digest(tile) },
+    { relativePath: 'tileset.json', byteSize: tileset.length, sha256: digest(tileset) },
+  ];
+  const manifestSha256 = digest(JSON.stringify(manifestFiles));
+  const provenance = romeV4Provenance(source);
+  assert.ok(context.processing.registerVerifiedLodAsset(secondJob.id, secondOwner, {
+    versionId: payload.ids.versionId,
+    rootKey: 'models',
+    relativePath: `${payload.targetRelativePath}/tiles-ktx2/tileset.json`,
+    byteSize: tileset.length,
+    attemptId: replacementAttempt.id,
+    sha256: digest(tileset),
+    manifestSha256,
+    manifestFiles,
+  }, provenance, { leaseToken: secondJob.lease_token }));
+  const auditEvidence = successfulLodAuditEvidence(provenance);
+  assert.deepEqual(auditEvidence, {
+    policyRevision: CONTROLLED_SURFACE_AUDIT_POLICY_V4.revision, acceptance: 'gray-zone', metric: 'areaRelativeDelta', observed,
+    limit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.normalAreaRelativeDeltaLimit,
+    grayZoneLimit: CONTROLLED_SURFACE_AUDIT_POLICY_V4.grayAreaRelativeDeltaLimit,
+    numericalAgreement: 0, equivalenceSha256: provenance.audit.equivalenceSha256,
+  });
+  const completed = context.processing.completeDerivativeAndMaybeReady(secondJob.id, secondOwner, {
+    verified: true, auditEvidence,
+  }, { event: { eventId: `processing-ready-${replacementAttempt.id}` }, leaseToken: secondJob.lease_token });
+  assert.equal(completed.ready, true);
+  assert.equal(context.processing.getDatasetOperation(operation.id, 'ops:rome').status, 'succeeded');
+  assert.equal(context.processing.getAttempt(replacementAttempt.id).status, 'ready_for_review');
+  assert.equal(context.processing.getModelOutput(payload.ids.versionId).status, 'ready');
+  const recovered = context.repository.getModelVersion(source.model.id, payload.ids.versionId).activeVersion;
+  assert.deepEqual(viewerEligibleAssets(recovered.metadata, recovered.assets).map((asset) => asset.kind).sort(), ['glb', 'obj', 'tiles']);
+  const diagnostic = context.processing.attemptDiagnostics(replacementAttempt.id).derivatives[0];
+  assert.deepEqual(diagnostic.auditEvidence, auditEvidence);
+  assert.equal(context.processing.archiveModelOutput(source.versionId, 'ops:rome').status, 'archived',
+    'successful recovery releases the old source for normal lifecycle cleanup');
+  const taskTrash = context.processing.trashTask(source.task.id, 'ops:rome');
+  assert.ok(taskTrash, 'successful recovery releases the task lifecycle guard');
+  assert.equal(context.processing.restoreMetadataEntity(taskTrash.id, 'ops:rome').status, 'ready_for_review');
+  const purgeTrash = context.processing.trashTask(source.task.id, 'ops:rome');
+  assert.ok(purgeTrash);
+  assert.ok(context.processing.purgeMetadataEntity(purgeTrash.id, 'ops:rome').permanentlyDeletedAt,
+    'normal task restore and purge semantics remain available after recovery succeeds');
 });
 
 test('LOD recovery and diagnostics routes enforce processing permissions before accessing source storage', async (t) => {

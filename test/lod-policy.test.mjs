@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { LRUCache, TilesRenderer } from '3d-tiles-renderer';
 import { resolveLodMemoryProfile } from '../lod-memory-profile.mjs';
-import { PerspectiveCamera, Sphere, Vector3 } from 'three';
+import { Group, PerspectiveCamera, Sphere, Vector3 } from 'three';
 import {
   advanceLodMemoryPressure,
   configureLodRenderer,
@@ -564,6 +564,199 @@ test('new interaction epoch may deliberately move the focal owner lock', () => {
   assert.equal(lodBranchBlockerGroups([ownerA, ownerB])[0].owner, ownerB);
 });
 
+test('shared camera focus preserves a refined cut through tiny motion and releases it after an angle change', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const blocker = (uri, overlap) => ({
+    content: { uri },
+    internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 5 },
+    __ltdsFocusOverlap: overlap,
+    __ltdsFocusActivityTime: 100,
+  });
+  const refinedA = blocker('a.b3dm', 1);
+  const pendingB = blocker('b.b3dm', 0.2);
+  const ownerA = {
+    refine: 'REPLACE', geometricError: 8, children: [refinedA],
+    traversal: { distanceFromCamera: 5 }, __ltdsFocusOverlap: 1,
+  };
+  const ownerB = {
+    refine: 'REPLACE', geometricError: 8, children: [pendingB],
+    traversal: { distanceFromCamera: 5 }, __ltdsFocusOverlap: 0.2,
+  };
+  const ready = new Set();
+  const focusState = {
+    owner: null, ownerView: null, ownerDistance: null, currentView: null,
+  };
+  const renderer = {
+    errorTarget: 5.481,
+    frameCount: 1,
+    __ltdsPeripheralPressureScale: 4,
+    __ltdsFocusOwnerState: focusState,
+  };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({
+    activeMotion: true,
+    lastActivityTime: renderer.frameCount * 100,
+  }));
+  plugin.init(renderer);
+  const viewProbe = {
+    engineData: {
+      boundingVolume: {
+        getSphere: target => target.copy(new Sphere(new Vector3(0, 0, -1), 0.05)),
+      },
+    },
+  };
+  plugin.calculateTileViewError(viewProbe);
+  const options = { isReady: tile => ready.has(tile), focusState };
+
+  assert.equal(lodBranchBlockerGroups([ownerA, ownerB], options)[0].owner, ownerA);
+  assert.equal(focusState.owner, ownerA);
+  assert.deepEqual(focusState.ownerView.position, [0, 0, 0]);
+  ready.add(refinedA);
+
+  // The completed child is now the visible representative of its historical
+  // REPLACE owner. A small change may reduce its overlap, but must not replace
+  // its owner lock while it still intersects the centered foreground region.
+  ownerA.__ltdsFocusOverlap = 0.1;
+  refinedA.__ltdsFocusOverlap = 0.1;
+  refinedA.__ltdsFocusActivityTime = 200;
+  ownerB.__ltdsFocusOverlap = 1;
+  pendingB.__ltdsFocusOverlap = 1;
+  pendingB.__ltdsFocusActivityTime = 200;
+  camera.position.x = 0.05;
+  camera.rotation.set(0, Math.PI / 180, 0);
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(viewProbe);
+  lodBranchBlockerGroups([refinedA, ownerB], options);
+  assert.equal(focusState.owner, ownerA);
+  assert.equal(ownerA.__ltdsFocalOwnerLocked, true);
+  assert.equal(ownerB.__ltdsFocalOwnerLocked, false);
+  assert.equal(lodPeripheralErrorTarget(5.481, refinedA, null, 0, 4), 5.481,
+    'the already-refined visible cut stays at raw SSE through tiny motion');
+
+  // A real camera turn must move the owner lock even while the old owner's
+  // broad bound still grazes the foreground region.
+  camera.rotation.set(0, 10 * Math.PI / 180, 0);
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(viewProbe);
+  refinedA.__ltdsFocusActivityTime = 300;
+  pendingB.__ltdsFocusActivityTime = 300;
+  lodBranchBlockerGroups([refinedA, ownerB], options);
+  assert.equal(focusState.owner, ownerB);
+  assert.equal(ownerA.__ltdsFocalOwnerLocked, false);
+  assert.equal(ownerB.__ltdsFocalOwnerLocked, true);
+
+  // Returning to A is another bounded view change and must reacquire its
+  // already-decoded replacement cut without depending on pointer position.
+  camera.position.set(0, 0, 0);
+  camera.rotation.set(0, 0, 0);
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(viewProbe);
+  ownerA.__ltdsFocusOverlap = 1;
+  refinedA.__ltdsFocusOverlap = 1;
+  ownerB.__ltdsFocusOverlap = 0.1;
+  pendingB.__ltdsFocusOverlap = 0.1;
+  refinedA.__ltdsFocusActivityTime = 400;
+  pendingB.__ltdsFocusActivityTime = 400;
+  lodBranchBlockerGroups([refinedA, ownerB], options);
+  assert.equal(focusState.owner, ownerA);
+  assert.equal(ownerA.__ltdsFocalOwnerLocked, true);
+  assert.equal(ownerB.__ltdsFocalOwnerLocked, false);
+
+  camera.position.x = 0.3;
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(viewProbe);
+  ownerA.__ltdsFocusOverlap = 0.1;
+  refinedA.__ltdsFocusOverlap = 0.1;
+  ownerB.__ltdsFocusOverlap = 1;
+  pendingB.__ltdsFocusOverlap = 1;
+  lodBranchBlockerGroups([refinedA, ownerB], options);
+  assert.equal(focusState.owner, ownerB,
+    'cumulative translation beyond 5% of owner distance releases the old lock');
+  plugin.dispose();
+});
+
+test('pan-only motion releases a focal owner while the camera remains inside its broad bound', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const broadSphere = new Sphere(new Vector3(0, 0, -1), 10);
+  const refinedA = {
+    content: { uri: 'a.b3dm' }, internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 0 },
+    __ltdsFocusOverlap: 1, __ltdsFocusActivityTime: 100,
+  };
+  const pendingB = {
+    content: { uri: 'b.b3dm' }, internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 4 },
+    __ltdsFocusOverlap: 0.1, __ltdsFocusActivityTime: 100,
+  };
+  const ownerA = {
+    refine: 'REPLACE', geometricError: 8, children: [refinedA],
+    traversal: { distanceFromCamera: 0 }, __ltdsFocusOverlap: 1,
+    engineData: { boundingVolume: { getSphere: target => target.copy(broadSphere) } },
+  };
+  const ownerB = {
+    refine: 'REPLACE', geometricError: 8, children: [pendingB],
+    traversal: { distanceFromCamera: 4 }, __ltdsFocusOverlap: 0.1,
+  };
+  refinedA.parent = ownerA;
+  pendingB.parent = ownerB;
+
+  const focusState = {
+    owner: null, ownerView: null, ownerDistance: null, currentView: null,
+  };
+  const renderer = {
+    errorTarget: 5.481,
+    frameCount: 1,
+    __ltdsPeripheralPressureScale: 4,
+    __ltdsFocusOwnerState: focusState,
+  };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({
+    activeMotion: true,
+    lastActivityTime: renderer.frameCount * 100,
+  }));
+  plugin.init(renderer);
+  plugin.calculateTileViewError(ownerA);
+  const ready = new Set();
+  const options = { isReady: tile => ready.has(tile), focusState };
+  lodBranchBlockerGroups([ownerA, ownerB], options);
+  assert.equal(focusState.owner, ownerA);
+  assert.equal(focusState.ownerDistance, 10,
+    'inside-volume ownership uses a positive bound scale instead of nullable surface distance');
+  ready.add(refinedA);
+
+  ownerA.__ltdsFocusOverlap = 0.2;
+  refinedA.__ltdsFocusOverlap = 0.2;
+  ownerB.__ltdsFocusOverlap = 1;
+  pendingB.__ltdsFocusOverlap = 1;
+  camera.position.x = 0.2;
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(refinedA);
+  refinedA.__ltdsFocusOverlap = 0.2;
+  lodBranchBlockerGroups([refinedA, ownerB], options);
+  assert.equal(focusState.owner, ownerA,
+    'a two-percent pan remains inside the documented five-percent hysteresis');
+
+  camera.position.x = 0.6;
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(refinedA);
+  refinedA.__ltdsFocusOverlap = 0.2;
+  lodBranchBlockerGroups([refinedA, ownerB], options);
+  assert.equal(focusState.owner, ownerB,
+    'a cumulative six-percent pan releases the stale owner without requiring rotation');
+  assert.equal(ownerA.__ltdsFocalOwnerLocked, false);
+  assert.equal(ownerB.__ltdsFocalOwnerLocked, true);
+  plugin.dispose();
+});
+
 test('LOD warmup advances only after the visible REPLACE frontier satisfies its target', () => {
   const root = { geometricError: 64, traversal: { visible: true, error: 140 }, children: [] };
   assert.equal(visibleLodTargetSatisfied(root, 32), false);
@@ -1117,6 +1310,297 @@ test('focus overlap includes projected bounding-sphere extent rather than only i
     0,
     'a genuinely peripheral projected extent remains outside the focus cone',
   );
+  assert.equal(
+    lodProjectedSphereFocusOverlap(camera, new Sphere(new Vector3(0, 0, 5), 0.5)),
+    0,
+    'a sphere wholly behind the camera cannot claim foreground focus',
+  );
+});
+
+test('a known foreground descendant prevents a fringe parent from relaxing traversal quality', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const sphereVolume = (center, radius) => ({
+    getSphere: target => target.copy(new Sphere(center, radius)),
+  });
+  const foregroundChild = {
+    engineData: { boundingVolume: sphereVolume(new Vector3(0, 0, -1), 0.05) },
+  };
+  const fringeParent = {
+    refine: 'REPLACE',
+    children: [foregroundChild],
+    engineData: { boundingVolume: sphereVolume(new Vector3(2, 0, -1), 0.01) },
+  };
+  foregroundChild.parent = fringeParent;
+  const renderer = { errorTarget: 5.481, __ltdsPeripheralPressureScale: 4, frameCount: 1 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({
+    activeMotion: true,
+    lastActivityTime: 1_000,
+  }));
+  plugin.init(renderer);
+
+  assert.equal(plugin.calculateTileViewError(fringeParent), false);
+  assert.equal(fringeParent.__ltdsFocusOverlap, 0);
+  assert.equal(fringeParent.__ltdsPeripheralErrorTarget, 5.481,
+    'the first traversal after initialization conservatively keeps internal parents at raw SSE');
+  plugin.calculateTileViewError(foregroundChild);
+  renderer.frameCount += 1;
+  assert.equal(plugin.calculateTileViewError(fringeParent), false);
+  assert.ok(fringeParent.__ltdsFocusOverlap > 0,
+    'the preceding visited cut propagates camera-centered focus to its parent');
+  assert.equal(fringeParent.__ltdsPeripheralErrorTarget, 5.481,
+    'a peripheral parent cannot block a foreground descendant with a relaxed SSE');
+  plugin.dispose();
+});
+
+test('a loose parent bound keeps broad queue priority without exempting background descendants from pressure', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const sphereVolume = (center, radius) => ({
+    getSphere: target => target.copy(new Sphere(center, radius)),
+  });
+  const backgroundChild = {
+    children: [],
+    engineData: { boundingVolume: sphereVolume(new Vector3(0.5, 0, -1), 0.05) },
+  };
+  const looseParent = {
+    refine: 'REPLACE',
+    children: [backgroundChild],
+    engineData: { boundingVolume: sphereVolume(new Vector3(0, 0, -1), 1) },
+  };
+  backgroundChild.parent = looseParent;
+  const renderer = { errorTarget: 5.481, __ltdsPeripheralPressureScale: 4, frameCount: 1 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({
+    activeMotion: false,
+    lastActivityTime: 0,
+  }));
+  plugin.init(renderer);
+  plugin.calculateTileViewError(looseParent);
+  plugin.calculateTileViewError(backgroundChild);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(looseParent);
+  assert.equal(looseParent.__ltdsFocusOverlap, 1,
+    'the broad parent remains highly ranked for download scheduling');
+  assert.equal(looseParent.__ltdsForegroundOverlap, 0,
+    'known background descendants override a loose internal bound for selection');
+  assert.equal(looseParent.__ltdsPeripheralErrorTarget, 21.924,
+    'persistent pressure can keep the known background branch coarse');
+  plugin.dispose();
+});
+
+test('multiple lazy preprocess callbacks in one renderer frame preserve earlier foreground markers', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const sphereVolume = center => ({
+    getSphere: target => target.copy(new Sphere(center, 0.02)),
+  });
+  const centeredChild = {
+    children: [],
+    engineData: { boundingVolume: sphereVolume(new Vector3(0, 0, -1)) },
+  };
+  const focusedParent = {
+    refine: 'REPLACE',
+    children: [centeredChild],
+    engineData: { boundingVolume: sphereVolume(new Vector3(2, 0, -1)) },
+  };
+  centeredChild.parent = focusedParent;
+  const lazyBranches = [1, 2].map(index => {
+    const child = {
+      children: [],
+      engineData: { boundingVolume: sphereVolume(new Vector3(3 + index, 0, -1)) },
+    };
+    const branch = {
+      children: [child],
+      engineData: { boundingVolume: sphereVolume(new Vector3(2 + index, 0, -1)) },
+    };
+    child.parent = branch;
+    return branch;
+  });
+  const renderer = { errorTarget: 5.481, __ltdsPeripheralPressureScale: 4, frameCount: 10 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => null);
+  plugin.init(renderer);
+  plugin.calculateTileViewError(focusedParent);
+  plugin.calculateTileViewError(centeredChild);
+  for (const branch of lazyBranches) {
+    plugin.preprocessNode(branch.children[0], '', branch);
+    plugin.calculateTileViewError(branch);
+  }
+
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(focusedParent);
+  assert.equal(focusedParent.__ltdsForegroundOverlap, 1,
+    'same-frame preprocess callbacks must not age the earlier marker by multiple frame tokens');
+  assert.equal(focusedParent.__ltdsPeripheralErrorTarget, 5.481,
+    'the preserved marker prevents a later branch from relaxing its foreground ancestor');
+  plugin.calculateTileViewError(lazyBranches[1]);
+  assert.equal(lazyBranches[1].__ltdsConservativeRawSse, true,
+    'the next complete renderer frame remains conservative after mid-frame hierarchy growth');
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(lazyBranches[1]);
+  assert.equal(lazyBranches[1].__ltdsConservativeRawSse, false);
+  assert.equal(lazyBranches[1].__ltdsPeripheralErrorTarget, 21.924,
+    'the background branch relaxes after its conservative discovery frame');
+  plugin.dispose();
+});
+
+test('focus projection transforms tile-root bounds through a non-identity viewer frame', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const parent = new Group();
+  const group = new Group();
+  parent.rotation.x = Math.PI;
+  parent.position.y = 2;
+  parent.add(group);
+  parent.updateWorldMatrix(true, true);
+  const tile = center => ({
+    children: [],
+    geometricError: 1,
+    engineData: {
+      boundingVolume: {
+        getSphere: target => target.copy(new Sphere(center, 0.05)),
+      },
+    },
+  });
+  // The production viewer applies the same pi-X parent rotation. Local +Z is
+  // world -Z (in front of the camera), while local -Z is behind the camera.
+  const localFront = tile(new Vector3(0, 2, 1));
+  const localBehind = tile(new Vector3(0, 2, -1));
+  const renderer = {
+    errorTarget: 5.481,
+    frameCount: 1,
+    group,
+    __ltdsPeripheralPressureScale: 4,
+  };
+  const plugin = createLodFocusPriorityPlugin(camera, () => null);
+  plugin.init(renderer);
+  plugin.calculateTileViewError(localFront);
+  plugin.calculateTileViewError(localBehind);
+  assert.equal(localFront.__ltdsFocusOverlap, 1,
+    'a locally behind-looking sphere is centered after the viewer frame transform');
+  assert.equal(localBehind.__ltdsFocusOverlap, 0,
+    'a locally forward-looking sphere transformed behind the world camera is rejected');
+  plugin.dispose();
+});
+
+test('descendant focus propagation projects each bounding volume once per renderer frame', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const tileCount = 512;
+  let projectionCalls = 0;
+  const tiles = Array.from({ length: tileCount }, () => ({
+    children: [],
+    engineData: {
+      boundingVolume: {
+        getSphere(target) {
+          projectionCalls += 1;
+          return target.copy(new Sphere(new Vector3(2, 0, -1), 0.01));
+        },
+      },
+    },
+  }));
+  for (let index = 0; index < tiles.length - 1; index += 1) {
+    tiles[index].children.push(tiles[index + 1]);
+  }
+
+  const renderer = {
+    errorTarget: 5.481,
+    frameCount: 7,
+    __ltdsPeripheralPressureScale: 4,
+  };
+  const plugin = createLodFocusPriorityPlugin(camera, () => ({
+    activeMotion: true,
+    lastActivityTime: 1_000,
+  }));
+  plugin.init(renderer);
+  plugin.calculateTileViewError(tiles[0]);
+  assert.equal(projectionCalls, 1,
+    'visiting a root projects only that root instead of scanning all known descendants');
+  for (const tile of tiles) plugin.calculateTileViewError(tile);
+  assert.equal(projectionCalls, tileCount,
+    'a deep chain remains linear instead of re-projecting every descendant per ancestor');
+
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(tiles[0]);
+  assert.equal(projectionCalls, tileCount + 1,
+    'the next root visit remains bounded to the renderer-visited cut');
+  for (const tile of tiles) plugin.calculateTileViewError(tile);
+  assert.equal(projectionCalls, tileCount * 2,
+    'the memoized projection is refreshed exactly once per tile on the next frame');
+  plugin.dispose();
+});
+
+test('focus projection memo invalidates for camera frames hierarchy growth and plugin re-init', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  let projectionCalls = 0;
+  const tile = (center, radius = 0.05) => ({
+    children: [],
+    engineData: {
+      boundingVolume: {
+        getSphere(target) {
+          projectionCalls += 1;
+          return target.copy(new Sphere(center, radius));
+        },
+      },
+    },
+  });
+  const front = tile(new Vector3(0, 0, -1));
+  const renderer = {
+    errorTarget: 5.481,
+    frameCount: 10,
+    __ltdsPeripheralPressureScale: 4,
+    __ltdsFocusOwnerState: {
+      owner: null, ownerView: null, ownerDistance: null, currentView: null,
+    },
+  };
+  const plugin = createLodFocusPriorityPlugin(camera, () => null);
+  plugin.init(renderer);
+  plugin.calculateTileViewError(front);
+  assert.equal(front.__ltdsFocusOverlap, 1);
+
+  camera.rotation.set(0, Math.PI, 0);
+  camera.updateMatrixWorld(true);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(front);
+  assert.equal(front.__ltdsFocusOverlap, 0,
+    'a new renderer frame recomputes a formerly front-facing sphere behind the camera');
+
+  camera.rotation.set(0, 0, 0);
+  camera.updateMatrixWorld(true);
+  const parent = tile(new Vector3(2, 0, -1), 0.01);
+  const centeredChild = tile(new Vector3(0, 0, -1));
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(parent);
+  assert.equal(parent.__ltdsFocusOverlap, 0);
+  centeredChild.parent = parent;
+  parent.children.push(centeredChild);
+  plugin.preprocessNode(centeredChild, '', parent);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(parent);
+  assert.equal(parent.__ltdsFocusOverlap, 0);
+  assert.equal(parent.__ltdsPeripheralErrorTarget, 5.481,
+    'a hierarchy mutation conservatively keeps the parent at raw SSE without scanning its subtree');
+  plugin.calculateTileViewError(centeredChild);
+  renderer.frameCount += 1;
+  plugin.calculateTileViewError(parent);
+  assert.equal(parent.__ltdsFocusOverlap, 1,
+    'a preprocessed child contributes to the following frame ancestor marker');
+
+  const beforeReinit = projectionCalls;
+  camera.rotation.set(0, Math.PI, 0);
+  camera.updateMatrixWorld(true);
+  plugin.init(renderer);
+  plugin.calculateTileViewError(centeredChild);
+  assert.equal(centeredChild.__ltdsFocusOverlap, 0,
+    're-initializing at the same frame count clears memoized camera projections');
+  assert.equal(projectionCalls, beforeReinit + 1);
+  plugin.dispose();
 });
 
 test('locked focal owner and all descendants retain raw requested SSE metadata', () => {
@@ -1233,17 +1717,24 @@ test('focus penalty persists while the focal replacement cut is incomplete', () 
 
 test('peripheral selection target preserves focal SSE and relaxes only under explicit memory pressure', () => {
   const moving = { activeMotion: true, lastActivityTime: 1_000 };
-  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsFocusOverlap: 1 }, moving, 1_000), 5.481);
-  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsFocusOverlap: 0 }, moving, 1_000), 5.481,
+  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsForegroundOverlap: 1 }, moving, 1_000), 5.481);
+  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsForegroundOverlap: 0 }, moving, 1_000), 5.481,
     'camera motion changes queue order but cannot coarsen traversal selection');
   assert.equal(lodPeripheralErrorTarget(
     5.481,
-    { __ltdsFocusOverlap: 0 },
+    { __ltdsFocusOverlap: 0.5, __ltdsForegroundOverlap: 0 },
     moving,
     1_000,
     4,
-  ), 21.924, 'persistent memory pressure may relax genuinely peripheral selection');
-  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsFocusOverlap: 0 }, {
+  ), 21.924, 'broad queue focus does not exempt background selection from persistent pressure');
+  assert.equal(lodPeripheralErrorTarget(
+    5.481,
+    { __ltdsFocusOverlap: 0.01, __ltdsForegroundOverlap: 0.01 },
+    moving,
+    1_000,
+    4,
+  ), 5.481, 'even a fringe intersection stays at raw SSE for descendant safety');
+  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsForegroundOverlap: 0 }, {
     activeMotion: false,
     lastActivityTime: 1_000,
   }, 2_000), 5.481, 'settled peripheral work eventually converges at the raw requested SSE');
@@ -1251,7 +1742,7 @@ test('peripheral selection target preserves focal SSE and relaxes only under exp
 
 test('active pan and orbit timing cannot deselect an already-loaded peripheral branch', () => {
   const rawTarget = 5.481;
-  const peripheral = { __ltdsFocusOverlap: 0 };
+  const peripheral = { __ltdsFocusOverlap: 0, __ltdsForegroundOverlap: 0 };
   const branchError = 8;
   const idleTarget = lodPeripheralErrorTarget(rawTarget, peripheral, {
     activeMotion: false,
@@ -1462,6 +1953,22 @@ test('controlled KTX2 provenance is accepted by the browser policy', () => {
   };
   assert.deepEqual(inspectLodProvenance(valid, '/assets/p/derivatives/model.glb'), { verified: true, errors: [] });
   assert.equal(inspectLodProvenance({ ...valid, converter: { ...valid.converter, commandSha256: 'c'.repeat(64) } }, '/assets/p/derivatives/model.glb').verified, false);
+
+  const serverCurrent = {
+    ...valid,
+    converter: {
+      ...valid.converter,
+      commandSha256: '0280b96902e3614f4facd89e3d617c4a0cd86bf814c35a034b94a65d7c6842f0',
+      binarySha256: 'd'.repeat(64),
+    },
+  };
+  assert.equal(inspectLodProvenance(serverCurrent, '/assets/p/derivatives/model.glb').verified, false,
+    'a legacy/untrusted browser config retains the static fail-closed contract');
+  assert.deepEqual(inspectLodProvenance(serverCurrent, '/assets/p/derivatives/model.glb', { serverVerified: true }),
+    { verified: true, errors: [] },
+    'a current runtime fork accepted by the exact-asset server policy is not rejected by a stale browser allowlist');
+  assert.equal(inspectLodProvenance({ ...serverCurrent, converter: { ...serverCurrent.converter, version: 'latest' } }, '/assets/p/derivatives/model.glb', { serverVerified: true }).verified, false,
+    'server authority does not bypass the browser structural contract');
 
   const v4 = {
     ...valid,

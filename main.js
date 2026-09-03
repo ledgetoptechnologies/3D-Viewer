@@ -46,8 +46,9 @@ import { EarthLikeControls, safeTopViewPosition } from './earth-controls.js';
 import { pickDirectPointSurface } from './direct-pointcloud-picking.mjs';
 import { localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
-import { normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
+import { cameraFeatureImageUpBearing, cameraFeatureMapPosition, normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
 import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives } from './camera-markers.mjs';
+import { clampPhotoView, fitPhotoBox, panPhotoView, zoomPhotoView } from './camera-photo-view.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
@@ -75,6 +76,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 let PROJECT = null;
 let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
 let LOD_PROVENANCE = null;
+let LOD_PROVENANCE_VERIFIED = false;
 let SHOTS_URL = null, PHOTO_BASE = null;
 let ORTHO_URL = null, DSM_URL = null, DTM_URL = null;
 let EPT_URL = null, POINT_COUNT = null;
@@ -116,7 +118,7 @@ const dom = {};
 ['loading-overlay','loading-text','loading-progress','error-panel','error-message',
  'three-container','leaflet-map','cloud-container','fps','mem-display','coords',
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
- 'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-img','photo-title',
+ 'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-frame','photo-imgwrap','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','photo-empty','cam-tooltip','labels-container',
  'error-actions','error-retry','error-lod','loading-cancel',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
@@ -249,9 +251,11 @@ function syncLodPendingAdmission() {
   }
   return true;
 }
-let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
+const CAMERA_MARKER_COMPONENTS = Object.freeze(['body', 'face', 'cue', 'tab']);
+let camGroupParent, camMarkerMeshes = [], camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
+let mapCameraLayer = null;
 let mapViews = {};            // per-tab map center/zoom retention
 let mapMeasure = null;        // active Leaflet distance/area sketch
 let mapMeasurements = [];     // completed Leaflet layer groups
@@ -659,6 +663,7 @@ function applyProjectConfig(p) {
   GLB_URL = p.assets.glb;
   TILES_URL = p.assets.tiles;
   LOD_PROVENANCE = p.lodProvenance || null;
+  LOD_PROVENANCE_VERIFIED = p.lodProvenanceVerified === true;
   OBJ_URL = p.assets.obj;
   SHOTS_URL = p.assets.shots;
   ORTHO_URL = p.assets.ortho;
@@ -860,6 +865,7 @@ function onResize() {
     refreshLodResolution(tilesRenderer, camera, renderer);
   }
   if (map) setTimeout(() => map.invalidateSize(), 80);
+  layoutPhotoViewer();
 }
 
 // Raycast pick against the active Model or direct point-cloud content.
@@ -970,7 +976,9 @@ function loadTiles() {
   rendererInstance.addEventListener('load-root-tileset', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
     const report = inspectLodTileset(ev.tileset);
-    const provenance = inspectLodProvenance(LOD_PROVENANCE, GLB_URL || OBJ_URL);
+    const provenance = inspectLodProvenance(LOD_PROVENANCE, GLB_URL || OBJ_URL, {
+      serverVerified: LOD_PROVENANCE_VERIFIED,
+    });
     state.lodManifestReport = { ...report, provenance };
     const decision = decideLodStartup(report, provenance, Boolean(GLB_URL || OBJ_URL));
     if (decision.action !== 'stream-lod') {
@@ -1521,11 +1529,11 @@ function buildCameraMarkerGeometries() {
     result.computeVertexNormals();
     return result;
   };
-  return { orangeGeometry: geometry(data.orange), whiteGeometry: geometry(data.white), yellowGeometry: geometry(data.yellow) };
+  return Object.fromEntries(CAMERA_MARKER_COMPONENTS.map((component) => [component, geometry(data[component])]));
 }
 
 async function loadCameras() {
-  if (state.camerasLoaded || state.camerasLoading || !SHOTS_URL) return;
+  if (state.camerasLoaded || state.camerasLoading || !SHOTS_URL || !SHARE_PERMISSIONS.cameras) return;
   state.camerasLoading = true;
   try {
     const res = await fetch(SHOTS_URL);
@@ -1539,18 +1547,18 @@ async function loadCameras() {
       return;
     }
 
-    const { orangeGeometry, whiteGeometry, yellowGeometry } = buildCameraMarkerGeometries();
+    const geometries = buildCameraMarkerGeometries();
     const material = () => new THREE.MeshStandardMaterial({
       transparent: true, opacity: CAMERA_MARKER_OPACITY.normal, side: THREE.FrontSide, depthWrite: false,
       metalness: 0, roughness: 0.5
     });
-    camInstances = new THREE.InstancedMesh(orangeGeometry, material(), camFeatures.length);
-    camWhiteInstances = new THREE.InstancedMesh(whiteGeometry, material(), camFeatures.length);
-    camYellowInstances = new THREE.InstancedMesh(yellowGeometry, material(), camFeatures.length);
-    for (const [index, mesh] of [camInstances, camWhiteInstances, camYellowInstances].entries()) {
+    camMarkerMeshes = CAMERA_MARKER_COMPONENTS.map((component, index) => {
+      const mesh = new THREE.InstancedMesh(geometries[component], material(), camFeatures.length);
+      mesh.userData.cameraMarkerComponent = component;
       mesh.frustumCulled = false;
       mesh.renderOrder = index;
-    }
+      return mesh;
+    });
 
     const q = new THREE.Quaternion();
     const axis = new THREE.Vector3();
@@ -1576,10 +1584,11 @@ async function loadCameras() {
       camMarkerQuaternions[i * 4 + 2] = q.z;
       camMarkerQuaternions[i * 4 + 3] = q.w;
     });
-    camInstances.count = 0;
-    camWhiteInstances.count = 0;
-    camYellowInstances.count = 0;
-    camGroupParent.getObjectByName('camOffset').add(camInstances, camWhiteInstances, camYellowInstances);
+    for (const mesh of camMarkerMeshes) {
+      mesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS[mesh.userData.cameraMarkerComponent]));
+      mesh.count = 0;
+    }
+    camGroupParent.getObjectByName('camOffset').add(...camMarkerMeshes);
     refreshCameraMarkerScales(true);
     state.camerasLoaded = true;
     window.__ltdsCams = camFeatures.length;
@@ -1589,6 +1598,71 @@ async function loadCameras() {
   } finally {
     state.camerasLoading = false;
   }
+}
+
+function mapCameraGlyph(feature) {
+  const scale = cameraMarkerScaleForView({ baseScale: cameraMarkerUserScale });
+  const size = Math.round(Math.max(20, Math.min(38, 24 * scale / DEFAULT_CAMERA_MARKER_SCALE)));
+  const bearing = cameraFeatureImageUpBearing(feature).toFixed(2);
+  return L.divIcon({
+    className: 'map-camera-marker',
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+    html: `<svg viewBox="0 0 24 24" aria-hidden="true" style="transform:rotate(${bearing}deg)">
+      <path d="M3 8.5 5 19h14l2-10.5z" fill="#6f7782" stroke="#3e4650" stroke-width="1"/>
+      <rect x="5.2" y="9.3" width="13.6" height="8.2" rx="1" fill="#d8dee6"/>
+      <circle cx="8.5" cy="13.4" r="1" fill="#f8cb2e"/><circle cx="12" cy="13.4" r="1" fill="#f8cb2e"/><circle cx="15.5" cy="13.4" r="1" fill="#f8cb2e"/>
+      <rect x="10" y="3" width="4" height="5.5" rx=".7" fill="#ee5007"/>
+    </svg>`,
+  });
+}
+
+function refreshMapCameraLayer() {
+  if (!map) return false;
+  const visible = state.activeMode === 'ortho' && state.camerasVisible
+    && state.camerasLoaded && SHARE_PERMISSIONS.cameras && Boolean(SHOTS_URL);
+  if (!visible) {
+    if (mapCameraLayer && map.hasLayer(mapCameraLayer)) map.removeLayer(mapCameraLayer);
+    window.__ltdsMapCamDrawn = 0;
+    window.__ltdsMapCamDrawToSource = [];
+    return false;
+  }
+  if (!mapCameraLayer) mapCameraLayer = L.layerGroup();
+  mapCameraLayer.clearLayers();
+  const viewport = map.getSize();
+  const positions = new Map();
+  const candidates = [];
+  for (let index = 0; index < camFeatures.length; index += 1) {
+    const position = cameraFeatureMapPosition(camFeatures[index], { projectedToLatLon: utmToLatLon });
+    if (!position) continue;
+    const latlng = L.latLng(position[0], position[1]);
+    const point = map.latLngToContainerPoint(latlng);
+    positions.set(index, latlng);
+    candidates.push({ index, x: point.x, y: point.y, depth: 1 });
+  }
+  const representatives = selectCameraMarkerRepresentatives(candidates, {
+    width: viewport.x,
+    height: viewport.y,
+    cellPixels: 26,
+    maxVisible: 1200,
+    margin: 20,
+  });
+  for (const source of representatives) {
+    const marker = L.marker(positions.get(source), {
+      icon: mapCameraGlyph(camFeatures[source]),
+      keyboard: true,
+      riseOnHover: true,
+    });
+    marker.on('click', (event) => {
+      if (event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+      openPhoto(source);
+    });
+    marker.addTo(mapCameraLayer);
+  }
+  mapCameraLayer.addTo(map);
+  window.__ltdsMapCamDrawn = representatives.length;
+  window.__ltdsMapCamDrawToSource = representatives.slice();
+  return true;
 }
 
 let cameraMarkerUserScale = DEFAULT_CAMERA_MARKER_SCALE;
@@ -1602,15 +1676,16 @@ let camDrawToSource = [], camSourceToDraw = null;
 function setCameraScale(value) {
   cameraMarkerUserScale = cameraMarkerScaleForView({ baseScale: value });
   refreshCameraMarkerScales(true);
+  refreshMapCameraLayer();
   pcApi()?.setCameraScale?.(cameraMarkerUserScale);
 }
 
 function ensureCamWorldPositions() {
-  if (camWorldPos || !camInstances || !camMarkerLocalPositions) return;
-  camInstances.updateMatrixWorld(true);
+  if (camWorldPos || !camMarkerMeshes.length || !camMarkerLocalPositions) return;
+  camMarkerMeshes[0].updateMatrixWorld(true);
   const n = camMarkerLocalPositions.length / 3;
   camWorldPos = new Float64Array(n * 3);
-  const mw = camInstances.matrixWorld.elements;
+  const mw = camMarkerMeshes[0].matrixWorld.elements;
   for (let i = 0; i < n; i++) {
     const o = i * 3;
     const ix = camMarkerLocalPositions[o], iy = camMarkerLocalPositions[o + 1], iz = camMarkerLocalPositions[o + 2];
@@ -1621,7 +1696,7 @@ function ensureCamWorldPositions() {
 }
 
 function refreshCameraMarkerScales(force = false) {
-  if (!camInstances || !camWhiteInstances || !camYellowInstances || !camera || !renderer) return false;
+  if (camMarkerMeshes.length !== CAMERA_MARKER_COMPONENTS.length || !camera || !renderer) return false;
   const now = performance.now();
   if (!force && now - cameraMarkerScaleUpdatedAt < 100) return false;
   const rect = renderer.domElement.getBoundingClientRect();
@@ -1643,11 +1718,8 @@ function refreshCameraMarkerScales(force = false) {
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
   const markerScale = new THREE.Vector3();
-  const orange = new THREE.Color(CAMERA_MARKER_COLORS.orange);
-  const orangeHover = orange.clone().lerp(new THREE.Color(0xffffff), 0.25);
-  const white = new THREE.Color(CAMERA_MARKER_COLORS.white);
-  const yellow = new THREE.Color(CAMERA_MARKER_COLORS.yellow);
-  const yellowHover = yellow.clone().lerp(new THREE.Color(0xffffff), 0.25);
+  const white = new THREE.Color(0xffffff);
+  const componentColors = Object.fromEntries(CAMERA_MARKER_COMPONENTS.map((component) => [component, new THREE.Color(CAMERA_MARKER_COLORS[component])]));
   const candidates = [];
   const pm = camera.projectionMatrix.elements;
   const vm = camera.matrixWorldInverse.elements;
@@ -1689,17 +1761,15 @@ function refreshCameraMarkerScales(force = false) {
     });
     markerScale.setScalar(scale);
     matrix.compose(position, quaternion, markerScale);
-    camInstances.setMatrixAt(draw, matrix);
-    camWhiteInstances.setMatrixAt(draw, matrix);
-    camYellowInstances.setMatrixAt(draw, matrix);
-    camInstances.setColorAt(draw, source === hoveredCam ? orangeHover : orange);
-    camWhiteInstances.setColorAt(draw, white);
-    camYellowInstances.setColorAt(draw, source === hoveredCam ? yellowHover : yellow);
+    const hovered = source === hoveredCam;
+    for (const mesh of camMarkerMeshes) {
+      const color = componentColors[mesh.userData.cameraMarkerComponent];
+      mesh.setMatrixAt(draw, matrix);
+      mesh.setColorAt(draw, hovered ? color.clone().lerp(white, 0.25) : color);
+    }
   }
-  camInstances.count = visibleSources.length;
-  camWhiteInstances.count = visibleSources.length;
-  camYellowInstances.count = visibleSources.length;
-  for (const mesh of [camInstances, camWhiteInstances, camYellowInstances]) {
+  for (const mesh of camMarkerMeshes) {
+    mesh.count = visibleSources.length;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   }
@@ -1709,9 +1779,9 @@ function refreshCameraMarkerScales(force = false) {
 }
 
 function pickCameraInstance(ndc) {
-  if (!state.camerasVisible || !camInstances) return -1;
+  if (!state.camerasVisible || camMarkerMeshes.length !== CAMERA_MARKER_COMPONENTS.length) return -1;
   hoverRaycaster.setFromCamera(ndc, camera);
-  const hits = hoverRaycaster.intersectObjects([camInstances, camWhiteInstances, camYellowInstances], false);
+  const hits = hoverRaycaster.intersectObjects(camMarkerMeshes, false);
   if (hits.length) return camDrawToSource[hits[0].instanceId];
 
   // Fallback: markers can be a few pixels at default size — pick the nearest
@@ -1742,39 +1812,51 @@ function pickCameraInstance(ndc) {
 }
 
 function highlightCam(idx) {
-  if (!camInstances) return;
-  const orange = new THREE.Color(CAMERA_MARKER_COLORS.orange);
-  const orangeHover = orange.clone().lerp(new THREE.Color(0xffffff), 0.25);
-  const white = new THREE.Color(CAMERA_MARKER_COLORS.white);
-  const yellow = new THREE.Color(CAMERA_MARKER_COLORS.yellow);
-  const yellowHover = yellow.clone().lerp(new THREE.Color(0xffffff), 0.25);
-  if (hoveredCam >= 0 && hoveredCam !== idx) {
-    const previousDraw = camSourceToDraw?.[hoveredCam] ?? -1;
-    if (previousDraw >= 0) {
-      camInstances.setColorAt(previousDraw, orange);
-      camWhiteInstances?.setColorAt(previousDraw, white);
-      camYellowInstances?.setColorAt(previousDraw, yellow);
+  if (camMarkerMeshes.length !== CAMERA_MARKER_COMPONENTS.length) return;
+  const white = new THREE.Color(0xffffff);
+  const setDrawColors = (source, hovered) => {
+    const draw = camSourceToDraw?.[source] ?? -1;
+    if (draw < 0) return;
+    for (const mesh of camMarkerMeshes) {
+      const color = new THREE.Color(CAMERA_MARKER_COLORS[mesh.userData.cameraMarkerComponent]);
+      mesh.setColorAt(draw, hovered ? color.clone().lerp(white, 0.25) : color);
     }
+  };
+  if (hoveredCam >= 0 && hoveredCam !== idx) {
+    setDrawColors(hoveredCam, false);
   }
   if (idx >= 0) {
-    const nextDraw = camSourceToDraw?.[idx] ?? -1;
-    if (nextDraw >= 0) {
-      camInstances.setColorAt(nextDraw, orangeHover);
-      camWhiteInstances?.setColorAt(nextDraw, white);
-      camYellowInstances?.setColorAt(nextDraw, yellowHover);
-    }
+    setDrawColors(idx, true);
   }
-  if (camInstances.instanceColor) camInstances.instanceColor.needsUpdate = true;
-  if (camWhiteInstances?.instanceColor) camWhiteInstances.instanceColor.needsUpdate = true;
-  if (camYellowInstances?.instanceColor) camYellowInstances.instanceColor.needsUpdate = true;
+  for (const mesh of camMarkerMeshes) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   hoveredCam = idx;
 }
 
-// Photo modal zoom/pan state (WebODM-style image inspection)
-const photoView = { scale: 1, tx: 0, ty: 0, dragging: false, sx: 0, sy: 0, stx: 0, sty: 0, moved: false };
+// Camera photo state. The default docked preview never blocks viewer input;
+// the expanded inspector owns zoom/pan and keeps the image covering its frame.
+const photoView = {
+  scale: 1, tx: 0, ty: 0, dragging: false,
+  sx: 0, sy: 0, stx: 0, sty: 0, moved: false,
+  naturalWidth: 4, naturalHeight: 3, presentation: 'docked',
+};
+
+function photoTransformBounds() {
+  return {
+    baseWidth: dom.photoImg.offsetWidth || dom.photoImgwrap.clientWidth,
+    baseHeight: dom.photoImg.offsetHeight || dom.photoImgwrap.clientHeight,
+    viewportWidth: dom.photoImgwrap.clientWidth,
+    viewportHeight: dom.photoImgwrap.clientHeight,
+  };
+}
 
 function applyPhotoTransform() {
   dom.photoImg.style.transform = `translate(${photoView.tx}px, ${photoView.ty}px) scale(${photoView.scale})`;
+  dom.photoImgwrap.classList.toggle('zoomed', photoView.presentation === 'expanded' && photoView.scale > 1);
+}
+
+function clampAndApplyPhotoView(next = photoView) {
+  Object.assign(photoView, clampPhotoView(next, photoTransformBounds()));
+  applyPhotoTransform();
 }
 
 function resetPhotoView() {
@@ -1782,10 +1864,41 @@ function resetPhotoView() {
   applyPhotoTransform();
 }
 
+function layoutPhotoViewer() {
+  if (dom.photoModal.style.display !== 'flex') return;
+  const expanded = photoView.presentation === 'expanded';
+  const maxWidth = expanded ? window.innerWidth * 0.90 : Math.min(380, window.innerWidth - 28);
+  const maxHeight = expanded
+    ? window.innerHeight * 0.76
+    : Math.min(420, Math.max(180, window.innerHeight - (window.innerWidth <= 640 ? 180 : 120)));
+  const box = fitPhotoBox({
+    naturalWidth: photoView.naturalWidth,
+    naturalHeight: photoView.naturalHeight,
+    maxWidth,
+    maxHeight,
+  });
+  const frameWidth = Math.min(maxWidth, Math.max(expanded ? 280 : 220, box.width));
+  dom.photoFrame.style.width = `${frameWidth}px`;
+  dom.photoImgwrap.style.width = `${box.width}px`;
+  dom.photoImgwrap.style.height = `${box.height}px`;
+  dom.photoImgwrap.style.alignSelf = 'center';
+  clampAndApplyPhotoView();
+}
+
+function setPhotoPresentation(value) {
+  photoView.presentation = value === 'expanded' ? 'expanded' : 'docked';
+  dom.photoModal.classList.toggle('expanded', photoView.presentation === 'expanded');
+  dom.photoModal.classList.toggle('docked', photoView.presentation === 'docked');
+  dom.photoModal.dataset.presentation = photoView.presentation;
+  dom.photoFrame.setAttribute('aria-modal', String(photoView.presentation === 'expanded'));
+  dom.photoImgwrap.setAttribute('aria-label', photoView.presentation === 'docked' ? 'Expand camera photo' : 'Camera photo inspector');
+  resetPhotoView();
+  layoutPhotoViewer();
+}
+
 function openPhoto(idx) {
   const feat = camFeatures[idx];
   if (!feat) return;
-  resetPhotoView();
   const photoKey = normalizeCameraPhotoKey(feat.properties?.photoKey);
   const fn = photoKey ? photoKey.split('/').at(-1) : '';
   const geometryAltitude = Number(feat.geometry?.coordinates?.[2]);
@@ -1798,6 +1911,10 @@ function openPhoto(idx) {
   dom.photoTitle.textContent = fn || 'Camera photo';
   dom.photoMeta.textContent = `Altitude ${altitude} MSL${time ? '  ·  ' + time : ''}`;
   dom.photoModal.style.display = 'flex';
+  dom.photoModal.setAttribute('aria-hidden', 'false');
+  photoView.naturalWidth = 4;
+  photoView.naturalHeight = 3;
+  setPhotoPresentation('docked');
   dom.photoSpinner.style.display = 'none';
   dom.photoEmpty.style.display = 'none';
   dom.photoImg.style.display = 'none';
@@ -1810,12 +1927,17 @@ function openPhoto(idx) {
   if (!PHOTO_BASE || !photoKey) {
     dom.photoEmpty.textContent = 'No photo available';
     dom.photoEmpty.style.display = 'flex';
+    layoutPhotoViewer();
     return;
   }
   const url = `${PHOTO_BASE}/${encodeURIComponent(photoKey)}`;
   dom.photoSpinner.style.display = 'block';
   dom.photoImg.style.display = '';
   dom.photoImg.onload = () => {
+    photoView.naturalWidth = dom.photoImg.naturalWidth || 4;
+    photoView.naturalHeight = dom.photoImg.naturalHeight || 3;
+    resetPhotoView();
+    layoutPhotoViewer();
     dom.photoSpinner.style.display = 'none';
     dom.photoImg.style.opacity = '1';
     if (SHARE_PERMISSIONS.download) dom.photoDownload.style.display = '';
@@ -1825,6 +1947,7 @@ function openPhoto(idx) {
     dom.photoImg.style.display = 'none';
     dom.photoEmpty.textContent = 'No photo available';
     dom.photoEmpty.style.display = 'flex';
+    layoutPhotoViewer();
   };
   dom.photoImg.src = url;
   dom.photoDownload.href = url;
@@ -1833,61 +1956,62 @@ function openPhoto(idx) {
 
 function closePhoto() {
   dom.photoModal.style.display = 'none';
+  dom.photoModal.classList.remove('docked', 'expanded');
+  dom.photoModal.setAttribute('aria-hidden', 'true');
   dom.photoImg.removeAttribute('src');
   dom.photoEmpty.style.display = 'none';
   resetPhotoView();
 }
 
 function bindPhotoViewer() {
-  const wrap = document.getElementById('photo-imgwrap');
+  const wrap = dom.photoImgwrap;
 
-  wrap.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const rect = dom.photoImg.getBoundingClientRect();
-    const prev = photoView.scale;
-    const factor = Math.pow(0.9, e.deltaY / 100);
-    const next = Math.min(40, Math.max(1, prev * factor));
-    if (next === prev) return;
-    // zoom toward the cursor: keep the image point under the mouse fixed.
-    // rect is the TRANSFORMED box, so its center = layout center + (tx, ty);
-    // cursor offset from that transformed center works out to tx += cx*(1-k).
-    const k = next / prev;
-    const cx = e.clientX - (rect.left + rect.width / 2);
-    const cy = e.clientY - (rect.top + rect.height / 2);
-    photoView.scale = next;
-    photoView.tx += cx * (1 - k);
-    photoView.ty += cy * (1 - k);
-    if (photoView.scale === 1) { photoView.tx = 0; photoView.ty = 0; }
+  wrap.addEventListener('wheel', (event) => {
+    if (photoView.presentation !== 'expanded') return;
+    event.preventDefault();
+    const rect = wrap.getBoundingClientRect();
+    Object.assign(photoView, zoomPhotoView(photoView, {
+      factor: Math.pow(0.9, event.deltaY / 100),
+      cursorX: event.clientX - (rect.left + rect.width / 2),
+      cursorY: event.clientY - (rect.top + rect.height / 2),
+      ...photoTransformBounds(),
+    }));
     applyPhotoTransform();
   }, { passive: false });
 
-  wrap.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
+  wrap.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || photoView.presentation !== 'expanded' || photoView.scale <= 1) return;
     photoView.dragging = true;
     photoView.moved = false;
-    photoView.sx = e.clientX; photoView.sy = e.clientY;
+    photoView.sx = event.clientX; photoView.sy = event.clientY;
     photoView.stx = photoView.tx; photoView.sty = photoView.ty;
-    wrap.setPointerCapture?.(e.pointerId);
-    dom.photoImg.style.cursor = 'grabbing';
-    e.preventDefault();
+    wrap.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
   });
-  wrap.addEventListener('pointermove', (e) => {
+  wrap.addEventListener('pointermove', (event) => {
     if (!photoView.dragging) return;
-    const dx = e.clientX - photoView.sx;
-    const dy = e.clientY - photoView.sy;
+    const dx = event.clientX - photoView.sx;
+    const dy = event.clientY - photoView.sy;
     if (Math.abs(dx) + Math.abs(dy) > 4) photoView.moved = true;
-    photoView.tx = photoView.stx + dx;
-    photoView.ty = photoView.sty + dy;
+    Object.assign(photoView, panPhotoView({ scale: photoView.scale, tx: photoView.stx, ty: photoView.sty }, {
+      dx, dy, ...photoTransformBounds(),
+    }));
     applyPhotoTransform();
   });
-  const stopPhotoDrag = () => {
-    photoView.dragging = false;
-    dom.photoImg.style.cursor = '';
-  };
+  const stopPhotoDrag = () => { photoView.dragging = false; };
   window.addEventListener('pointerup', stopPhotoDrag);
   window.addEventListener('pointercancel', stopPhotoDrag);
-  wrap.addEventListener('dblclick', (e) => {
-    e.preventDefault();
+  wrap.addEventListener('click', () => {
+    if (photoView.presentation === 'docked' && dom.photoImg.style.display !== 'none') setPhotoPresentation('expanded');
+  });
+  wrap.addEventListener('keydown', (event) => {
+    if (photoView.presentation !== 'docked' || !['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    setPhotoPresentation('expanded');
+  });
+  wrap.addEventListener('dblclick', (event) => {
+    if (photoView.presentation !== 'expanded') return;
+    event.preventDefault();
     resetPhotoView();
   });
 }
@@ -2549,6 +2673,7 @@ function ensureMap() {
     if (mapMeasure.points.length >= 3) finishMapMeasure();
     else { cancelMapMeasure(); setMapTool('none'); }
   });
+  map.on('moveend zoomend resize', refreshMapCameraLayer);
 }
 
 function throwIfAborted(signal) {
@@ -3022,6 +3147,7 @@ function removeMapOverlays() {
   [orthoLayers, demLayers.dsm, demLayers.dtm].forEach((l) => {
     if (l) { map.removeLayer(l.overlay); map.removeLayer(l.grid); }
   });
+  if (mapCameraLayer && map.hasLayer(mapCameraLayer)) map.removeLayer(mapCameraLayer);
 }
 
 function showDemHover(e, layer) {
@@ -3372,6 +3498,7 @@ function syncCameraLayer() {
     loadCameras();
     return false;
   }
+  refreshMapCameraLayer();
   if (state.activeMode !== 'cloud' || state.cloudMode !== 'potree') return true;
   const iframe = document.getElementById('pc-iframe');
   const api = pcApi();
@@ -3721,7 +3848,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   // sidebar panel visibility per tab
   const isDem = mode === 'dsm' || mode === 'dtm';
   document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
-  document.getElementById('panel-camera-positions').style.display = (is3D || isPC) && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
+  document.getElementById('panel-camera-positions').style.display = (is3D || isPC || mode === 'ortho') && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
@@ -3975,7 +4102,10 @@ function updateLodBranchBlockers() {
   for (const tile of lodBranchBlockers) tile.__ltdsBranchBlocker = false;
   lodBranchBlockers.clear();
   if (!tilesRenderer || lodBootstrapPhase !== 'complete') return;
-  for (const tile of lodBranchBlockerCut(tilesRenderer.visibleTiles, { isReady: lodTileSceneReady })) {
+  for (const tile of lodBranchBlockerCut(tilesRenderer.visibleTiles, {
+    isReady: lodTileSceneReady,
+    focusState: tilesRenderer.__ltdsFocusOwnerState,
+  })) {
     tile.__ltdsBranchBlocker = true;
     lodBranchBlockers.add(tile);
   }

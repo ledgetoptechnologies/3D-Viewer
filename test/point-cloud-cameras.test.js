@@ -59,12 +59,12 @@ test('large projected camera positions are rebased before Float32 instance matri
   assert.deepEqual(markers[0].translation, [367000.125, 4760000.25, 220.5], 'input payload remains immutable');
 });
 
-test('Potree r124 allocates all WebODM-like instance-color buffers before the active draw count becomes zero', () => {
+test('Potree r124 allocates every shared glyph instance-color buffer before the active draw count becomes zero', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'pointcloud-cameras.js'), 'utf8');
-  const allocations = ['orange', 'white', 'yellow'].map((name) => source.indexOf(`${name}Mesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS.${name}))`));
-  const zeroCount = source.indexOf('orangeMesh.count = 0');
-  assert.ok(allocations.every((index) => index >= 0), 'all three full-capacity instance-color buffers are initialized');
-  assert.ok(allocations.every((index) => index < zeroCount), 'legacy Three allocates from mesh.count, so colors must precede count=0');
+  const allocation = source.indexOf('mesh.setColorAt(0, new THREE.Color(CAMERA_MARKER_COLORS[mesh.userData.cameraMarkerComponent]))');
+  const zeroCount = source.indexOf('mesh.count = 0', allocation);
+  assert.ok(allocation >= 0, 'all four full-capacity instance-color buffers are initialized through the component loop');
+  assert.ok(allocation < zeroCount, 'legacy Three allocates from mesh.count, so colors must precede count=0');
 });
 
 test('point-cloud hover follows source indices when representative draw slots change', async () => {
@@ -83,24 +83,25 @@ test('point-cloud hover follows source indices when representative draw slots ch
     { translation: [0.8, 0, -2], rotation: [0, 0, 0] },
   ]);
   layer.setVisible(true);
-  const [orange] = layer.group.children;
+  const [body] = layer.group.children;
+  assert.equal(layer.group.children.length, 4, 'body, face, amber cue, and orange tab share every marker transform');
   for (const mesh of layer.group.children) {
     assert.equal(mesh.material.depthTest, false, 'Potree overlay markers must not be hidden by point-cloud depth');
     assert.equal(mesh.material.depthWrite, false);
   }
-  const normal = orange.getColorAt(0, new THREE.Color()).toArray();
+  const normal = body.getColorAt(0, new THREE.Color()).toArray();
   assert.equal(layer.setHovered(1), true);
-  const highlighted = orange.getColorAt(0, new THREE.Color()).toArray();
+  const highlighted = body.getColorAt(0, new THREE.Color()).toArray();
   assert.notDeepEqual(highlighted, normal);
 
   camera.position.set(0, 0, -3);
   camera.lookAt(0, 0, 0);
   camera.updateMatrixWorld(true);
   layer.updateView(true);
-  const replacement = orange.getColorAt(0, new THREE.Color()).toArray();
+  const replacement = body.getColorAt(0, new THREE.Color()).toArray();
   replacement.forEach((component, index) => assert.ok(Math.abs(component - normal[index]) < 1e-9));
   assert.equal(layer.setHovered(0), true);
-  assert.notDeepEqual(orange.getColorAt(0, new THREE.Color()).toArray(), normal);
+  assert.notDeepEqual(body.getColorAt(0, new THREE.Color()).toArray(), normal);
   layer.dispose();
 });
 

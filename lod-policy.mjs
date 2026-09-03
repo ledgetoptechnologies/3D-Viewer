@@ -24,6 +24,19 @@ export const LOD_FALLBACK_HARD_MAX_BYTES = 1.5 * 1024 * 1024 * 1024;
 export const LOD_FALLBACK_MIN_DETAIL_BYTES = 1.625 * 1024 * 1024 * 1024;
 export const LOD_FOCUS_IDLE_MS = 250;
 export const LOD_FOCUS_DECAY_MS = 500;
+// Focus-owner retention is intentionally wider than the 1-8 px motion range
+// used by browser acceptance. The snapshot remains anchored at acquisition so
+// many individually small moves still release a stale owner after a bounded
+// cumulative 3 degree turn or 5% camera-to-owner translation.
+export const LOD_FOCUS_OWNER_MAX_ANGLE_DEGREES = 3;
+export const LOD_FOCUS_OWNER_MAX_TRANSLATION_RATIO = 0.05;
+// Queue ordering uses a broad region so nearby work completes smoothly, while
+// pressure-driven selection reserves raw SSE for the central fifth-width
+// foreground region. Internal tiles inherit that narrower classification from
+// visited descendants, so a loose parent bound cannot label the entire view as
+// foreground or hide a genuinely centered child.
+export const LOD_FOCUS_PRIORITY_CONE_RADIUS = 0.65;
+export const LOD_FOREGROUND_CONE_RADIUS = 0.2;
 export const LOD_QUALITY_STABLE_FRAMES = 2;
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 const CONTROLLED_CONVERTER_COMMAND_SHA256 = new Set([
@@ -156,6 +169,63 @@ function lodTileCameraDistance(tile) {
   return Number.isFinite(value) ? value : Infinity;
 }
 
+function lodTileFocusReferenceDistance(tile) {
+  const surfaceDistance = lodTileCameraDistance(tile);
+  if (surfaceDistance > 0 && Number.isFinite(surfaceDistance)) return surfaceDistance;
+
+  // distanceFromCamera is distance to the bounding-volume surface and is zero
+  // while the camera is inside a broad owner. Keep translation hysteresis
+  // bounded in that case with the positive world-space bound scale captured by
+  // the projection plugin. Positive geometric error is a final conservative
+  // scale for malformed or not-yet-projected owner bounds.
+  const boundScale = Number(tile?.__ltdsFocusReferenceDistance);
+  if (Number.isFinite(boundScale) && boundScale > 0) return boundScale;
+  const geometricError = Number(tile?.geometricError);
+  return Number.isFinite(geometricError) && geometricError > 0
+    ? geometricError
+    : null;
+}
+
+function validLodFocusView(view) {
+  return Array.isArray(view?.position) && view.position.length === 3
+    && view.position.every(Number.isFinite)
+    && Array.isArray(view?.forward) && view.forward.length === 3
+    && view.forward.every(Number.isFinite);
+}
+
+function copyLodFocusView(view) {
+  if (!validLodFocusView(view)) return null;
+  return {
+    frameCount: Number.isFinite(Number(view.frameCount)) ? Number(view.frameCount) : null,
+    position: [...view.position],
+    forward: [...view.forward],
+  };
+}
+
+function lodFocusOwnerViewExceeded(focusState) {
+  const acquired = focusState?.ownerView;
+  const current = focusState?.currentView;
+  if (!validLodFocusView(acquired) || !validLodFocusView(current)) return false;
+
+  const dot = Math.min(1, Math.max(-1,
+    acquired.forward[0] * current.forward[0]
+    + acquired.forward[1] * current.forward[1]
+    + acquired.forward[2] * current.forward[2]));
+  const minimumDirectionDot = Math.cos(
+    THREE.MathUtils.degToRad(LOD_FOCUS_OWNER_MAX_ANGLE_DEGREES),
+  );
+  if (dot < minimumDirectionDot) return true;
+
+  const translation = Math.hypot(
+    current.position[0] - acquired.position[0],
+    current.position[1] - acquired.position[1],
+    current.position[2] - acquired.position[2],
+  );
+  const ownerDistance = Number(focusState?.ownerDistance);
+  return Number.isFinite(ownerDistance) && ownerDistance > 0
+    && translation > ownerDistance * LOD_FOCUS_OWNER_MAX_TRANSLATION_RATIO;
+}
+
 export function lodTileInLockedFocalOwner(tile) {
   const assignedOwner = tile?.__ltdsFallbackOwner;
   if (assignedOwner?.__ltdsFocalOwnerLocked === true) return true;
@@ -176,7 +246,10 @@ export function lodTileInLockedFocalOwner(tile) {
 // so no one branch completed and all refined content remained hidden. Keep the
 // public flat cut for compatibility, but attach an explicit nearest-owner group
 // to every blocker so request scheduling can complete one useful spatial cut.
-export function lodBranchBlockerGroups(visibleTiles, { isReady = () => false } = {}) {
+export function lodBranchBlockerGroups(visibleTiles, {
+  isReady = () => false,
+  focusState = null,
+} = {}) {
   const visible = Array.from(visibleTiles || []);
   const owners = visible.filter(fallback => (
     String(fallback?.refine || '').toUpperCase() === 'REPLACE'
@@ -309,12 +382,32 @@ export function lodBranchBlockerGroups(visibleTiles, { isReady = () => false } =
     (latest, candidate) => Math.max(latest, candidate.focusActivityTime),
     0,
   );
-  let focusedOwner = focusCandidates.find(candidate => (
-    candidate.owner?.__ltdsFocalOwnerLocked === true
-    && (Number(candidate.owner?.__ltdsFocalOwnerEpoch) || 0) >= latestActivityTime
-  ))?.owner || null;
+  const sharedFocusState = focusState && typeof focusState === 'object' ? focusState : null;
+  const previousFocusedOwner = sharedFocusState?.owner || null;
+  const previousMetric = previousFocusedOwner
+    ? focusMetrics.get(previousFocusedOwner) || null
+    : null;
+  // Keep an already-completed focal cut sharp through small camera motion while
+  // it still intersects the centered foreground region. Once the owner leaves
+  // that region (or the view entirely), release it even though it is absent
+  // from the current visible-owner set. Without the explicit shared pointer an
+  // off-view owner could keep __ltdsFocalOwnerLocked forever and pin the prior
+  // camera angle in the recent-frontier cache.
+  const ownerViewExceeded = sharedFocusState
+    ? lodFocusOwnerViewExceeded(sharedFocusState)
+    : false;
+  let focusedOwner = previousMetric?.focusOverlap > 0 && !ownerViewExceeded
+    ? previousFocusedOwner
+    : null;
+  if (!focusedOwner && !sharedFocusState) {
+    focusedOwner = focusCandidates.find(candidate => (
+      candidate.owner?.__ltdsFocalOwnerLocked === true
+      && (Number(candidate.owner?.__ltdsFocalOwnerEpoch) || 0) >= latestActivityTime
+    ))?.owner || null;
+  }
   if (!focusedOwner) focusedOwner = focusCandidates[0]?.owner || null;
 
+  if (previousFocusedOwner) focusOwners.add(previousFocusedOwner);
   for (const owner of focusOwners) {
     owner.__ltdsFocalOwnerLocked = false;
     owner.__ltdsFocalOwnerPending = false;
@@ -324,6 +417,23 @@ export function lodBranchBlockerGroups(visibleTiles, { isReady = () => false } =
     focusedOwner.__ltdsFocalOwnerLocked = true;
     focusedOwner.__ltdsFocalOwnerPending = Boolean(focalGroup);
     focusedOwner.__ltdsFocalOwnerEpoch = latestActivityTime;
+  }
+  if (sharedFocusState) {
+    const ownerChanged = focusedOwner !== previousFocusedOwner;
+    sharedFocusState.owner = focusedOwner;
+    if (ownerChanged || (focusedOwner && !validLodFocusView(sharedFocusState.ownerView))) {
+      sharedFocusState.ownerView = focusedOwner
+        ? copyLodFocusView(sharedFocusState.currentView)
+        : null;
+      const selectedMetric = focusedOwner ? focusMetrics.get(focusedOwner) : null;
+      sharedFocusState.ownerDistance = focusedOwner
+        ? (lodTileFocusReferenceDistance(focusedOwner)
+          ?? (Number.isFinite(selectedMetric?.distanceFromCamera)
+            && selectedMetric.distanceFromCamera > 0
+            ? selectedMetric.distanceFromCamera
+            : null))
+        : null;
+    }
   }
 
   const ranked = focalGroup
@@ -386,11 +496,26 @@ export function lodPeripheralErrorTarget(
   const rawTarget = Number(errorTarget);
   if (!Number.isFinite(rawTarget) || rawTarget <= 0) return errorTarget;
   if (lodTileInLockedFocalOwner(tile)) return rawTarget;
+  // Descendant focus is propagated from the preceding traversal. For the one
+  // frame after a camera or hierarchy change that propagation is intentionally
+  // invalid, so internal tiles retain raw SSE while the renderer visits the
+  // new cut and rebuilds camera-centered ancestor markers. Leaves cannot block
+  // a known descendant and remain eligible for ordinary pressure relaxation.
+  if (tile?.__ltdsConservativeRawSse === true) return rawTarget;
   const pressure = Math.min(
     LOD_MAX_PERIPHERAL_PRESSURE_SCALE,
     Math.max(1, Number(memoryPressureScale) || 1),
   );
-  const overlap = lodTileFocusOverlap(tile);
+  const overlap = Math.min(
+    1,
+    Math.max(0, Number(tile?.__ltdsForegroundOverlap) || 0),
+  );
+  // Foreground membership is binary for selection. Internal tiles consume the
+  // preceding visited cut's narrow descendant marker rather than their own
+  // often-loose bound. The conservative change frame above discovers the new
+  // cut before any parent can relax, while the wider focus overlap remains
+  // available independently for smooth queue ordering.
+  if (overlap > 0) return rawTarget;
   // Persistent cache pressure may keep the periphery coarse even after the
   // motion delay expires. The camera-centered focal branch remains exactly at
   // the requested SSE, while only tiles outside that cone are relaxed.
@@ -405,12 +530,19 @@ function projectedSphereFocusOverlap(camera, sphere, coneRadius, scratch) {
 
   const {
     centerNdc, edgeNdc, cameraPosition, cameraRight, cameraUp,
+    cameraForward, cameraToCenter,
   } = scratch;
-  centerNdc.copy(sphere.center).project(camera);
-  if (![centerNdc.x, centerNdc.y, centerNdc.z].every(Number.isFinite)) return 0;
-
   cameraPosition.setFromMatrixPosition(camera.matrixWorld);
   if (cameraPosition.distanceTo(sphere.center) <= radius) return 1;
+  cameraForward.setFromMatrixColumn(camera.matrixWorld, 2).normalize().negate();
+  cameraToCenter.subVectors(sphere.center, cameraPosition);
+  // Vector3.project returns finite x/y values for geometry behind a perspective
+  // camera. Reject a sphere only when its complete extent is behind the camera
+  // plane; a sphere crossing the plane can still cover the centered view.
+  if (cameraToCenter.dot(cameraForward) + radius <= 0) return 0;
+
+  centerNdc.copy(sphere.center).project(camera);
+  if (![centerNdc.x, centerNdc.y, centerNdc.z].every(Number.isFinite)) return 0;
 
   let projectedRadius = 0;
   if (radius > 0) {
@@ -447,7 +579,77 @@ export function lodProjectedSphereFocusOverlap(camera, sphere, coneRadius = 0.65
     cameraPosition: new THREE.Vector3(),
     cameraRight: new THREE.Vector3(),
     cameraUp: new THREE.Vector3(),
+    cameraForward: new THREE.Vector3(),
+    cameraToCenter: new THREE.Vector3(),
   });
+}
+
+function projectedTileFocusOverlaps(camera, tile, sphere, scratch) {
+  const cache = scratch.tileOverlapCache;
+  if (cache.has(tile)) return cache.get(tile);
+  const volume = tile?.engineData?.boundingVolume;
+  const overlaps = { priority: 0, foreground: 0 };
+  if (volume?.getSphere) {
+    volume.getSphere(sphere);
+    // Tile bounds are authored in TilesRenderer.group root space. The viewer
+    // deliberately parents that group under a rotated and translated frame,
+    // while the camera is a world-space camera. Projecting the raw local sphere
+    // makes foreground selection depend on camera angle. Convert the sphere to
+    // world space once per visited tile/frame before comparing or projecting.
+    sphere.applyMatrix4(scratch.groupWorldMatrix);
+    const centerDistance = scratch.cameraPosition.distanceTo(sphere.center);
+    const boundScale = Math.max(
+      Number.isFinite(centerDistance) ? centerDistance : 0,
+      Number.isFinite(sphere.radius) ? Math.max(0, sphere.radius) : 0,
+      Number.isFinite(Number(tile?.geometricError)) ? Math.max(0, Number(tile.geometricError)) : 0,
+    );
+    tile.__ltdsFocusReferenceDistance = boundScale > 0 ? boundScale : null;
+    overlaps.priority = projectedSphereFocusOverlap(
+      camera,
+      sphere,
+      LOD_FOCUS_PRIORITY_CONE_RADIUS,
+      scratch,
+    );
+    overlaps.foreground = projectedSphereFocusOverlap(
+      camera,
+      sphere,
+      LOD_FOREGROUND_CONE_RADIUS,
+      scratch,
+    );
+  } else {
+    tile.__ltdsFocusReferenceDistance = null;
+  }
+  cache.set(tile, overlaps);
+  return overlaps;
+}
+
+function lodCameraProjectionSnapshot(camera, scratch, frameCount, tilesRenderer) {
+  const group = tilesRenderer?.group;
+  group?.updateWorldMatrix?.(true, false);
+  if (group?.matrixWorld?.isMatrix4) scratch.groupWorldMatrix.copy(group.matrixWorld);
+  else scratch.groupWorldMatrix.identity();
+  scratch.cameraPosition.setFromMatrixPosition(camera.matrixWorld);
+  scratch.cameraForward.setFromMatrixColumn(camera.matrixWorld, 2).normalize().negate();
+  return {
+    frameCount: Number.isFinite(frameCount) ? frameCount : null,
+    position: scratch.cameraPosition.toArray(),
+    forward: scratch.cameraForward.toArray(),
+    projection: Array.from(camera.projectionMatrix?.elements || []),
+    groupWorld: Array.from(scratch.groupWorldMatrix.elements),
+  };
+}
+
+function lodCameraProjectionChanged(previous, current) {
+  if (!previous || !current) return true;
+  for (const key of ['position', 'forward', 'projection', 'groupWorld']) {
+    const left = previous[key];
+    const right = current[key];
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return true;
+    for (let index = 0; index < left.length; index += 1) {
+      if (Math.abs(left[index] - right[index]) > 1e-10) return true;
+    }
+  }
+  return false;
 }
 
 export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
@@ -458,23 +660,113 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
     cameraPosition: new THREE.Vector3(),
     cameraRight: new THREE.Vector3(),
     cameraUp: new THREE.Vector3(),
+    cameraForward: new THREE.Vector3(),
+    cameraToCenter: new THREE.Vector3(),
+    groupWorldMatrix: new THREE.Matrix4(),
+    tileOverlapCache: new WeakMap(),
+    tileOverlapCacheFrame: null,
+    propagatedFocusFrame: new WeakMap(),
+    frameToken: 0,
+    previousFrameToken: null,
+    cameraSnapshot: null,
+    hierarchyEpoch: 0,
+    frameHierarchyEpoch: -1,
+    hierarchyDirty: true,
+    forceRawFrame: true,
   };
   let tilesRenderer = null;
   return {
     name: 'LTDS_FOCUS_REQUEST_PRIORITY',
     init(tiles) {
       tilesRenderer = tiles;
+      focusScratch.tileOverlapCache = new WeakMap();
+      focusScratch.tileOverlapCacheFrame = null;
+      focusScratch.propagatedFocusFrame = new WeakMap();
+      focusScratch.frameToken = 0;
+      focusScratch.previousFrameToken = null;
+      focusScratch.cameraSnapshot = null;
+      focusScratch.hierarchyEpoch = 0;
+      focusScratch.frameHierarchyEpoch = -1;
+      focusScratch.hierarchyDirty = true;
+      focusScratch.forceRawFrame = true;
+    },
+    preprocessNode() {
+      // External tilesets can append multiple nodes during one renderer frame.
+      // Record every mutation, but batch its conservative invalidation in
+      // calculateTileViewError so a later preprocess cannot age an earlier
+      // focused-descendant marker by several logical frame tokens.
+      focusScratch.hierarchyEpoch += 1;
+      focusScratch.hierarchyDirty = true;
     },
     calculateTileViewError(tile) {
       let overlap = 0;
       const state = interactionStateProvider?.();
-      const volume = tile?.engineData?.boundingVolume;
-      if (camera && volume?.getSphere) {
-        volume.getSphere(sphere);
-        // Use the projected sphere extent rather than only its center. Large
-        // tiles frequently cover the focal ray even when their center lies in
-        // the periphery; center-only scoring incorrectly starved those owners.
-        overlap = projectedSphereFocusOverlap(camera, sphere, 0.65, focusScratch);
+      if (camera) {
+        const frameCount = Number(tilesRenderer?.frameCount);
+        const frameChanged = !Number.isFinite(frameCount)
+          ? focusScratch.tileOverlapCacheFrame === null
+          : frameCount !== focusScratch.tileOverlapCacheFrame;
+        const hierarchyChanged = focusScratch.hierarchyDirty
+          || focusScratch.hierarchyEpoch !== focusScratch.frameHierarchyEpoch;
+        if (frameChanged) {
+          const cameraSnapshot = lodCameraProjectionSnapshot(
+            camera,
+            focusScratch,
+            frameCount,
+            tilesRenderer,
+          );
+          focusScratch.previousFrameToken = focusScratch.frameToken || null;
+          focusScratch.frameToken += 1;
+          focusScratch.tileOverlapCache = new WeakMap();
+          focusScratch.tileOverlapCacheFrame = Number.isFinite(frameCount)
+            ? frameCount
+            : 0;
+          focusScratch.forceRawFrame = hierarchyChanged
+            || lodCameraProjectionChanged(focusScratch.cameraSnapshot, cameraSnapshot);
+          focusScratch.cameraSnapshot = cameraSnapshot;
+          focusScratch.frameHierarchyEpoch = focusScratch.hierarchyEpoch;
+          focusScratch.hierarchyDirty = false;
+          const focusState = tilesRenderer?.__ltdsFocusOwnerState;
+          if (focusState && typeof focusState === 'object') {
+            focusState.currentView = {
+              frameCount: cameraSnapshot.frameCount,
+              position: [...cameraSnapshot.position],
+              forward: [...cameraSnapshot.forward],
+            };
+          }
+        } else if (hierarchyChanged) {
+          // The renderer may interleave preprocess and traversal callbacks for
+          // many lazy branches in one physical frame. Keep the current marker
+          // token and projection memo, but retain conservative raw SSE through
+          // the remainder of this frame while the enlarged cut is discovered.
+          focusScratch.forceRawFrame = true;
+          focusScratch.frameHierarchyEpoch = focusScratch.hierarchyEpoch;
+        }
+        const directOverlaps = projectedTileFocusOverlaps(camera, tile, sphere, focusScratch);
+        const directOverlap = directOverlaps.priority;
+        const directForegroundOverlap = directOverlaps.foreground;
+        const propagatedToken = focusScratch.propagatedFocusFrame.get(tile);
+        const descendantForeground = propagatedToken === focusScratch.previousFrameToken
+          || propagatedToken === focusScratch.frameToken;
+        overlap = Math.max(directOverlap, descendantForeground ? 1 : 0);
+        const internal = Array.isArray(tile?.children) && tile.children.length > 0;
+        tile.__ltdsConservativeRawSse = focusScratch.forceRawFrame && internal;
+        tile.__ltdsForegroundOverlap = internal
+          ? (descendantForeground ? 1 : 0)
+          : directForegroundOverlap;
+
+        // A positive direct projection marks its ancestor chain for the next
+        // traversal. Stop at the first already-marked ancestor, making the
+        // propagation cost linear in the union of focused ancestor paths rather
+        // than in every known descendant of every visited root.
+        if (directForegroundOverlap > 0) {
+          let ancestor = tile?.parent;
+          for (let depth = 0; ancestor && depth < 256; depth += 1) {
+            if (focusScratch.propagatedFocusFrame.get(ancestor) === focusScratch.frameToken) break;
+            focusScratch.propagatedFocusFrame.set(ancestor, focusScratch.frameToken);
+            ancestor = ancestor.parent;
+          }
+        }
       }
       tile.__ltdsFocusOverlap = overlap;
       tile.__ltdsFocusActivityTime = Number(state?.lastActivityTime) || 0;
@@ -492,6 +784,18 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
       return false;
     },
     dispose() {
+      const focusState = tilesRenderer?.__ltdsFocusOwnerState;
+      const owner = focusState?.owner;
+      if (owner) {
+        owner.__ltdsFocalOwnerLocked = false;
+        owner.__ltdsFocalOwnerPending = false;
+        focusState.owner = null;
+      }
+      if (focusState) {
+        focusState.ownerView = null;
+        focusState.ownerDistance = null;
+        focusState.currentView = null;
+      }
       tilesRenderer = null;
     },
   };
@@ -958,6 +1262,12 @@ export function configureLodRenderer(tilesRenderer, {
   const profile = lodRuntimeProfile(detail, deviceMemoryGiB, resolvedMemoryProfile);
   tilesRenderer.errorTarget = detailToErrorTarget(profile.activeDetail);
   tilesRenderer.__ltdsPeripheralPressureScale = 1;
+  tilesRenderer.__ltdsFocusOwnerState = {
+    owner: null,
+    ownerView: null,
+    ownerDistance: null,
+    currentView: null,
+  };
   // Let normal REPLACE traversal keep the currently displayed parent until its
   // selected children are ready, but do not pin every traversed ancestor in the
   // cache. Ancestor pinning made a small camera move retain the old frontier
@@ -1138,7 +1448,9 @@ function isExternalTileset(uri) {
   return /\.json(?:[?#].*)?$/i.test(uri);
 }
 
-export function inspectLodProvenance(provenance, fullMeshUrl) {
+export function inspectLodProvenance(provenance, fullMeshUrl, {
+  serverVerified = false,
+} = {}) {
   const errors = [];
   if (!provenance || typeof provenance !== 'object') {
     return { verified: false, errors: ['lod-provenance.json is required'] };
@@ -1169,7 +1481,12 @@ export function inspectLodProvenance(provenance, fullMeshUrl) {
     if (!Number.isFinite(maxDelta) || maxDelta < 0 || maxDelta > tolerance) errors.push('audit maxNumericDelta must not exceed coordinateTolerance');
   }
   if (controlled) {
-    if (provenance.converter?.name !== 'OpenDroneMap/Obj2Tiles' || provenance.converter?.version !== '1.6.2' || !CONTROLLED_CONVERTER_COMMAND_SHA256.has(String(provenance.converter?.commandSha256||'').toLowerCase()) || !CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256||'').toLowerCase())) errors.push('controlled audit converter contract is invalid');
+    const serverAuthorizedContract = serverVerified === true;
+    if (provenance.converter?.name !== 'OpenDroneMap/Obj2Tiles'
+      || provenance.converter?.version !== '1.6.2'
+      || (!serverAuthorizedContract
+        && (!CONTROLLED_CONVERTER_COMMAND_SHA256.has(String(provenance.converter?.commandSha256||'').toLowerCase())
+          || !CONTROLLED_CONVERTER_BINARY_SHA256.has(String(provenance.converter?.binarySha256||'').toLowerCase())))) errors.push('controlled audit converter contract is invalid');
     if (!Number.isFinite(provenance.audit?.surfaceTolerance) || provenance.audit.surfaceTolerance <= 0 || !Number.isFinite(provenance.audit?.maximumSurfaceDistance) || provenance.audit.maximumSurfaceDistance < 0 || provenance.audit.maximumSurfaceDistance > provenance.audit.surfaceTolerance || !Number.isFinite(provenance.audit?.minimumNormalDot) || !Number.isFinite(provenance.audit?.maximumReversedNormalFraction) || provenance.audit.maximumReversedNormalFraction < 0 || provenance.audit.maximumReversedNormalFraction > 0.01) errors.push('controlled audit surface evidence is invalid');
     if (controlledV4 && (provenance.audit?.policyRevision !== 'ltds-controlled-surface-policy-v4'
       || !['normal', 'gray-zone'].includes(provenance.audit?.acceptance)

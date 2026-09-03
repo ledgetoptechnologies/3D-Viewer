@@ -34,6 +34,22 @@ function derivativeJob(context, type = 'mesh_tiles') {
   return { project, dataset, task, attempt, versionId, jobId: context.processing.enqueueDerivative(attempt.id, type, { optional: false }) };
 }
 
+function providerIngest(context) {
+  const project = context.processing.createProject({ displayName: 'Provider ingest project' });
+  const dataset = context.processing.createDataset({ projectId: project.id, displayName: 'Provider ingest dataset', storageMode: 'managed', rootKey: 'datasets', relativePath: 'provider-source' });
+  context.processing.finalizeDataset(dataset.id, [{ relativePath: 'photo.jpg', byteSize: 1, sha256: 'a'.repeat(64) }], 'b'.repeat(64));
+  const task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Provider ingest task' });
+  const provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
+  const attempt = context.processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {} });
+  const owner = 'provider-ingest-owner', job = context.processing.claimJob(owner);
+  context.processing.transitionAttemptForJob(job.id, owner, 'ingesting');
+  const model = context.repository.upsertModelVersion({ provider: 'ltds-processing', providerModelId: task.id, providerVersionId: attempt.id, displayName: task.displayName, status: 'importing', assets: [], makeActive: false });
+  const versionId = context.db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;
+  context.processing.setAttemptResultForJob(job.id, owner, model.id, versionId);
+  context.processing.registerModelOutput({ versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: project.id, relativePath: `${task.id}/${attempt.id}`, status: 'staged', byteSize: 33_400_000_000, assetCount: 0 });
+  return { project, dataset, task, attempt, versionId, owner, job };
+}
+
 const meshFiles = [
   { role: 'mesh_obj', rootKey: 'datasets', relativePath: 'source/model.obj', byteSize: 100, sha256: '1'.repeat(64) },
   { role: 'mesh_mtl', rootKey: 'datasets', relativePath: 'source/model.mtl', byteSize: 20, sha256: '2'.repeat(64) },
@@ -52,6 +68,55 @@ test('v31 binds an immutable derivative closure and reserves from closure bytes,
   assert.deepEqual(context.processing.persistDerivativeInputSnapshot(item.jobId, 'mesh_tiles', meshFiles), snapshot, 'canonical replay is idempotent');
   assert.throws(() => context.processing.persistDerivativeInputSnapshot(item.jobId, 'mesh_tiles', meshFiles.map((file, index) => index ? file : { ...file, sha256: 'f'.repeat(64) })), { code: 'derivative_input_changed' });
   assert.throws(() => context.db.prepare('UPDATE derivative_input_snapshots SET total_byte_size=1 WHERE job_id=?').run(item.jobId), /immutable/);
+});
+
+test('provider ingest atomically exposes pending jobs with exact mesh and EPT closures and reservations', (t) => {
+  const context = fixture(t), item = providerIngest(context), gib = 1024 ** 3;
+  const providerMeshFiles = [
+    { role: 'mesh_obj', rootKey: 'models', relativePath: 'provider/model.obj', byteSize: gib, sha256: '1'.repeat(64) },
+    { role: 'mesh_mtl', rootKey: 'models', relativePath: 'provider/model.mtl', byteSize: 1, sha256: '2'.repeat(64) },
+    { role: 'mesh_texture', rootKey: 'models', relativePath: 'provider/texture.jpg', byteSize: 2 * gib - 2, sha256: '3'.repeat(64) },
+    { role: 'mesh_glb', rootKey: 'models', relativePath: 'provider/model.glb', byteSize: 1, sha256: '4'.repeat(64) },
+  ];
+  const providerEptFiles = [{ role: 'point_cloud_source', rootKey: 'models', relativePath: 'provider/cloud.laz', byteSize: 2 * gib, sha256: '5'.repeat(64) }];
+  const activated = context.processing.completeIngestAndEnqueueDerivatives(item.job.id, item.owner, item.attempt.id, [
+    { type: 'mesh_tiles', request: { optional: false } },
+    { type: 'ept', request: { optional: false } },
+  ], { trustedInputFilesByType: { mesh_tiles: providerMeshFiles, ept: providerEptFiles }, requireTrustedInputs: true });
+  assert.equal(activated.status, 'derivatives');
+  assert.equal(context.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(item.job.id).status, 'complete');
+  const jobs = context.db.prepare('SELECT id,derivative_type,status FROM derivative_jobs WHERE attempt_id=? ORDER BY derivative_type').all(item.attempt.id);
+  assert.deepEqual(jobs.map((job) => ({ type: job.derivative_type, status: job.status })), [
+    { type: 'ept', status: 'pending' },
+    { type: 'mesh_tiles', status: 'pending' },
+  ]);
+  const byType = new Map(jobs.map((job) => [job.derivative_type, job]));
+  const meshSnapshot = context.processing.derivativeInputSnapshot(byType.get('mesh_tiles').id), eptSnapshot = context.processing.derivativeInputSnapshot(byType.get('ept').id);
+  assert.equal(meshSnapshot.totalByteSize, 3 * gib);
+  assert.deepEqual(meshSnapshot.files.map((file) => file.role), ['mesh_glb', 'mesh_mtl', 'mesh_obj', 'mesh_texture']);
+  assert.equal(eptSnapshot.totalByteSize, 2 * gib);
+  assert.deepEqual(eptSnapshot.files.map((file) => file.role), ['point_cloud_source']);
+  assert.deepEqual(context.processing.derivativeStorageReservation(byType.get('mesh_tiles').id), {
+    reservedByteSize: 12 * gib, accountedByteSize: 12 * gib, state: 'reserved', inputByteSize: 3 * gib,
+    inputManifestSha256: meshSnapshot.manifestSha256, inputFileCount: 4,
+  });
+  assert.deepEqual(context.processing.derivativeStorageReservation(byType.get('ept').id), {
+    reservedByteSize: 16 * gib, accountedByteSize: 16 * gib, state: 'reserved', inputByteSize: 2 * gib,
+    inputManifestSha256: eptSnapshot.manifestSha256, inputFileCount: 1,
+  });
+});
+
+test('provider ingest rolls back jobs, snapshots, files, and journals when a required trusted closure is absent', (t) => {
+  const context = fixture(t), item = providerIngest(context);
+  assert.throws(() => context.processing.completeIngestAndEnqueueDerivatives(item.job.id, item.owner, item.attempt.id, [
+    { type: 'mesh_tiles', request: { optional: false } },
+    { type: 'ept', request: { optional: false } },
+  ], { trustedInputFilesByType: { mesh_tiles: meshFiles }, requireTrustedInputs: true }), { code: 'invalid_derivative_input' });
+  assert.equal(context.processing.getAttempt(item.attempt.id).status, 'ingesting');
+  assert.equal(context.db.prepare('SELECT status FROM processing_jobs WHERE id=?').get(item.job.id).status, 'leased');
+  for (const table of ['derivative_jobs', 'derivative_input_snapshots', 'derivative_input_files', 'derivative_storage_journal']) {
+    assert.equal(context.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, `${table} must remain invisible after rollback`);
+  }
 });
 
 test('derivative closure admission fails precisely above 16 GiB', () => {

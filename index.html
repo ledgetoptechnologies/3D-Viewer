@@ -217,26 +217,41 @@
       display: none; backdrop-filter: blur(8px); pointer-events: none;
     }
 
-    /* Photo modal */
+    /* Camera photo: nonblocking preview by default, expanded inspector on demand */
     #photo-modal {
       position: fixed; inset: 0; z-index: 400; display: none;
-      align-items: center; justify-content: center;
-      background: rgba(0,0,0,0.88); backdrop-filter: blur(6px);
+      pointer-events: none;
     }
     #photo-frame {
-      position: relative; max-width: 92vw; max-height: 90vh;
-      display: flex; flex-direction: column; gap: 10px;
+      position: absolute; display: flex; flex-direction: column; gap: 8px;
+      box-sizing: border-box; padding: 10px; pointer-events: auto;
+      color: #fff; background: var(--brand-panel); border: 1px solid var(--panel-border);
+      border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.65);
     }
-    #photo-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    #photo-modal.docked #photo-frame {
+      top: 66px; right: 14px; max-width: calc(100vw - 28px); max-height: calc(100vh - 108px);
+    }
+    #photo-modal.expanded {
+      align-items: center; justify-content: center; pointer-events: auto;
+      background: rgba(0,0,0,0.88); backdrop-filter: blur(6px);
+    }
+    #photo-modal.expanded #photo-frame {
+      position: relative; max-width: 94vw; max-height: 92vh; padding: 12px;
+    }
+    #photo-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-right: 28px; min-width: 0; }
     #photo-title { font-size: 14px; font-weight: 700; color: #fff; font-family: ui-monospace, Menlo, monospace; }
-    #photo-meta { font-size: 12px; color: var(--brand-muted); }
-    #photo-imgwrap { position: relative; display: flex; align-items: center; justify-content: center; min-width: 320px; min-height: 200px; }
-     #photo-imgwrap { overflow: hidden; border-radius: 8px; cursor: grab; touch-action: none; }
+    #photo-meta { font-size: 11px; color: var(--brand-muted); white-space: nowrap; }
+    #photo-imgwrap {
+      position: relative; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; border-radius: 8px; background: #080808; touch-action: none;
+    }
+    #photo-modal.docked #photo-imgwrap { cursor: zoom-in; }
+    #photo-modal.expanded #photo-imgwrap.zoomed { cursor: grab; }
     #photo-img {
-      max-width: 92vw; max-height: 78vh; border-radius: 8px;
+      width: 100%; height: 100%; object-fit: contain; border-radius: 8px;
       border: 2px solid var(--brand-orange); box-shadow: 0 12px 60px rgba(0,0,0,0.8);
-       transition: opacity 0.25s ease; background: #111;
-       user-select: none; -webkit-user-drag: none; will-change: transform;
+      box-sizing: border-box; transition: opacity 0.25s ease; background: #111;
+      user-select: none; -webkit-user-drag: none; will-change: transform;
     }
     #photo-spinner {
       position: absolute; width: 44px; height: 44px; border-radius: 50%;
@@ -245,22 +260,24 @@
     }
     #photo-empty {
       display: none; align-items: center; justify-content: center;
-      min-width: min(520px, 86vw); min-height: 220px; padding: 24px;
+      width: 100%; height: 100%; min-height: 180px; padding: 24px; box-sizing: border-box;
       border: 1px solid var(--panel-border); border-radius: 8px;
       background: #111; color: var(--brand-muted); font-weight: 700;
     }
-    #photo-actions { display: flex; gap: 10px; align-items: center; }
+    #photo-actions { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
     #photo-download {
       color: #fff; background: linear-gradient(135deg, var(--brand-orange), #c73a0a);
       text-decoration: none; font-size: 12px; font-weight: 700;
       padding: 8px 16px; border-radius: 8px;
     }
     #photo-close {
-      position: absolute; top: -14px; right: -14px; width: 34px; height: 34px;
+      position: absolute; top: 6px; right: 6px; width: 30px; height: 30px;
       border-radius: 50%; background: var(--brand-orange); color: #fff; border: none;
       font-size: 18px; font-weight: 700; cursor: pointer; z-index: 5;
       box-shadow: 0 4px 14px rgba(0,0,0,0.6);
     }
+    .map-camera-marker { background: transparent; border: 0; }
+    .map-camera-marker svg { display: block; width: 100%; height: 100%; transform-origin: 50% 50%; filter: drop-shadow(0 2px 2px rgba(0,0,0,.75)); }
 
     /* Admin-only topbar controls (Share / Log out) — hidden by default,
        shown by main.js only in admin mode. */
@@ -351,6 +368,8 @@
       .tab-btn span { display: none; }
       #statusbar { font-size: 10px; padding: 0 8px; }
       #status-left, #status-right { gap: 8px; }
+      #photo-modal.docked #photo-frame { top: 112px; right: 8px; max-width: calc(100vw - 16px); max-height: calc(100vh - 154px); }
+      #photo-actions .hint { display: none; }
     }
   </style>
 </head>
@@ -627,21 +646,21 @@
 
 <div id="cam-tooltip"></div>
 
-<div id="photo-modal">
-  <div id="photo-frame">
+<div id="photo-modal" aria-hidden="true">
+  <div id="photo-frame" role="dialog" aria-modal="false" aria-labelledby="photo-title">
     <button id="photo-close" aria-label="Close">×</button>
     <div id="photo-header">
       <span id="photo-title">—</span>
       <span id="photo-meta"></span>
     </div>
-    <div id="photo-imgwrap">
+    <div id="photo-imgwrap" tabindex="0" aria-label="Expand camera photo">
       <img id="photo-img" alt="Flight photo">
       <div id="photo-spinner"></div>
       <div id="photo-empty" role="status">No photo available</div>
     </div>
     <div id="photo-actions">
       <a id="photo-download" href="#" download>Download Original</a>
-       <span class="hint">Scroll to zoom · drag to pan · double-click resets · Esc closes</span>
+       <span class="hint">Click to expand · scroll to zoom when expanded · Esc closes</span>
     </div>
   </div>
 </div>

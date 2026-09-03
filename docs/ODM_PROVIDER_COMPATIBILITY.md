@@ -78,12 +78,16 @@ processing, download, and cancellation. That mode creates an LTDS-assigned
 UUID, uploads and commits the corpus, polls status and bounded output, streams
 and hashes `all.zip` without retaining the archive, safely extracts it into an
 ephemeral bounded workspace through the production ZIP path, and requires the
-requested native GLB, EPT, and 3D Tiles outputs,
+requested native EPT and 3D Tiles outputs plus the complete textured-mesh input
+closure used by the Viewer worker: one OBJ, every referenced MTL and texture,
+and the independent companion GLB. The closure is parsed and hashed with the
+same immutable-manifest implementation used by derivative admission,
 then uploads and commits a second task, verifies that cancelling real queued or
 running work settles at NodeODM status code 50, and removes both tasks. It
 prints the immutable provider image, corpus count/bytes/content-manifest,
-archive/expanded byte counts, entry count, and discovered output kinds in the
-result. Success is emitted only after both UUIDs are confirmed absent and the
+archive/expanded byte counts, entry count, discovered output kinds, and the
+mesh-input file count, byte count, and manifest digest in the result. Success
+is emitted only after both UUIDs are confirmed absent and the
 ephemeral output workspace is removed;
 ambiguous initialization responses and failed removal verification fail the
 gate. It has a two-hour default timeout and never runs without the exact

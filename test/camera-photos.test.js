@@ -295,6 +295,22 @@ test('camera photo persistence rejects path escapes and the viewer has an explic
   assert.doesNotMatch(main, /if \(!PHOTO_BASE \|\| !feat\) return/);
 });
 
+test('camera photos default to a nonblocking dock and clamp expanded transforms', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(main, /import \{ clampPhotoView, fitPhotoBox, panPhotoView, zoomPhotoView \} from '\.\/camera-photo-view\.mjs'/);
+  assert.match(main, /presentation: 'docked'/);
+  assert.match(main, /setPhotoPresentation\('docked'\)/);
+  assert.match(main, /photoView\.presentation !== 'expanded'\) return/);
+  assert.match(main, /photoView\.scale <= 1\) return/);
+  assert.match(main, /naturalWidth = dom\.photoImg\.naturalWidth/);
+  assert.match(main, /layoutPhotoViewer\(\);/);
+  assert.match(html, /#photo-modal\.docked #photo-frame/);
+  assert.match(html, /#photo-modal\.expanded/);
+  assert.match(html, /#photo-modal \{[\s\S]*pointer-events: none/);
+  assert.match(html, /id="photo-imgwrap" tabindex="0" aria-label="Expand camera photo"/);
+});
+
 test('server starts accepting requests before bounded legacy camera-photo maintenance runs', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   assert.match(server, /const \{ reconcileImportedCameraPhotoLinks \} = require\('\.\/cameraPhotos'\)/);
@@ -304,22 +320,19 @@ test('server starts accepting requests before bounded legacy camera-photo mainte
   assert.ok(listen > 0 && deferred > listen && reconcile > deferred);
 });
 
-test('camera layer renders and highlights a smaller three-material WebODM-style frustum', () => {
+test('camera layer renders and highlights the shared four-component WebODM-inspired glyph', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /import \{ CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives \} from '\.\/camera-markers\.mjs'/);
-  assert.match(main, /let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null/);
-  assert.match(main, /camInstances = new THREE\.InstancedMesh\(orangeGeometry, material\(\), camFeatures\.length\)/);
-  assert.match(main, /camWhiteInstances = new THREE\.InstancedMesh\(whiteGeometry, material\(\), camFeatures\.length\)/);
-  assert.match(main, /camYellowInstances = new THREE\.InstancedMesh\(yellowGeometry, material\(\), camFeatures\.length\)/);
+  assert.match(main, /const CAMERA_MARKER_COMPONENTS = Object\.freeze\(\['body', 'face', 'cue', 'tab'\]\)/);
+  assert.match(main, /camMarkerMeshes = CAMERA_MARKER_COMPONENTS\.map\(\(component, index\) => \{/);
+  assert.match(main, /new THREE\.InstancedMesh\(geometries\[component\], material\(\), camFeatures\.length\)/);
   assert.match(main, /new THREE\.MeshStandardMaterial\(\{[\s\S]*opacity: CAMERA_MARKER_OPACITY\.normal[\s\S]*side: THREE\.FrontSide/);
   assert.match(main, /let cameraMarkerUserScale = DEFAULT_CAMERA_MARKER_SCALE/);
   assert.match(main, /let camDrawToSource = \[\], camSourceToDraw = null/);
   assert.match(main, /const visibleSources = selectCameraMarkerRepresentatives\(candidates/);
-  for (const mesh of ['camInstances', 'camWhiteInstances', 'camYellowInstances']) {
-    assert.match(main, new RegExp(`${mesh}\\.count = visibleSources\\.length`));
-  }
-  assert.match(main, /for \(const mesh of \[camInstances, camWhiteInstances, camYellowInstances\]\)[\s\S]*mesh\.instanceColor\.needsUpdate = true/);
-  assert.match(main, /hoverRaycaster\.intersectObjects\(\[camInstances, camWhiteInstances, camYellowInstances\], false\)/);
+  assert.match(main, /for \(const mesh of camMarkerMeshes\) \{\s*mesh\.count = visibleSources\.length/);
+  assert.match(main, /if \(mesh\.instanceColor\) mesh\.instanceColor\.needsUpdate = true/);
+  assert.match(main, /hoverRaycaster\.intersectObjects\(camMarkerMeshes, false\)/);
   assert.match(main, /return camDrawToSource\[hits\[0\]\.instanceId\]/);
   assert.match(main, /CAMERA_MARKER_STYLE\.pickRadius/);
 });

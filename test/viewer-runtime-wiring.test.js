@@ -38,6 +38,10 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.ok(rootStart >= 0 && tilesetStart > rootStart && modelStart > tilesetStart, 'LOD event handlers are present in order');
   const rootHandler = main.slice(rootStart, tilesetStart);
   assert.match(rootHandler, /const decision = decideLodStartup\(/);
+  assert.match(main, /LOD_PROVENANCE_VERIFIED = p\.lodProvenanceVerified === true/,
+    'the browser consumes the server authority bit only from its viewer configuration');
+  assert.match(rootHandler, /serverVerified: LOD_PROVENANCE_VERIFIED/,
+    'the exact-asset server verification is forwarded to browser provenance inspection');
   assert.match(rootHandler, /if \(decision\.action !== 'stream-lod'\)\s*\{[\s\S]*?return;\s*\}/);
   assert.doesNotMatch(rootHandler, /root\.refine\s*=/);
   assert.match(rootHandler, /rendererInstance\.root\?\.internal\?\.hasRenderableContent/);

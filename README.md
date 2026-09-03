@@ -429,15 +429,16 @@ empty.
   provider. NodeODM API 2.2.3 is the direct-node baseline. ClusterODM is
   accepted only when its 1.x API response includes the official proxy resource
   sentinels; a merely API-compatible 1.x response is ambiguous and rejected.
-- **Production derivatives prefer ODM's native stages.** Provider
-  capabilities request `pc-ept`, `3d-tiles`, and `gltf`, and the Viewer audits
-  existing tile manifests before reuse. The production image pins and verifies
-  Obj2Tiles 1.6.2 for controlled mesh generation while local Entwine remains
-  disabled by default. Imported native tiles are quarantined until an
-  audit binds them to the companion GLB. The original GLB remains available as
-  an authenticated Operations download, never an interactive Viewer layer,
-  when that proof is missing or fails. Explicitly enabling mesh generation
-  permits one bounded background attempt and one authorized manual retry.
+- **Production point clouds use ODM's native EPT; new textured meshes use the
+  Viewer-local KTX2 lane.** Provider capabilities currently request `pc-ept`,
+  `3d-tiles`, and `gltf`, but a new provider result is accepted only when it
+  contains EPT plus one textured OBJ, every referenced MTL and texture, and an
+  independent companion GLB. The Viewer hashes that immutable mesh closure and
+  generates current ETC1S KTX2 tiles with its pinned Obj2Tiles 1.6.2 worker;
+  bundled ODM JPEG mesh tiles do not satisfy a required new derivative. Native
+  tiles are retained only for the separate legacy exact-audit lane. The
+  original GLB remains available as an authenticated Operations download,
+  never an interactive Viewer layer, when generation or proof fails.
   Migration 23 also gives pre-fix terminal LOD jobs one durable, audited
   compare-and-swap recovery per explicitly shipped recovery revision. Current
   jobs are stamped before execution, so this upgrade recovery cannot become an
@@ -610,44 +611,46 @@ WGS84 UTM 16N
 
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
-  Detail `2..24` maps exponentially to `tilesRenderer.errorTarget` from 512
-  down to 2. The Viewer requests balanced Detail 16 and first attaches a
-  complete Detail-13 frontier, then advances once to 16. This restores finer
-  close-range screen-space-error refinement without the cold global Detail-24
-  fanout. Raising Detail remains an explicit request for finer visible
-  coverage. Desktop requests above Detail 13 warm at Detail 13, then advance
-  through bounded three-detail stages
-  only after each visible frontier is complete;
-  a visible terminal zero-error leaf satisfies that warmup target even when the
-  camera is inside its bounding volume and the renderer reports infinite
-  screen-space error. A non-terminal or non-zero-error tile at infinite error
-  still blocks advancement. Clients reporting 4 GiB or less are capped at
-  Detail 13. Desktop retains up to a 3.25 GiB recent frontier below a measured
-  3.5 GiB cap; reduced-memory clients retain 640 MiB below an unchanged 768 MiB
-  cap. The corresponding soft item floors are 512 and 256, below hard limits of
-  1,024 and 512. This prevents small camera motions from immediately discarding
-  just-viewed decoded tiles while preserving hard admission limits. Loaded
-  coarse ancestors remain visible while selected descendants load, without
-  explicit or ancestor-triggered off-frustum sibling preload. Two consecutive
-  one-second full-cache/idle-queue samples with selected content pending start
-  bounded admission recovery without changing quality. Recovery lowers the
-  soft floor only far enough to evict one stale LRU tile; it never purges toward
-  zero. A completed foreground parse also gets this synchronous eviction chance
-  before renderer 0.5.1 can discard it. Only two further blocked samples restore
-  the last complete detail stage and establish a stable camera-pose ceiling.
-  The measured soft floor is
-  restored after the lower active frontier is attached, queues are idle, and
-  the cache is below its hard cap;
-  the status bar reports `LOD: memory-limited` while that ceiling holds the
-  active request back. Tiny camera motions retain the ceiling and cache; a
-  cumulative 20% zoom, 10% focus-relative translation, or 10-degree orbit
-  clears it and retries staged refinement for the new view. It says
-  `LOD: full-detail` only when every visible tile
-  is on the declared zero-error frontier. Invalid hierarchy or tile-load
-  failures remain unavailable until a verified streaming derivative exists;
-  original GLB/OBJ files are download-only and are never decoded automatically
-  in the browser. Resize/orientation changes also refresh the render resolution
-  used by the screen-space-error calculation.
+  Detail `2..24` maps exponentially to the raw camera screen-space-error target
+  from 512 down to 2; the default Detail 20 target is exactly `5.481` and is not
+  multiplied by bootstrap geometry. Startup displays the renderable whole-model
+  root, then performs a depth-2 prefetch of the direct-child shell. The root is
+  retired only after every renderable direct child is decoded and ready for two
+  frames, so strict REPLACE refinement never exposes a hole. A shell that is
+  structurally unusable or cannot fit beside at least 1.625 GiB of focal-detail
+  reserve stays honestly root-only instead of promoting an incomplete cut.
+  Clients reporting 4 GiB or less retain that root and are capped at Detail 13.
+
+  After shell promotion the renderer immediately uses the requested raw SSE at
+  unlimited traversal depth. Selection remains camera-distance driven. A
+  camera-centered focus pass changes download/parse ordering, not visibility:
+  while the camera moves, peripheral work receives a 1–4× queue penalty, then
+  decays to neutral after 250 ms idle over the following 500 ms. Tile bounds are
+  transformed through the real `TilesRenderer.group.matrixWorld` before focus
+  projection; otherwise the Viewer's rotated/translated tiles frame makes the
+  chosen foreground branch depend on camera angle. The focused REPLACE owner is
+  retained across tiny motion and changes only after a cumulative 3-degree turn
+  or 5% camera-to-owner translation. Recently decoded detail is retained only as
+  complete replacement cuts, preventing a one-pixel move from briefly restoring
+  a blurry parent.
+
+  Viewer memory is an explicit `Auto`, `Balanced`, or `High` policy rather than
+  a raw-RAM slider. Auto uses the browser's coarse device-memory hint: capable
+  desktops use a 3 GiB soft / 3.75 GiB hard cache, and an unavailable hint uses
+  the Balanced 2.5 GiB / 3.125 GiB profile. High uses 4 GiB / 5 GiB. A known
+  ≤4-GiB client always uses the constrained 768 MiB / 1 GiB profile even when a
+  stale High preference exists. These limits describe decoded tile residency,
+  not total browser or GPU memory. At pressure, bounded synchronous admission
+  recovery evicts stale peripheral content first. Persistent pressure may relax
+  only fully peripheral selection up to 4×; the locked foreground branch keeps
+  the requested raw SSE and automatically converges when headroom returns.
+
+  `LOD: full-detail` is shown only when every visible tile is on the declared
+  zero-error frontier. Invalid hierarchy, provenance, or tile-load failures stay
+  unavailable until a verified streaming derivative exists; original GLB/OBJ
+  files are authenticated downloads and are never decoded automatically in the
+  browser. Resize and orientation changes refresh the render resolution used by
+  the screen-space-error calculation.
 
   Zero geometric error verifies renderer convergence, not conversion provenance:
   the tiles match the full mesh only if the derivative pipeline generated every
@@ -701,10 +704,19 @@ WGS84 UTM 16N
   locally reproduced runtime diagnosis, measured working sets, real-browser
   verification, and safe diagnostic procedure are recorded in
   [docs/VIEWER_LOD_CAMERA_HANDOFF.md](docs/VIEWER_LOD_CAMERA_HANDOFF.md).
-- **Camera positions**: three synchronized instanced meshes form an independently
-  drawn orange, white, and yellow camera/frustum. Markers use fixed world-space
-  scale with a default of `0.5`, source-index hover/picking, density
-  decluttering, a 12-pixel fallback, tooltip, photo opening, and a size slider.
+- **Camera positions**: a shared four-part glyph uses a neutral frustum body,
+  amber image plane/front cues, and an LTDS-orange top-edge tab, making both
+  forward direction and image-up readable from either side. Model and direct
+  point-cloud views use synchronized instanced meshes; Potree draws the same
+  components in its post-EDL overlay; the orthophoto uses a matching rotated
+  Leaflet marker. Markers retain source-index picking, density decluttering,
+  tooltip, photo opening, and size controls. Camera permission governs every
+  view, and the map representation is bounded to 1,200 markers.
+- **Camera photos**: selecting a marker opens a non-blocking top-right preview
+  so model/map navigation remains usable. The image keeps its natural aspect
+  ratio and can expand to the full viewer. Fit-to-window images cannot pan;
+  zoomed images clamp translation so empty space cannot be dragged on screen.
+  Resize and image-load changes reapply the same bounds.
 - **Measurements**: distance / area / volume with CSS2D labels pinned to the
   geometry. Imperial is the default; project/session/share state can select
   metric, and distance, elevation, area, and volume use one consistent unit

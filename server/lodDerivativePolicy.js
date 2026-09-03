@@ -1,12 +1,31 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const path = require('node:path');
 const {
   ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256,
   CONTROLLED_CONVERTER_BINARY_SHA256,
+  stable,
 } = require('../lod-converter-policy.cjs');
 const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINARY_SHA256);
 const CONTROLLED_CONVERTER_COMMAND_SHA256_SET = new Set(ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256);
+const LOD_VERIFICATION_RECEIPT_VERSION = 1;
+const LEGACY_LOD_VERIFICATION_RECEIPT_KEYS = Object.freeze([
+  'attemptId',
+  'manifestSha256',
+  'policySha256',
+  'published',
+  'sourceSha256',
+  'versionId',
+]);
+const LOD_VERIFICATION_RECEIPT_KEYS = Object.freeze([
+  ...LEGACY_LOD_VERIFICATION_RECEIPT_KEYS,
+  'equivalenceSha256',
+  'leaseToken',
+  'provenanceSha256',
+  'receiptVersion',
+  'schemaVersion',
+].sort());
 
 function meshAsset(assets, kind) {
   return assets.find((asset) => asset.kind === kind) || null;
@@ -84,9 +103,62 @@ function verifiedLodProvenance(metadata, assets) {
   return provenance;
 }
 
+function exactObjectKeys(value, expected) {
+  return JSON.stringify(Object.keys(value).sort()) === JSON.stringify(expected);
+}
+
+function lodVerificationReceiptDetails(provenance, { attemptId, versionId, leaseToken }) {
+  return {
+    receiptVersion: LOD_VERIFICATION_RECEIPT_VERSION,
+    attemptId,
+    versionId,
+    published: false,
+    leaseToken,
+    sourceSha256: provenance.sourceSha256,
+    manifestSha256: provenance.tilesManifestSha256,
+    policySha256: provenance.converter?.commandSha256 || null,
+    schemaVersion: provenance.schemaVersion,
+    equivalenceSha256: provenance.audit?.equivalenceSha256 || null,
+    provenanceSha256: crypto.createHash('sha256').update(stable(provenance)).digest('hex'),
+  };
+}
+
+function receiptVerifiedLodProvenance(metadata, assets, receipt, versionId = null) {
+  const provenance = verifiedLodProvenance(metadata, assets);
+  const details = receipt?.details;
+  if (!provenance || !details || typeof details !== 'object' || Array.isArray(details)
+    || typeof receipt?.eventId !== 'string' || !receipt.eventId
+    || typeof receipt?.derivativeJobId !== 'string' || !receipt.derivativeJobId
+    || (versionId !== null && details.versionId !== versionId)
+    || details.published !== false
+    || details.sourceSha256 !== provenance.sourceSha256
+    || details.manifestSha256 !== provenance.tilesManifestSha256
+    || (provenance.schemaVersion >= 3
+      && details.policySha256 !== provenance.converter?.commandSha256)
+    || (provenance.schemaVersion === 2 && details.policySha256 !== null)) return null;
+
+  // Historical worker receipts had exactly these six fields. Keep accepting
+  // that one durable shape; a partially stripped current receipt must not be
+  // mistaken for legacy evidence.
+  if (exactObjectKeys(details, LEGACY_LOD_VERIFICATION_RECEIPT_KEYS)) return provenance;
+
+  if (!exactObjectKeys(details, LOD_VERIFICATION_RECEIPT_KEYS)
+    || details.receiptVersion !== LOD_VERIFICATION_RECEIPT_VERSION
+    || details.schemaVersion !== provenance.schemaVersion
+    || details.equivalenceSha256 !== (provenance.audit?.equivalenceSha256 || null)
+    || details.provenanceSha256 !== crypto.createHash('sha256').update(stable(provenance)).digest('hex')) return null;
+  return provenance;
+}
+
 function viewerEligibleAssets(metadata, assets) {
   const provenance = verifiedLodProvenance(metadata, assets);
   return assets.filter((asset) => asset.kind !== 'tiles' || provenance);
 }
 
-module.exports = { lodDerivativeSpecs, verifiedLodProvenance, viewerEligibleAssets };
+module.exports = {
+  lodDerivativeSpecs,
+  lodVerificationReceiptDetails,
+  receiptVerifiedLodProvenance,
+  verifiedLodProvenance,
+  viewerEligibleAssets,
+};
