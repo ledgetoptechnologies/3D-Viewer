@@ -403,8 +403,17 @@
           </div>
           <div class="slider-row">
             <span>Detail</span>
-            <input type="range" id="lod-detail" min="2" max="24" step="1" value="16">
+            <input type="range" id="lod-detail" min="2" max="24" step="1" value="20">
           </div>
+          <label class="slider-row" for="lod-memory-mode">
+            <span>Viewer memory</span>
+            <select id="lod-memory-mode" aria-describedby="lod-memory-help">
+              <option value="auto">Auto</option>
+              <option value="balanced">Balanced</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <div class="hint" id="lod-memory-help" style="margin-top:6px;">Controls decoded model data kept by this viewer. Auto uses a coarse browser capability hint; it does not measure system RAM.</div>
           <div class="hint" style="margin-top:10px;">Starts with balanced view-local refinement. Raise Detail only when you need finer coverage.</div>
         </div>
 

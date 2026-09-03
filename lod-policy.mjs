@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { resolveLodMemoryProfile } from './lod-memory-profile.mjs';
 
 export const MIN_LOD_DETAIL = 2;
 export const MAX_LOD_DETAIL = 24;
@@ -8,6 +9,7 @@ export const LOD_REFINEMENT_STEP = 3;
 export const LOW_MEMORY_MAX_LOD_DETAIL = 13;
 export const LOD_ADMISSION_RECOVERY_SAMPLES = 2;
 export const LOD_PRESSURE_FALLBACK_SAMPLES = 4;
+export const LOD_MAX_PERIPHERAL_PRESSURE_SCALE = 4;
 export const LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET = 4096;
 export const LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET = 1024;
 export const LOD_PREFETCH_MAX_MS = 3_000;
@@ -145,61 +147,352 @@ export function lodFallbackShellPlan(root, {
   };
 }
 
-export function lodBranchBlockerCut(visibleTiles, { isReady = () => false } = {}) {
-  const blockers = [];
-  for (const fallback of visibleTiles || []) {
-    if (String(fallback?.refine || '').toUpperCase() !== 'REPLACE'
-      || Number(fallback?.geometricError) <= 0) continue;
-    const stack = [...(fallback.children || [])];
+function lodTileFocusOverlap(tile) {
+  return Math.min(1, Math.max(0, Number(tile?.__ltdsFocusOverlap) || 0));
+}
+
+function lodTileCameraDistance(tile) {
+  const value = Number(tile?.traversal?.distanceFromCamera);
+  return Number.isFinite(value) ? value : Infinity;
+}
+
+export function lodTileInLockedFocalOwner(tile) {
+  const assignedOwner = tile?.__ltdsFallbackOwner;
+  if (assignedOwner?.__ltdsFocalOwnerLocked === true) return true;
+
+  let current = tile;
+  // A valid 3D Tiles tree cannot contain a parent cycle. Keep a defensive
+  // bound so malformed runtime metadata cannot wedge request prioritization.
+  for (let depth = 0; current && depth < 256; depth += 1) {
+    if (current.__ltdsFocalOwnerLocked === true) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+// A visible positive-error REPLACE tile is the spatial fallback owner for the
+// cold cut immediately below it. Treating every cold tile as one global queue
+// caused wide views to spread cache admission across every fallback branch,
+// so no one branch completed and all refined content remained hidden. Keep the
+// public flat cut for compatibility, but attach an explicit nearest-owner group
+// to every blocker so request scheduling can complete one useful spatial cut.
+export function lodBranchBlockerGroups(visibleTiles, { isReady = () => false } = {}) {
+  const visible = Array.from(visibleTiles || []);
+  const owners = visible.filter(fallback => (
+    String(fallback?.refine || '').toUpperCase() === 'REPLACE'
+    && Number(fallback?.geometricError) > 0
+  ));
+  const groupsByOwner = new Map(owners.map((owner, index) => [owner, {
+    owner,
+    ownerIndex: index,
+    blockers: [],
+    focusOverlap: lodTileFocusOverlap(owner),
+    distanceFromCamera: lodTileCameraDistance(owner),
+    focusActivityTime: Number(owner?.__ltdsFocusActivityTime) || 0,
+  }]));
+  const assignmentByTile = new Map();
+  let encounterIndex = 0;
+
+  for (const owner of owners) {
+    const stack = (owner.children || []).map(tile => ({ tile, depth: 1 }));
     while (stack.length) {
-      const tile = stack.pop();
+      const { tile, depth } = stack.pop();
       if (!tile?.traversal?.used || !tile?.traversal?.inFrustum) continue;
       if (tile.internal?.hasUnrenderableContent === true) {
-        stack.push(...(tile.children || []));
+        stack.push(...(tile.children || []).map(child => ({ tile: child, depth: depth + 1 })));
         continue;
       }
       if (tile.internal?.hasRenderableContent || contentUri(tile)) {
-        if (!isReady(tile)) blockers.push(tile);
+        if (!isReady(tile)) {
+          const existing = assignmentByTile.get(tile);
+          if (!existing || depth < existing.depth) {
+            assignmentByTile.set(tile, {
+              owner,
+              depth,
+              encounterIndex: existing?.encounterIndex ?? encounterIndex++,
+            });
+          }
+        }
         continue;
       }
-      stack.push(...(tile.children || []));
+      stack.push(...(tile.children || []).map(child => ({ tile: child, depth: depth + 1 })));
     }
   }
-  return blockers;
+
+  for (const [tile, assignment] of assignmentByTile) {
+    const group = groupsByOwner.get(assignment.owner);
+    if (!group) continue;
+    group.blockers.push({ tile, encounterIndex: assignment.encounterIndex });
+    group.focusOverlap = Math.max(group.focusOverlap, lodTileFocusOverlap(tile));
+    group.distanceFromCamera = Math.min(group.distanceFromCamera, lodTileCameraDistance(tile));
+    group.focusActivityTime = Math.max(
+      group.focusActivityTime,
+      Number(tile?.__ltdsFocusActivityTime) || 0,
+    );
+  }
+
+  const pendingGroups = Array.from(groupsByOwner.values())
+    .filter(group => group.blockers.length > 0)
+    .map(group => ({
+      ...group,
+      blockers: group.blockers
+        .sort((a, b) => a.encounterIndex - b.encounterIndex)
+        .map(entry => entry.tile),
+    }));
+  const naturallyRanked = pendingGroups.sort((a, b) => (
+    b.focusOverlap - a.focusOverlap
+    || a.distanceFromCamera - b.distanceFromCamera
+    || a.ownerIndex - b.ownerIndex
+  ));
+
+  // Focus identity is separate from atomic load completion. Once the focused
+  // owner's replacement cut attaches it leaves the visible fallback list, but
+  // its descendants still identify their historical owner. Keep that owner at
+  // raw requested SSE until a newer camera interaction deliberately selects a
+  // different camera-centered owner. Otherwise peripheral queue work would
+  // immediately take the focus lock and coarsen the sharp foreground again.
+  const focusOwners = new Set();
+  const focusMetrics = new Map();
+  const addFocusOwner = (owner) => {
+    if (!owner) return null;
+    focusOwners.add(owner);
+    let metric = focusMetrics.get(owner);
+    if (!metric) {
+      metric = {
+        owner,
+        ownerIndex: focusMetrics.size,
+        focusOverlap: lodTileFocusOverlap(owner),
+        distanceFromCamera: lodTileCameraDistance(owner),
+        focusActivityTime: Number(owner?.__ltdsFocusActivityTime) || 0,
+      };
+      focusMetrics.set(owner, metric);
+    }
+    return metric;
+  };
+  for (const owner of owners) addFocusOwner(owner);
+  for (const tile of visible) {
+    if (tile?.__ltdsFallbackOwner) {
+      const metric = addFocusOwner(tile.__ltdsFallbackOwner);
+      metric.focusOverlap = Math.max(metric.focusOverlap, lodTileFocusOverlap(tile));
+      metric.distanceFromCamera = Math.min(metric.distanceFromCamera, lodTileCameraDistance(tile));
+      metric.focusActivityTime = Math.max(
+        metric.focusActivityTime,
+        Number(tile?.__ltdsFocusActivityTime) || 0,
+      );
+    }
+    let ancestor = tile?.parent;
+    for (let depth = 0; ancestor && depth < 256; depth += 1) {
+      if (Number.isFinite(Number(ancestor.__ltdsFocalOwnerEpoch))) addFocusOwner(ancestor);
+      ancestor = ancestor.parent;
+    }
+  }
+  for (const [owner, pendingGroup] of groupsByOwner) {
+    const metric = addFocusOwner(owner);
+    metric.focusOverlap = Math.max(metric.focusOverlap, Number(pendingGroup.focusOverlap) || 0);
+    metric.distanceFromCamera = Math.min(
+      metric.distanceFromCamera,
+      Number.isFinite(Number(pendingGroup.distanceFromCamera))
+        ? Number(pendingGroup.distanceFromCamera)
+        : Infinity,
+    );
+    metric.focusActivityTime = Math.max(
+      metric.focusActivityTime,
+      Number(pendingGroup.focusActivityTime) || 0,
+    );
+  }
+  const focusCandidates = Array.from(focusMetrics.values()).sort((a, b) => (
+    b.focusOverlap - a.focusOverlap
+    || a.distanceFromCamera - b.distanceFromCamera
+    || a.ownerIndex - b.ownerIndex
+  ));
+  const latestActivityTime = focusCandidates.reduce(
+    (latest, candidate) => Math.max(latest, candidate.focusActivityTime),
+    0,
+  );
+  let focusedOwner = focusCandidates.find(candidate => (
+    candidate.owner?.__ltdsFocalOwnerLocked === true
+    && (Number(candidate.owner?.__ltdsFocalOwnerEpoch) || 0) >= latestActivityTime
+  ))?.owner || null;
+  if (!focusedOwner) focusedOwner = focusCandidates[0]?.owner || null;
+
+  for (const owner of focusOwners) {
+    owner.__ltdsFocalOwnerLocked = false;
+    owner.__ltdsFocalOwnerPending = false;
+  }
+  const focalGroup = naturallyRanked.find(group => group.owner === focusedOwner) || null;
+  if (focusedOwner) {
+    focusedOwner.__ltdsFocalOwnerLocked = true;
+    focusedOwner.__ltdsFocalOwnerPending = Boolean(focalGroup);
+    focusedOwner.__ltdsFocalOwnerEpoch = latestActivityTime;
+  }
+
+  const ranked = focalGroup
+    ? [focalGroup, ...naturallyRanked.filter(group => group !== focalGroup)]
+    : naturallyRanked;
+  for (let rank = 0; rank < ranked.length; rank += 1) {
+    const group = ranked[rank];
+    group.rank = rank;
+    group.focal = group === focalGroup;
+    group.owner.__ltdsOwnerRank = rank;
+    group.owner.__ltdsOwnerPendingBlockers = group.blockers.length;
+    for (const tile of group.blockers) {
+      tile.__ltdsBranchBlocker = true;
+      tile.__ltdsFallbackOwner = group.owner;
+      tile.__ltdsOwnerRank = rank;
+      tile.__ltdsOwnerFocusOverlap = group.focusOverlap;
+      tile.__ltdsFocalOwnerPending = group.focal;
+      tile.__ltdsFocusPending = true;
+    }
+  }
+
+  return ranked;
+}
+
+export function lodBranchBlockerCut(visibleTiles, options = {}) {
+  return lodBranchBlockerGroups(visibleTiles, options).flatMap(group => group.blockers);
 }
 
 export function lodFocusPriorityPenalty(tile, interactionState, now = performance.now()) {
+  // The locked owner and every descendant in its replacement cut keep the raw
+  // requested SSE. Foveation may defer peripheral work, but it must never
+  // coarsen the exact spatial branch the user is waiting to see sharpen.
+  if (lodTileInLockedFocalOwner(tile)) return 1;
   const age = Math.max(0, Number(now) - (Number(interactionState?.lastActivityTime) || 0));
-  let strength = interactionState?.activeMotion ? 1 : 0;
-  if (!interactionState?.activeMotion && age > LOD_FOCUS_IDLE_MS) {
+  const focalCutPending = interactionState?.focusPending === true
+    || (tile?.__ltdsBranchBlocker === true && tile?.__ltdsFocusPending === true);
+  let strength = interactionState?.activeMotion || focalCutPending ? 1 : 0;
+  if (!focalCutPending && !interactionState?.activeMotion && age > LOD_FOCUS_IDLE_MS) {
     strength = Math.max(0, 1 - (age - LOD_FOCUS_IDLE_MS) / LOD_FOCUS_DECAY_MS);
-  } else if (!interactionState?.activeMotion && age <= LOD_FOCUS_IDLE_MS) {
+  } else if (!focalCutPending && !interactionState?.activeMotion && age <= LOD_FOCUS_IDLE_MS) {
     strength = 1;
   }
   const overlap = Math.min(1, Math.max(0, Number(tile?.__ltdsFocusOverlap) || 0));
   return 1 + 3 * strength * (1 - overlap);
 }
 
+// Per-tile traversal may use this raised target only after the adaptive memory
+// governor explicitly reports persistent pressure. Camera motion affects queue
+// priority through lodFocusPriorityPenalty, but never selection: otherwise a
+// one-pixel pan would immediately replace decoded detail with a coarse parent.
+// The focal ray always receives raw requested SSE and strict REPLACE remains
+// entirely renderer-controlled.
+export function lodPeripheralErrorTarget(
+  errorTarget,
+  tile,
+  interactionState,
+  now = performance.now(),
+  memoryPressureScale = 1,
+) {
+  const rawTarget = Number(errorTarget);
+  if (!Number.isFinite(rawTarget) || rawTarget <= 0) return errorTarget;
+  if (lodTileInLockedFocalOwner(tile)) return rawTarget;
+  const pressure = Math.min(
+    LOD_MAX_PERIPHERAL_PRESSURE_SCALE,
+    Math.max(1, Number(memoryPressureScale) || 1),
+  );
+  const overlap = lodTileFocusOverlap(tile);
+  // Persistent cache pressure may keep the periphery coarse even after the
+  // motion delay expires. The camera-centered focal branch remains exactly at
+  // the requested SSE, while only tiles outside that cone are relaxed.
+  const pressurePenalty = 1 + (pressure - 1) * (1 - overlap);
+  return rawTarget * pressurePenalty;
+}
+
+function projectedSphereFocusOverlap(camera, sphere, coneRadius, scratch) {
+  if (!camera || !sphere?.center) return 0;
+  const radius = Math.max(0, Number(sphere.radius) || 0);
+  const cone = Math.max(1e-6, Number(coneRadius) || 0.65);
+
+  const {
+    centerNdc, edgeNdc, cameraPosition, cameraRight, cameraUp,
+  } = scratch;
+  centerNdc.copy(sphere.center).project(camera);
+  if (![centerNdc.x, centerNdc.y, centerNdc.z].every(Number.isFinite)) return 0;
+
+  cameraPosition.setFromMatrixPosition(camera.matrixWorld);
+  if (cameraPosition.distanceTo(sphere.center) <= radius) return 1;
+
+  let projectedRadius = 0;
+  if (radius > 0) {
+    cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+    cameraUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+    edgeNdc.copy(sphere.center).addScaledVector(cameraRight, radius).project(camera);
+    if (Number.isFinite(edgeNdc.x) && Number.isFinite(edgeNdc.y)) {
+      projectedRadius = Math.max(
+        projectedRadius,
+        Math.hypot(edgeNdc.x - centerNdc.x, edgeNdc.y - centerNdc.y),
+      );
+    }
+    edgeNdc.copy(sphere.center).addScaledVector(cameraUp, radius).project(camera);
+    if (Number.isFinite(edgeNdc.x) && Number.isFinite(edgeNdc.y)) {
+      projectedRadius = Math.max(
+        projectedRadius,
+        Math.hypot(edgeNdc.x - centerNdc.x, edgeNdc.y - centerNdc.y),
+      );
+    }
+  }
+
+  // Foveated quality is anchored to the stable camera view center. Pointer
+  // position is intentionally irrelevant: moving a cursor over an unchanged
+  // camera view must not reshuffle owner groups or alter effective tile SSE.
+  const centerDistance = Math.hypot(centerNdc.x, centerNdc.y);
+  const distanceFromProjectedExtent = Math.max(0, centerDistance - projectedRadius);
+  return Math.min(1, Math.max(0, 1 - distanceFromProjectedExtent / cone));
+}
+
+export function lodProjectedSphereFocusOverlap(camera, sphere, coneRadius = 0.65) {
+  return projectedSphereFocusOverlap(camera, sphere, coneRadius, {
+    centerNdc: new THREE.Vector3(),
+    edgeNdc: new THREE.Vector3(),
+    cameraPosition: new THREE.Vector3(),
+    cameraRight: new THREE.Vector3(),
+    cameraUp: new THREE.Vector3(),
+  });
+}
+
 export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
   const sphere = new THREE.Sphere();
-  const centerNdc = new THREE.Vector3();
+  const focusScratch = {
+    centerNdc: new THREE.Vector3(),
+    edgeNdc: new THREE.Vector3(),
+    cameraPosition: new THREE.Vector3(),
+    cameraRight: new THREE.Vector3(),
+    cameraUp: new THREE.Vector3(),
+  };
+  let tilesRenderer = null;
   return {
     name: 'LTDS_FOCUS_REQUEST_PRIORITY',
+    init(tiles) {
+      tilesRenderer = tiles;
+    },
     calculateTileViewError(tile) {
       let overlap = 0;
       const state = interactionStateProvider?.();
-      const focus = state?.focusNdc;
       const volume = tile?.engineData?.boundingVolume;
-      if (camera && Array.isArray(focus) && focus.length === 2 && volume?.getSphere) {
+      if (camera && volume?.getSphere) {
         volume.getSphere(sphere);
-        centerNdc.copy(sphere.center).project(camera);
-        const distance = Math.hypot(centerNdc.x - Number(focus[0]), centerNdc.y - Number(focus[1]));
-        // A broad center cone protects the user's focal branch. This metadata
-        // is consumed only by queue ordering and never changes traversal SSE.
-        overlap = Math.max(0, 1 - distance / 0.65);
+        // Use the projected sphere extent rather than only its center. Large
+        // tiles frequently cover the focal ray even when their center lies in
+        // the periphery; center-only scoring incorrectly starved those owners.
+        overlap = projectedSphereFocusOverlap(camera, sphere, 0.65, focusScratch);
       }
       tile.__ltdsFocusOverlap = overlap;
+      tile.__ltdsFocusActivityTime = Number(state?.lastActivityTime) || 0;
+      tile.__ltdsPeripheralSelectionPenalty = lodFocusPriorityPenalty(tile, state);
+      tile.__ltdsPeripheralErrorTarget = lodPeripheralErrorTarget(
+        tilesRenderer?.errorTarget,
+        tile,
+        state,
+        performance.now(),
+        tilesRenderer?.__ltdsPeripheralPressureScale,
+      );
+      // Returning false leaves camera visibility and the authored REPLACE
+      // hierarchy under renderer control. The pinned traversal patch consumes
+      // the per-tile target above without mutating the global requested SSE.
       return false;
+    },
+    dispose() {
+      tilesRenderer = null;
     },
   };
 }
@@ -213,13 +506,22 @@ export function createLodFocusPriorityCallback(interactionStateProvider, nowProv
     const aBlocker = a?.__ltdsBranchBlocker === true;
     const bBlocker = b?.__ltdsBranchBlocker === true;
     if (aBlocker !== bBlocker) return aBlocker ? 1 : -1;
+    if (aBlocker && bBlocker) {
+      const aOwnerRank = Number.isFinite(Number(a?.__ltdsOwnerRank))
+        ? Number(a.__ltdsOwnerRank)
+        : Infinity;
+      const bOwnerRank = Number.isFinite(Number(b?.__ltdsOwnerRank))
+        ? Number(b.__ltdsOwnerRank)
+        : Infinity;
+      if (aOwnerRank !== bOwnerRank) return aOwnerRank < bOwnerRank ? 1 : -1;
+    }
     const state = interactionStateProvider?.();
     const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
     const bDistance = Number.isFinite(bt.distanceFromCamera) ? bt.distanceFromCamera : Infinity;
     const now = nowProvider();
-    // Every blocker must arrive before its coarse REPLACE parent can retire;
-    // applying a peripheral focus penalty to one of them delays the entire
-    // branch, including already-loaded focal descendants.
+    // Blockers within one owner are a single atomic replacement cut. Owner
+    // rank above guarantees the focal cut completes before another spatial
+    // group; distance keeps ordering deterministic within that group.
     const aScore = aDistance * (aBlocker ? 1 : lodFocusPriorityPenalty(a, state, now));
     const bScore = bDistance * (bBlocker ? 1 : lodFocusPriorityPenalty(b, state, now));
     if (aScore !== bScore) return aScore > bScore ? -1 : 1;
@@ -272,6 +574,84 @@ export function retainLodOverviewTiles(tilesRenderer, overviewTiles) {
   return retained;
 }
 
+function lodRecentFrontierOwner(tile) {
+  if (tile?.__ltdsFallbackOwner) return tile.__ltdsFallbackOwner;
+  let current = tile?.parent;
+  for (let depth = 0; current && depth < 256; depth += 1) {
+    if (Number.isFinite(Number(current.__ltdsFocalOwnerEpoch))) return current;
+    current = current.parent;
+  }
+  return tile;
+}
+
+// A REPLACE cut is useful only when every tile in the cut remains available.
+// Retain recent detail as whole historical fallback-owner groups, ranked by
+// the current focal ray, instead of a tile FIFO that can preserve 14/15 leaves
+// and force the renderer back to the coarse parent after a one-pixel motion.
+export function selectLodRecentFrontier(entries, {
+  now = 0,
+  maxTiles = Infinity,
+  maxBytes = Infinity,
+  getBytes = () => 0,
+} = {}) {
+  const tileLimit = Number.isFinite(Number(maxTiles))
+    ? Math.max(0, Number(maxTiles))
+    : Infinity;
+  const byteLimit = Number.isFinite(Number(maxBytes))
+    ? Math.max(0, Number(maxBytes))
+    : Infinity;
+  const groups = new Map();
+  for (const entry of entries || []) {
+    const [tile, expiresAt] = entry || [];
+    if (!tile || Number(expiresAt) <= Number(now)) continue;
+    const owner = lodRecentFrontierOwner(tile);
+    let group = groups.get(owner);
+    if (!group) {
+      group = {
+        owner,
+        entries: [],
+        bytes: 0,
+        focusOverlap: Math.min(1, Math.max(0,
+          Number(owner?.__ltdsFocusOverlap) || Number(tile?.__ltdsOwnerFocusOverlap) || 0)),
+        distanceFromCamera: lodTileCameraDistance(owner),
+      };
+      groups.set(owner, group);
+    }
+    const bytes = Math.max(0, Number(getBytes(tile)) || 0);
+    group.entries.push([tile, expiresAt]);
+    group.bytes += bytes;
+    group.focusOverlap = Math.max(
+      group.focusOverlap,
+      Math.min(1, Math.max(0,
+        Number(tile?.__ltdsFocusOverlap)
+          || Number(tile?.__ltdsOwnerFocusOverlap)
+          || 0)),
+    );
+    group.distanceFromCamera = Math.min(
+      group.distanceFromCamera,
+      lodTileCameraDistance(tile),
+    );
+  }
+
+  const ranked = Array.from(groups.values()).sort((a, b) => (
+    Number(b.owner?.__ltdsFocalOwnerLocked === true)
+      - Number(a.owner?.__ltdsFocalOwnerLocked === true)
+    || b.focusOverlap - a.focusOverlap
+    || a.distanceFromCamera - b.distanceFromCamera
+  ));
+  const selected = new Map();
+  let selectedBytes = 0;
+  for (const group of ranked) {
+    // Never retain a partial replacement cut. If the whole group does not fit,
+    // its already-pinned coarse owner remains the stable fallback.
+    if (selected.size + group.entries.length > tileLimit
+      || selectedBytes + group.bytes > byteLimit) continue;
+    for (const [tile, expiresAt] of group.entries) selected.set(tile, expiresAt);
+    selectedBytes += group.bytes;
+  }
+  return selected;
+}
+
 export function installLodOverviewRetention(tilesRenderer, overviewTilesProvider) {
   const cache = tilesRenderer?.lruCache;
   const original = cache?.scheduleUnload;
@@ -300,7 +680,34 @@ export function installLodOverviewRetention(tilesRenderer, overviewTilesProvider
 // move look like unrecoverable memory pressure. This restores the cache shape
 // from the known-good streaming implementation: recently viewed content stays
 // warm, while stale off-view tiles can actually be evicted for the next view.
-export function lodCacheBudget(deviceMemoryGiB) {
+function hasResolvedLodMemoryProfile(profile) {
+  return profile
+    && Number.isFinite(Number(profile.cacheSoftBytes))
+    && Number(profile.cacheSoftBytes) > 0
+    && Number.isFinite(Number(profile.cacheHardBytes))
+    && Number(profile.cacheHardBytes) >= Number(profile.cacheSoftBytes);
+}
+
+export function lodCacheBudget(deviceMemoryGiB, memoryProfile = null) {
+  if (hasResolvedLodMemoryProfile(memoryProfile)) {
+    const softBytes = Number(memoryProfile.cacheSoftBytes);
+    const hardBytes = Number(memoryProfile.cacheHardBytes);
+    const recentBytes = Math.max(0, Number(memoryProfile.recentFrontierBytes) || 0);
+    const constrained = memoryProfile.policyKey === 'constrained';
+    return {
+      // The LRU's minimum is only a warm floor. Explicit overview and recent
+      // frontier retention decide which tiles are protected.
+      minBytesSize: Math.min(recentBytes, softBytes * 0.20),
+      // `softBytesSize` is an LTDS scheduling threshold. The renderer's
+      // `maxBytesSize` remains the absolute prospective-admission boundary.
+      softBytesSize: softBytes,
+      maxBytesSize: hardBytes,
+      minSize: constrained ? 256 : 8,
+      maxSize: constrained ? 512 : 1024,
+      unloadPercent: 0.20,
+    };
+  }
+
   const memory = Number(deviceMemoryGiB);
   if (Number.isFinite(memory) && memory <= 4) {
     // Low-memory clients intentionally retain a coarse/fallback profile. The
@@ -382,18 +789,39 @@ export function lodCacheRetentionMinBytes(budget, recoveryActive = false, cache 
   return Math.min(retainedFloor, recoveryFloor);
 }
 
-export function recoverLodCacheAdmission(cache, budget) {
-  if (!cache?.isFull?.() || typeof cache?.unloadUnusedContent !== 'function') return false;
+export function recoverLodCacheAdmission(cache, budget, incomingBytes = 0, maxPasses = 8) {
+  if (!cache || typeof cache?.unloadUnusedContent !== 'function') return false;
+  const incoming = Math.max(0, Number(incomingBytes) || 0);
+  const hardBytes = Number(budget?.maxBytesSize ?? cache.maxBytesSize);
+  const maxItems = Number(budget?.maxSize ?? cache.maxSize);
+  const prospectiveBytes = () => Math.max(0, Number(cache.cachedBytes) || 0) + incoming;
+  const overBytes = () => Number.isFinite(hardBytes) && prospectiveBytes() > hardBytes;
+  const overItems = () => Number.isFinite(maxItems)
+    && Number(cache.itemSet?.size) >= maxItems;
+  if (!overBytes() && !overItems() && !cache.isFull?.()) return false;
   const recoveryFloor = lodCacheRetentionMinBytes(budget, true, cache);
   const currentFloor = Number(cache.minBytesSize);
   if (!Number.isFinite(recoveryFloor) || recoveryFloor < 0) return false;
   if (!Number.isFinite(currentFloor) || recoveryFloor < currentFloor) {
     cache.minBytesSize = recoveryFloor;
   }
-  // Run synchronously even when the existing floor is already low enough.
-  // A parse completes before the renderer's next scheduled unload, and 0.5.1
-  // otherwise discards that completed foreground tile immediately.
-  cache.unloadUnusedContent();
+  // Run synchronously even when the existing floor is already low enough. A
+  // single unloadPercent pass can leave less free space than the incoming
+  // decoded tile needs, after which renderer 0.5.1 discards that foreground
+  // parse. Iterate only while each pass makes progress; LRUCache itself never
+  // removes used/pinned content.
+  const boundedPasses = Math.min(16, Math.max(1, Number.parseInt(maxPasses, 10) || 8));
+  for (let pass = 0; pass < boundedPasses; pass += 1) {
+    const beforeBytes = Number(cache.cachedBytes) || 0;
+    const beforeItems = Number(cache.itemSet?.size) || 0;
+    cache.unloadUnusedContent();
+    const afterBytes = Number(cache.cachedBytes) || 0;
+    const afterItems = Number(cache.itemSet?.size) || 0;
+    const fitsBytes = !Number.isFinite(hardBytes) || prospectiveBytes() <= hardBytes;
+    const fitsItems = !Number.isFinite(maxItems) || afterItems < maxItems;
+    if (fitsBytes && fitsItems && !cache.isFull?.()) break;
+    if (afterBytes >= beforeBytes && afterItems >= beforeItems) break;
+  }
   return true;
 }
 
@@ -434,22 +862,31 @@ export function lodViewChangeRequiresRetry(previous, current, {
     || zoom >= zoomLogRatio;
 }
 
-export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB) {
+export function lodRuntimeProfile(requestedDetail, deviceMemoryGiB, memoryProfile = null) {
   const parsed = Number.parseInt(requestedDetail, 10);
   const requested = Number.isFinite(parsed)
     ? Math.min(MAX_LOD_DETAIL, Math.max(MIN_LOD_DETAIL, parsed))
     : DEFAULT_LOD_DETAIL;
   const memory = Number(deviceMemoryGiB);
-  const reduced = Number.isFinite(memory) && memory <= 4;
+  const resolvedMemoryProfile = hasResolvedLodMemoryProfile(memoryProfile)
+    ? memoryProfile
+    : null;
+  const reduced = resolvedMemoryProfile
+    ? resolvedMemoryProfile.policyKey === 'constrained'
+    : Number.isFinite(memory) && memory <= 4;
   const maximumDetail = reduced ? LOW_MEMORY_MAX_LOD_DETAIL : MAX_LOD_DETAIL;
   const cappedRequest = Math.min(requested, maximumDetail);
-  return {
-    budget: lodCacheBudget(deviceMemoryGiB),
+  const result = {
+    budget: lodCacheBudget(deviceMemoryGiB, resolvedMemoryProfile),
     requestedDetail: requested,
     activeDetail: cappedRequest,
     maximumDetail,
     reduced,
   };
+  // Preserve the legacy return shape for callers that have not opted into
+  // the new policy module yet.
+  if (resolvedMemoryProfile) result.memoryProfile = resolvedMemoryProfile;
+  return result;
 }
 
 export function lodDetailRequestPending(profile) {
@@ -508,12 +945,19 @@ export function configureLodRenderer(tilesRenderer, {
   renderer,
   detail = DEFAULT_LOD_DETAIL,
   deviceMemoryGiB,
+  memoryProfile,
   interactionStateProvider,
 } = {}) {
   tilesRenderer.setCamera(camera);
   tilesRenderer.setResolutionFromRenderer(camera, renderer);
-  const profile = lodRuntimeProfile(detail, deviceMemoryGiB);
+  const resolvedMemoryProfile = memoryProfile
+    ? (hasResolvedLodMemoryProfile(memoryProfile)
+      ? memoryProfile
+      : resolveLodMemoryProfile({ mode: memoryProfile, deviceMemoryGiB }))
+    : null;
+  const profile = lodRuntimeProfile(detail, deviceMemoryGiB, resolvedMemoryProfile);
   tilesRenderer.errorTarget = detailToErrorTarget(profile.activeDetail);
+  tilesRenderer.__ltdsPeripheralPressureScale = 1;
   // Let normal REPLACE traversal keep the currently displayed parent until its
   // selected children are ready, but do not pin every traversed ancestor in the
   // cache. Ancestor pinning made a small camera move retain the old frontier
@@ -528,12 +972,14 @@ export function configureLodRenderer(tilesRenderer, {
   if (tilesRenderer.downloadQueue) {
     tilesRenderer.downloadQueue.priorityCallback = focusPriorityCallback;
     const current = Number(tilesRenderer.downloadQueue.maxJobs);
-    tilesRenderer.downloadQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 6) : 6;
+    const limit = resolvedMemoryProfile?.downloadConcurrency ?? 6;
+    tilesRenderer.downloadQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, limit) : limit;
   }
   if (tilesRenderer.parseQueue) {
     tilesRenderer.parseQueue.priorityCallback = focusPriorityCallback;
     const current = Number(tilesRenderer.parseQueue.maxJobs);
-    tilesRenderer.parseQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, 2) : 2;
+    const limit = resolvedMemoryProfile?.parseConcurrency ?? 2;
+    tilesRenderer.parseQueue.maxJobs = Number.isFinite(current) && current > 0 ? Math.min(current, limit) : limit;
   }
 
   Object.assign(tilesRenderer.lruCache, profile.budget);
@@ -604,6 +1050,7 @@ export function resolveLodMemoryPressure(profile, starvedAtDetail = null, lastSe
 
 export function advanceLodMemoryPressure(snapshot, profile, {
   consecutiveSamples = 0,
+  clearSamples = 0,
   starvedAtDetail = null,
   lastSettledDetail = null,
 } = {}) {
@@ -613,25 +1060,52 @@ export function advanceLodMemoryPressure(snapshot, profile, {
     LOD_ADMISSION_RECOVERY_SAMPLES,
   );
   if (!starvation.starved) {
+    const currentScale = Math.min(
+      LOD_MAX_PERIPHERAL_PRESSURE_SCALE,
+      Math.max(1, Number(profile?.peripheralPressureScale) || 1),
+    );
+    const queues = snapshot?.queues;
+    const settled = snapshot?.cache?.full !== true
+      && Number(snapshot?.pendingRequiredTiles ?? snapshot?.pendingRequiredLeaves) === 0
+      && queues?.download !== true
+      && queues?.parse !== true
+      && queues?.process !== true;
+    const nextClearSamples = settled && currentScale > 1
+      ? Math.max(0, Number.parseInt(clearSamples, 10) || 0) + 1
+      : 0;
+    const shouldRecover = currentScale > 1
+      && nextClearSamples >= LOD_PRESSURE_FALLBACK_SAMPLES;
+    const nextScale = shouldRecover ? Math.max(1, currentScale / 2) : currentScale;
+    const changed = nextScale !== currentScale;
     return {
-      changed: false,
+      changed,
       recoveryRequired: false,
-      profile,
+      profile: changed ? { ...profile, peripheralPressureScale: nextScale } : profile,
       consecutiveSamples: starvation.count,
-      starvedAtDetail,
+      clearSamples: changed ? 0 : nextClearSamples,
+      starvedAtDetail: null,
     };
   }
 
-  // A full cache is an eviction signal, not a global quality decision. The old
-  // coordinator repeatedly lowered Detail 13 to 10, 7, ... 2 while keeping the
-  // cache full, producing angle-dependent one-tile/35-tile coarse frontiers.
-  // Preserve the requested camera-driven SSE target and keep relaxing the LRU
-  // floor until stale content is admitted out of the way.
+  // First give stale, unpinned content a bounded synchronous eviction chance.
+  // If the same idle/full state persists, relax only camera-peripheral
+  // selection. Never lower the requested/global SSE or blur the locked focal
+  // branch. Once the relaxed frontier settles, the scale automatically halves
+  // back toward one so the full view can converge when there is headroom.
+  const currentScale = Math.min(
+    LOD_MAX_PERIPHERAL_PRESSURE_SCALE,
+    Math.max(1, Number(profile?.peripheralPressureScale) || 1),
+  );
+  const nextScale = starvation.count >= LOD_PRESSURE_FALLBACK_SAMPLES
+    ? Math.min(LOD_MAX_PERIPHERAL_PRESSURE_SCALE, currentScale * 2)
+    : currentScale;
+  const changed = nextScale !== currentScale;
   return {
-    changed: false,
+    changed,
     recoveryRequired: true,
-    profile,
+    profile: changed ? { ...profile, peripheralPressureScale: nextScale } : profile,
     consecutiveSamples: starvation.count,
+    clearSamples: 0,
     starvedAtDetail: null,
   };
 }
@@ -884,14 +1358,20 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
   const toMiB = (value) => Number.isFinite(Number(value)) ? Math.round(Number(value) / (1024 * 1024)) : null;
   const cache = tilesRenderer?.lruCache;
   const cachedBytes = Number(cache?.cachedBytes);
+  const softBytesSize = Number(runtimeProfile?.budget?.softBytesSize);
   const maxBytesSize = Number(cache?.maxBytesSize);
   const maxSize = Number(cache?.maxSize);
   const itemSet = cache?.itemSet;
   const itemCount = Number(itemSet?.size);
+  const pendingAdmissionBytes = Math.max(0, Number(runtimeProfile?.pendingAdmissionBytes) || 0);
+  const prospectiveFull = runtimeProfile?.prospectiveAdmissionBlocked === true
+    && pendingAdmissionBytes > 0;
 
-  const memoryLimited = runtimeProfile?.starvedAtDetail !== null
-    && runtimeProfile?.starvedAtDetail !== undefined
-    && Number(runtimeProfile?.activeDetail) < Number(runtimeProfile?.requestedDetail);
+  const peripheralPressureScale = Math.max(1, Number(runtimeProfile?.peripheralPressureScale) || 1);
+  const memoryLimited = peripheralPressureScale > 1
+    || (runtimeProfile?.starvedAtDetail !== null
+      && runtimeProfile?.starvedAtDetail !== undefined
+      && Number(runtimeProfile?.activeDetail) < Number(runtimeProfile?.requestedDetail));
   const bootstrapPhase = runtimeProfile?.bootstrapPhase;
   const detailPending = lodDetailRequestPending(runtimeProfile);
   return {
@@ -909,6 +1389,7 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
     maximumDetail: Number(runtimeProfile?.maximumDetail) || null,
     errorTarget: Number.isFinite(Number(tilesRenderer?.errorTarget)) ? Number(tilesRenderer.errorTarget) : null,
     rawErrorTarget: detailToErrorTarget(runtimeProfile?.activeDetail),
+    peripheralPressureScale,
     prefetch: {
       elapsedMs: Number.isFinite(Number(runtimeProfile?.prefetchElapsedMs)) ? Number(runtimeProfile.prefetchElapsedMs) : null,
       exitReason: runtimeProfile?.prefetchExitReason || null,
@@ -953,10 +1434,13 @@ export function lodDebugSnapshot(tilesRenderer, runtimeProfile, warmupComplete) 
     },
     cache: {
       usedMiB: toMiB(cachedBytes),
+      softMiB: toMiB(softBytesSize),
       maxMiB: toMiB(maxBytesSize),
-      full: Boolean(cache?.isFull?.()),
+      full: Boolean(cache?.isFull?.()) || prospectiveFull,
       fullByBytes: Number.isFinite(cachedBytes) && Number.isFinite(maxBytesSize) && cachedBytes >= maxBytesSize,
       fullByItems: Number.isFinite(itemCount) && Number.isFinite(maxSize) && itemCount >= maxSize,
+      prospectiveFull,
+      pendingAdmissionMiB: toMiB(pendingAdmissionBytes),
     },
   };
 }

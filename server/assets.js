@@ -137,7 +137,8 @@ function resolveProject(projectId, rootKey) {
 // not for an entire storage mount. Metadata files for EPT and 3D Tiles are
 // roots for their relative child requests; every other asset is a single file.
 function publishedAssetMatch(model, rootKey, relPath, { review = false, publicOnly = false } = {}) {
-  if (!model?.activeVersion || model.status !== 'ready') return false;
+  if (!model?.activeVersion) return false;
+  if (review ? model.activeVersion.status !== 'ready' : model.status !== 'ready') return false;
   const requested = String(relPath || '').replaceAll('\\', '/');
   const hierarchical = new Set(['ept', 'tiles']);
   return model.activeVersion.assets.find((asset) => {
@@ -171,8 +172,9 @@ async function pathTokenAuthorization(req, projectId) {
       : canonicalRepository.getModel(requestedModelId);
     const allowed = viewer.permissions?.view !== false
       && viewer.modelId === requestedModelId
-      && model?.status === 'ready'
-      && (review ? model.activeVersion?.id === viewer.modelVersionId : model.activeVersionId === viewer.modelVersionId);
+      && (review
+        ? model?.activeVersion?.id === viewer.modelVersionId && model.activeVersion.status === 'ready'
+        : model?.status === 'ready' && model.activeVersionId === viewer.modelVersionId);
     return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false } : false;
   }
   const payload = auth.verify(req.params.token);

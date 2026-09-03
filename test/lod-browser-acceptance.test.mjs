@@ -95,13 +95,21 @@ function contentType(file) {
   return 'application/octet-stream';
 }
 
-async function startFixture(tileRoot) {
-  const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', server: { middlewareMode: true, hmr: false } });
+async function startFixture(tileRoot, { assetDelayMs = () => 0, forceOptimizeDeps = false } = {}) {
+  const vite = await createViteServer({
+    root,
+    appType: 'spa',
+    logLevel: 'silent',
+    server: { middlewareMode: true, hmr: false },
+    optimizeDeps: { force: forceOptimizeDeps },
+  });
   const assetPrefix = `/assets/${fixtureId}/derivatives/`;
   const config = fixtureConfig();
+  const requests = [];
   config.assets.ortho = '/fixtures/orthophoto.tif';
   const server = createServer((request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
+    requests.push(url.pathname);
     if (url.pathname === '/api/v1/health') {
       reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'X-LTDS-Viewer-Revision': 'a'.repeat(40) });
       reply.end('{"ok":true}');
@@ -155,8 +163,17 @@ async function startFixture(tileRoot) {
         reply.end('not found');
         return;
       }
-      reply.writeHead(200, { 'Content-Type': contentType(file), 'Content-Length': statSync(file).size });
-      createReadStream(file).pipe(reply);
+      const sendAsset = () => {
+        if (reply.destroyed || !existsSync(file)) {
+          reply.destroy();
+          return;
+        }
+        reply.writeHead(200, { 'Content-Type': contentType(file), 'Content-Length': statSync(file).size });
+        createReadStream(file).pipe(reply);
+      };
+      const delayMs = Math.max(0, Number(assetDelayMs(relative)) || 0);
+      if (delayMs > 0) setTimeout(sendAsset, delayMs);
+      else sendAsset();
       return;
     }
     vite.middlewares(request, reply);
@@ -165,7 +182,7 @@ async function startFixture(tileRoot) {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  return { server, vite, origin: `http://127.0.0.1:${server.address().port}` };
+  return { server, vite, requests, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
 async function startStreamingOnlyFixture(assetOverrides = {}) {
@@ -551,8 +568,8 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not settle');
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not remain settled');
-    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 16`,
-      'default view did not complete the 13 to 16 refinement stage', 20_000);
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20`,
+      'default view did not enter direct Detail 20 refinement', 20_000);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -564,17 +581,16 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
       status: document.querySelector('#lod-status').textContent,
     })`);
-    assert.equal(balancedStartup.slider, '16');
-    assert.equal(balancedStartup.requested, 16);
-    assert.equal(balancedStartup.active, 16);
+    assert.equal(balancedStartup.slider, '20');
+    assert.equal(balancedStartup.requested, 20);
+    assert.equal(balancedStartup.active, 20);
     assert.equal(balancedStartup.phase, 'requested-detail');
     assert.equal(balancedStartup.bootstrapPhase, 'complete');
-    const balancedSteadyScale = Math.max(1, balancedStartup.errorScale / 2);
-    assert.ok(Math.abs(balancedStartup.errorTarget - 15.023 * balancedSteadyScale) < 0.01,
+    assert.ok(Math.abs(balancedStartup.errorTarget - 5.481) < 0.01,
       JSON.stringify(balancedStartup));
     assert.ok(balancedStartup.errorTarget < balancedStartup.bootstrapCoverageTarget,
-      `steady Detail 16 must refine beyond the temporary coarse bootstrap target: ${JSON.stringify(balancedStartup)}`);
-    assert.match(balancedStartup.status, /^LOD: (?:Detail 16|full-detail) \(\d+ tiles?\)$/);
+      `steady Detail 20 must refine beyond the temporary coarse bootstrap target: ${JSON.stringify(balancedStartup)}`);
+    assert.match(balancedStartup.status, /^LOD: (?:Detail 20|full-detail) \(\d+ tiles?\)$/);
     assert.doesNotMatch(balancedStartup.status, /warming|streaming/i);
     const startupLod0Requests = client.events.filter((event) => event.method === 'Network.requestWillBeSent'
       && /\/LOD-0\/[^/?#]+\.b3dm(?:[?#]|$)/i.test(event.params.request.url));
@@ -635,7 +651,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       };
     })()`);
     assert.deepEqual(explicitHighDetail, {
-      slider: '24', requested: 24, active: 16, errorTarget: balancedStartup.errorTarget,
+      slider: '24', requested: 24, active: 24, errorTarget: 2,
     });
 
     const topRadius = Math.max(25, home.diameter * 0.15);
@@ -1038,8 +1054,8 @@ test('browser close view refines at the default Detail and small motion retains 
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
 
-    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 16`,
-      'default Detail did not finish its bounded 13 to 16 stage', 180_000);
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20`,
+      'default Detail did not enter direct Detail 20 refinement', 180_000);
     const defaultState = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1049,12 +1065,12 @@ test('browser close view refines at the default Detail and small motion retains 
       bootstrapCoverageTarget: window.__ltds.state.lodRuntimeProfile?.bootstrapCoverageTarget,
       errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
     })`);
-    assert.equal(defaultState.slider, '16');
-    assert.equal(defaultState.requested, 16);
-    assert.equal(defaultState.active, 16);
+    assert.equal(defaultState.slider, '20');
+    assert.equal(defaultState.requested, 20);
+    assert.equal(defaultState.active, 20);
     assert.equal(defaultState.bootstrapPhase, 'complete');
-    assert.ok(Math.abs(defaultState.errorTarget - 15.023 * Math.max(1, defaultState.errorScale / 2)) < 0.01,
-      `the default view must leave coarse bootstrap and resume bounded requested detail: ${JSON.stringify(defaultState)}`);
+    assert.ok(Math.abs(defaultState.errorTarget - 5.481) < 0.01,
+      `the default view must leave coarse bootstrap and resume raw Detail 20: ${JSON.stringify(defaultState)}`);
     assert.ok(defaultState.errorTarget < defaultState.bootstrapCoverageTarget, JSON.stringify(defaultState));
 
     const basePosition = [0, 44, 52];
@@ -1661,20 +1677,34 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();
       const shell = tiles.root.children;
-      const originalGet = Map.prototype.get;
-      const bytesMap = tiles.lruCache.bytesMap;
       const logicalBytesPerTile = ${logicalShellBytes} / shell.length;
-      Map.prototype.get = function (key) {
-        if (this === bytesMap && shell.includes(key)) return logicalBytesPerTile;
-        return originalGet.call(this, key);
+      const originalGetBytesUsed = tiles.getBytesUsed;
+      tiles.getBytesUsed = function (tile) {
+        return shell.includes(tile)
+          ? logicalBytesPerTile
+          : originalGetBytesUsed.call(this, tile);
       };
-      window.__restoreLogicalShellBytes = () => { Map.prototype.get = originalGet; };
+      // Keep both per-tile accounting and the aggregate cache total coherent.
+      // This makes the browser exercise the real hard/soft byte paths instead
+      // of only spoofing Map.get while cachedBytes remains near zero.
+      for (const tile of shell) {
+        if (tiles.lruCache.has(tile) && tile.internal?.loadingState === 4) {
+          tiles.lruCache.setMemoryUsage(tile, logicalBytesPerTile);
+        }
+      }
+      window.__restoreLogicalShellBytes = () => {
+        tiles.getBytesUsed = originalGetBytesUsed;
+        for (const tile of shell) {
+          if (tiles.lruCache.has(tile)) {
+            tiles.lruCache.setMemoryUsage(tile, originalGetBytesUsed.call(tiles, tile));
+          }
+        }
+      };
       return true;
     })()`);
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20
       && window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
       'refreshed session did not enter direct Detail 20 refinement', 20_000);
-    await client.evaluate(`window.__restoreLogicalShellBytes?.()`);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1694,8 +1724,8 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     assert.equal(balancedStartup.errorScale, 1);
     assert.equal(balancedStartup.prefetch.shellMiB, 1329,
       `runtime did not measure the production-sized logical shell: ${JSON.stringify(balancedStartup)}`);
-    assert.equal(balancedStartup.prefetch.shellSoftLimitMiB, 1280);
-    assert.equal(balancedStartup.prefetch.shellLimitMiB, 1408);
+    assert.equal(balancedStartup.prefetch.shellSoftLimitMiB, 512);
+    assert.equal(balancedStartup.prefetch.shellLimitMiB, 1536);
     assert.equal(balancedStartup.prefetch.detailReserveMiB, 1664);
     assert.equal(balancedStartup.prefetch.overSoftBudget, true,
       'crossing the 1.25 GiB target must remain diagnostic while the safe shell promotes');
@@ -1985,6 +2015,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       .map(event => new URL(event.params.request.url).pathname);
     assert.deepEqual(duplicateMotionRequests, [],
       `tiny camera motion re-requested cached leaf content: ${JSON.stringify(duplicateMotionRequests)}`);
+    await client.evaluate(`window.__restoreLogicalShellBytes?.()`);
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});
@@ -1996,6 +2027,497 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     }
     if (server) await new Promise((resolve) => server.close(resolve));
+    if (vite) await vite.close();
+    rmSync(tileRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    releaseLock();
+    await removeBrowserProfile(profile);
+  }
+});
+
+test('production-weighted broad view completes focal Detail 20 without cache-admission deadlock', { timeout: 180_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) {
+    t.skip('Chrome or Edge is required for production-weighted LOD acceptance.');
+    return;
+  }
+
+  const { makeGlb, TRIANGLE_A } = await import('./helpers/lod-fixture.mjs');
+  const tileRoot = mkdtempSync(path.join(tmpdir(), 'ltds-weighted-lod-fixture-'));
+  const validPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+  const tileBytes = makeGlb([TRIANGLE_A], validPng);
+  const shellCount = 11;
+  const centerShellIndex = Math.floor(shellCount / 2);
+  let fineIndex = 0;
+  const shell = Array.from({ length: shellCount }, (_, shellIndex) => {
+    const x = (shellIndex - centerShellIndex) * 28;
+    const leafCount = shellIndex === centerShellIndex ? 15 : 14;
+    const children = Array.from({ length: leafCount }, (_, localIndex) => {
+      const uri = `fine-${String(fineIndex++).padStart(3, '0')}.glb`;
+      writeFileSync(path.join(tileRoot, uri), tileBytes);
+      return {
+        geometricError: 0,
+        boundingVolume: {
+          sphere: [
+            x + ((localIndex % 5) - 2) * 4,
+            (Math.floor(localIndex / 5) - 1) * 4,
+            0,
+            5,
+          ],
+        },
+        content: { uri },
+      };
+    });
+    const uri = `shell-${String(shellIndex).padStart(2, '0')}.glb`;
+    writeFileSync(path.join(tileRoot, uri), tileBytes);
+    return {
+      geometricError: 6,
+      boundingVolume: { sphere: [x, 0, 0, 20] },
+      content: { uri },
+      children,
+    };
+  });
+  assert.equal(fineIndex, 155);
+  writeFileSync(path.join(tileRoot, 'coarse.glb'), tileBytes);
+  writeFileSync(path.join(tileRoot, 'tileset.json'), JSON.stringify({
+    asset: { version: '1.0' },
+    geometricError: 64,
+    root: {
+      refine: 'REPLACE',
+      geometricError: 64,
+      boundingVolume: { sphere: [0, 0, 0, 170] },
+      content: { uri: 'coarse.glb' },
+      children: shell,
+    },
+  }));
+
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client, fixture;
+  try {
+    fixture = await startFixture(tileRoot, {
+      // This acceptance case validates the patched renderer package itself.
+      // Force Vite to rebuild its optimized dependency so a prior browser run
+      // cannot silently exercise an older renderer implementation.
+      forceOptimizeDeps: true,
+      assetDelayMs: relative => /^shell-\d+\.glb$/i.test(relative)
+        ? 4_000
+        : /^fine-\d+\.glb$/i.test(relative) ? 80 : 0,
+    });
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-weighted-lod-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort, browser);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Log.enable');
+    await client.command('Network.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', {
+      width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
+      screenWidth: 1440, screenHeight: 900,
+    });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model` });
+    await waitFor(client, `Boolean(window.__ltds?.tiles()?.root?.children?.length === ${shellCount})`,
+      'production-weighted hierarchy did not initialize', 20_000);
+
+    const logicalShellBytes = 1329 * 1024 * 1024;
+    const logicalFineBytes = 24 * 1024 * 1024;
+    await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const originalGetBytesUsed = tiles.getBytesUsed;
+      const originalSetMemoryUsage = tiles.lruCache.setMemoryUsage;
+      const shellBytes = ${logicalShellBytes} / ${shellCount};
+      const fineBytes = ${logicalFineBytes};
+      const decodedOnce = new WeakSet();
+      const uriFor = tile => String(tile?.content?.uri || tile?.content?.url || '').split(/[?#]/, 1)[0];
+      // Production byte plugins report decoded GPU/geometry allocations only
+      // after a scene exists. Reserving the logical amount while the request is
+      // merely queued would bypass the renderer's post-parse prospective check.
+      const logicalBytes = tile => {
+        if (tile?.engineData?.scene) decodedOnce.add(tile);
+        if (!decodedOnce.has(tile)) return null;
+        return /(?:^|\\/)shell-\\d+\\.glb$/i.test(uriFor(tile))
+          ? shellBytes
+          : /(?:^|\\/)fine-\\d+\\.glb$/i.test(uriFor(tile)) ? fineBytes : null;
+      };
+      tiles.getBytesUsed = function (tile) {
+        const weighted = logicalBytes(tile);
+        return weighted === null ? originalGetBytesUsed.call(this, tile) : weighted;
+      };
+      window.__weightedAdmissionTrace = [];
+      tiles.lruCache.setMemoryUsage = function (tile, bytes) {
+        const before = this.cachedBytes;
+        const result = originalSetMemoryUsage.call(this, tile, bytes);
+        window.__weightedAdmissionTrace.push({
+          kind: 'set', uri: uriFor(tile), before, bytes, after: this.cachedBytes, max: this.maxBytesSize,
+          loaded: tile?.internal?.loadingState, scene: Boolean(tile?.engineData?.scene),
+        });
+        if (window.__weightedAdmissionTrace.length > 40) window.__weightedAdmissionTrace.shift();
+        return result;
+      };
+      tiles.addEventListener('tile-memory-pressure', event => {
+        window.__weightedAdmissionTrace.push({
+          kind: 'pressure', uri: uriFor(event.tile), before: tiles.lruCache.cachedBytes,
+          bytes: event.bytesUsed, max: tiles.lruCache.maxBytesSize,
+        });
+        if (window.__weightedAdmissionTrace.length > 40) window.__weightedAdmissionTrace.shift();
+      });
+      for (const tile of tiles.lruCache.itemSet.keys()) {
+        const weighted = logicalBytes(tile);
+        if (weighted !== null && tile.internal?.loadingState === 4) {
+          tiles.lruCache.setMemoryUsage(tile, weighted);
+        }
+      }
+      window.__restoreProductionWeights = () => {
+        tiles.getBytesUsed = originalGetBytesUsed;
+        tiles.lruCache.setMemoryUsage = originalSetMemoryUsage;
+        for (const tile of tiles.lruCache.itemSet.keys()) {
+          tiles.lruCache.setMemoryUsage(tile, originalGetBytesUsed.call(tiles, tile));
+        }
+      };
+      return true;
+    })()`);
+
+    const fineRequest = requestPath => /\/fine-\d+\.glb$/i.test(requestPath);
+    const bootstrapDeadline = Date.now() + 20_000;
+    let bootstrapPhase = null;
+    while (Date.now() < bootstrapDeadline) {
+      bootstrapPhase = await client.evaluate(`window.__ltds.state.lodRuntimeProfile?.bootstrapPhase`);
+      if (bootstrapPhase === 'complete') break;
+      assert.equal(fixture.requests.some(fineRequest), false,
+        `prefetch descended into fine tiles while phase=${bootstrapPhase}`);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(bootstrapPhase, 'complete', 'production-weighted direct shell did not promote');
+
+    const startup = await client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const diagnostics = window.__ltds.lodDiagnostics();
+      return {
+        requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
+        active: window.__ltds.state.lodRuntimeProfile?.activeDetail,
+        policyKey: window.__ltds.state.lodRuntimeProfile?.memoryProfile?.policyKey,
+        rawTarget: diagnostics.rawErrorTarget,
+        target: tiles.errorTarget,
+        softMiB: diagnostics.cache.softMiB,
+        hardMiB: diagnostics.cache.maxMiB,
+        shellMiB: diagnostics.prefetch.shellMiB,
+        fallbackUris: [...(tiles.lodFallbackTiles || [])].map(tile => tile.content?.uri || tile.content?.url || ''),
+        rootAttached: Boolean(tiles.root?.engineData?.scene && tiles.group.children.includes(tiles.root.engineData.scene)),
+        rootVisible: tiles.root?.traversal?.visible === true,
+      };
+    })()`);
+    assert.deepEqual({
+      requested: startup.requested,
+      active: startup.active,
+      policyKey: startup.policyKey,
+      rawTarget: startup.rawTarget,
+      target: startup.target,
+      softMiB: startup.softMiB,
+      hardMiB: startup.hardMiB,
+      shellMiB: startup.shellMiB,
+      rootAttached: startup.rootAttached,
+      rootVisible: startup.rootVisible,
+    }, {
+      requested: 20,
+      active: 20,
+      policyKey: 'roomy',
+      rawTarget: 5.481,
+      target: 5.481,
+      softMiB: 3072,
+      hardMiB: 3840,
+      shellMiB: 1329,
+      rootAttached: false,
+      rootVisible: false,
+    });
+    assert.equal(startup.fallbackUris.length, shellCount);
+    assert.deepEqual(startup.fallbackUris.sort(), Array.from({ length: shellCount }, (_, index) => `shell-${String(index).padStart(2, '0')}.glb`));
+
+    const ownerDeadline = Date.now() + 15_000;
+    let focalOwner = null;
+    while (Date.now() < ownerDeadline && !focalOwner) {
+      focalOwner = await client.evaluate(`(() => {
+        const tiles = window.__ltds.tiles();
+        const owner = tiles.root.children.find(tile => tile.__ltdsFocalOwnerLocked === true);
+        if (!owner) return null;
+        return {
+          uri: owner.content?.uri || owner.content?.url || '',
+          overlap: owner.__ltdsFocusOverlap,
+          maximumOverlap: Math.max(...tiles.root.children.map(tile => Number(tile.__ltdsFocusOverlap) || 0)),
+          effectiveTarget: owner.__ltdsPeripheralErrorTarget,
+          blockers: Number(owner.__ltdsOwnerPendingBlockers) || 0,
+          childTargets: owner.children.map(tile => tile.__ltdsPeripheralErrorTarget),
+        };
+      })()`);
+      if (!focalOwner) await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.ok(focalOwner, 'no focal REPLACE owner was locked while its cut was cold');
+    assert.equal(focalOwner.uri, `shell-${String(centerShellIndex).padStart(2, '0')}.glb`, JSON.stringify(focalOwner));
+    assert.equal(focalOwner.overlap, focalOwner.maximumOverlap,
+      `the locked owner was not the most camera-centered fallback: ${JSON.stringify(focalOwner)}`);
+    assert.equal(focalOwner.effectiveTarget, 5.481, JSON.stringify(focalOwner));
+    assert.ok(focalOwner.blockers >= 1, JSON.stringify(focalOwner));
+    assert.equal(focalOwner.childTargets.filter(Number.isFinite).every(value => value === 5.481), true,
+      `locked focal descendants did not retain raw Detail 20: ${JSON.stringify(focalOwner)}`);
+
+    const focalCompletionDeadline = Date.now() + 15_000;
+    let focalCut = null;
+    while (Date.now() < focalCompletionDeadline) {
+      focalCut = await client.evaluate(`(() => {
+        const tiles = window.__ltds.tiles();
+        const owner = tiles.root.children.find(tile => /shell-${String(centerShellIndex).padStart(2, '0')}\\.glb$/i.test(tile.content?.uri || tile.content?.url || ''));
+        const attached = tile => Boolean(tile.engineData?.scene && tiles.group.children.includes(tile.engineData.scene));
+        return {
+          ownerAttached: attached(owner),
+          ownerVisible: owner?.traversal?.visible === true,
+          children: owner?.children?.length || 0,
+          attachedChildren: owner?.children?.filter(attached).length || 0,
+          cachedChildren: owner?.children?.filter(tile => tiles.lruCache.has(tile)).length || 0,
+        };
+      })()`);
+      if (focalCut.children === focalCut.attachedChildren && !focalCut.ownerAttached) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.deepEqual(focalCut, {
+      ownerAttached: false,
+      ownerVisible: false,
+      children: 15,
+      attachedChildren: 15,
+      cachedChildren: 15,
+    }, `centered owner never completed its strict REPLACE cut: ${JSON.stringify(focalCut)}`);
+
+    const sampleRuntime = () => client.evaluate(`(() => {
+      const tiles = window.__ltds.tiles();
+      const diagnostics = window.__ltds.lodDiagnostics();
+      const attached = tile => Boolean(tile?.engineData?.scene && tiles.group.children.includes(tile.engineData.scene));
+      const descendantsAttached = tile => {
+        const result = [];
+        const stack = [...(tile.children || [])];
+        while (stack.length) {
+          const next = stack.pop();
+          if (attached(next)) result.push(next.content?.uri || next.content?.url || '');
+          stack.push(...(next.children || []));
+        }
+        return result;
+      };
+      const replacementViolations = [];
+      const coverageGaps = [];
+      for (const owner of tiles.root.children) {
+        const ownerUri = owner.content?.uri || owner.content?.url || '';
+        const childAttached = descendantsAttached(owner);
+        if (attached(owner) && childAttached.length) replacementViolations.push({ owner: ownerUri, children: childAttached });
+        if (owner.traversal?.used === true && owner.traversal?.inFrustum === true && !attached(owner)) {
+          const selected = owner.children.filter(tile => tile.traversal?.used === true && tile.traversal?.inFrustum === true);
+          if (!selected.length || selected.some(tile => !attached(tile))) {
+            coverageGaps.push({ owner: ownerUri, selected: selected.length, attached: selected.filter(attached).length });
+          }
+        }
+      }
+      const leaves = tiles.root.children.flatMap(owner => owner.children);
+      const center = tiles.root.children[${centerShellIndex}];
+      const centerRows = center.children.map(tile => ({
+        uri: tile.content?.uri || tile.content?.url || '',
+        attached: attached(tile),
+        cached: tiles.lruCache.has(tile),
+        scene: tile.engineData?.scene?.uuid || null,
+      }));
+      const cacheRows = [tiles.root, ...tiles.root.children, ...leaves]
+        .filter(tile => tiles.lruCache.has(tile))
+        .map(tile => ({
+          uri: tile.content?.uri || tile.content?.url || 'root',
+          bytes: tiles.lruCache.getMemoryUsage(tile),
+          used: tiles.lruCache.isUsed(tile),
+          attached: attached(tile),
+          selected: tile.traversal?.used === true && tile.traversal?.inFrustum === true,
+          errorTarget: tile.__ltdsPeripheralErrorTarget,
+        }));
+      const sum = (rows, predicate) => rows
+        .filter(predicate)
+        .reduce((total, row) => total + row.bytes, 0) / ${GiB};
+      return {
+        diagnostics,
+        replacementViolations,
+        coverageGaps,
+        attachedFine: leaves.filter(attached).length,
+        cachedFine: leaves.filter(tile => tiles.lruCache.has(tile)).length,
+        cachedFineUris: leaves
+          .filter(tile => tiles.lruCache.has(tile))
+          .map(tile => tile.content?.uri || tile.content?.url || ''),
+        selectedFine: leaves.filter(tile => tile.traversal?.used === true && tile.traversal?.inFrustum === true).length,
+        centerRows,
+        peripheralTargets: tiles.root.children.map(tile => tile.__ltdsPeripheralErrorTarget).filter(Number.isFinite),
+        admissionTrace: [...(window.__weightedAdmissionTrace || [])],
+        cacheBreakdown: {
+          rows: cacheRows.length,
+          usedGiB: sum(cacheRows, row => row.used),
+          unusedGiB: sum(cacheRows, row => !row.used),
+          shellGiB: sum(cacheRows, row => /^shell-/i.test(row.uri)),
+          fineGiB: sum(cacheRows, row => /^fine-/i.test(row.uri)),
+          selectedFineGiB: sum(cacheRows, row => /^fine-/i.test(row.uri) && row.selected),
+          attachedFineGiB: sum(cacheRows, row => /^fine-/i.test(row.uri) && row.attached),
+        },
+      };
+    })()`);
+    const assertStrictCoverage = (sample, label) => {
+      assert.deepEqual(sample.replacementViolations, [], `${label}: parent and descendant rendered together`);
+      assert.deepEqual(sample.coverageGaps, [], `${label}: strict REPLACE coverage gap`);
+      assert.ok(sample.diagnostics.attachedVisibleTiles > 0, `${label}: no attached visible coverage`);
+      assert.ok(sample.diagnostics.cache.usedMiB <= sample.diagnostics.cache.maxMiB,
+        `${label}: cache crossed hard cap: ${JSON.stringify({ cache: sample.diagnostics.cache, trace: sample.admissionTrace })}`);
+    };
+
+    let pressureSample = null;
+    let peakCacheMiB = 0;
+    let deadlockStartedAt = null;
+    let maximumBlockedMs = 0;
+    const updateDeadlockWindow = (sample) => {
+      const diagnostics = sample.diagnostics;
+      peakCacheMiB = Math.max(peakCacheMiB, diagnostics.cache.usedMiB || 0);
+      const blocked = diagnostics.cache.full && diagnostics.pendingRequiredTiles > 0
+        && !diagnostics.queues.download && !diagnostics.queues.parse && !diagnostics.queues.process;
+      if (blocked) {
+        deadlockStartedAt ??= Date.now();
+        maximumBlockedMs = Math.max(maximumBlockedMs, Date.now() - deadlockStartedAt);
+      } else {
+        deadlockStartedAt = null;
+      }
+    };
+    const pressureDeadline = Date.now() + 45_000;
+    while (Date.now() < pressureDeadline) {
+      const sample = await sampleRuntime();
+      assertStrictCoverage(sample, 'broad-view admission');
+      updateDeadlockWindow(sample);
+      // The pressure scalar and the renderer's per-owner targets are applied
+      // on adjacent animation frames. Sample only after both sides of that
+      // contract are observable so this assertion cannot catch the transient
+      // frame between them.
+      if (sample.diagnostics.peripheralPressureScale > 1
+        && sample.peripheralTargets.some(value => value > 5.481)) {
+        pressureSample = sample;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.ok(pressureSample, 'production-weighted broad view never activated adaptive peripheral pressure');
+    assert.equal(pressureSample.diagnostics.rawErrorTarget, 5.481);
+    assert.equal(pressureSample.diagnostics.errorTarget, 5.481,
+      'memory pressure mutated the global requested SSE');
+    assert.ok(pressureSample.diagnostics.peripheralPressureScale >= 2
+      && pressureSample.diagnostics.peripheralPressureScale <= 4, JSON.stringify(pressureSample.diagnostics));
+    assert.ok(pressureSample.cachedFine < 155 && pressureSample.attachedFine < 155,
+      `broad peripheral frontier was not bounded: ${JSON.stringify({ cached: pressureSample.cachedFine, attached: pressureSample.attachedFine })}`);
+    assert.ok(pressureSample.peripheralTargets.some(value => value > 5.481),
+      `peripheral targets did not adapt above raw Detail 20: ${JSON.stringify(pressureSample.peripheralTargets)}`);
+    assert.ok(peakCacheMiB > 3072 && peakCacheMiB <= 3840,
+      `fixture did not exercise Auto overflow admission safely: peak=${peakCacheMiB} MiB`);
+
+    const beforeMotion = await sampleRuntime();
+    assertStrictCoverage(beforeMotion, 'before tiny motion');
+    assert.equal(beforeMotion.centerRows.every(row => row.attached && row.cached && row.scene), true,
+      `focal cut was not warm before motion: ${JSON.stringify(beforeMotion.centerRows)}`);
+    const centerScenes = Object.fromEntries(beforeMotion.centerRows.map(row => [row.uri, row.scene]));
+    const requestCountsBefore = new Map(beforeMotion.cachedFineUris.map(uri => [
+      uri,
+      fixture.requests.filter(requestPath => requestPath.endsWith(`/${uri}`)).length,
+    ]));
+    const canvas = await client.evaluate(`(() => { const r=document.querySelector('#three-container canvas').getBoundingClientRect();
+      return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+    const sampleMovement = async (label) => {
+      const deadline = Date.now() + 500;
+      while (Date.now() < deadline) {
+        const sample = await sampleRuntime();
+        assertStrictCoverage(sample, label);
+        updateDeadlockWindow(sample);
+        assert.equal(sample.centerRows.every(row => row.attached && row.cached), true,
+          `${label}: tiny movement dropped the warm focal cut`);
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    };
+    for (const pixels of [1, 2, 4, 8]) {
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mousePressed', x: canvas.x, y: canvas.y, button: 'right', buttons: 2, clickCount: 1,
+      });
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseMoved', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 2,
+      });
+      await client.command('Input.dispatchMouseEvent', {
+        type: 'mouseReleased', x: canvas.x + pixels, y: canvas.y, button: 'right', buttons: 0, clickCount: 1,
+      });
+      await sampleMovement(`${pixels}-pixel pan`);
+    }
+    await client.command('Input.dispatchMouseEvent', {
+      type: 'mousePressed', x: canvas.x, y: canvas.y, button: 'left', buttons: 1, clickCount: 1,
+    });
+    await client.command('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: canvas.x + 4, y: canvas.y, button: 'left', buttons: 1,
+    });
+    await client.command('Input.dispatchMouseEvent', {
+      type: 'mouseReleased', x: canvas.x + 4, y: canvas.y, button: 'left', buttons: 0, clickCount: 1,
+    });
+    await sampleMovement('4-pixel orbit');
+
+    const afterMotion = await sampleRuntime();
+    assertStrictCoverage(afterMotion, 'after tiny motion');
+    assert.deepEqual(Object.fromEntries(afterMotion.centerRows.map(row => [row.uri, row.scene])), centerScenes,
+      'tiny camera movement discarded or recreated the warm focal scenes');
+    for (const [uri, before] of requestCountsBefore) {
+      const after = fixture.requests.filter(requestPath => requestPath.endsWith(`/${uri}`)).length;
+      assert.equal(after, before, `tiny movement re-fetched cached ${uri}`);
+    }
+
+    const finalRecoveryDeadline = Date.now() + 8_000;
+    let finalBlockedSample = null;
+    while (deadlockStartedAt !== null && Date.now() < finalRecoveryDeadline) {
+      finalBlockedSample = await sampleRuntime();
+      assertStrictCoverage(finalBlockedSample, 'post-motion pressure recovery');
+      updateDeadlockWindow(finalBlockedSample);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(deadlockStartedAt, null,
+      `cache admission remained idle and blocked for ${maximumBlockedMs} ms after tiny motion: ${JSON.stringify({
+        diagnostics: finalBlockedSample?.diagnostics,
+        cacheBreakdown: finalBlockedSample?.cacheBreakdown,
+        admissionTrace: finalBlockedSample?.admissionTrace,
+      })}`);
+    assert.ok(maximumBlockedMs < 8_000,
+      `cache admission recovery exceeded its bounded pressure window: ${maximumBlockedMs} ms`);
+    const fineRequests = fixture.requests.filter(fineRequest);
+    const uniqueFineRequests = new Set(fineRequests);
+    assert.ok(uniqueFineRequests.size >= 15 && uniqueFineRequests.size <= 155,
+      `unexpected production frontier request count: ${uniqueFineRequests.size}`);
+    const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown'
+      && !event.params.exceptionDetails?.url?.includes('/@vite/client'));
+    assert.deepEqual(exceptions, []);
+    t.diagnostic(JSON.stringify({
+      shellTiles: shellCount,
+      fineTiles: 155,
+      requestedFineUrls: uniqueFineRequests.size,
+      focalOwner: focalOwner.uri,
+      focalLeaves: focalCut.attachedChildren,
+      rawDetail20: pressureSample.diagnostics.rawErrorTarget,
+      peripheralPressureScale: pressureSample.diagnostics.peripheralPressureScale,
+      peakCacheMiB,
+      hardCacheMiB: pressureSample.diagnostics.cache.maxMiB,
+      cachedFineAtPressure: pressureSample.cachedFine,
+      attachedFineAtPressure: pressureSample.attachedFine,
+      maximumBlockedMs,
+    }));
+    await client.evaluate(`window.__restoreProductionWeights?.()`);
+  } finally {
+    if (client) {
+      await client.command('Page.close', {}, 2_000).catch(() => {});
+      client.close();
+    }
+    if (browser) {
+      const exited = new Promise(resolve => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise(resolve => server.close(resolve));
     if (vite) await vite.close();
     rmSync(tileRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     releaseLock();

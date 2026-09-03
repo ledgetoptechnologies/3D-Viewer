@@ -818,7 +818,7 @@ class ViewerRepository {
   viewerSessionLive(session, at = Date.now()) {
     if (!session || session.revokedAt || Date.parse(session.expiresAt) <= at) return false;
     if (session.sessionMode !== 'review') return true;
-    const attempt = this.database.prepare(`SELECT a.status,a.result_model_id,a.result_model_version_id,o.status AS output_status
+    const attempt = this.database.prepare(`SELECT a.status,a.result_model_id,a.result_model_version_id,o.status AS output_status,v.status AS version_status
       FROM processing_attempts a
       JOIN model_outputs o ON o.id=a.result_model_version_id AND o.attempt_id=a.id AND o.model_id=a.result_model_id
       JOIN model_versions v ON v.id=a.result_model_version_id AND v.model_id=a.result_model_id
@@ -826,6 +826,7 @@ class ViewerRepository {
     return Boolean(attempt
       && attempt.status === 'ready_for_review'
       && attempt.output_status === 'ready'
+      && attempt.version_status === 'ready'
       && attempt.result_model_id === session.modelId
       && attempt.result_model_version_id === session.modelVersionId);
   }

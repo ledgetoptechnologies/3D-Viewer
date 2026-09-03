@@ -35,6 +35,7 @@ import {
   refreshLodResolution,
   recoverLodCacheAdmission,
   retainLodOverviewTiles,
+  selectLodRecentFrontier,
   resolveLodDetailRequest,
   resolveLodWarmupAdvance,
   detailToErrorTarget,
@@ -55,6 +56,11 @@ import { preserveLodMaterials } from './lod-materials.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { classifyTileLoadFailure } from './lod-load-recovery.mjs';
+import {
+  parseLodMemoryMode,
+  resolveLodMemoryProfile,
+  serializeLodMemoryMode,
+} from './lod-memory-profile.mjs';
 
 // BVH-accelerated raycasting (critical for pivot picking on huge meshes)
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -114,7 +120,7 @@ const dom = {};
  'photo-meta','photo-close','photo-download','photo-spinner','photo-empty','cam-tooltip','labels-container',
  'error-actions','error-retry','error-lod','loading-cancel',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
- 'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float',
+ 'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float','lod-memory-mode',
  'share-password-overlay','share-password-input','share-password-error','share-password-submit',
  'share-modal','share-modal-close','share-new-password','share-new-expires',
  'share-new-perm-measure','share-new-perm-cameras','share-create-btn','share-create-result',
@@ -174,6 +180,9 @@ let lodPrefetchSoftBudgetReported = false;
 let lodOverviewTiles = [];
 let restoreLodOverviewRetention = null;
 let lodStarvationSamples = 0;
+let lodPressureClearSamples = 0;
+let lodPendingAdmissionTile = null;
+let lodPendingAdmissionBytes = 0;
 let lodStarvedAtDetail = null;
 let lodCacheRecoveryActive = false;
 let lodLastSettledDetail = null;
@@ -190,10 +199,56 @@ let lodBranchBlockers = new Set();
 const LOD_RECENT_FRONTIER_TTL_MS = 2_000;
 const LOD_RECENT_FRONTIER_MAX_TILES = 128;
 const LOD_RECENT_FRONTIER_MAX_BYTES = 384 * 1024 * 1024;
+const LOD_MEMORY_MODE_STORAGE_KEY = 'ltds-viewer:lod-memory-mode';
+
+function readLodMemoryMode() {
+  try {
+    return parseLodMemoryMode(globalThis.localStorage?.getItem(LOD_MEMORY_MODE_STORAGE_KEY));
+  } catch {
+    return parseLodMemoryMode(null);
+  }
+}
+
+function persistLodMemoryMode(mode) {
+  const stableMode = serializeLodMemoryMode(mode);
+  try {
+    globalThis.localStorage?.setItem(LOD_MEMORY_MODE_STORAGE_KEY, stableMode);
+  } catch {
+    // Storage can be blocked in embedded/private contexts. The selection still
+    // applies to the current viewer session.
+  }
+  return stableMode;
+}
+
+let lodMemoryMode = readLodMemoryMode();
 let lodTileRecoveryPending = false;
 let lodTileRetryAttempt = 0;
 let lodTileRetryTimer = null;
 let lodTileLastFailureAt = 0;
+
+function clearLodPendingAdmission() {
+  lodPendingAdmissionTile = null;
+  lodPendingAdmissionBytes = 0;
+}
+
+function syncLodPendingAdmission() {
+  if (!tilesRenderer || !lodPendingAdmissionTile || lodPendingAdmissionBytes <= 0) {
+    clearLodPendingAdmission();
+    return false;
+  }
+  const cache = tilesRenderer.lruCache;
+  const cachedBytes = Math.max(0, Number(cache?.cachedBytes) || 0);
+  const hardBytes = Number(cache?.maxBytesSize);
+  const traversal = lodPendingAdmissionTile.traversal;
+  const stillRequired = traversal?.used === true && traversal?.inFrustum === true;
+  const nowFits = Number.isFinite(hardBytes)
+    && cachedBytes + lodPendingAdmissionBytes <= hardBytes;
+  if (!stillRequired || nowFits) {
+    clearLodPendingAdmission();
+    return false;
+  }
+  return true;
+}
 let camGroupParent, camInstances = null, camWhiteInstances = null, camYellowInstances = null, camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
@@ -853,6 +908,8 @@ function loadTiles() {
   lodRecentFrontier = new Map();
   lodBranchBlockers = new Set();
   lodStarvationSamples = 0;
+  lodPressureClearSamples = 0;
+  clearLodPendingAdmission();
   lodStarvedAtDetail = null;
   lodCacheRecoveryActive = false;
   lodLastSettledDetail = null;
@@ -867,16 +924,29 @@ function loadTiles() {
   tilesRenderer = rendererInstance;
   lodKtx2Support = installLodKtx2Support(rendererInstance, renderer);
   const detailSlider = document.getElementById('lod-detail');
-  if (detailSlider) detailSlider.value = String(DEFAULT_LOD_DETAIL);
-  const deviceMemoryGiB = navigator.deviceMemory
-    ?? (/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) ? 4 : 8);
+  const currentDetail = Number.parseInt(detailSlider?.value, 10);
+  if (detailSlider && (!Number.isFinite(currentDetail)
+    || currentDetail < Number(detailSlider.min)
+    || currentDetail > Number(detailSlider.max))) {
+    detailSlider.value = String(DEFAULT_LOD_DETAIL);
+  }
+  // deviceMemory is a coarse browser capability hint, not system or GPU RAM.
+  // Leave it unknown when the browser does not provide it; Auto then uses the
+  // safe Balanced profile instead of guessing from user-agent strings.
+  const deviceMemoryGiB = navigator.deviceMemory;
+  const memoryProfile = resolveLodMemoryProfile({
+    mode: lodMemoryMode,
+    deviceMemoryGiB,
+  });
   lodRuntimeProfileState = configureLodRenderer(rendererInstance, {
     camera,
     renderer,
     detail: detailSlider?.value,
     deviceMemoryGiB,
+    memoryProfile,
     interactionStateProvider: () => controls?.getInteractionState?.() || null,
   });
+  lodRuntimeProfileState.peripheralPressureScale = 1;
   if (restoreLodOverviewRetention) restoreLodOverviewRetention();
   restoreLodOverviewRetention = installLodOverviewRetention(
     rendererInstance,
@@ -939,18 +1009,42 @@ function loadTiles() {
       failLod(`LOD child manifest cannot reach a valid full-detail frontier: ${report.errors[0]}`);
     }
   });
-  rendererInstance.addEventListener('tile-memory-pressure', () => {
+  rendererInstance.addEventListener('tile-memory-pressure', (event) => {
     // The exact-pinned renderer emits this synchronously before it discards a
     // completed foreground parse. Evict one stale, non-active ancestor while
     // the newly parsed tile can still be admitted.
     if (tilesRenderer !== rendererInstance || !lodRuntimeProfileState) return;
-    lodRecentFrontier.clear();
-    if (recoverLodCacheAdmission(rendererInstance.lruCache, lodRuntimeProfileState.budget)) {
+    const incomingBytes = Math.max(0, Number(event?.bytesUsed) || 0);
+    // Direct synchronous recovery bypasses the scheduleUnload wrapper that
+    // normally pins both the bounded REPLACE shell and the recently refined
+    // focal frontier. Pin them explicitly before evicting stale detail, or
+    // recovery can discard either layer and replace a sharp stable view with a
+    // coarse tile (or deadlock trying to reload the missing shell).
+    retainLodOverviewTiles(rendererInstance, retainedLodTiles());
+    if (recoverLodCacheAdmission(
+      rendererInstance.lruCache,
+      lodRuntimeProfileState.budget,
+      incomingBytes,
+    )) {
       lodCacheRecoveryActive = true;
+    }
+    const cachedBytes = Math.max(0, Number(rendererInstance.lruCache?.cachedBytes) || 0);
+    const hardBytes = Number(rendererInstance.lruCache?.maxBytesSize);
+    if (incomingBytes > 0 && Number.isFinite(hardBytes)
+      && cachedBytes + incomingBytes > hardBytes) {
+      // The renderer is about to discard this parsed tile even though the
+      // current cache may sit just below its hard cap. Preserve that exact
+      // prospective refusal so the idle-pressure coordinator cannot mistake
+      // it for ordinary headroom.
+      lodPendingAdmissionTile = event?.tile || null;
+      lodPendingAdmissionBytes = incomingBytes;
+    } else if (lodPendingAdmissionTile === event?.tile) {
+      clearLodPendingAdmission();
     }
   });
   rendererInstance.addEventListener('load-model', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
+    if (lodPendingAdmissionTile === ev.tile) clearLodPendingAdmission();
     ev.scene.traverse((c) => {
       if (c.isMesh) {
         // B3DM tiles come in as PBR (metalness=1) and render black without an
@@ -1014,6 +1108,8 @@ function disposeTiles() {
   lodOverviewTiles = [];
   lodRecentFrontier = new Map();
   lodStarvationSamples = 0;
+  lodPressureClearSamples = 0;
+  clearLodPendingAdmission();
   lodStarvedAtDetail = null;
   lodCacheRecoveryActive = false;
   lodLastSettledDetail = null;
@@ -3435,13 +3531,35 @@ function bindUI() {
   document.getElementById('dem-reset').addEventListener('click', resetDemSettings);
   bindPcPanel();
 
+  // Viewer memory profile. Only the stable mode key is persisted; byte limits
+  // stay release-controlled so policy tuning takes effect automatically.
+  if (dom.lodMemoryMode) {
+    dom.lodMemoryMode.value = lodMemoryMode;
+    dom.lodMemoryMode.addEventListener('change', (event) => {
+      const nextMode = persistLodMemoryMode(event.target.value);
+      event.target.value = nextMode;
+      if (nextMode === lodMemoryMode) return;
+      lodMemoryMode = nextMode;
+      if (!tilesRenderer) return;
+      // Recreate the renderer so queue limits, hard admission, and reduced
+      // profile state change atomically. Preserve the user's current view.
+      preserveIncomingModelView = true;
+      disposeTiles();
+      loadTiles();
+    });
+  }
+
   // LOD detail slider
   document.getElementById('lod-detail').addEventListener('input', (e) => {
     lodStarvationSamples = 0;
+    lodPressureClearSamples = 0;
+    clearLodPendingAdmission();
     lodStarvedAtDetail = null;
     lodCacheRecoveryActive = false;
     lodPressureView = null;
     if (!tilesRenderer || !lodRuntimeProfileState) return;
+    lodRuntimeProfileState.peripheralPressureScale = 1;
+    tilesRenderer.__ltdsPeripheralPressureScale = 1;
     tilesRenderer.lruCache.minBytesSize = lodCacheRetentionMinBytes(lodRuntimeProfileState.budget, false);
     const next = resolveLodDetailRequest(lodRuntimeProfileState, lodWarmupComplete, e.target.value);
     if (lodBootstrapPhase !== 'complete') {
@@ -3686,6 +3804,7 @@ function toggleFullscreen() {
 // ───────────────────────────────────────────────────────────────
 let statTimer = 0;
 function emitLodDebugSnapshot(reason = 'status', force = false) {
+  const prospectiveAdmissionBlocked = syncLodPendingAdmission();
   const runtimeProfile = lodRuntimeProfileState
     ? {
       ...lodRuntimeProfileState,
@@ -3706,6 +3825,8 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
       fallbackBudgetBytes: state.lodRuntimeProfile?.fallbackBudgetBytes ?? null,
       fallbackDetailReserveBytes: state.lodRuntimeProfile?.fallbackDetailReserveBytes ?? null,
       focusPriority: controls?.getInteractionState?.() || null,
+      prospectiveAdmissionBlocked,
+      pendingAdmissionBytes: lodPendingAdmissionBytes,
       errorScale: lodErrorScale,
     }
     : null;
@@ -3765,13 +3886,14 @@ function updateLodQualityStatus(now = performance.now(), force = false) {
     stableFrames: lodQualityStableFrames,
   });
   const visibleCount = frontier.visibleCount || tilesRenderer.stats?.visible || 0;
-  const memoryLimited = lodStarvedAtDetail !== null
-    && lodRuntimeProfileState.activeDetail < lodRuntimeProfileState.requestedDetail;
+  const memoryLimited = (Number(lodRuntimeProfileState.peripheralPressureScale) || 1) > 1
+    || (lodStarvedAtDetail !== null
+      && lodRuntimeProfileState.activeDetail < lodRuntimeProfileState.requestedDetail);
   let label;
   if (lodBootstrapPhase === 'root') label = 'loading complete overview';
   else if (lodBootstrapPhase === 'prefetch') label = 'building stable overview';
   else if (lodBootstrapPhase === 'root-only') label = 'complete overview (detail shell unavailable)';
-  else if (memoryLimited) label = `memory-limited Detail ${lodRuntimeProfileState.activeDetail}`;
+  else if (memoryLimited) label = `focused Detail ${lodRuntimeProfileState.activeDetail}`;
   else if (lodRuntimeProfileState.reduced) label = `reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`;
   else if (lodDetailRequestPending(lodRuntimeProfileState)) label = `warming Detail ${lodRuntimeProfileState.activeDetail}`;
   else if (quality.fullDetail) label = 'full-detail';
@@ -3807,28 +3929,46 @@ function retainedLodTiles(now = performance.now()) {
   return retained;
 }
 
+function lodRecentFrontierMaxBytes() {
+  const configured = Number(lodRuntimeProfileState?.memoryProfile?.recentFrontierBytes);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : LOD_RECENT_FRONTIER_MAX_BYTES;
+}
+
+function lodShellRetentionMaxBytes() {
+  const configured = Number(lodRuntimeProfileState?.memoryProfile?.shellRetentionBytes);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : LOD_FALLBACK_TARGET_BYTES;
+}
+
+function lodShellBudgetBytes(root = tilesRenderer?.root) {
+  const rootBytes = Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0;
+  return lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
+    bootstrapResidentBytes: rootBytes,
+  });
+}
+
 function updateLodRecentFrontier(now = performance.now()) {
-  if (!tilesRenderer || lodBootstrapPhase !== 'complete' || tilesRenderer.lruCache?.isFull?.()) {
-    if (tilesRenderer?.lruCache?.isFull?.()) lodRecentFrontier.clear();
-    return;
-  }
+  if (!tilesRenderer || lodBootstrapPhase !== 'complete') return;
+  const cache = tilesRenderer.lruCache;
   const fallback = tilesRenderer.lodFallbackTiles;
   for (const tile of tilesRenderer.visibleTiles || []) {
     if (!tile || tile === tilesRenderer.root || fallback?.has?.(tile)) continue;
-    if (!tilesRenderer.lruCache?.has?.(tile)) continue;
+    if (!cache?.has?.(tile)) continue;
     lodRecentFrontier.delete(tile);
     lodRecentFrontier.set(tile, now + LOD_RECENT_FRONTIER_TTL_MS);
   }
-
-  const bytesMap = tilesRenderer.lruCache?.bytesMap;
-  let bytes = 0;
-  for (const tile of lodRecentFrontier.keys()) bytes += Math.max(0, Number(bytesMap?.get?.(tile)) || 0);
-  while (lodRecentFrontier.size > LOD_RECENT_FRONTIER_MAX_TILES || bytes > LOD_RECENT_FRONTIER_MAX_BYTES) {
-    const oldest = lodRecentFrontier.keys().next().value;
-    if (!oldest) break;
-    bytes -= Math.max(0, Number(bytesMap?.get?.(oldest)) || 0);
-    lodRecentFrontier.delete(oldest);
-  }
+  lodRecentFrontier = selectLodRecentFrontier(
+    Array.from(lodRecentFrontier).filter(([tile]) => cache?.has?.(tile)),
+    {
+      now,
+      maxTiles: LOD_RECENT_FRONTIER_MAX_TILES,
+      maxBytes: lodRecentFrontierMaxBytes(),
+      getBytes: tile => Number(cache?.bytesMap?.get?.(tile)) || 0,
+    },
+  );
 }
 
 function updateLodBranchBlockers() {
@@ -3843,14 +3983,11 @@ function updateLodBranchBlockers() {
 
 function captureLodPrefetchShell(root) {
   const bytesMap = tilesRenderer?.lruCache?.bytesMap;
-  const rootBytes = Number(bytesMap?.get?.(root)) || 0;
-  const maxBytes = lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
-    bootstrapResidentBytes: rootBytes,
-  });
+  const maxBytes = lodShellBudgetBytes(root);
   return lodFallbackShellPlan(root, {
     isReady: lodTileSceneReady,
     getBytes: tile => Number(bytesMap?.get?.(tile)) || 0,
-    softMaxBytes: LOD_FALLBACK_TARGET_BYTES,
+    softMaxBytes: lodShellRetentionMaxBytes(),
     maxBytes,
   });
 }
@@ -3874,10 +4011,8 @@ function enterLodRootOnly(reason) {
     prefetchElapsedMs: lodPrefetchElapsedMs,
     fallbackTileCount: lodOverviewTiles.length,
     fallbackBytes: Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0,
-    fallbackSoftBudgetBytes: LOD_FALLBACK_TARGET_BYTES,
-    fallbackBudgetBytes: lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
-      bootstrapResidentBytes: Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0,
-    }),
+    fallbackSoftBudgetBytes: lodShellRetentionMaxBytes(),
+    fallbackBudgetBytes: lodShellBudgetBytes(root),
     fallbackDetailReserveBytes: LOD_FALLBACK_MIN_DETAIL_BYTES,
     errorScale: 1,
   };
@@ -3914,10 +4049,8 @@ function finishLodPrefetch(reason, captured = captureLodPrefetchShell(tilesRende
     fallbackBytes: lodRuntimeProfileState?.reduced
       ? Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0
       : captured.bytes,
-    fallbackSoftBudgetBytes: LOD_FALLBACK_TARGET_BYTES,
-    fallbackBudgetBytes: lodFallbackShellMaxBytes(tilesRenderer?.lruCache?.maxBytesSize, {
-      bootstrapResidentBytes: Number(tilesRenderer?.lruCache?.bytesMap?.get?.(root)) || 0,
-    }),
+    fallbackSoftBudgetBytes: lodShellRetentionMaxBytes(),
+    fallbackBudgetBytes: lodShellBudgetBytes(root),
     fallbackDetailReserveBytes: LOD_FALLBACK_MIN_DETAIL_BYTES,
     errorScale: 1,
   };
@@ -3964,10 +4097,8 @@ function maybeAdvanceLodBootstrap() {
       bootstrapPhase: lodBootstrapPhase,
       bootstrapRootTarget: lodBootstrapRootTarget,
       bootstrapCoverageTarget: lodBootstrapCoverageTarget,
-      fallbackSoftBudgetBytes: LOD_FALLBACK_TARGET_BYTES,
-      fallbackBudgetBytes: lodFallbackShellMaxBytes(tilesRenderer.lruCache?.maxBytesSize, {
-        bootstrapResidentBytes: Number(tilesRenderer.lruCache?.bytesMap?.get?.(root)) || 0,
-      }),
+      fallbackSoftBudgetBytes: lodShellRetentionMaxBytes(),
+      fallbackBudgetBytes: lodShellBudgetBytes(root),
       fallbackDetailReserveBytes: LOD_FALLBACK_MIN_DETAIL_BYTES,
     };
     dom.lodStatus.textContent = 'LOD: prefetching nearby coverage';
@@ -4060,6 +4191,7 @@ function retryLodForChangedView() {
   if (!lodViewChangeRequiresRetry(lodPressureView, currentView)) return false;
 
   lodStarvationSamples = 0;
+  lodPressureClearSamples = 0;
   lodStarvedAtDetail = null;
   lodPressureView = null;
   const next = resolveLodDetailRequest(
@@ -4139,10 +4271,20 @@ function updateStats() {
     countVisible(tilesRenderer.group);
     const frontier = visibleLodFrontier(tilesRenderer.root);
     const queuesSettled = lodQueuesSettled(tilesRenderer);
+    const prospectiveAdmissionBlocked = syncLodPendingAdmission();
     const pressureSnapshot = lodDebugSnapshot(tilesRenderer, {
       ...lodRuntimeProfileState,
       starvedAtDetail: lodStarvedAtDetail,
+      prospectiveAdmissionBlocked,
+      pendingAdmissionBytes: lodPendingAdmissionBytes,
     }, lodWarmupComplete);
+    const cacheSoftBytes = Number(lodRuntimeProfileState?.budget?.softBytesSize);
+    if (Number.isFinite(cacheSoftBytes)
+      && Number(tilesRenderer.lruCache?.cachedBytes) > cacheSoftBytes) {
+      // Crossing the soft cache asks the LRU to trim stale, unpinned content;
+      // prospective parse admission remains available up to the hard cap.
+      tilesRenderer.lruCache?.scheduleUnload?.();
+    }
     const cacheRecoverySettled = lodCacheRecoveryActive
       && pressureSnapshot.cache.full === false
       && pressureSnapshot.pendingRequiredTiles === 0
@@ -4154,10 +4296,12 @@ function updateStats() {
     }
     const pressure = advanceLodMemoryPressure(pressureSnapshot, lodRuntimeProfileState, {
       consecutiveSamples: lodStarvationSamples,
+      clearSamples: lodPressureClearSamples,
       starvedAtDetail: lodStarvedAtDetail,
       lastSettledDetail: lodLastSettledDetail,
     });
     lodStarvationSamples = pressure.consecutiveSamples;
+    lodPressureClearSamples = pressure.clearSamples;
     lodStarvedAtDetail = pressure.starvedAtDetail;
     if (pressure.recoveryRequired) {
       lodCacheRecoveryActive = true;
@@ -4168,16 +4312,22 @@ function updateStats() {
       );
     }
     if (pressure.changed) {
-      lodRuntimeProfileState.activeDetail = pressure.profile.activeDetail;
-      tilesRenderer.errorTarget = lodTargetForDetail(pressure.profile.activeDetail);
-      lodWarmupComplete = pressure.profile.activeDetail >= 13;
-      lodPressureView = captureLodPressureView();
+      Object.assign(lodRuntimeProfileState, pressure.profile);
+      tilesRenderer.__ltdsPeripheralPressureScale = Math.max(
+        1,
+        Number(lodRuntimeProfileState.peripheralPressureScale) || 1,
+      );
       state.lodRuntimeProfile = {
         ...state.lodRuntimeProfile,
         ...lodRuntimeProfileState,
         starvedAtDetail: lodStarvedAtDetail,
       };
-      emitLodDebugSnapshot('memory-pressure', true);
+      emitLodDebugSnapshot(
+        tilesRenderer.__ltdsPeripheralPressureScale > 1
+          ? 'peripheral-memory-pressure'
+          : 'peripheral-memory-recovered',
+        true,
+      );
     }
     updateLodQualityStatus(performance.now(), true);
   } else if (glbParent.visible) {

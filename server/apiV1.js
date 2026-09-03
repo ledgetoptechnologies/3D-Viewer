@@ -20,7 +20,7 @@ function encodedAssetUrl(modelId, asset, assetToken = null) {
   return `${prefix}/${encodeURIComponent(modelId)}/${encodeURIComponent(asset.rootKey)}/${relative}`;
 }
 
-function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
+function toViewerConfig(model, { assetToken = null, assetFilter = null, sessionMode = 'published' } = {}) {
   if (!model || !model.activeVersion) return null;
   const eligibleAssets = viewerEligibleAssets(model.activeVersion.metadata, model.activeVersion.assets);
   // Validate the complete private asset set before review-session filtering.
@@ -40,7 +40,8 @@ function toViewerConfig(model, { assetToken = null, assetFilter = null } = {}) {
     status: model.status,
     providerStatus: model.metadata.webodmStatus ?? null,
     statusLabel: String(model.status || '').toUpperCase(),
-    available: model.status === 'ready' && model.activeVersion.status === 'ready',
+    available: model.activeVersion.status === 'ready'
+      && (sessionMode === 'review' || model.status === 'ready'),
     provider: model.provider,
     georef: model.activeVersion.georef || {},
     pointCount: model.activeVersion.pointCount ?? null,
@@ -177,6 +178,7 @@ function createApiV1(repository) {
       model: toViewerConfig(model, {
         assetToken: accessToken,
         assetFilter: session.sessionMode === 'review' ? (asset) => publicDerivativeKind(asset.kind) : null,
+        sessionMode: session.sessionMode || 'published',
       }),
       permissions: session.permissions,
       sessionId: session.id,

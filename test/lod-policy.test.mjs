@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { LRUCache, TilesRenderer } from '3d-tiles-renderer';
+import { resolveLodMemoryProfile } from '../lod-memory-profile.mjs';
+import { PerspectiveCamera, Sphere, Vector3 } from 'three';
 import {
   advanceLodMemoryPressure,
   configureLodRenderer,
@@ -15,10 +18,15 @@ import {
   installLodOverviewRetention,
   classifyLodQuality,
   createLodFocusPriorityCallback,
+  createLodFocusPriorityPlugin,
   lodBranchBlockerCut,
+  lodBranchBlockerGroups,
   lodFallbackShellMaxBytes,
   lodFallbackShellPlan,
   lodFocusPriorityPenalty,
+  lodPeripheralErrorTarget,
+  lodProjectedSphereFocusOverlap,
+  lodTileInLockedFocalOwner,
   LOD_BOOTSTRAP_COVERAGE_MIN_ERROR_TARGET,
   LOD_BOOTSTRAP_ROOT_MIN_ERROR_TARGET,
   LOD_REFINEMENT_STEP,
@@ -38,6 +46,7 @@ import {
   refreshLodResolution,
   recoverLodCacheAdmission,
   retainLodOverviewTiles,
+  selectLodRecentFrontier,
   resolveLodDetailRequest,
   resolveLodMemoryPressure,
   resolveLodWarmupAdvance,
@@ -47,6 +56,61 @@ import {
   visibleLodFrontier,
   visibleLodTargetSatisfied,
 } from '../lod-policy.mjs';
+
+test('recent frontier retains focused REPLACE cuts atomically under production pressure', () => {
+  const MiB = 1024 ** 2;
+  const focalOwner = { __ltdsFocusOverlap: 0.9, traversal: { distanceFromCamera: 10 } };
+  const peripheralOwners = Array.from({ length: 10 }, (_, index) => ({
+    __ltdsFocusOverlap: 0.2 - index / 100,
+    traversal: { distanceFromCamera: 20 + index },
+  }));
+  const focal = Array.from({ length: 15 }, () => ({
+    __ltdsFallbackOwner: focalOwner,
+    __ltdsFocusOverlap: 0.9,
+    traversal: { distanceFromCamera: 10 },
+  }));
+  const peripheral = peripheralOwners.flatMap((owner, ownerIndex) => (
+    Array.from({ length: 14 }, () => ({
+      __ltdsFallbackOwner: owner,
+      __ltdsFocusOverlap: owner.__ltdsFocusOverlap,
+      traversal: { distanceFromCamera: 20 + ownerIndex },
+    }))
+  ));
+  const selected = selectLodRecentFrontier(
+    [...focal, ...peripheral].map(tile => [tile, 2_000]),
+    { now: 1_000, maxTiles: 128, maxBytes: 512 * MiB, getBytes: () => 24 * MiB },
+  );
+  assert.equal(focal.every(tile => selected.has(tile)), true,
+    'peripheral admission must not evict any member of the complete focused cut');
+  for (const owner of peripheralOwners) {
+    const group = peripheral.filter(tile => tile.__ltdsFallbackOwner === owner);
+    const retained = group.filter(tile => selected.has(tile)).length;
+    assert.ok(retained === 0 || retained === group.length, 'a peripheral REPLACE cut was partially retained');
+  }
+});
+
+test('oversize focused REPLACE cut is skipped instead of partially pinned', () => {
+  const MiB = 1024 ** 2;
+  const focalOwner = { __ltdsFocusOverlap: 1, traversal: { distanceFromCamera: 5 } };
+  const peripheralOwner = { __ltdsFocusOverlap: 0.1, traversal: { distanceFromCamera: 20 } };
+  const focal = Array.from({ length: 22 }, () => ({
+    __ltdsFallbackOwner: focalOwner,
+    __ltdsFocusOverlap: 1,
+    traversal: { distanceFromCamera: 5 },
+  }));
+  const peripheral = Array.from({ length: 14 }, () => ({
+    __ltdsFallbackOwner: peripheralOwner,
+    __ltdsFocusOverlap: 0.1,
+    traversal: { distanceFromCamera: 20 },
+  }));
+  const selected = selectLodRecentFrontier(
+    [...focal, ...peripheral].map(tile => [tile, 2_000]),
+    { now: 1_000, maxTiles: 128, maxBytes: 512 * MiB, getBytes: () => 24 * MiB },
+  );
+  assert.equal(focal.some(tile => selected.has(tile)), false,
+    'an oversize focused cut must fall back to its coarse owner, not partial detail');
+  assert.equal(peripheral.every(tile => selected.has(tile)), true);
+});
 
 test('detail slider maps monotonically across a perceptible bounded SSE range', () => {
   assert.equal(detailToErrorTarget(2), 512);
@@ -226,6 +290,56 @@ test('desktop fallback promotion requires a complete bounded direct-child shell 
   assert.equal(overBudget.overBudget, true);
 });
 
+test('renderer configuration applies bounded memory profiles without breaking legacy callers', () => {
+  const renderer = {};
+  const camera = {};
+  const createTiles = () => ({
+    lruCache: {},
+    downloadQueue: { maxJobs: 25 },
+    parseQueue: { maxJobs: 5 },
+    setCamera() {},
+    setResolutionFromRenderer() {},
+  });
+
+  const highMemory = resolveLodMemoryProfile({ mode: 'high', deviceMemoryGiB: 8 });
+  const highTiles = createTiles();
+  const high = configureLodRenderer(highTiles, {
+    camera, renderer, detail: 24, deviceMemoryGiB: 8, memoryProfile: highMemory,
+  });
+  assert.equal(high.reduced, false);
+  assert.equal(high.activeDetail, 24);
+  assert.equal(high.memoryProfile.mode, 'high');
+  assert.equal(highTiles.lruCache.softBytesSize, 4 * 1024 ** 3);
+  assert.equal(highTiles.lruCache.maxBytesSize, 5 * 1024 ** 3,
+    'renderer hard admission uses the profile overflow ceiling');
+  assert.equal(highTiles.downloadQueue.maxJobs, 10);
+  assert.equal(highTiles.parseQueue.maxJobs, 3);
+
+  const constrainedMemory = resolveLodMemoryProfile({ mode: 'high', deviceMemoryGiB: 4 });
+  const constrainedTiles = createTiles();
+  const constrained = configureLodRenderer(constrainedTiles, {
+    camera, renderer, detail: 24, deviceMemoryGiB: 4, memoryProfile: constrainedMemory,
+  });
+  assert.equal(constrainedMemory.mode, 'high', 'the stable preference is not rewritten');
+  assert.equal(constrainedMemory.policyKey, 'constrained');
+  assert.equal(constrained.reduced, true, 'known low-memory devices retain the Detail-13 safety contract');
+  assert.equal(constrained.activeDetail, 13);
+  assert.equal(constrainedTiles.lruCache.softBytesSize, 768 * 1024 ** 2);
+  assert.equal(constrainedTiles.lruCache.maxBytesSize, 1 * 1024 ** 3);
+  assert.equal(constrainedTiles.downloadQueue.maxJobs, 4);
+  assert.equal(constrainedTiles.parseQueue.maxJobs, 1);
+
+  const boundedTiles = createTiles();
+  boundedTiles.downloadQueue.maxJobs = 3;
+  boundedTiles.parseQueue.maxJobs = 1;
+  configureLodRenderer(boundedTiles, {
+    camera, renderer, memoryProfile: highMemory,
+  });
+  assert.equal(boundedTiles.downloadQueue.maxJobs, 3,
+    'existing lower host queue limits remain authoritative');
+  assert.equal(boundedTiles.parseQueue.maxJobs, 1);
+});
+
 test('fallback shell allowance admits the measured church shell without starving detail headroom', () => {
   const MiB = 1024 * 1024;
   const GiB = 1024 * MiB;
@@ -338,6 +452,118 @@ test('branch-blocker cut finds cold children for any visible positive-error REPL
     [wrappedCold, cold]);
 });
 
+test('branch blockers belong to the nearest visible fallback owner', () => {
+  const sharedCold = {
+    content: { uri: 'shared-cold.b3dm' },
+    internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 3 },
+    __ltdsFocusOverlap: 0.9,
+  };
+  const nestedOwner = {
+    refine: 'REPLACE',
+    geometricError: 8,
+    content: { uri: 'nested-ready.b3dm' },
+    internal: { hasRenderableContent: true },
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 4 },
+    children: [sharedCold],
+    __ltdsFocusOverlap: 0.8,
+  };
+  const wrapper = {
+    internal: { hasUnrenderableContent: true },
+    traversal: { used: true, inFrustum: true },
+    children: [nestedOwner],
+  };
+  const outerOwner = {
+    refine: 'REPLACE',
+    geometricError: 32,
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 8 },
+    children: [wrapper],
+    __ltdsFocusOverlap: 0.1,
+  };
+
+  const groups = lodBranchBlockerGroups([outerOwner, nestedOwner], {
+    isReady: tile => tile === nestedOwner,
+  });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].owner, nestedOwner);
+  assert.deepEqual(groups[0].blockers, [sharedCold]);
+  assert.equal(sharedCold.__ltdsFallbackOwner, nestedOwner);
+  assert.equal(sharedCold.__ltdsOwnerRank, 0);
+});
+
+test('focal owner rank stays latched until its complete replacement cut attaches', () => {
+  const blocker = (uri, overlap, distance, activity = 100) => ({
+    content: { uri },
+    internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: distance },
+    __ltdsFocusOverlap: overlap,
+    __ltdsFocusActivityTime: activity,
+  });
+  const focalA = blocker('a.b3dm', 1, 20);
+  const focalASecond = blocker('a-2.b3dm', 0.95, 22);
+  const peripheralB = blocker('b.b3dm', 0.2, 5);
+  const ownerA = {
+    refine: 'REPLACE', geometricError: 8, children: [focalA, focalASecond],
+    traversal: { distanceFromCamera: 20 }, __ltdsFocusOverlap: 0.9, __ltdsFocusActivityTime: 100,
+  };
+  const ownerB = {
+    refine: 'REPLACE', geometricError: 8, children: [peripheralB],
+    traversal: { distanceFromCamera: 5 }, __ltdsFocusOverlap: 0.2, __ltdsFocusActivityTime: 100,
+  };
+  const ready = new Set();
+  const first = lodBranchBlockerGroups([ownerA, ownerB], { isReady: tile => ready.has(tile) });
+  assert.equal(first[0].owner, ownerA);
+  assert.equal(first[0].focal, true);
+  assert.equal(first[0].blockers.length, 2);
+  assert.equal(peripheralB.__ltdsOwnerRank, 1);
+
+  // Idle-time overlap drift alone must not abandon an incomplete focal cut.
+  ownerA.__ltdsFocusOverlap = 0;
+  focalA.__ltdsFocusOverlap = 0;
+  focalASecond.__ltdsFocusOverlap = 0;
+  ownerB.__ltdsFocusOverlap = 1;
+  peripheralB.__ltdsFocusOverlap = 1;
+  const stillA = lodBranchBlockerGroups([ownerA, ownerB], { isReady: tile => ready.has(tile) });
+  assert.equal(stillA[0].owner, ownerA);
+
+  ready.add(focalA);
+  assert.equal(
+    lodBranchBlockerGroups([ownerA, ownerB], { isReady: tile => ready.has(tile) })[0].owner,
+    ownerA,
+    'one attached tile is not enough to retire the focal owner',
+  );
+  ready.add(focalASecond);
+  const afterAttach = lodBranchBlockerGroups([ownerA, ownerB], { isReady: tile => ready.has(tile) });
+  assert.equal(afterAttach[0].owner, ownerB, 'the next owner begins only after the focal cut attaches');
+  assert.equal(afterAttach[0].focal, false,
+    'peripheral queue work must not inherit focus merely because the focused cut completed');
+  assert.equal(ownerA.__ltdsFocalOwnerLocked, true,
+    'completed focused owner remains the raw-SSE camera focus identity');
+  assert.equal(ownerB.__ltdsFocalOwnerLocked, false);
+});
+
+test('new interaction epoch may deliberately move the focal owner lock', () => {
+  const tileA = {
+    content: { uri: 'a.b3dm' }, internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 5 },
+    __ltdsFocusOverlap: 1, __ltdsFocusActivityTime: 100,
+  };
+  const tileB = {
+    content: { uri: 'b.b3dm' }, internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 5 },
+    __ltdsFocusOverlap: 0, __ltdsFocusActivityTime: 100,
+  };
+  const ownerA = { refine: 'REPLACE', geometricError: 8, children: [tileA], traversal: {} };
+  const ownerB = { refine: 'REPLACE', geometricError: 8, children: [tileB], traversal: {} };
+  assert.equal(lodBranchBlockerGroups([ownerA, ownerB])[0].owner, ownerA);
+
+  tileA.__ltdsFocusOverlap = 0;
+  tileA.__ltdsFocusActivityTime = 200;
+  tileB.__ltdsFocusOverlap = 1;
+  tileB.__ltdsFocusActivityTime = 200;
+  assert.equal(lodBranchBlockerGroups([ownerA, ownerB])[0].owner, ownerB);
+});
+
 test('LOD warmup advances only after the visible REPLACE frontier satisfies its target', () => {
   const root = { geometricError: 64, traversal: { visible: true, error: 140 }, children: [] };
   assert.equal(visibleLodTargetSatisfied(root, 32), false);
@@ -386,8 +612,13 @@ test('pinned renderer retains loaded replacement branches and recovers before pa
     /const childIsReady = c\.internal\.hasRenderableContent\s*\? c\.internal\.loadingState === LOADED\s*: c\.traversal\.allChildrenLoaded/,
     'only LOADED renderable children retire a parent; contentless branches recurse');
   assert.match(renderer,
-    /dispatchEvent\( \{ type: 'tile-memory-pressure', tile, bytesUsed \} \);\s*if \( lruCache\.isFull\(\) \)/,
-    'the app gets one synchronous eviction opportunity before the second hard-cap check');
+    /const queuedBytesUsed = this\.getBytesUsed\( tile \);[\s\S]*?lruCache\.cachedBytes \+ queuedBytesUsed > lruCache\.maxBytesSize[\s\S]*?bytesUsed: queuedBytesUsed[\s\S]*?lruCache\.setMemoryUsage\( tile, queuedBytesUsed \)/,
+    'known requeue bytes must receive a prospective guard before cache reservation');
+  assert.match(renderer,
+    /const previousBytesUsed = lruCache\.getMemoryUsage\( tile \);\s*const additionalBytesUsed = Math\.max\( 0, bytesUsed - previousBytesUsed \);[\s\S]*?lruCache\.cachedBytes \+ additionalBytesUsed > lruCache\.maxBytesSize[\s\S]*?bytesUsed: additionalBytesUsed/,
+    'decoded estimate growth must reserve only its positive incremental bytes');
+  assert.doesNotMatch(renderer, /lruCache\.getMemoryUsage\( tile \) === 0 && bytesUsed > 0/,
+    'a prior nonzero estimate must not bypass decoded-delta admission');
   assert.ok(renderer.indexOf("type: 'tile-memory-pressure'") < renderer.indexOf('lruCache.remove( tile )'),
     'pre-discard recovery must precede renderer removal');
   const built = fs.readdirSync(path.join(packageRoot, 'build'))
@@ -399,9 +630,21 @@ test('pinned renderer retains loaded replacement branches and recovers before pa
   const builtReadiness = /let ([A-Za-z_$][\w$]*) = ([A-Za-z_$][\w$]*)\.internal\.hasRenderableContent \? \2\.internal\.loadingState === 4 : \2\.traversal\.allChildrenLoaded;\s*\1 \|\|/;
   assert.equal(built.filter(source => builtReadiness.test(source)).length, 1,
     'the browser-consumed build uses the same branch-local readiness rule');
-  const builtRecovery = /if \(([A-Za-z_$][\w$]*)\.getMemoryUsage\(([A-Za-z_$][\w$]*)\) === 0 && ([A-Za-z_$][\w$]*) > 0 && \1\.isFull\(\)\) \{\s*this\.dispatchEvent\(\{ type: "tile-memory-pressure", tile: \2, bytesUsed: \3 \}\);\s*if \(\1\.isFull\(\)\) \{\s*\1\.remove\(\2\);\s*return;\s*\}\s*\}/;
+  const builtQueuedRecovery = /const ltdsQueuedBytes = this\.getBytesUsed\(([A-Za-z_$][\w$]*)\);[\s\S]*?bytesUsed: ltdsQueuedBytes[\s\S]*?\.setMemoryUsage\(\1, ltdsQueuedBytes\)/;
+  assert.equal(built.filter(source => builtQueuedRecovery.test(source)).length, 1,
+    'the browser-consumed build guards known requeue bytes before reservation');
+  const builtRecovery = /const ltdsPreviousBytes = ([A-Za-z_$][\w$]*)\.getMemoryUsage\(([A-Za-z_$][\w$]*)\);\s*const ltdsAdditionalBytes = Math\.max\(0, ([A-Za-z_$][\w$]*) - ltdsPreviousBytes\);[\s\S]*?bytesUsed: ltdsAdditionalBytes[\s\S]*?\1\.setMemoryUsage\(\2, \3\)/;
   assert.equal(built.filter(source => builtRecovery.test(source)).length, 1,
-    'the browser-consumed build rechecks the hard cap after the synchronous recovery hook');
+    'the browser-consumed build rechecks incremental decoded bytes after synchronous recovery');
+});
+
+test('pinned renderer source and browser-build admission patch is idempotent', () => {
+  const script = path.resolve('scripts/patch-3d-tiles-renderer.mjs');
+  for (let run = 1; run <= 2; run += 1) {
+    const result = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+    assert.equal(result.status, 0,
+      `renderer patch run ${run} failed: ${result.stderr || result.stdout}`);
+  }
 });
 
 test('zero-error terminal leaves satisfy warmup at infinite SSE while refinable tiles do not', () => {
@@ -548,6 +791,33 @@ test('bounded LRU admission recovery frees one stale tile without purging the re
     'synchronous recovery also runs when the existing floor already permits eviction');
 });
 
+test('prospective recovery loops only until the incoming decoded tile fits', () => {
+  const memoryProfile = resolveLodMemoryProfile({ mode: 'balanced', deviceMemoryGiB: 8 });
+  const budget = lodCacheBudget(8, memoryProfile);
+  const cache = new LRUCache();
+  Object.assign(cache, budget);
+  const items = Array.from({ length: 8 }, (_, index) => ({ index }));
+  for (const item of items) {
+    cache.add(item, () => {});
+    cache.setLoaded(item, true);
+  }
+  for (const item of items) cache.setMemoryUsage(item, 0.5 * 1024 ** 3);
+  for (const item of items.slice(0, 3)) cache.markUnused(item);
+
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => 0;
+  try {
+    assert.equal(recoverLodCacheAdmission(cache, budget, 0.5 * 1024 ** 3), true);
+  } finally {
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+  }
+
+  assert.ok(cache.cachedBytes + 0.5 * 1024 ** 3 <= budget.maxBytesSize,
+    'recovery accounts for bytes that have been decoded but not yet registered');
+  assert.ok(cache.itemSet.size >= 5, 'used/pinned tiles remain resident');
+  for (const item of items.slice(3)) assert.equal(cache.has(item), true);
+});
+
 test('memory pressure returns to the last complete frontier and remembers the failed ceiling', () => {
   const profile = {
     requestedDetail: 24,
@@ -615,28 +885,51 @@ test('memory-pressure coordinator preserves camera-driven quality while requesti
   };
   const profile = { requestedDetail: 16, activeDetail: 13, maximumDetail: 24, reduced: false };
   let samples = 0;
+  let clearSamples = 0;
+  let currentProfile = { ...profile, peripheralPressureScale: 1 };
 
   for (let index = 0; index < 8; index += 1) {
-    const result = advanceLodMemoryPressure(blocked, profile, {
+    const result = advanceLodMemoryPressure(blocked, currentProfile, {
       consecutiveSamples: samples,
+      clearSamples,
       starvedAtDetail: null,
       lastSettledDetail: 13,
     });
     samples = result.consecutiveSamples;
-    assert.equal(result.changed, false, 'cache pressure must never lower the global LOD target');
+    clearSamples = result.clearSamples;
+    currentProfile = result.profile;
     assert.equal(result.profile.activeDetail, 13);
     assert.equal(result.starvedAtDetail, null, 'transient cache admission cannot latch a quality ceiling');
     assert.equal(result.recoveryRequired, index > 0);
+    assert.equal(
+      result.profile.peripheralPressureScale,
+      index < 3 ? 1 : index === 3 ? 2 : 4,
+      'persistent pressure may relax only camera-peripheral work while focal SSE remains unchanged',
+    );
   }
 
-  const cleared = advanceLodMemoryPressure(
-    { ...blocked, cache: { full: false } },
-    profile,
-    { consecutiveSamples: samples, starvedAtDetail: null, lastSettledDetail: 13 },
-  );
-  assert.equal(cleared.consecutiveSamples, 0);
-  assert.equal(cleared.recoveryRequired, false);
-  assert.equal(cleared.profile.activeDetail, 13);
+  const settled = {
+    pendingRequiredLeaves: 0,
+    pendingRequiredTiles: 0,
+    queues: { download: false, parse: false, process: false },
+    cache: { full: false },
+  };
+  for (let index = 0; index < 8; index += 1) {
+    const result = advanceLodMemoryPressure(settled, currentProfile, {
+      consecutiveSamples: samples,
+      clearSamples,
+      starvedAtDetail: null,
+      lastSettledDetail: 13,
+    });
+    samples = result.consecutiveSamples;
+    clearSamples = result.clearSamples;
+    currentProfile = result.profile;
+    assert.equal(result.recoveryRequired, false);
+    assert.equal(result.profile.activeDetail, 13);
+  }
+  assert.equal(samples, 0);
+  assert.equal(currentProfile.peripheralPressureScale, 1,
+    'a settled frontier automatically restores the unscaled full camera selection');
 });
 
 test('memory-pressure ceiling retries only after a materially different camera view', () => {
@@ -704,7 +997,7 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
   }, true);
   assert.deepEqual(value, {
     phase: 'requested-detail', requestedDetail: 24, activeDetail: 24, maximumDetail: 24,
-    errorTarget: 2, rawErrorTarget: 2,
+    errorTarget: 2, rawErrorTarget: 2, peripheralPressureScale: 1,
     prefetch: {
       elapsedMs: null,
       exitReason: null,
@@ -729,10 +1022,29 @@ test('LOD console diagnostics are bounded and strip origins query strings and cr
       process: { queued: 0, running: 0 },
     },
     cache: {
-      usedMiB: 1536, maxMiB: 3072, full: false,
-      fullByBytes: false, fullByItems: false,
+      usedMiB: 1536, softMiB: null, maxMiB: 3072, full: false,
+      fullByBytes: false, fullByItems: false, prospectiveFull: false,
+      pendingAdmissionMiB: 0,
     },
   });
+  const prospective = lodDebugSnapshot(renderer, {
+    requestedDetail: 24,
+    activeDetail: 24,
+    maximumDetail: 24,
+    reduced: false,
+    prospectiveAdmissionBlocked: true,
+    pendingAdmissionBytes: 256 * 1024 * 1024,
+  }, true);
+  assert.equal(prospective.cache.fullByBytes, false,
+    'current residency remains truthfully below the hard limit');
+  assert.equal(prospective.cache.prospectiveFull, true);
+  assert.equal(prospective.cache.pendingAdmissionMiB, 256);
+  assert.equal(prospective.cache.full, true,
+    'a confirmed incoming-byte refusal participates in starvation recovery');
+  assert.deepEqual(detectLodStarvation({
+    ...prospective,
+    queues: { download: false, parse: false, process: false },
+  }, 1), { count: 2, starved: true });
   assert.equal(lodDebugSnapshot(renderer, {
     requestedDetail: 24, activeDetail: 23, maximumDetail: 24, reduced: false, starvedAtDetail: 24,
   }, true).phase, 'memory-limited');
@@ -785,6 +1097,200 @@ test('focus priority penalizes only peripheral queue work and decays after idle'
   assert.ok(compare(blocker, focal) > 0,
     'a child blocking a visible REPLACE parent must outrank even focal work');
   assert.ok(compare(focal, blocker) < 0);
+});
+
+test('focus overlap includes projected bounding-sphere extent rather than only its center', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const grazingSphere = new Sphere(new Vector3(0.8, 0, -1), 0.3);
+  const overlap = lodProjectedSphereFocusOverlap(camera, grazingSphere);
+  assert.ok(overlap > 0 && overlap < 1,
+    'a sphere whose projected edge reaches the focus cone must not be scored as fully peripheral');
+  assert.equal(
+    lodProjectedSphereFocusOverlap(camera, new Sphere(new Vector3(0.5, 0, -1), 0.6)),
+    1,
+    'a projected sphere covering the focal ray receives full overlap',
+  );
+  assert.equal(
+    lodProjectedSphereFocusOverlap(camera, new Sphere(new Vector3(2, 0, -1), 0.01)),
+    0,
+    'a genuinely peripheral projected extent remains outside the focus cone',
+  );
+});
+
+test('locked focal owner and all descendants retain raw requested SSE metadata', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const state = { activeMotion: true, lastActivityTime: 1_000 };
+  const plugin = createLodFocusPriorityPlugin(camera, () => state);
+  plugin.init({ errorTarget: 5.481, __ltdsPeripheralPressureScale: 4 });
+  const sphere = new Sphere(new Vector3(0.9, 0, -1), 0.02);
+  const tile = {
+    refine: 'REPLACE',
+    engineData: { boundingVolume: { getSphere: target => target.copy(sphere) } },
+  };
+
+  assert.equal(plugin.calculateTileViewError(tile), false, 'the plugin never overrides camera visibility');
+  assert.ok(tile.__ltdsPeripheralErrorTarget > 5.481);
+  assert.equal(tile.refine, 'REPLACE');
+
+  const owner = {
+    __ltdsFocalOwnerLocked: true,
+    __ltdsFocalOwnerPending: true,
+  };
+  const child = { parent: owner };
+  const grandchild = { ...tile, parent: child };
+  assert.equal(lodTileInLockedFocalOwner(owner), true);
+  assert.equal(lodTileInLockedFocalOwner(child), true);
+  assert.equal(lodTileInLockedFocalOwner(grandchild), true);
+  assert.equal(plugin.calculateTileViewError(grandchild), false);
+  assert.equal(grandchild.__ltdsPeripheralErrorTarget, 5.481,
+    'projected position cannot penalize a descendant of the active focal owner');
+  assert.equal(lodPeripheralErrorTarget(5.481, owner, state, 1_000), 5.481);
+
+  owner.__ltdsFocalOwnerLocked = false;
+  owner.__ltdsFocalOwnerPending = false;
+  assert.equal(lodTileInLockedFocalOwner(grandchild), false);
+  assert.ok(lodPeripheralErrorTarget(5.481, grandchild, state, 1_000, 4) > 5.481,
+    'active memory-pressure policy resumes once the owner replacement cut attaches');
+  plugin.dispose();
+});
+
+test('pointer position cannot move camera-centered focus or change owner scheduling', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const state = {
+    activeMotion: false,
+    lastActivityTime: 1_000,
+    focusNdc: [-0.95, 0.7],
+  };
+  const plugin = createLodFocusPriorityPlugin(camera, () => state);
+  plugin.init({ errorTarget: 5.481 });
+  const tile = center => ({
+    content: { uri: `${center.x}.b3dm` },
+    internal: {},
+    traversal: { used: true, inFrustum: true, distanceFromCamera: 5 },
+    engineData: {
+      boundingVolume: {
+        getSphere: target => target.copy(new Sphere(center, 0.05)),
+      },
+    },
+  });
+  const centerTile = tile(new Vector3(0, 0, -1));
+  const rightTile = tile(new Vector3(0.8, 0, -1));
+  plugin.calculateTileViewError(centerTile);
+  plugin.calculateTileViewError(rightTile);
+  const before = {
+    centerOverlap: centerTile.__ltdsFocusOverlap,
+    rightOverlap: rightTile.__ltdsFocusOverlap,
+    centerTarget: centerTile.__ltdsPeripheralErrorTarget,
+    rightTarget: rightTile.__ltdsPeripheralErrorTarget,
+  };
+  const ownerAtCenter = {
+    refine: 'REPLACE', geometricError: 8, children: [centerTile], traversal: { distanceFromCamera: 5 },
+  };
+  const ownerAtRight = {
+    refine: 'REPLACE', geometricError: 8, children: [rightTile], traversal: { distanceFromCamera: 5 },
+  };
+  const firstRank = lodBranchBlockerGroups([ownerAtCenter, ownerAtRight]).map(group => group.owner);
+
+  // Simulate ordinary pointer movement without a camera or interaction-timing
+  // change. Runtime focus must remain the view-center ray at NDC [0, 0].
+  state.focusNdc = [0.95, -0.8];
+  plugin.calculateTileViewError(centerTile);
+  plugin.calculateTileViewError(rightTile);
+  assert.deepEqual({
+    centerOverlap: centerTile.__ltdsFocusOverlap,
+    rightOverlap: rightTile.__ltdsFocusOverlap,
+    centerTarget: centerTile.__ltdsPeripheralErrorTarget,
+    rightTarget: rightTile.__ltdsPeripheralErrorTarget,
+  }, before);
+  assert.deepEqual(
+    lodBranchBlockerGroups([ownerAtCenter, ownerAtRight]).map(group => group.owner),
+    firstRank,
+  );
+  assert.ok(centerTile.__ltdsFocusOverlap > rightTile.__ltdsFocusOverlap,
+    'the camera-center tile remains focal regardless of cursor coordinates');
+  plugin.dispose();
+});
+
+test('focus penalty persists while the focal replacement cut is incomplete', () => {
+  const peripheralBlocker = {
+    __ltdsFocusOverlap: 0,
+    __ltdsBranchBlocker: true,
+    __ltdsFocusPending: true,
+  };
+  const idle = { activeMotion: false, lastActivityTime: 1_000 };
+  assert.equal(lodFocusPriorityPenalty(peripheralBlocker, idle, 60_000), 4,
+    'idle time cannot dissolve focus while its owner cut is pending');
+  peripheralBlocker.__ltdsBranchBlocker = false;
+  assert.equal(lodFocusPriorityPenalty(peripheralBlocker, idle, 60_000), 1,
+    'the normal decay resumes after the replacement cut completes');
+});
+
+test('peripheral selection target preserves focal SSE and relaxes only under explicit memory pressure', () => {
+  const moving = { activeMotion: true, lastActivityTime: 1_000 };
+  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsFocusOverlap: 1 }, moving, 1_000), 5.481);
+  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsFocusOverlap: 0 }, moving, 1_000), 5.481,
+    'camera motion changes queue order but cannot coarsen traversal selection');
+  assert.equal(lodPeripheralErrorTarget(
+    5.481,
+    { __ltdsFocusOverlap: 0 },
+    moving,
+    1_000,
+    4,
+  ), 21.924, 'persistent memory pressure may relax genuinely peripheral selection');
+  assert.equal(lodPeripheralErrorTarget(5.481, { __ltdsFocusOverlap: 0 }, {
+    activeMotion: false,
+    lastActivityTime: 1_000,
+  }, 2_000), 5.481, 'settled peripheral work eventually converges at the raw requested SSE');
+});
+
+test('active pan and orbit timing cannot deselect an already-loaded peripheral branch', () => {
+  const rawTarget = 5.481;
+  const peripheral = { __ltdsFocusOverlap: 0 };
+  const branchError = 8;
+  const idleTarget = lodPeripheralErrorTarget(rawTarget, peripheral, {
+    activeMotion: false,
+    lastActivityTime: 0,
+  }, 10_000, 1);
+  const panTarget = lodPeripheralErrorTarget(rawTarget, peripheral, {
+    activeMotion: true,
+    lastActivityTime: 10_000,
+  }, 10_000, 1);
+  const orbitTarget = lodPeripheralErrorTarget(rawTarget, peripheral, {
+    activeMotion: true,
+    lastActivityTime: 10_010,
+  }, 10_010, 1);
+
+  assert.equal(idleTarget, rawTarget);
+  assert.equal(panTarget, rawTarget);
+  assert.equal(orbitTarget, rawTarget);
+  assert.equal(branchError > idleTarget, true);
+  assert.equal(branchError > panTarget, true,
+    'pan timing must leave the same refined REPLACE branch selected');
+  assert.equal(branchError > orbitTarget, true,
+    'orbit timing must leave the same refined REPLACE branch selected');
+});
+
+test('owner-grouped priority completes the focal cut before peripheral blockers', () => {
+  const tile = (distanceFromCamera, ownerRank) => ({
+    __ltdsBranchBlocker: true,
+    __ltdsOwnerRank: ownerRank,
+    traversal: { used: true, inFrustum: true, distanceFromCamera },
+  });
+  const focalFar = tile(100, 0);
+  const focalNear = tile(10, 0);
+  const peripheralNear = tile(1, 1);
+  const compare = createLodFocusPriorityCallback(() => ({ activeMotion: false }), () => 10_000);
+  assert.ok(compare(focalFar, peripheralNear) > 0,
+    'every tile in the focal owner cut outranks a nearer peripheral owner');
+  assert.ok(compare(peripheralNear, focalFar) < 0);
+  assert.ok(compare(focalNear, focalFar) > 0,
+    'distance is deterministic only after owner rank has been satisfied');
 });
 
 test('overview retention pins only the captured coarse frontier in the LRU', () => {

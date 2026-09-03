@@ -75,7 +75,7 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
     'the startup deadline is an honest telemetry milestone, not unsafe partial promotion');
   assert.match(main, /tilesRenderer\.maxDepth = Infinity/);
   assert.match(main, /lodOverviewTiles = captured\.shell/);
-  assert.match(main, /maxBytes = lodFallbackShellMaxBytes\(tilesRenderer\?\.lruCache\?\.maxBytesSize/,
+  assert.match(main, /function lodShellBudgetBytes[\s\S]*?lodFallbackShellMaxBytes\(tilesRenderer\?\.lruCache\?\.maxBytesSize/,
     'shell safety limit must be derived from the configured cache budget');
   assert.match(main, /captured\.overSoftBudget && !lodPrefetchSoftBudgetReported[\s\S]*?shell-soft-budget-exceeded/,
     'crossing the preferred shell target must be diagnostic rather than terminal');
@@ -183,7 +183,7 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
 test('LOD starts close-responsive, stages explicit high-detail requests, and caps reduced-memory clients honestly', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="16"/);
+  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="20"/);
   assert.match(html, /Starts with balanced view-local refinement\. Raise Detail only when you need finer coverage\./);
   assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
@@ -198,6 +198,47 @@ test('LOD starts close-responsive, stages explicit high-detail requests, and cap
   assert.match(main, /else if \(quality\.fullDetail\) label = 'full-detail'/);
   assert.match(main, /pendingRequiredTiles > 0 \|\| snapshot\.pendingHierarchyNodes > 0/);
   assert.doesNotMatch(main, /releaseStaleLodDetails|transientRootBackdropEnabled|syncTransientRootLodBackdrop/);
+});
+
+test('viewer memory modes persist only a stable key and apply bounded runtime policy', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const policy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
+
+  assert.match(html, /id="lod-memory-mode"[\s\S]*?<option value="auto">Auto<\/option>[\s\S]*?<option value="balanced">Balanced<\/option>[\s\S]*?<option value="high">High<\/option>/);
+  assert.match(html, /Controls decoded model data kept by this viewer/);
+  assert.match(html, /does not measure system RAM/);
+  assert.match(main, /LOD_MEMORY_MODE_STORAGE_KEY = 'ltds-viewer:lod-memory-mode'/);
+  assert.match(main, /localStorage\?\.setItem\(LOD_MEMORY_MODE_STORAGE_KEY, stableMode\)/);
+  assert.doesNotMatch(main, /localStorage\?\.setItem\([^\n]*JSON\.stringify/,
+    'runtime byte limits must never become stale persisted configuration');
+  assert.match(main, /const deviceMemoryGiB = navigator\.deviceMemory;/);
+  assert.doesNotMatch(main, /deviceMemory[\s\S]{0,120}userAgent/,
+    'a user-agent guess must not be presented as memory capability');
+  assert.match(main, /resolveLodMemoryProfile\(\{\s*mode: lodMemoryMode,\s*deviceMemoryGiB/);
+  assert.match(main, /configureLodRenderer\(rendererInstance,[\s\S]*?memoryProfile,/);
+  assert.match(main, /currentDetail[\s\S]*?detailSlider\.value = String\(DEFAULT_LOD_DETAIL\)/,
+    'invalid detail values may default');
+  assert.doesNotMatch(main, /if \(detailSlider\) detailSlider\.value = String\(DEFAULT_LOD_DETAIL\)/,
+    'memory-profile reload must preserve the current Detail slider value');
+  assert.match(main, /preserveIncomingModelView = true;\s*disposeTiles\(\);\s*loadTiles\(\);/);
+  assert.match(main, /recentFrontierBytes/);
+  assert.match(main, /shellRetentionBytes/);
+  assert.match(main, /softMaxBytes: lodShellRetentionMaxBytes\(\)/,
+    'profile shell retention is a preferred soft target');
+  const shellBudget = main.slice(
+    main.indexOf('function lodShellBudgetBytes'),
+    main.indexOf('function updateLodRecentFrontier'),
+  );
+  assert.doesNotMatch(shellBudget, /hardMaxBytes:.*shellRetention/,
+    'the legacy 1.30 GiB shell can still use the dataset-driven 1.5 GiB hard bound');
+  assert.match(main, /budget\?\.softBytesSize[\s\S]*?scheduleUnload/,
+    'crossing the soft cache boundary schedules stale-content eviction');
+
+  assert.match(policy, /softBytesSize: softBytes/);
+  assert.match(policy, /maxBytesSize: hardBytes/);
+  assert.match(policy, /resolvedMemoryProfile\?\.downloadConcurrency/);
+  assert.match(policy, /resolvedMemoryProfile\?\.parseConcurrency/);
 });
 
 test('production installs the exact renderer and applies the scoped ancestor patch in both image stages', () => {
@@ -225,16 +266,18 @@ test('LOD memory pressure preserves camera-driven quality and resets on explicit
   const statsBlock = main.slice(main.indexOf('function updateStats()'), main.indexOf('// expose for debugging/verification'));
 
   assert.match(main, /advanceLodMemoryPressure/);
-  assert.match(main, /let lodStarvationSamples = 0;\s*let lodStarvedAtDetail = null;\s*let lodCacheRecoveryActive = false;\s*let lodLastSettledDetail = null;\s*let lodPressureView = null;/);
+  assert.match(main, /let lodStarvationSamples = 0;\s*let lodPressureClearSamples = 0;\s*let lodPendingAdmissionTile = null;\s*let lodPendingAdmissionBytes = 0;\s*let lodStarvedAtDetail = null;\s*let lodCacheRecoveryActive = false;\s*let lodLastSettledDetail = null;\s*let lodPressureView = null;/);
   for (const [label, block] of [['load', loadBlock], ['dispose', disposeBlock], ['slider', sliderBlock]]) {
-    assert.match(block, /lodStarvationSamples = 0;\s*lodStarvedAtDetail = null;\s*lodCacheRecoveryActive = false;/, `${label} must reset memory-pressure state`);
+    assert.match(block, /lodStarvationSamples = 0;\s*lodPressureClearSamples = 0;\s*clearLodPendingAdmission\(\);\s*lodStarvedAtDetail = null;\s*lodCacheRecoveryActive = false;/, `${label} must reset memory-pressure state`);
   }
   assert.match(sliderBlock, /if \(Number\.isFinite\(lodLastSettledDetail\)\) \{\s*lodLastSettledDetail = Math\.min\(lodLastSettledDetail, next\.activeDetail\)/);
   assert.match(statsBlock, /advanceLodMemoryPressure\(pressureSnapshot, lodRuntimeProfileState/);
   assert.match(statsBlock, /consecutiveSamples: lodStarvationSamples/);
+  assert.match(statsBlock, /clearSamples: lodPressureClearSamples/);
   assert.match(statsBlock, /starvedAtDetail: lodStarvedAtDetail/);
   assert.match(statsBlock, /lastSettledDetail: lodLastSettledDetail/);
   assert.match(statsBlock, /lodStarvationSamples = pressure\.consecutiveSamples/);
+  assert.match(statsBlock, /lodPressureClearSamples = pressure\.clearSamples/);
   assert.match(statsBlock, /lodStarvedAtDetail = pressure\.starvedAtDetail/);
   assert.match(statsBlock, /if \(pressure\.recoveryRequired\)/);
   assert.match(statsBlock, /lodCacheRecoveryActive = true/);
@@ -243,17 +286,33 @@ test('LOD memory pressure preserves camera-driven quality and resets on explicit
   assert.match(statsBlock, /pressureSnapshot\.pendingRequiredTiles === 0/);
   assert.match(statsBlock, /lodCacheRecoveryActive = false/);
   assert.match(statsBlock, /tilesRenderer\.lruCache\.minBytesSize = lodCacheRetentionMinBytes\(lodRuntimeProfileState\.budget, false\)/);
-  assert.match(statsBlock, /lodRuntimeProfileState\.activeDetail = pressure\.profile\.activeDetail/);
-  assert.match(statsBlock, /tilesRenderer\.errorTarget = lodTargetForDetail\(pressure\.profile\.activeDetail\)/);
-  assert.match(main, /memory-limited Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
+  assert.match(statsBlock, /tilesRenderer\.__ltdsPeripheralPressureScale = Math\.max/);
+  const pressureChangeBlock = statsBlock.slice(
+    statsBlock.indexOf('if (pressure.changed)'),
+    statsBlock.indexOf('updateLodQualityStatus', statsBlock.indexOf('if (pressure.changed)')),
+  );
+  assert.doesNotMatch(pressureChangeBlock, /activeDetail\s*=/,
+    'cache pressure must not lower the camera-driven global Detail target');
+  assert.doesNotMatch(pressureChangeBlock, /tilesRenderer\.errorTarget\s*=/,
+    'cache pressure must not inflate the global SSE target');
+  assert.match(main, /focused Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
   assert.match(main, /function retryLodForChangedView\(\)/);
   assert.match(main, /lodViewChangeRequiresRetry\(lodPressureView, currentView\)/);
   const loadModelStart = loadBlock.indexOf("addEventListener('load-model'");
   const loadModelBlock = loadBlock.slice(loadModelStart, loadBlock.indexOf("addEventListener('load-error'", loadModelStart));
   assert.doesNotMatch(loadModelBlock, /recoverLodCacheAdmission\(/,
     'load-model fires after renderer 0.5.1 has already discarded an unadmitted parse');
-  assert.match(loadBlock, /addEventListener\('tile-memory-pressure',[\s\S]*?recoverLodCacheAdmission\(rendererInstance\.lruCache, lodRuntimeProfileState\.budget\)/,
+  assert.match(loadBlock, /addEventListener\('tile-memory-pressure',[\s\S]*?const incomingBytes = Math\.max\(0, Number\(event\?\.bytesUsed\) \|\| 0\);[\s\S]*?recoverLodCacheAdmission\([\s\S]*?rendererInstance\.lruCache,[\s\S]*?lodRuntimeProfileState\.budget,[\s\S]*?incomingBytes/,
     'pre-discard recovery must run from the exact-pinned synchronous renderer event');
+  assert.match(loadBlock, /const incomingBytes = Math\.max\(0, Number\(event\?\.bytesUsed\) \|\| 0\);[\s\S]*?retainLodOverviewTiles\(rendererInstance, retainedLodTiles\(\)\);\s*if \(recoverLodCacheAdmission\(/,
+    'synchronous recovery must pin the bounded REPLACE shell and recent focal frontier before evicting stale detail');
+  assert.doesNotMatch(loadBlock, /addEventListener\('tile-memory-pressure',[\s\S]*?lodRecentFrontier\.clear\(\)/,
+    'ordinary prospective admission must not discard the bounded warm focal frontier');
+  assert.match(loadBlock, /cachedBytes \+ incomingBytes > hardBytes[\s\S]*?lodPendingAdmissionTile = event\?\.tile[\s\S]*?lodPendingAdmissionBytes = incomingBytes/,
+    'a prospective refusal below current isFull must remain visible to pressure recovery');
+  assert.match(loadBlock, /addEventListener\('load-model',[\s\S]*?lodPendingAdmissionTile === ev\.tile[\s\S]*?clearLodPendingAdmission\(\)/,
+    'successful later admission clears the exact refused-tile signal');
+  assert.match(statsBlock, /prospectiveAdmissionBlocked = syncLodPendingAdmission\(\)[\s\S]*?pendingAdmissionBytes: lodPendingAdmissionBytes/);
   assert.match(main, /if \(lodStarvedAtDetail !== null\) return false;\s*lodLastSettledDetail = lodRuntimeProfileState\.activeDetail/,
     'a memory-limited fallback must never overwrite the last genuinely settled detail');
   assert.match(main, /emitLodDebugSnapshot\('view-change-retry', true\)/);

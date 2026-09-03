@@ -103,7 +103,7 @@ COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./
 RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
-COPY lod-policy.mjs ./lod-policy.mjs
+COPY lod-policy.mjs lod-memory-profile.mjs ./
 COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
 COPY --from=build /app/dist ./dist
