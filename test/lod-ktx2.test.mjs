@@ -54,10 +54,11 @@ test('Viewer installs KTX2 support before configuring or updating the tile rende
   const root = path.resolve(import.meta.dirname, '..');
   const main = fs.readFileSync(path.join(root, 'main.js'), 'utf8');
   assert.match(main, /import \{ installLodKtx2Support \} from '\.\/lod-ktx2\.mjs';/);
-  assert.match(
-    main,
-    /const rendererInstance = new TilesRenderer\(TILES_URL\);\s*tilesRenderer = rendererInstance;\s*lodKtx2Support = installLodKtx2Support\(rendererInstance, renderer\);\s*const detailSlider/,
-  );
+  const create = main.indexOf('const rendererInstance = new TilesRenderer(TILES_URL);');
+  const install = main.indexOf('lodKtx2Support = installLodKtx2Support(rendererInstance, renderer', create);
+  const configure = main.indexOf('configureLodRenderer(rendererInstance', create);
+  assert.ok(create >= 0 && install > create);
+  assert.ok(configure > install, 'the decoder plugin is installed before renderer configuration');
   assert.match(main, /tilesRenderer\.dispose\(\);[\s\S]*lodKtx2Support\?\.dispose\(\);[\s\S]*lodKtx2Support = null;/);
 });
 

@@ -8,6 +8,8 @@ import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { TilesRenderer } from '3d-tiles-renderer';
 import { installLodKtx2Support } from './lod-ktx2.mjs';
+import { installLodLoadingTiming } from './lod-loading-timing.mjs';
+import { lodEvaluationOptions, formatJsHeap } from './lod-evaluation-options.mjs';
 import { createLodOwnerDiagnostics } from './lod-owner-diagnostics.mjs';
 import { createLodRegionalFallbackCoordinator } from './lod-regional-fallback.mjs';
 import { installLodAdmissionThrottle } from './lod-admission-throttle.mjs';
@@ -77,6 +79,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 // WebODM project any more — see README for the GET /api/models(/:id) shape.
 // ────────────────────────────────────────────────
 let PROJECT = null;
+const LOD_EVALUATION = lodEvaluationOptions(location.search);
 let GLB_URL = null, TILES_URL = null, OBJ_URL = null;
 let LOD_PROVENANCE = null;
 let LOD_PROVENANCE_VERIFIED = false;
@@ -171,6 +174,7 @@ let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
 let tilesRenderer = null;
 let lodKtx2Support = null;
+let lodLoadingTiming = null;
 let lodRuntimeProfileState = null;
 let lodWarmupComplete = false;
 let lodBootstrapPhase = 'inactive';
@@ -936,8 +940,16 @@ function loadTiles() {
   lodTileRetryTimer = null;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
+  rendererInstance.__ltdsDistanceDemand = LOD_EVALUATION.distanceDemand ? { enabled: true } : null;
+  const evaluationNote = document.getElementById('lod-evaluation-note');
+  if (evaluationNote) evaluationNote.hidden = !LOD_EVALUATION.distanceDemand;
   tilesRenderer = rendererInstance;
-  lodKtx2Support = installLodKtx2Support(rendererInstance, renderer);
+  lodLoadingTiming?.dispose();
+  lodLoadingTiming = LOD_EVALUATION.loadingTiming
+    ? installLodLoadingTiming(rendererInstance, { enabled: true, capacity: 256 }) : null;
+  lodKtx2Support = installLodKtx2Support(rendererInstance, renderer, {
+    workerObserver: lodLoadingTiming?.workerObserver,
+  });
   const detailSlider = document.getElementById('lod-detail');
   lodOwnerDebug?.dispose();
   lodOwnerDebug = createLodOwnerDiagnostics(rendererInstance, {
@@ -1123,6 +1135,8 @@ function loadTiles() {
 // Free up to 3 GiB of decoded tile textures/geometry. Needed before a large
 // Draco decode: cache + decode together OOM'd the renderer (heap hit 2.7GB).
 function disposeTiles() {
+  lodLoadingTiming?.dispose();
+  lodLoadingTiming = null;
   lodRegionalFallback?.dispose();
   lodRegionalFallback = null;
   lodAdmissionThrottle?.dispose();
@@ -4451,9 +4465,7 @@ function startLoop() {
 }
 
 function updateStats() {
-  if (performance.memory) {
-    dom.memDisplay.textContent = Math.round(performance.memory.usedJSHeapSize / 1048576) + ' MB';
-  }
+  dom.memDisplay.textContent = formatJsHeap(performance.memory?.usedJSHeapSize);
   let tris = 0;
   if (tilesParent.visible && tilesRenderer) {
     const countVisible = (obj) => {
@@ -4541,6 +4553,8 @@ window.__ltds = { scene: () => scene, camera: () => camera, controls: () => cont
   lodTrace: () => lodTraceEntries.map(entry => structuredClone(entry)),
   lodOwnerDiagnostics: (options) => lodOwnerDebug?.snapshot(options) ?? null,
   lodTileEvents: () => lodOwnerDebug?.trace() ?? [],
+  lodEvaluation: () => ({ ...LOD_EVALUATION }),
+  lodLoadingTiming: () => lodLoadingTiming?.snapshot() ?? null,
   cameraWorldPositions: () => camWorldPos ? Array.from(camWorldPos) : [],
   // Georeferencing self-test: latlon -> UTM -> source px -> linear window -> UTM -> latlon roundtrip.
   // Expect maxRoundtripM to be tiny (sub-mm); large values mean the warp mapping drifted.

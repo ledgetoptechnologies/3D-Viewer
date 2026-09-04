@@ -437,6 +437,7 @@
             </select>
           </label>
           <div class="hint" id="lod-memory-help" style="margin-top:6px;">Controls decoded model data kept by this viewer. Auto uses a coarse browser capability hint; it does not measure system RAM.</div>
+          <div class="hint" id="lod-evaluation-note" hidden style="margin-top:6px;color:var(--brand-orange)">Evaluation mode: reduced medium/far demand. Nearby surfaces retain requested detail; Detail 24 restores raw quality everywhere.</div>
           <div class="hint" style="margin-top:10px;">Starts with balanced view-local refinement. Raise Detail only when you need finer coverage.</div>
         </div>
 
@@ -640,7 +641,7 @@
       <span class="status-pill" id="mode-status">Mode: 3D Model</span>
     </div>
     <div id="status-right">
-      <span class="status-pill" id="mem-display">— MB</span>
+      <span class="status-pill" id="mem-display" title="JavaScript heap only. Not tile cache, total browser memory, or GPU memory. Tile cache usage is available in LOD diagnostics.">JS heap: unavailable</span>
       <span class="status-pill" id="lod-status">LOD: —</span>
       <span class="status-pill" id="cloud-status">Cloud: —</span>
       <span class="status-pill" id="tris-status">Tris: —</span>

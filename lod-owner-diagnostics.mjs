@@ -3,6 +3,8 @@ import { Matrix4, Sphere, Vector3 } from 'three';
 const finite = value => value !== null && value !== undefined && value !== ''
   && Number.isFinite(Number(value)) ? Number(value) : null;
 const EVENTS = ['tile-download-start', 'load-model', 'dispose-model', 'tile-visibility-change'];
+const DISTANCE_REASONS = new Set(['disabled', 'bootstrap-target', 'unknown-bounds',
+  'maximum-detail', 'locked-quality-cut', 'near-surface', 'medium-surface', 'far-surface']);
 
 // Opt-in snapshots and a bounded event ring. Never retain a tile/scene in the
 // trace or emit asset URLs: signed query strings and model paths are private.
@@ -122,6 +124,17 @@ export function createLodOwnerDiagnostics(tiles, {
           focusOverlap: finite(tile.__ltdsFocusOverlap),
           foregroundOverlap: finite(tile.__ltdsForegroundOverlap),
           conservativeRaw: tile.__ltdsConservativeRawSse === true,
+          distanceDemand: tile.__ltdsDistanceDemand ? {
+            enabled: tile.__ltdsDistanceDemand.enabled === true,
+            ready: tile.__ltdsDistanceDemand.ready === true,
+            protected: tile.__ltdsDistanceDemand.protected === true,
+            distance: finite(tile.__ltdsDistanceDemand.distance),
+            modelRadius: finite(tile.__ltdsDistanceDemand.modelRadius),
+            nearRadius: finite(tile.__ltdsDistanceDemand.nearRadius),
+            farRadius: finite(tile.__ltdsDistanceDemand.farRadius),
+            target: finite(tile.__ltdsDistanceDemand.target),
+            reason: DISTANCE_REASONS.has(tile.__ltdsDistanceDemand.reason) ? tile.__ltdsDistanceDemand.reason : null,
+          } : null,
           focalLocked: tile.__ltdsFocalOwnerLocked === true,
           regionalReady: tile.__ltdsRegionalCoverReady === true,
           regionalPreparing: tile.__ltdsRegionalCoverPreparing === true,
@@ -136,6 +149,7 @@ export function createLodOwnerDiagnostics(tiles, {
       return {
         version: 1, at: Math.round(now()), frame: finite(tiles.frameCount),
         requestedTarget: finite(tiles.errorTarget),
+        distanceDemandEnabled: tiles.__ltdsDistanceDemand?.enabled === true,
         pressure: finite(tiles.__ltdsPeripheralPressureScale),
         camera: camera ? {
           world: Array.from(camera.matrixWorld.elements).map(finite),

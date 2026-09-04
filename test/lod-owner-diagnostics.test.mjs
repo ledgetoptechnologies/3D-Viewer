@@ -77,3 +77,23 @@ test('owner snapshot bounds traversal and reports stale-frame membership honestl
   assert.equal(row.selected, false);
   assert.equal(row.inFrustum, false);
 });
+
+test('distance experiment diagnostics expose protection reasons without arbitrary strings or nonfinite values', () => {
+  const { tiles, root } = fixture();
+  tiles.__ltdsDistanceDemand = { enabled: true };
+  root.__ltdsDistanceDemand = {
+    enabled: true, ready: true, protected: false, distance: 60, modelRadius: 100,
+    nearRadius: 25, farRadius: 50, target: 512, reason: 'far-surface',
+  };
+  const debug = createLodOwnerDiagnostics(tiles);
+  const snapshot = debug.snapshot();
+  assert.equal(snapshot.distanceDemandEnabled, true);
+  assert.deepEqual(snapshot.tiles[0].distanceDemand, root.__ltdsDistanceDemand);
+  root.__ltdsDistanceDemand.reason = 'https://private.invalid/?token=DO_NOT_LEAK';
+  root.__ltdsDistanceDemand.distance = Infinity;
+  const redacted = debug.snapshot();
+  assert.equal(redacted.tiles[0].distanceDemand.reason, null);
+  assert.equal(redacted.tiles[0].distanceDemand.distance, null);
+  assert.equal(JSON.stringify(redacted).includes('DO_NOT_LEAK'), false);
+  debug.dispose();
+});

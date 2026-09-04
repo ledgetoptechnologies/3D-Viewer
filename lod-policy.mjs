@@ -38,6 +38,42 @@ export const LOD_FOCUS_OWNER_MAX_TRANSLATION_RATIO = 0.05;
 export const LOD_FOCUS_PRIORITY_CONE_RADIUS = 0.65;
 export const LOD_FOREGROUND_CONE_RADIUS = 0.2;
 export const LOD_QUALITY_STABLE_FRAMES = 2;
+
+// Experimental demand policy, deliberately disabled unless the renderer opts
+// in. Ratios are fractions of the transformed root bounding-sphere radius, not
+// assumed metres. These defaults need real-dataset visual calibration.
+export const LOD_DISTANCE_DEMAND_NEAR_RADIUS_RATIO = 0.25;
+export const LOD_DISTANCE_DEMAND_FAR_RADIUS_RATIO = 0.5;
+export const LOD_DISTANCE_DEMAND_FAR_TARGET_AT_DETAIL20 = 512;
+
+export function lodDistanceDemandTarget(rawTarget, {
+  distance = Infinity, modelRadius = 0, unknown = false, locked = false,
+} = {}, config = null) {
+  const raw = Number(rawTarget);
+  const enabled = config?.enabled === true;
+  const nearRatio = Number.isFinite(config?.nearRadiusRatio) && config.nearRadiusRatio > 0
+    ? config.nearRadiusRatio : LOD_DISTANCE_DEMAND_NEAR_RADIUS_RATIO;
+  const farRatio = Number.isFinite(config?.farRadiusRatio) && config.farRadiusRatio > nearRatio
+    ? config.farRadiusRatio : Math.max(LOD_DISTANCE_DEMAND_FAR_RADIUS_RATIO, nearRatio * 2);
+  const nearRadius = modelRadius * nearRatio;
+  const farRadius = modelRadius * farRatio;
+  const ready = Number.isFinite(modelRadius) && modelRadius > 0 && Number.isFinite(distance) && distance >= 0 && !unknown;
+  const result = { enabled, ready, distance, modelRadius, nearRadius, farRadius, target: rawTarget, protected: false, reason: 'disabled' };
+  if (!enabled) return result;
+  if (raw > detailToErrorTarget(MIN_LOD_DETAIL)) return { ...result, protected: true, reason: 'bootstrap-target' };
+  if (!Number.isFinite(raw) || raw <= 0 || !Number.isFinite(modelRadius) || modelRadius <= 0
+    || !Number.isFinite(distance) || distance < 0 || unknown) {
+    return { ...result, protected: true, reason: 'unknown-bounds' };
+  }
+  // Maximum quality is an explicit user override, not another distance band.
+  if (raw <= detailToErrorTarget(MAX_LOD_DETAIL)) return { ...result, protected: true, reason: 'maximum-detail' };
+  if (locked) return { ...result, protected: true, reason: 'locked-quality-cut' };
+  if (distance <= nearRadius) return { ...result, protected: true, reason: 'near-surface' };
+  const progress = Math.min(1, Math.max(0, (distance - nearRadius) / (farRadius - nearRadius)));
+  const smooth = progress * progress * (3 - 2 * progress);
+  const cap = Math.max(raw, LOD_DISTANCE_DEMAND_FAR_TARGET_AT_DETAIL20 * raw / detailToErrorTarget(DEFAULT_LOD_DETAIL));
+  return { ...result, target: raw + (cap - raw) * smooth, reason: progress === 1 ? 'far-surface' : 'medium-surface' };
+}
 const CONTROLLED_CONVERTER_BINARY_SHA256 = new Set(['40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274','c54dbcbe953640f2aa0e7c2568709108a97063dac492781c9560a5042e46d9b1']);
 const CONTROLLED_CONVERTER_COMMAND_SHA256 = new Set([
   '7d82c354b3d65985e602454c0bcc204fe8e75d8efc1826b76a5681d85c34f681',
@@ -756,6 +792,22 @@ function lodCameraProjectionSnapshot(camera, scratch, frameCount, tilesRenderer)
   else scratch.groupWorldMatrix.identity();
   scratch.cameraPosition.setFromMatrixPosition(camera.matrixWorld);
   scratch.cameraForward.setFromMatrixColumn(camera.matrixWorld, 2).normalize().negate();
+  if (tilesRenderer?.__ltdsDistanceDemand?.enabled === true) {
+    const elements = scratch.groupWorldMatrix.elements;
+    const x = new THREE.Vector3(elements[0], elements[1], elements[2]);
+    const y = new THREE.Vector3(elements[4], elements[5], elements[6]);
+    const z = new THREE.Vector3(elements[8], elements[9], elements[10]);
+    const lengths = [x.length(), y.length(), z.length()];
+    const scale = Math.max(...lengths);
+    const tolerance = scale * scale * 1e-10;
+    const orthogonal = Math.abs(x.dot(y)) <= tolerance && Math.abs(x.dot(z)) <= tolerance && Math.abs(y.dot(z)) <= tolerance;
+    const similarity = scale > 0 && orthogonal && lengths.every(value => Math.abs(value - scale) <= scale * 1e-10);
+    scratch.distanceWorldScale = similarity ? scale : null;
+    // Frobenius norm safely encloses a sphere under shear; maximum column
+    // length is sufficient only for orthogonal scaled axes.
+    scratch.distanceSphereScale = orthogonal ? scale : Math.hypot(...lengths);
+    scratch.distanceCameraLocal.copy(scratch.cameraPosition).applyMatrix4(scratch.distanceGroupInverse.copy(scratch.groupWorldMatrix).invert());
+  }
   return {
     frameCount: Number.isFinite(frameCount) ? frameCount : null,
     position: scratch.cameraPosition.toArray(),
@@ -814,6 +866,81 @@ function tileForegroundRelevance(camera, tile, sphere, scratch) {
   return cache.get(tile);
 }
 
+function distanceDemandBound(tile, scratch) {
+  if (scratch.distanceBoundCache.has(tile)) return scratch.distanceBoundCache.get(tile);
+  const getSphere = tile?.engineData?.boundingVolume?.getSphere;
+  if (typeof getSphere !== 'function') return { distance: Infinity, radius: 0, unknown: true };
+  const sphere = scratch.distanceSphere;
+  sphere.makeEmpty();
+  try {
+    getSphere.call(tile.engineData.boundingVolume, sphere);
+    if (![sphere.center.x, sphere.center.y, sphere.center.z, sphere.radius].every(Number.isFinite)
+      || sphere.radius < 0) return { distance: Infinity, radius: 0, unknown: true };
+    sphere.center.applyMatrix4(scratch.groupWorldMatrix);
+    sphere.radius *= scratch.distanceSphereScale;
+  } catch {
+    return { distance: Infinity, radius: 0, unknown: true };
+  }
+  let distance = Math.max(0, scratch.cameraPosition.distanceTo(sphere.center) - sphere.radius);
+  // A tight OBB gives useful distance where its circumscribing sphere covers
+  // half the site. Distances transform exactly under uniform scale + rigid
+  // transforms. Nonuniform/sheared groups use the conservative world sphere.
+  const volume = tile.engineData.boundingVolume;
+  if (scratch.distanceWorldScale !== null && typeof volume.distanceToPoint === 'function') {
+    try {
+      const localDistance = volume.distanceToPoint(scratch.distanceCameraLocal);
+      if (Number.isFinite(localDistance) && localDistance >= 0) distance = localDistance * scratch.distanceWorldScale;
+    } catch { /* malformed optional tight bound retains conservative sphere distance */ }
+  }
+  const result = {
+    distance,
+    radius: sphere.radius,
+    unknown: false,
+  };
+  scratch.distanceBoundCache.set(tile, result);
+  return result;
+}
+
+function tileDistanceDemandRelevance(tile, scratch) {
+  const cache = scratch.distanceRelevanceCache;
+  const pending = [{ tile, visited: false }];
+  const visiting = new Set();
+  while (pending.length) {
+    const entry = pending.pop();
+    const current = entry.tile;
+    if (!current || typeof current !== 'object') continue;
+    if (cache.has(current)) continue;
+    if (!entry.visited) {
+      const own = distanceDemandBound(current, scratch);
+      if (own.unknown || visiting.has(current)) {
+        cache.set(current, { ...own, unknown: true });
+        continue;
+      }
+      const children = Array.isArray(current.children) ? current.children : [];
+      if (!children.length) { cache.set(current, own); continue; }
+      visiting.add(current);
+      pending.push({ tile: current, visited: true, own });
+      for (const child of children) if (child && typeof child === 'object' && !cache.has(child)) {
+        pending.push({ tile: child, visited: false });
+      }
+    } else {
+      let distance = entry.own.distance;
+      let unknown = false;
+      for (const child of current.children) {
+        const relevance = cache.get(child);
+        if (!relevance || relevance.unknown) unknown = true;
+        if (relevance) distance = Math.min(distance, relevance.distance);
+      }
+      // Own bound plus every known descendant: even a malformed non-enclosing
+      // parent cannot relax away a nearby surface. Loose bounds intentionally
+      // over-protect. No occlusion or screen-center visibility guess is made.
+      cache.set(current, { ...entry.own, distance, unknown });
+      visiting.delete(current);
+    }
+  }
+  return cache.get(tile) || { distance: Infinity, radius: 0, unknown: true };
+}
+
 export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
   const sphere = new THREE.Sphere();
   const focusScratch = {
@@ -828,6 +955,13 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
     tileOverlapCache: new WeakMap(),
     tileOverlapCacheFrame: null,
     tileRelevanceCache: new WeakMap(),
+    distanceRelevanceCache: new WeakMap(),
+    distanceSphere: new THREE.Sphere(),
+    distanceCameraLocal: new THREE.Vector3(),
+    distanceGroupInverse: new THREE.Matrix4(),
+    distanceWorldScale: null,
+    distanceSphereScale: 1,
+    distanceBoundCache: new WeakMap(),
   };
   let tilesRenderer = null;
   return {
@@ -837,6 +971,8 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
       focusScratch.tileOverlapCache = new WeakMap();
       focusScratch.tileOverlapCacheFrame = null;
       focusScratch.tileRelevanceCache = new WeakMap();
+      focusScratch.distanceRelevanceCache = new WeakMap();
+      focusScratch.distanceBoundCache = new WeakMap();
     },
     preprocessNode(tile, _tilesetDir, parentTile = null) {
       // The engine installs this node's transformed bounds after this hook.
@@ -845,11 +981,14 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
       if (!tile || typeof tile !== 'object') return;
       focusScratch.tileOverlapCache.delete(tile);
       focusScratch.tileRelevanceCache.delete(tile);
+      focusScratch.distanceRelevanceCache.delete(tile);
+      focusScratch.distanceBoundCache.delete(tile);
       const seen = new Set();
       let ancestor = parentTile || tile.parent;
       while (ancestor && !seen.has(ancestor)) {
         seen.add(ancestor);
         focusScratch.tileRelevanceCache.delete(ancestor);
+        focusScratch.distanceRelevanceCache.delete(ancestor);
         ancestor = ancestor.parent;
       }
     },
@@ -870,6 +1009,8 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
           );
           focusScratch.tileOverlapCache = new WeakMap();
           focusScratch.tileRelevanceCache = new WeakMap();
+          focusScratch.distanceRelevanceCache = new WeakMap();
+          focusScratch.distanceBoundCache = new WeakMap();
           focusScratch.tileOverlapCacheFrame = Number.isFinite(frameCount)
             ? frameCount
             : 0;
@@ -899,6 +1040,22 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
         performance.now(),
         tilesRenderer?.__ltdsPeripheralPressureScale,
       );
+      if (tilesRenderer?.__ltdsDistanceDemand?.enabled === true) {
+        const rootBound = distanceDemandBound(tilesRenderer.root, focusScratch);
+        const relevance = tileDistanceDemandRelevance(tile, focusScratch);
+        const demand = lodDistanceDemandTarget(tilesRenderer.errorTarget, {
+          distance: relevance.distance,
+          modelRadius: rootBound.radius,
+          unknown: !camera || rootBound.unknown || relevance.unknown,
+          locked: lodTileInLockedQualityOwner(tile),
+        }, tilesRenderer.__ltdsDistanceDemand);
+        tile.__ltdsDistanceDemand = demand;
+        // This is a separate opt-in selection experiment. Do not multiply its
+        // target by motion, cone overlap, or the peripheral pressure multiplier.
+        tile.__ltdsPeripheralErrorTarget = demand.target;
+      } else {
+        tile.__ltdsDistanceDemand = null;
+      }
       // Returning false leaves camera visibility and the authored REPLACE
       // hierarchy under renderer control. The pinned traversal patch consumes
       // the per-tile target above without mutating the global requested SSE.

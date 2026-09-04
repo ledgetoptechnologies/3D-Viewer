@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { deflateSync } from 'node:zlib';
 import { createServer as createViteServer } from 'vite';
+import { writeArrayBuffer } from 'geotiff';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
 
@@ -52,6 +53,31 @@ function assertPhotoPanBounds({ wrap, image }) {
         `letterboxed photo moved off center on ${start}/${end}: ${JSON.stringify({ wrap, image })}`);
     }
   }
+}
+
+async function assertExpandedPhotoWheelAndPan(client) {
+  // Image decoding precedes the onload/layout callback, and CDP acknowledges
+  // wheel dispatch before its DOM handler necessarily runs. Wait on observable
+  // layout transitions rather than using a CSS transform as a zoom indicator.
+  await waitFor(client, `(() => { const img=document.querySelector('#photo-img');
+    return img.complete && img.naturalWidth>0 && getComputedStyle(img).opacity==='1'
+      && img.getBoundingClientRect().width>0; })()`, 'expanded photo did not finish its initial layout', 10_000);
+  const before = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect();
+    return {x:r.left+r.width/2,y:r.top+r.height/2,width:document.querySelector('#photo-img').getBoundingClientRect().width}; })()`);
+  await client.command('Input.dispatchMouseEvent', { type:'mouseWheel', x:before.x, y:before.y, deltaX:0, deltaY:-420 });
+  await waitFor(client, `document.querySelector('#photo-img').getBoundingClientRect().width > ${before.width * 1.1}`,
+    'expanded wheel did not enlarge the painted camera photo', 5_000);
+  const zoomed = await client.evaluate(`(() => {const r=document.querySelector('#photo-img').getBoundingClientRect();return {left:r.left,top:r.top};})()`);
+  await client.command('Input.dispatchMouseEvent', { type:'mousePressed', x:before.x, y:before.y, button:'left', buttons:1, clickCount:1 });
+  await client.command('Input.dispatchMouseEvent', { type:'mouseMoved', x:2, y:2, button:'left', buttons:1 });
+  await client.command('Input.dispatchMouseEvent', { type:'mouseReleased', x:2, y:2, button:'left', buttons:0, clickCount:1 });
+  await waitFor(client, `(() => {const r=document.querySelector('#photo-img').getBoundingClientRect();
+    return Math.hypot(r.left-(${zoomed.left}),r.top-(${zoomed.top}))>1;})()`, 'expanded drag did not move the zoomed photo', 5_000);
+  await client.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  const after = await client.evaluate(`(() => {const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect();
+    return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom}}; })()`);
+  assert.ok(after.image.r-after.image.l > before.width*1.1, 'drag reset the photo zoom');
+  assertPhotoPanBounds(after);
 }
 
 async function assertStableMapCameraAnchors(client) {
@@ -578,6 +604,11 @@ async function startStreamingOnlyFixture(assetOverrides = {}) {
   const config = fixtureConfig();
   config.assets.tiles = null;
   Object.assign(config.assets, assetOverrides);
+  const orthophoto = Buffer.from(writeArrayBuffer(new Uint8Array([
+    238,80,7, 255,150,48, 34,97,74, 109,190,140,
+  ]), { width:2, height:2, SamplesPerPixel:3, BitsPerSample:[8,8,8],
+    PhotometricInterpretation:2, PlanarConfiguration:1,
+    ModelPixelScale:[20,20,0], ModelTiepoint:[0,0,0,367240,4760000,0], ProjectedCSTypeGeoKey:32616 }));
   const server = createServer((request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     requests.push(url.pathname);
@@ -599,6 +630,18 @@ async function startStreamingOnlyFixture(assetOverrides = {}) {
     if (url.pathname === config.assets.glb) {
       reply.writeHead(200, { 'Content-Type': 'model/gltf-binary', 'Content-Length': 4 });
       reply.end('GLB!');
+      return;
+    }
+    if (url.pathname === config.assets.ortho) {
+      // The streaming reader requires actual byte ranges, not SPA fallback
+      // HTML or a successful status containing an invalid raster.
+      const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.range || '');
+      const start = range ? Number(range[1]) : 0;
+      const end = range && range[2] ? Math.min(Number(range[2]), orthophoto.length-1) : orthophoto.length-1;
+      if (start > end) { reply.writeHead(416, { 'Content-Range':`bytes */${orthophoto.length}` }); reply.end(); return; }
+      reply.writeHead(range ? 206 : 200, { 'Content-Type':'image/tiff', 'Accept-Ranges':'bytes',
+        'Content-Length':end-start+1, ...(range ? { 'Content-Range':`bytes ${start}-${end}/${orthophoto.length}` } : {}) });
+      reply.end(orthophoto.subarray(start,end+1));
       return;
     }
     vite.middlewares(request, reply);
@@ -719,8 +762,8 @@ class CdpClient {
     });
   }
 
-  async evaluate(expression) {
-    const result = await this.command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  async evaluate(expression, timeoutMs = 30_000) {
+    const result = await this.command('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
     return result.result?.value;
   }
@@ -732,7 +775,8 @@ async function waitFor(client, expression, message, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
-    last = await client.evaluate(expression);
+    try { last = await client.evaluate(expression, Math.min(30_000, Math.max(1, deadline-Date.now()))); }
+    catch (error) { throw new Error(`${message}; evaluation failed: ${error.message}`, { cause:error }); }
     if (last) return last;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -1380,14 +1424,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.ok(Math.abs(dockedPhoto.aspect - 1) < 0.02, 'natural square photo aspect was not preserved');
     await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo click did not open the expanded inspector');
-    const expandedCenter = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
-    await client.command('Input.dispatchMouseEvent', { type: 'mouseWheel', x: expandedCenter.x, y: expandedCenter.y, deltaX: 0, deltaY: -420 });
-    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: expandedCenter.x, y: expandedCenter.y, button: 'left', buttons: 1, clickCount: 1 });
-    await client.command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'left', buttons: 1 });
-    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1 });
-    const clampedPhoto = await client.evaluate(`(() => { const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect(); return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom},transform:getComputedStyle(document.querySelector('#photo-img')).transform}; })()`);
-    assert.notEqual(clampedPhoto.transform, 'none', 'expanded wheel did not zoom the camera photo');
-    assertPhotoPanBounds(clampedPhoto);
+    await assertExpandedPhotoWheelAndPan(client);
     await client.evaluate(`document.querySelector('#photo-close').click()`);
     await client.evaluate(`(() => { window.__ltds.state.activeMode='cloud'; window.__ltds.state.cloudMode='direct'; return true; })()`);
     await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -1950,14 +1987,7 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     assert.ok(Math.abs(dockedPhoto.aspect - 1) < 0.02, 'docked preview did not preserve the photo natural aspect ratio');
     await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo click did not open the expanded inspector');
-    const expandedCenter = await client.evaluate(`(() => { const r=document.querySelector('#photo-imgwrap').getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
-    await client.command('Input.dispatchMouseEvent', { type: 'mouseWheel', x: expandedCenter.x, y: expandedCenter.y, deltaX: 0, deltaY: -420 });
-    await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: expandedCenter.x, y: expandedCenter.y, button: 'left', buttons: 1, clickCount: 1 });
-    await client.command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'left', buttons: 1 });
-    await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1 });
-    const clampedPhoto = await client.evaluate(`(() => { const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect(); return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom},transform:getComputedStyle(document.querySelector('#photo-img')).transform}; })()`);
-    assert.notEqual(clampedPhoto.transform, 'none', 'expanded wheel did not zoom the camera photo');
-    assertPhotoPanBounds(clampedPhoto);
+    await assertExpandedPhotoWheelAndPan(client);
     await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-ortho').click()`);
     await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
     const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
@@ -3785,6 +3815,112 @@ test('browser camera photo fills the window and preserves source pixels through 
   }
 });
 
+test('browser opt-in distance demand protects nearby surfaces and exposes bounded timing without changing queue limits', { timeout: 90_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) { t.skip('Chrome or Edge is required for evaluation-switch integration acceptance.'); return; }
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  try {
+    // Actual depth-separated geometry: two nearby walls and eight background
+    // patches, not a coplanar grid. Coarse SSE is about 400 at this fixed pose.
+    // Synthetic content tests integration, not Church visual acceptability.
+    const encoded = readFileSync(path.join(root,'test','fixtures','ktx2-tiles','LOD-0','Mesh.b3dm'));
+    const glbOffset = 28+[12,16,20,24].reduce((total,offset)=>total+encoded.readUInt32LE(offset),0);
+    const glb = encoded.subarray(glbOffset), jsonLength=glb.readUInt32LE(12);
+    const gltf = JSON.parse(glb.subarray(20,20+jsonLength).toString('utf8'));
+    const image = gltf.images.find(value=>value.mimeType==='image/ktx2');
+    assert.ok(image,'committed compressed fixture must contain an actual KTX2 image');
+    const imageView=gltf.bufferViews[image.bufferView], imageOffset=28+jsonLength+(imageView.byteOffset||0);
+    const compressedImage=glb.subarray(imageOffset,imageOffset+imageView.byteLength);
+    const bodies = {}, rootTriangles = [];
+    const branch = (name, x, y, z, radius, error) => {
+      const triangles = [
+        [[x-radius/2,y-radius/2,z],[x+radius/2,y-radius/2,z],[x-radius/2,y+radius/2,z]],
+        [[x+radius/2,y-radius/2,z],[x+radius/2,y+radius/2,z],[x-radius/2,y+radius/2,z]],
+      ];
+      rootTriangles.push(...triangles);
+      const body = makeB3dm(makeGlb(triangles, compressedImage, {basisu:true}));
+      const uri = `${name}/root.b3dm`, leaf = `LOD-0/${name}.b3dm`;
+      bodies[uri] = body; bodies[leaf] = body;
+      return { name, refine:'REPLACE', boundingVolume:{ sphere:[x,y,z,radius] }, geometricError:error,
+        content:{ uri }, children:[{ name:`${name}-leaf`, refine:'REPLACE', geometricError:0,
+          boundingVolume:{ sphere:[x,y,z,radius] }, content:{ uri:leaf } }] };
+    };
+    const near = [branch('near-left',-2,0,-8,1,3), branch('near-right',2,0,-8,1,3)];
+    const background = Array.from({ length:8 }, (_,i) => {
+      const x=(i%4-1.5)*8, y=(Math.floor(i/4)-0.5)*10, z=-65-i;
+      return branch(`background-${i}`,x,y,z,2,400*(Math.hypot(x,y,z)-2)*2*Math.tan(Math.PI/6)/900);
+    });
+    bodies['coarse/root.b3dm'] = makeB3dm(makeGlb(rootTriangles, compressedImage, {basisu:true}));
+    const fixture = await startFixture(path.join(root,'test','fixtures','ktx2-tiles'), {
+      tilesetJson:{ asset:{ version:'1.0', gltfUpAxis:'Z' }, geometricError:1000,
+        root:{ boundingVolume:{ sphere:[0,0,-40,100] }, geometricError:1000, refine:'REPLACE',
+          content:{ uri:'coarse/root.b3dm' }, children:[...near,...background] } },
+      assetBodies:bodies, configureConfig:config => { config.georef.bboxCenter={x:0,y:0,z:0}; },
+    });
+    ({ server,vite } = fixture);
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-evaluation-switches-'));
+    const port=await reserveDevToolsPort();
+    browser=spawn(executable,[ '--headless=new','--disable-gpu','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--no-sandbox',
+      '--remote-debugging-address=127.0.0.1',`--remote-debugging-port=${port}`,`--user-data-dir=${profile}`,'about:blank' ],{stdio:'ignore'});
+    const devTools=await waitForDevTools(port,browser);
+    const target=await (await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();
+    client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable'); await client.command('Runtime.enable');
+    await client.command('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
+    const results=[];
+    for (const enabled of [false,true]) {
+      await client.command('Page.navigate',{url:`${fixture.origin}/?project=${fixtureId}${enabled?'&lodDistanceDemand=1&lodLoadingTiming=1':''}`});
+      await waitFor(client, `window.__ltds?.state?.lodRuntimeProfile?.bootstrapPhase==='complete'`, 'evaluation fixture bootstrap did not complete',20_000);
+      await client.evaluate(`(() => {const tiles=window.__ltds.tiles(),cam=window.__ltds.camera(),V=cam.position.constructor;
+        tiles.group.updateWorldMatrix(true,false);
+        window.__evaluationPoseFrame=tiles.frameCount;
+        window.__ltds.controls().setView(new V(0,0,0).applyMatrix4(tiles.group.matrixWorld),new V(0,0,-20).applyMatrix4(tiles.group.matrixWorld));
+      })()`);
+      await waitFor(client, `(() => {const t=window.__ltds.tiles();return t.frameCount>window.__evaluationPoseFrame+2 && t.root.children.every(b=>b.traversal?.inFrustum)
+        && !t.downloadQueue.running && !t.parseQueue.running && !t.processNodeQueue.running;})()`, 'fixed-pose evaluation did not settle',15_000);
+      const result=await client.evaluate(`(() => {const t=window.__ltds.tiles();return {
+        options:window.__ltds.lodEvaluation(),note:!document.querySelector('#lod-evaluation-note').hidden,
+        timing:window.__ltds.lodLoadingTiming(),owner:window.__ltds.lodOwnerDiagnostics(),raw:t.errorTarget,
+        limits:{downloads:t.downloadQueue.maxJobs,parses:t.parseQueue.maxJobs,
+          workers:t.plugins.find(p=>p.ktxLoader)?.ktxLoader.workerPool.pool,soft:t.lruCache.minBytesSize,hard:t.lruCache.maxBytesSize},
+        branches:t.root.children.map(b=>({name:b.name,target:b.__ltdsPeripheralErrorTarget,sse:b.traversal.error,
+          demand:b.__ltdsDistanceDemand,parentVisible:t.visibleTiles.has(b),leafVisible:t.visibleTiles.has(b.children[0]),refine:b.refine}))
+      };})()`);
+      assert.deepEqual(result.options,{distanceDemand:enabled,loadingTiming:enabled});
+      assert.equal(result.note,enabled); assert.equal(result.owner.distanceDemandEnabled,enabled);
+      assert.ok(Math.abs(result.raw-5.481)<0.01);
+      if (!enabled) {
+        assert.equal(result.timing,null);
+        assert.ok(result.branches.every(b=>Math.abs(b.target-result.raw)<0.01),JSON.stringify(result.branches));
+        assert.ok(result.branches.every(b=>b.leafVisible), 'baseline must select all high-SSE terminal leaves');
+      } else {
+        assert.ok(result.branches.filter(b=>b.name.startsWith('background')&&b.target>100).length>=6,JSON.stringify(result.branches));
+        assert.ok(result.branches.filter(b=>b.name.startsWith('background')&&b.parentVisible&&!b.leafVisible).length>=6,
+          `medium demand did not decrease: ${JSON.stringify(result.branches)}`);
+        for (const b of result.branches.filter(b=>b.name.startsWith('near'))) {
+          assert.equal(b.demand.protected,true,JSON.stringify(b)); assert.equal(b.target,result.raw,JSON.stringify(b)); assert.equal(b.leafVisible,true,JSON.stringify(b));
+        }
+        assert.ok(result.branches.every(b=>b.refine==='REPLACE' && b.parentVisible!==b.leafVisible), 'every branch must render parent or leaf, not both');
+        assert.equal(result.timing.enabled,true); assert.equal(result.timing.capacity,256);
+        assert.ok(result.timing.records.length>0 && result.timing.records.length<=256);
+        for(const stage of ['parse-enqueued','parse-start','parse-end','model-ready','ktx-enqueued','ktx-start','ktx-end']) assert.ok(result.timing.aggregates[stage]?.count>0,stage);
+        assert.doesNotMatch(JSON.stringify(result.timing),/https?:|\.b3dm|token|secret/);
+        assert.ok(result.owner.tiles.some(row=>row.distanceDemand?.target>100));
+      }
+      results.push(result);
+    }
+    assert.deepEqual(results[1].limits,results[0].limits,'evaluation changed concurrency or memory budget');
+    assert.equal(results[1].limits.workers,2);
+  } finally {
+    if(client){await client.command('Page.close',{},2_000).catch(()=>{});client.close();}
+    if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5_000))]);}
+    if(server)await new Promise(resolve=>server.close(resolve));
+    if(vite)await vite.close();
+    releaseLock();await removeBrowserProfile(profile);
+  }
+});
+
 test('browser defaults to orthophoto when LOD is unavailable and tears down point-cloud runtime across history navigation', { timeout: 60_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) {
@@ -3794,6 +3930,12 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
 
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client;
+  const started = Date.now();
+  const stage = async (label, expression) => {
+    t.diagnostic(`lifecycle entering ${label} at ${Date.now()-started}ms`);
+    await waitFor(client, expression, `lifecycle ${label}`, 15_000);
+    t.diagnostic(`lifecycle completed ${label} at ${Date.now()-started}ms`);
+  };
   try {
     const fixture = await startStreamingOnlyFixture({
       ortho: '/fixtures/orthophoto.tif',
@@ -3812,17 +3954,20 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
     await client.command('Page.enable');
     await client.command('Runtime.enable');
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
-    await waitFor(client, `location.search.includes('view=ortho') && document.querySelector('#tab-ortho')?.classList.contains('active')`, 'orthophoto fallback was not selected');
+    await stage('orthophoto fallback selection', `location.search.includes('view=ortho') && document.querySelector('#tab-ortho')?.classList.contains('active')`);
+    await stage('orthophoto raster rendered', `(() => {const image=document.querySelector('.leaflet-image-layer');
+      return image?.complete && image.naturalWidth>0 && getComputedStyle(document.querySelector('#error-panel')).display==='none';})()`);
+    assert.ok(fixture.requests.includes('/fixtures/orthophoto.tif'), 'raster fixture was not requested');
 
     await client.evaluate(`document.querySelector('#tab-cloud').click()`);
-    await waitFor(client, `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`, 'point-cloud mode did not start');
+    await stage('point-cloud iframe start', `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`);
     await client.evaluate(`document.querySelector('#tab-ortho').click()`);
-    await waitFor(client, `location.search.includes('view=ortho') && !document.querySelector('#pc-iframe')`, 'leaving point cloud did not stop its iframe');
+    await stage('point-cloud iframe teardown', `location.search.includes('view=ortho') && !document.querySelector('#pc-iframe')`);
 
     await client.evaluate('history.back()');
-    await waitFor(client, `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`, 'browser history did not restore point-cloud mode');
+    await stage('history restores point cloud', `location.search.includes('view=cloud') && Boolean(document.querySelector('#pc-iframe'))`);
     await client.command('Page.reload');
-    await waitFor(client, `location.search.includes('view=cloud') && document.querySelector('#tab-cloud')?.classList.contains('active') && Boolean(document.querySelector('#pc-iframe'))`, 'refresh did not preserve point-cloud mode');
+    await stage('refresh preserves point cloud', `location.search.includes('view=cloud') && document.querySelector('#tab-cloud')?.classList.contains('active') && Boolean(document.querySelector('#pc-iframe'))`);
 
     assert.equal(fixture.requests.filter((requestPath) => requestPath === fixture.glbPath).length, 0, 'view lifecycle fetched the original GLB');
   } finally {
