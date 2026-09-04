@@ -3,6 +3,10 @@
 ## Scope and status
 
 Candidate branch: `codex/hermes-medium-demand-evaluation`.
+Implementation commit: `413a00ca39bde77c3193dd0af20c05625807d442`.
+The branch and image are local-only; they have not been pushed to origin or a
+registry. Hermes needs access to this candidate checkout or an explicitly arranged
+transfer before running the comparison; fetching origin alone will not obtain it.
 Baseline: `26643bec38765f1af1d447a90afd87bb89fde70d`.
 The candidate also contains local photo/camera/navigation commit `c2c2148`;
 see `PHOTO_CAMERA_NAVIGATION_QA.md` for those separate changes.
@@ -164,6 +168,22 @@ baseline regressions and one actual-main distance/timing A/B test using real KTX
 The A/B test asserts both near leaves retain raw detail, at least six background
 branches remain coarse, every branch has strict parent-XOR-child cover, cache and
 all queue limits match baseline, and real texture-worker timing events are recorded.
+This is targeted browser coverage, not a rerun of every browser acceptance case.
+
+The exact local runtime image `ltds-viewer:hermes-eval-413a00c` built successfully
+from the implementation commit. Its local image ID is
+`sha256:258c6de75eaf5804943c027267a2a599941a3e9550449787dd1dded51fb1d0d4`,
+the revision label matches, and runtime user is `568:568`.
+With networking disabled and no production mounts, the packaged converter smoke
+test passed (`schemaVersion: 4`, 57 artifacts, 83 compressed textures), and both
+live production-readiness tests passed against that exact image. The tests use
+synthetic fixtures; they do not test the real Rome/Church derivatives.
+
+Build warnings remain: Vite reports a large viewer chunk and the existing
+loaders.gl CommonJS/ESM warning; `npm ci --omit=dev` reports three moderate
+dependency vulnerabilities. Dependency manifests were not changed or automatically
+upgraded in this task. These warnings were not treated as evidence of an LOD fix
+or silently removed from the release assessment.
 
 Reproduce the new browser test:
 
