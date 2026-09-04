@@ -174,6 +174,12 @@ documentation-only commits may record additional evidence).
   raw-SSE stress/retention fixtures explicitly disable the new selection policy;
   the distance A/B compares explicit-off, normal default-on, and explicit-on.
   Real KTX2, production CSP, photos, map lifecycle, and workspace/share UI are covered.
+- A no-repository-write replay measured actual synthetic downloads: explicit-off
+  requested 21 B3DM files (2 near leaves, 8 far leaves); default-on and explicit-on
+  each requested 14 (2 near leaves, 1 far leaf). Both kept near SSE 5.481 and
+  rendered coarse far parents. One far leaf was requested during startup, so the
+  policy does not claim zero transient over-demand. This is request-count evidence
+  for a small fixture, not Church/Rome byte savings or loading-time proof.
 - Vite production build passed. Three isolated temporary browser profiles remained
   locked by Windows at cleanup; these produced cleanup warnings, not failed tests.
 - Exact default-on local runtime image `ltds-viewer:preprod-distance-6606c73` built;
