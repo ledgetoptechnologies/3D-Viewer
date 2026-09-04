@@ -161,6 +161,33 @@ experiment requires the new stage evidence and the same frame-time/memory contro
 
 ## Local QA and remaining gates
 
+### Default-on pre-production verification
+
+Runtime code revision: `6606c737efac36983232c20f2ea243da0b5791af` (later
+documentation-only commits may record additional evidence).
+
+- Linux dev-image run: 117 non-browser files, 850 passed, no failures. The one
+  skipped opt-in host-volume test was then run separately on the host and passed,
+  including rootless storage persistence across restart and candidate-image upgrade.
+- Full real Edge gate: all 38 cases in LOD, project sharing, and workspace-project
+  browser suites passed, with no failures, cancellations, or skips. Historical
+  raw-SSE stress/retention fixtures explicitly disable the new selection policy;
+  the distance A/B compares explicit-off, normal default-on, and explicit-on.
+  Real KTX2, production CSP, photos, map lifecycle, and workspace/share UI are covered.
+- Vite production build passed. Three isolated temporary browser profiles remained
+  locked by Windows at cleanup; these produced cleanup warnings, not failed tests.
+- Exact default-on local runtime image `ltds-viewer:preprod-distance-6606c73` built;
+  local image ID `sha256:10578a25b04fb64eb1af74ab3e0e3a29ee91c47d873907f7a0d669c77327f6f7`.
+  Conversion/provenance smoke passed with 57 artifacts and 83 compressed textures;
+  both live readiness tests passed with networking disabled and no production mounts.
+
+This clears the local regression gates for the owner's pre-production rollout.
+GitHub CI and image publication must also succeed before pulling the update.
+The real Church/Rome visual and loading-time comparison remains open and is the
+purpose of enabling this pre-production trial; synthetic success is not that proof.
+
+### Initial opt-in candidate verification
+
 Completed locally: production frontend build; 193 focused policy, real-traversal,
 diagnostics, decoder, cache, regional-fallback, photo, camera, navigation, and runtime
 wiring tests; and 9 production-runtime/readiness tests with the repository's serial
