@@ -67,7 +67,7 @@ test('Potree r124 allocates every shared glyph instance-color buffer before the 
   assert.ok(allocation < zeroCount, 'legacy Three allocates from mesh.count, so colors must precede count=0');
 });
 
-test('point-cloud hover follows source indices when representative draw slots change', async () => {
+test('point-cloud hover follows source indices when viewport culling changes draw slots', async () => {
   const THREE = await import('three');
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
@@ -91,17 +91,57 @@ test('point-cloud hover follows source indices when representative draw slots ch
   }
   const normal = body.getColorAt(0, new THREE.Color()).toArray();
   assert.equal(layer.setHovered(1), true);
-  const highlighted = body.getColorAt(0, new THREE.Color()).toArray();
+  assert.equal(body.count, 3, 'all overlapping cameras are drawn');
+  const highlighted = body.getColorAt(1, new THREE.Color()).toArray();
   assert.notDeepEqual(highlighted, normal);
 
-  camera.position.set(0, 0, -3);
-  camera.lookAt(0, 0, 0);
+  camera.position.set(0, 0, -1.5);
+  camera.lookAt(0, 0, -2);
   camera.updateMatrixWorld(true);
   layer.updateView(true);
   const replacement = body.getColorAt(0, new THREE.Color()).toArray();
   replacement.forEach((component, index) => assert.ok(Math.abs(component - normal[index]) < 1e-9));
   assert.equal(layer.setHovered(0), true);
   assert.notDeepEqual(body.getColorAt(0, new THREE.Color()).toArray(), normal);
+  layer.dispose();
+});
+
+test('model and cloud retain all crowded cameras through pan and depth-order changes', async () => {
+  const model = await import('../camera-markers.mjs');
+  const cameras = Array.from({ length: 4500 }, (_, index) => ({ index, x: 18, y: 18, depth: 1 + index }));
+  for (const pan of [-8, -1, 0, 1, 8]) {
+    const moved = cameras.map(candidate => ({ ...candidate, x: candidate.x + pan, depth: 5000 - candidate.depth })).reverse();
+    const selected = selectCameraMarkerRepresentatives(moved, { width: 100, height: 100 });
+    assert.deepEqual(selected, cameras.map(candidate => candidate.index));
+    assert.deepEqual(selected, model.selectCameraMarkerRepresentatives(moved, { width: 100, height: 100 }));
+  }
+});
+
+test('point-cloud instance transforms stay at capture poses during small pan and orbit', async () => {
+  const THREE = await import('three');
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  camera.lookAt(0, 0, -2);
+  camera.updateMatrixWorld(true);
+  const dom = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+  const layer = createPointCloudCameraLayer({ THREE, scene, dom, getCamera: () => camera });
+  layer.setMarkers([
+    { translation: [0, 0, -2], rotation: [0, 0, 0] },
+    { translation: [0.01, 0, -2], rotation: [0, 0, Math.PI] },
+    { translation: [-0.01, 0, -2], rotation: [0, 0, 0] },
+  ]);
+  layer.setVisible(true);
+  const snapshots = layer.group.children.map(mesh => Array.from(mesh.instanceMatrix.array));
+  for (const offset of [-0.05, -0.01, 0.01, 0.05]) {
+    camera.position.set(offset, 0, 0);
+    camera.lookAt(offset / 2, 0, -2);
+    camera.updateMatrixWorld(true);
+    layer.updateView(true);
+    layer.group.children.forEach((mesh, index) => {
+      assert.equal(mesh.count, 3);
+      assert.deepEqual(Array.from(mesh.instanceMatrix.array), snapshots[index]);
+    });
+  }
   layer.dispose();
 });
 

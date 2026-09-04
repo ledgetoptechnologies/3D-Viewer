@@ -127,6 +127,8 @@ test('admin review sessions expose only an exact review-ready derived version an
   assert.equal(redeemResponse.status, 200);
   const session = await redeemResponse.json();
   assert.equal(session.sessionMode, 'review');
+  assert.equal(session.permissions.cameraPhotoDownload, true, 'staff review offers original-photo download');
+  assert.equal(session.permissions.download, false, 'photo downloads do not enable general model downloads');
   assert.equal(session.reviewAttemptId, attempt.id);
   assert.equal(session.model.activeVersion.id, versionId);
   assert.ok(session.model.assets.glb);
@@ -148,6 +150,8 @@ test('admin review sessions expose only an exact review-ready derived version an
   const renewed = await renewalResponse.json();
   assert.equal(renewed.accessToken, session.accessToken);
   assert.equal(renewed.sessionId, session.sessionId);
+  assert.equal(renewed.permissions.cameraPhotoDownload, true);
+  assert.equal(renewed.permissions.download, false);
 
   database.prepare("UPDATE processing_attempts SET status='published' WHERE id=?").run(attempt.id);
   assert.equal((await fetch(`${base}/api/v1/sessions/current`, { headers: { authorization: `Bearer ${session.accessToken}` } })).status, 401);

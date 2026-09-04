@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createReadStream, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
+import { deflateSync } from 'node:zlib';
 import { createServer as createViteServer } from 'vite';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
@@ -15,6 +16,99 @@ import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
 const GiB = 1024 * 1024 * 1024;
+
+// Lossless one-source-pixel stripes expose enlargement of a fit-sized raster.
+// A 1x1 fixture can verify routing, but cannot verify photo detail at native size.
+function stripedPhotoPng(width, height) {
+  const chunk = (type, body) => {
+    const data = Buffer.concat([Buffer.from(type), body]);
+    let crc = 0xffffffff;
+    for (const byte of data) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+    const header = Buffer.alloc(4), tail = Buffer.alloc(4);
+    header.writeUInt32BE(body.length); tail.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+    return Buffer.concat([header, data, tail]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 2;
+  const pixels = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const offset = y * (width * 3 + 1) + 1 + x * 3;
+    pixels.fill(x % 2 ? 255 : 0, offset, offset + 3);
+  }
+  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+function assertPhotoPanBounds({ wrap, image }) {
+  for (const [start, end] of [['l', 'r'], ['t', 'b']]) {
+    if (image[end] - image[start] >= wrap[end] - wrap[start] - 2) {
+      assert.ok(image[start] <= wrap[start] + 2 && image[end] >= wrap[end] - 2,
+        `zoomed photo exposed excess background on ${start}/${end}: ${JSON.stringify({ wrap, image })}`);
+    } else {
+      assert.ok(Math.abs(image[start] + image[end] - wrap[start] - wrap[end]) <= 2,
+        `letterboxed photo moved off center on ${start}/${end}: ${JSON.stringify({ wrap, image })}`);
+    }
+  }
+}
+
+async function assertStableMapCameraAnchors(client) {
+  // This fixture exercises the real Leaflet marker layer without a GeoTIFF
+  // response. These assertions prove camera anchoring, not raster rendering.
+  await waitFor(client, `!document.querySelector('#leaflet-map .leaflet-zoom-anim')`, 'initial map zoom did not settle');
+  await client.evaluate(`(() => {
+    window.__mapPinNodes=Array.from(document.querySelectorAll('.map-camera-marker'));
+    window.__mapPinSources=window.__ltdsMapCamDrawToSource.slice();
+  })()`);
+  const read = () => client.evaluate(`(() => {
+    const nodes=Array.from(document.querySelectorAll('.map-camera-marker'));
+    return {sources:window.__ltdsMapCamDrawToSource.slice(),same:nodes.every((node,index)=>node===window.__mapPinNodes[index]),
+      points:nodes.map(node=>{const r=node.getBoundingClientRect();const style=getComputedStyle(node);return {
+        x:r.left+r.width/2,y:r.bottom,width:r.width,height:r.height,left:parseFloat(style.marginLeft),top:parseFloat(style.marginTop),
+        viewBox:node.querySelector('svg')?.getAttribute('viewBox'),transform:node.querySelector('svg')?.style.transform||''};})};
+  })()`);
+  const before = await read(); assert.deepEqual(before.sources, [0, 1, 2]);
+  for (const point of before.points) {
+    assert.equal(point.viewBox, '0 0 24 32'); assert.equal(point.transform, '', 'map pin body must remain upright');
+    assert.ok(Math.abs(point.left + point.width / 2) < 1 && Math.abs(point.top + point.height) < 1,
+      'map pin tip must stay attached to its source coordinate');
+  }
+  const separation = value => Math.hypot(value.points[2].x-value.points[0].x,value.points[2].y-value.points[0].y);
+  await client.evaluate(`document.querySelector('.leaflet-control-zoom-in').click()`);
+  try { await waitFor(client, `(() => {const nodes=Array.from(document.querySelectorAll('.map-camera-marker'));if(nodes.length!==3)return false;
+    const a=nodes[0].getBoundingClientRect(),b=nodes[2].getBoundingClientRect();
+    return !document.querySelector('#leaflet-map .leaflet-zoom-anim') && Math.hypot(b.left-a.left,b.top-a.top)>${separation(before) + 0.25};})()`, 'map camera anchors did not follow map zoom', 4_000); }
+  catch(error) { throw new Error(`${error.message}; before=${JSON.stringify(before)}; after=${JSON.stringify(await read())}; controls=${JSON.stringify(await client.evaluate(`({zoom:document.querySelector('.leaflet-control-zoom-in')?.outerHTML,map:document.querySelector('#leaflet-map')?.className})`))}`); }
+  const zoomed = await read(); assert.equal(zoomed.same, true, 'map zoom recreated the source markers');
+  assert.deepEqual(zoomed.sources, before.sources, 'map zoom changed source photo identities');
+  assert.ok(Math.abs(separation(zoomed) - 2 * separation(before)) < 3, 'geographic marker separation must follow one map zoom level');
+  for (let index=0;index<3;index++) {
+    assert.ok(Math.abs(zoomed.points[index].width-before.points[index].width)<1 && Math.abs(zoomed.points[index].height-before.points[index].height)<1,
+      'map zoom changed the pin icon dimensions');
+  }
+  const area = await client.evaluate(`(() => {const r=document.querySelector('#leaflet-map').getBoundingClientRect();return {x:r.left+r.width*.7,y:r.top+r.height*.7};})()`);
+  await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:area.x,y:area.y,button:'left',buttons:1,clickCount:1});
+  await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:area.x+70,y:area.y+45,button:'left',buttons:1});
+  await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:area.x+70,y:area.y+45,button:'left',buttons:0,clickCount:1});
+  await waitFor(client, `(() => {const r=document.querySelector('.map-camera-marker').getBoundingClientRect();return Math.hypot(r.left+r.width/2-${zoomed.points[0].x},r.bottom-${zoomed.points[0].y})>20;})()`, 'map drag did not move its source anchors');
+  const panned = await read(); assert.equal(panned.same, true, 'map drag recreated source markers');
+  assert.deepEqual(panned.sources, before.sources);
+  for (let index=1;index<3;index++) {
+    assert.ok(Math.abs((panned.points[index].x-zoomed.points[index].x)-(panned.points[0].x-zoomed.points[0].x))<2
+      && Math.abs((panned.points[index].y-zoomed.points[index].y)-(panned.points[0].y-zoomed.points[0].y))<2,
+    'map pan changed relative source camera locations');
+  }
+  // Leaflet deliberately suppresses the click immediately after a drag. Start
+  // a fresh stationary pointer sequence before the later marker-click check.
+  await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:area.x,y:area.y,button:'left',buttons:1,clickCount:1});
+  await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:area.x,y:area.y,button:'left',buttons:0,clickCount:1});
+  if (process.env.LTDS_PHOTO_QA_ARTIFACT_DIR) {
+    const shot=await client.command('Page.captureScreenshot',{format:'png'});
+    writeFileSync(path.join(process.env.LTDS_PHOTO_QA_ARTIFACT_DIR,'ortho-camera-pins-qa.png'),Buffer.from(shot.data,'base64'));
+  }
+}
 
 // Use the production server's actual header expression, not a permissive test
 // approximation. Importing index.js would also start its DB and HTTP listener.
@@ -343,6 +437,7 @@ async function startFixture(tileRoot, {
   configureConfig = null,
   contentSecurityPolicy = null,
   productionBuild = false,
+  cameraPhotoBodies = null,
 } = {}) {
   const vite = productionBuild ? null : await createViteServer({
     root,
@@ -375,6 +470,14 @@ async function startFixture(tileRoot, {
       reply.end(JSON.stringify(config));
       return;
     }
+    if (['/api/share/photo-allowed', '/api/share/photo-staff', '/api/share/photo-denied'].includes(url.pathname)) {
+      reply.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      reply.end(JSON.stringify({ ...config, permissions: {
+        measure: true, cameras: true, download: url.pathname.endsWith('photo-allowed'),
+        cameraPhotoDownload: url.pathname.endsWith('photo-staff'),
+      } }));
+      return;
+    }
     if (url.pathname === `${assetPrefix}shots.geojson`) {
       const center = config.georef.bboxCenter;
       const features = [0, 1, 2].map((index) => {
@@ -390,6 +493,7 @@ async function startFixture(tileRoot, {
             translation,
             rotation: [0, 0, 0],
             filename: `photo-${index}.jpg`,
+            capture_time: 1_775_577_600,
           },
         };
       });
@@ -400,7 +504,7 @@ async function startFixture(tileRoot, {
     if (url.pathname.startsWith(`${assetPrefix}camera-photos/`)) {
       const filename = decodeURIComponent(url.pathname.slice(`${assetPrefix}camera-photos/`.length));
       if (!/^photo-[0-2]\.jpg$/.test(filename)) { reply.writeHead(404); reply.end(); return; }
-      const body = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8ZkAAAAASUVORK5CYII=', 'base64');
+      const body = cameraPhotoBodies?.[filename] || Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8ZkAAAAASUVORK5CYII=', 'base64');
       reply.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': body.length, 'Cache-Control': 'no-store' });
       reply.end(body);
       return;
@@ -1229,7 +1333,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     assert.equal(visibleCameras.totalInstances, visibleCameras.drawn * 4, 'each selected camera renders body, face, amber cue, and orange image-up tab');
     assert.deepEqual(visibleCameras.meshes.map(item => item.count).sort((a, b) => a - b), [visibleCameras.drawn, visibleCameras.drawn, visibleCameras.drawn, visibleCameras.drawn]);
     assert.equal(visibleCameras.drawToSource.length, visibleCameras.drawn);
-    assert.deepEqual(visibleCameras.meshes.map(item => item.color).sort((a, b) => a - b), [0x6F7782, 0xD8DEE6, 0xF8CB2E, 0xEE5007].sort((a, b) => a - b));
+    assert.deepEqual(visibleCameras.meshes.map(item => item.color).sort((a, b) => a - b), [0xD8DEE6, 0xEE5007, 0xF8CB2E, 0xEE5007].sort((a, b) => a - b));
     const cameraClick = await client.evaluate(`(() => {
       const meshes = [];
       window.__ltds.scene().traverse((object) => { if (object.isInstancedMesh && object.count === window.__ltdsCamDrawn && object.parent?.parent?.visible) meshes.push(object); });
@@ -1283,9 +1387,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1 });
     const clampedPhoto = await client.evaluate(`(() => { const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect(); return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom},transform:getComputedStyle(document.querySelector('#photo-img')).transform}; })()`);
     assert.notEqual(clampedPhoto.transform, 'none', 'expanded wheel did not zoom the camera photo');
-    assert.ok(clampedPhoto.image.l <= clampedPhoto.wrap.l + 2 && clampedPhoto.image.t <= clampedPhoto.wrap.t + 2
-      && clampedPhoto.image.r >= clampedPhoto.wrap.r - 2 && clampedPhoto.image.b >= clampedPhoto.wrap.b - 2,
-    `expanded pan exposed empty frame background: ${JSON.stringify(clampedPhoto)}`);
+    assertPhotoPanBounds(clampedPhoto);
     await client.evaluate(`document.querySelector('#photo-close').click()`);
     await client.evaluate(`(() => { window.__ltds.state.activeMode='cloud'; window.__ltds.state.cloudMode='direct'; return true; })()`);
     await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x: cameraClick.x, y: cameraClick.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -1297,8 +1399,9 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await client.evaluate(`document.querySelector('#tab-ortho').click()`);
     await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
     const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
-    assert.ok(mapCamera.drawn > 0 && mapCamera.drawn <= 1200, JSON.stringify(mapCamera));
+    assert.equal(mapCamera.drawn, 3, 'map must preserve every source photo marker');
     assert.equal(mapCamera.icons, mapCamera.drawn);
+    await assertStableMapCameraAnchors(client);
     await client.evaluate(`document.querySelector('.map-camera-marker').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'orthophoto camera did not open the shared photo preview');
     const mapPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
@@ -1689,7 +1792,7 @@ test('browser close view refines at the default Detail and small motion retains 
   }
 });
 
-test('browser camera layer activates a bounded representative draw set', { timeout: 90_000 }, async (t) => {
+test('browser camera layer preserves all in-view source markers and map anchors through motion', { timeout: 90_000 }, async (t) => {
   const tileRoot = process.env.LTDS_LOD_TEST_TILE_ROOT;
   const executable = browserPath();
   if (!tileRoot || !existsSync(path.join(tileRoot, 'tileset.json')) || !executable) {
@@ -1751,14 +1854,15 @@ test('browser camera layer activates a bounded representative draw set', { timeo
         if (!object.isInstancedMesh || !object.parent?.parent?.visible) return;
         const c = new object.material.color.constructor();
         object.getColorAt(0, c);
-        meshes.push({ count: object.count, color: c.getHex(), opacity: object.material.opacity, renderOrder: object.renderOrder });
+        meshes.push({ count: object.count, color: c.getHex(), opacity: object.material.opacity, renderOrder: object.renderOrder, unlit: object.material.isMeshBasicMaterial === true });
       });
       return { source: window.__ltdsCams, drawn: window.__ltdsCamDrawn, meshes };
     })()`);
     assert.equal(state.source, 3);
     assert.ok(state.drawn >= 0 && state.drawn <= 3, JSON.stringify(state));
     assert.deepEqual(state.meshes.map((mesh) => mesh.count), [state.drawn, state.drawn, state.drawn, state.drawn]);
-    assert.deepEqual(state.meshes.map((mesh) => mesh.color), [0x6F7782, 0xD8DEE6, 0xF8CB2E, 0xEE5007]);
+    assert.deepEqual(state.meshes.map((mesh) => mesh.color), [0xD8DEE6, 0xEE5007, 0xF8CB2E, 0xEE5007]);
+    assert.ok(state.meshes.every(mesh => mesh.unlit), 'model camera glyph colors must not vary with scene lighting');
     assert.deepEqual(state.meshes.map((mesh) => mesh.opacity), [0.82, 0.82, 0.82, 0.82]);
     assert.deepEqual(state.meshes.map((mesh) => mesh.renderOrder), [0, 1, 2, 3]);
 
@@ -1796,6 +1900,7 @@ test('browser camera layer activates a bounded representative draw set', { timeo
       writeFileSync(`${process.env.LTDS_CAMERA_SCREENSHOT_PREFIX}-close.png`, Buffer.from(closeCapture.data, 'base64'));
     }
     const farScale = await setCameraOffset([100, 75, 100]);
+    assert.deepEqual(await client.evaluate('window.__ltdsCamDrawToSource'), [0, 1, 2], 'overlapping far cameras must all remain selectable');
     if (process.env.LTDS_CAMERA_SCREENSHOT_PREFIX) {
       const farCapture = await client.command('Page.captureScreenshot', { format: 'png' });
       writeFileSync(`${process.env.LTDS_CAMERA_SCREENSHOT_PREFIX}-far.png`, Buffer.from(farCapture.data, 'base64'));
@@ -1852,14 +1957,13 @@ test('browser camera layer activates a bounded representative draw set', { timeo
     await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 2, y: 2, button: 'left', buttons: 0, clickCount: 1 });
     const clampedPhoto = await client.evaluate(`(() => { const w=document.querySelector('#photo-imgwrap').getBoundingClientRect(),i=document.querySelector('#photo-img').getBoundingClientRect(); return {wrap:{l:w.left,t:w.top,r:w.right,b:w.bottom},image:{l:i.left,t:i.top,r:i.right,b:i.bottom},transform:getComputedStyle(document.querySelector('#photo-img')).transform}; })()`);
     assert.notEqual(clampedPhoto.transform, 'none', 'expanded wheel did not zoom the camera photo');
-    assert.ok(clampedPhoto.image.l <= clampedPhoto.wrap.l + 2 && clampedPhoto.image.t <= clampedPhoto.wrap.t + 2
-      && clampedPhoto.image.r >= clampedPhoto.wrap.r - 2 && clampedPhoto.image.b >= clampedPhoto.wrap.b - 2,
-    `expanded pan exposed empty frame background: ${JSON.stringify(clampedPhoto)}`);
+    assertPhotoPanBounds(clampedPhoto);
     await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-ortho').click()`);
     await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
     const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
-    assert.ok(mapCamera.drawn > 0 && mapCamera.drawn <= 1200, JSON.stringify(mapCamera));
+    assert.equal(mapCamera.drawn, 3, 'map must preserve every source photo marker');
     assert.equal(mapCamera.icons, mapCamera.drawn);
+    await assertStableMapCameraAnchors(client);
     await client.evaluate(`document.querySelector('.map-camera-marker').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'orthophoto camera did not open the shared photo preview');
     const mapPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
@@ -3518,6 +3622,168 @@ for (const { sameOwner, twoNear } of [{ sameOwner: false }, { sameOwner: true },
     }
   });
 }
+
+test('browser camera photo fills the window and preserves source pixels through zoom and bounded pan', { timeout: 90_000 }, async (t) => {
+  const executable = browserPath();
+  if (!executable) { t.skip('Chrome or Edge is required for photo rendering acceptance.'); return; }
+  const releaseLock = await acquireBrowserHarnessLock({ root });
+  let browser, profile, server, vite, client;
+  const cases = [
+    { name: 'landscape', width: 1440, height: 900, photoWidth: 1536, photoHeight: 1024 },
+    { name: 'ultrawide-portrait', width: 2560, height: 1080, photoWidth: 1024, photoHeight: 1536 },
+    { name: 'narrow-panorama', width: 390, height: 844, photoWidth: 2048, photoHeight: 512 },
+  ];
+  try {
+    const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'), {
+      cameraPhotoBodies: Object.fromEntries(cases.map((item, index) => [`photo-${index}.jpg`, stripedPhotoPng(item.photoWidth, item.photoHeight)])),
+    });
+    ({ server, vite } = fixture);
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-photo-window-browser-'));
+    const devToolsPort = await reserveDevToolsPort();
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${profile}`, 'about:blank',
+    ], { stdio: 'ignore' });
+    const devTools = await waitForDevTools(devToolsPort, browser);
+    const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+    client = await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');
+    await client.command('Runtime.enable');
+    await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `
+      window.__photoFullscreenCalls = 0;
+      Element.prototype.requestFullscreen = function () { window.__photoFullscreenCalls++; return Promise.reject(new Error('Unexpected device fullscreen')); };
+    ` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/view/photo-allowed` });
+    await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root)', 'photo fixture did not initialize');
+    await client.evaluate(`document.querySelector('#layer-cameras').click()`);
+    await waitFor(client, 'window.__ltdsCams === 3', 'photo fixture camera positions did not load');
+    // Exercise the real shared camera-open handler with its origin, source,
+    // correlation, permission and index checks; a point-cloud render is irrelevant here.
+    await client.evaluate(`(() => {
+      const frame = document.createElement('iframe'); frame.id = 'pc-iframe';
+      frame.dataset.correlationId = 'photo-ui-fixture'; frame.src = 'about:blank'; frame.style.display = 'none';
+      document.querySelector('#cloud-container').appendChild(frame);
+    })()`);
+    const readPhoto = () => client.evaluate(`(() => {
+      const frame=document.querySelector('#photo-frame'),wrap=document.querySelector('#photo-imgwrap'),img=document.querySelector('#photo-img');
+      const title=document.querySelector('#photo-title'),meta=document.querySelector('#photo-meta');
+      const rect=e=>{const r=e.getBoundingClientRect();return {l:r.left,t:r.top,r:r.right,b:r.bottom,width:r.width,height:r.height};};
+      return {frame:rect(frame),wrap:rect(wrap),image:rect(img),title:rect(title),meta:rect(meta),
+        filename:title.textContent,time:meta.textContent,source:img.currentSrc,download:document.querySelector('#photo-download').href,
+        downloadVisible:getComputedStyle(document.querySelector('#photo-download')).display!=='none',downloadFilename:document.querySelector('#photo-download').download,
+        naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight,layoutWidth:img.offsetWidth,
+        full:document.fullscreenElement!==null,fullscreenCalls:window.__photoFullscreenCalls};
+    })()`);
+    const drag = async (x, y, endX, endY) => {
+      await client.command('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+      await client.command('Input.dispatchMouseEvent', { type: 'mouseMoved', x: endX, y: endY, button: 'left', buttons: 1 });
+      await client.command('Input.dispatchMouseEvent', { type: 'mouseReleased', x: endX, y: endY, button: 'left', buttons: 0, clickCount: 1 });
+    };
+    for (const [index, item] of cases.entries()) {
+      await client.command('Emulation.setDeviceMetricsOverride', { width: item.width, height: item.height, deviceScaleFactor: 1, mobile: false });
+      await client.evaluate(`(() => { const frame=document.querySelector('#pc-iframe');
+        window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:frame.contentWindow,
+          data:{source:'ltds-pointcloud',type:'camera-open',correlationId:frame.dataset.correlationId,index:${index}}}));
+      })()`);
+      await waitFor(client, `document.querySelector('#photo-img').naturalWidth === ${item.photoWidth} && getComputedStyle(document.querySelector('#photo-img')).opacity === '1'`, `${item.name} original photo did not decode`);
+      const docked = await readPhoto();
+      assert.equal(docked.naturalHeight, item.photoHeight);
+      assert.equal(docked.source, docked.download, 'preview and download must identify the same original image');
+      assert.equal(docked.downloadVisible, true, 'permitted original download must be visible');
+      assert.equal(docked.downloadFilename, `photo-${index}.jpg`);
+      assert.ok(docked.frame.l >= 0 && docked.frame.r <= item.width + 1, `docked photo escaped viewport: ${JSON.stringify(docked)}`);
+      assert.ok(Math.abs(docked.image.width / docked.image.height - item.photoWidth / item.photoHeight) < 0.01);
+      const photoRequests = () => fixture.requests.filter(uri => uri.includes('/camera-photos/')).length;
+      const requestCount = photoRequests();
+      if (index === 0 && process.env.LTDS_PHOTO_QA_ARTIFACT_DIR) {
+        const shot = await client.command('Page.captureScreenshot', { format: 'png' });
+        writeFileSync(path.join(process.env.LTDS_PHOTO_QA_ARTIFACT_DIR, 'photo-docked-qa.png'), Buffer.from(shot.data, 'base64'));
+      }
+      await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
+      await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'expanded'`, 'photo did not expand');
+      const expanded = await readPhoto();
+      assert.deepEqual([expanded.frame.l, expanded.frame.t, expanded.frame.r, expanded.frame.b], [0, 0, item.width, item.height], 'inspector must fill browser viewport');
+      assert.deepEqual([expanded.wrap.l, expanded.wrap.t, expanded.wrap.r, expanded.wrap.b], [0, 0, item.width, item.height]);
+      assert.equal(expanded.filename, `photo-${index}.jpg`);
+      assert.ok(expanded.time.length > 0); assert.doesNotMatch(expanded.time, /altitude|MSL|feet|\bft\b/i);
+      assert.ok(expanded.title.l <= 20 && expanded.title.b >= item.height - 20, 'filename must remain at lower left');
+      assert.ok(expanded.meta.r >= item.width - 20 && expanded.meta.b >= item.height - 20, 'capture time must remain at lower right');
+      assert.ok(expanded.title.r <= expanded.meta.l + 1, 'footer labels overlap');
+      assert.equal(expanded.full, false); assert.equal(expanded.fullscreenCalls, 0);
+      assert.equal(photoRequests(), requestCount, 'expansion fetched the original again');
+      await drag(item.width / 2, item.height / 2, 8, 8);
+      const fitPanned = await readPhoto();
+      assert.deepEqual(fitPanned.image, expanded.image, 'fit-to-window photo must not pan');
+      // Zoom exactly to one CSS pixel per source pixel. DPR is explicitly one.
+      const factor = item.photoWidth / expanded.image.width;
+      await client.evaluate(`document.querySelector('#photo-imgwrap').dispatchEvent(new WheelEvent('wheel', {
+        deltaY:${100 * Math.log(factor) / Math.log(0.9)},clientX:${item.width / 2},clientY:${item.height / 2},bubbles:true,cancelable:true
+      }))`);
+      await waitFor(client, `Math.abs(document.querySelector('#photo-img').getBoundingClientRect().width - ${item.photoWidth}) < 1`, 'photo did not reach native scale');
+      const native = await readPhoto();
+      assert.ok(Math.abs(native.layoutWidth - item.photoWidth) < 1, 'zoom must give the source a native-size paint surface');
+      assert.ok(Math.abs(native.image.height - item.photoHeight) < 1);
+      const screenshot = await client.command('Page.captureScreenshot', { format: 'png', clip: { x: item.width / 2 - 32, y: item.height / 2 - 32, width: 64, height: 64, scale: 1 } });
+      const pixels = await client.evaluate(`(async () => {
+        const image = new Image(); image.src='data:image/png;base64,${screenshot.data}'; await image.decode();
+        const canvas=document.createElement('canvas');canvas.width=64;canvas.height=64;
+        const context=canvas.getContext('2d');context.drawImage(image,0,0);
+        const row=context.getImageData(0,32,64,1).data;return Array.from({length:64},(_,x)=>row[x*4]);
+      })()`);
+      assert.ok(pixels.slice(1).filter((value, i) => Math.abs(value - pixels[i]) > 200).length >= 58,
+        `${item.name}: native single-pixel source stripes became blurred in the painted overlay: ${pixels.join(',')}`);
+      if (index === 0 && process.env.LTDS_PHOTO_QA_ARTIFACT_DIR) {
+        const shot = await client.command('Page.captureScreenshot', { format: 'png' });
+        writeFileSync(path.join(process.env.LTDS_PHOTO_QA_ARTIFACT_DIR, 'photo-expanded-native-qa.png'), Buffer.from(shot.data, 'base64'));
+      }
+      for (const [endX, endY] of [[2, 2], [item.width - 2, item.height - 2]]) {
+        await drag(item.width / 2, item.height / 2, endX, endY);
+        assertPhotoPanBounds(await readPhoto());
+      }
+      assert.equal(photoRequests(), requestCount, 'zoom and pan fetched another photo representation');
+      if (index === 0) {
+        const downloadPath = path.join(profile, 'photo-downloads'); mkdirSync(downloadPath);
+        await client.command('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath });
+        await client.evaluate(`document.querySelector('#photo-download').click()`);
+        const filename = path.join(downloadPath, 'photo-0.jpg');
+        const deadline = Date.now() + 10_000;
+        while (!existsSync(filename) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+        assert.ok(existsSync(filename), 'clicking Download Original did not save the named photo');
+        assert.deepEqual(readFileSync(filename), stripedPhotoPng(item.photoWidth, item.photoHeight), 'download changed the original response bytes');
+      }
+      await client.evaluate(`document.querySelector('#photo-close').click()`);
+      assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('#photo-modal')).display`), 'none');
+    }
+    for (const [grant, allowed] of [['photo-staff', true], ['photo-denied', false]]) {
+      await client.command('Page.navigate', { url: `${fixture.origin}/view/${grant}` });
+      await waitFor(client, `location.pathname === '/view/${grant}' && Boolean(window.__ltds?.tiles()?.root)`, 'permission fixture did not initialize');
+      await client.evaluate(`document.querySelector('#layer-cameras').click()`);
+      await waitFor(client, 'window.__ltdsCams === 3', 'permission fixture cameras did not load');
+      await client.evaluate(`(() => {
+        const frame=document.createElement('iframe');frame.id='pc-iframe';frame.dataset.correlationId='download-permission';frame.style.display='none';
+        document.querySelector('#cloud-container').appendChild(frame);
+        window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:frame.contentWindow,
+          data:{source:'ltds-pointcloud',type:'camera-open',correlationId:frame.dataset.correlationId,index:0}}));
+      })()`);
+      await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1536 && getComputedStyle(document.querySelector('#photo-img')).opacity === '1'`, 'permission fixture photo did not decode');
+      const photo = await readPhoto();
+      assert.equal(photo.downloadVisible, allowed, `${grant} photo-download permission was ignored`);
+      assert.equal(photo.source, photo.download); assert.equal(photo.downloadFilename, 'photo-0.jpg');
+      await client.evaluate(`document.querySelector('#photo-imgwrap').click()`);
+      assert.equal((await readPhoto()).downloadVisible, allowed, 'expanding a photo changed download permissions');
+    }
+  } finally {
+    if (client) { await client.command('Page.close', {}, 2_000).catch(() => {}); client.close(); }
+    if (browser) {
+      const exited = new Promise(resolve => browser.once('exit', resolve)); browser.kill();
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+    }
+    if (server) await new Promise(resolve => server.close(resolve));
+    if (vite) await vite.close();
+    releaseLock(); await removeBrowserProfile(profile);
+  }
+});
 
 test('browser defaults to orthophoto when LOD is unavailable and tears down point-cloud runtime across history navigation', { timeout: 60_000 }, async (t) => {
   const executable = browserPath();

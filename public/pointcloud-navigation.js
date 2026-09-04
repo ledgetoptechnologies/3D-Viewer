@@ -62,6 +62,14 @@
     );
   }
 
+  function radiusAfterDolly(radius, displacementAlongView) {
+    // Potree derives its target from position + direction * radius. Preserve
+    // the focal plane as position moves, including an off-center wheel ray.
+    const previous = positiveFinite(radius, NAVIGATION_POLICY.minZoomDistance);
+    const displacement = Number(displacementAlongView);
+    return clampZoomDistance(previous - (Number.isFinite(displacement) ? displacement : 0));
+  }
+
   function isPlausibleAnchorDistance(hitDistance, referenceDistance) {
     if (!Number.isFinite(hitDistance) || !Number.isFinite(referenceDistance)
       || hitDistance < 0 || referenceDistance <= 0) return false;
@@ -96,6 +104,7 @@
     worldUnitsPerPixel,
     maxPanStep,
     clampZoomDistance,
+    radiusAfterDolly,
     isPlausibleAnchorDistance,
     canUseOverviewAnchor,
   });

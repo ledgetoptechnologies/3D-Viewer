@@ -169,6 +169,7 @@
       worldUnitsPerPixel,
       maxPanStep,
       clampZoomDistance,
+      radiusAfterDolly,
       isPlausibleAnchorDistance,
       canUseOverviewAnchor,
     } = window.LtdsPointCloudNavigation;
@@ -589,19 +590,24 @@
           cloudDiameter * NAVIGATION_POLICY.overviewBoundsPaddingRatio,
         );
         const boundsHit = this._ray(px).intersectBox(paddedBounds, new THREE.Vector3());
-        // The ray-box hit proves the cursor crosses the visible cloud volume,
-        // but the focal-plane point is the pivot we actually return. Validate
-        // that exact pivot as well so an edge ray cannot orbit empty space.
-        return boundsHit && canUseOverviewAnchor({ point: depthAnchor, bounds, referenceDistance, cloudDiameter })
-          ? depthAnchor.clone()
-          : null;
+        if (!boundsHit) return null;
+        // Ray arithmetic may land a few ulps outside a box face at UTM scale.
+        boundsHit.clamp(paddedBounds.min, paddedBounds.max);
+        // An oblique ray can cross the cloud while its focal-plane point lies
+        // past an edge. Use the bounded box intersection in that case, rather
+        // than disabling orbit on sparse overview points. Validate the exact
+        // returned pivot; off-cloud rays and close no-hit views still fail.
+        const fallback = canUseOverviewAnchor({ point: depthAnchor, bounds, referenceDistance, cloudDiameter })
+          ? depthAnchor : boundsHit;
+        return canUseOverviewAnchor({ point: fallback, bounds, referenceDistance, cloudDiameter })
+          ? fallback.clone() : null;
       }
       // Pan and wheel zoom retain a focal-plane fallback. Potree's default
       // 65px point window is never used, so sparse gaps cannot grab far points.
       _anchor(px) {
         const depthAnchor = this._depthAnchor(px);
         const hit = this._surfaceAnchor(px, depthAnchor);
-        if (hit && depthAnchor) {
+        if (hit) {
           return hit;
         }
         return depthAnchor || this.view.getPivot();
@@ -844,6 +850,8 @@
 
       _zoomTowards(target, s) {
         const view = this.view;
+        const previousPosition = view.position.clone();
+        const forward = view.getPivot().sub(previousPosition).normalize();
         const offset = new THREE.Vector3().subVectors(view.position, target);
         let d = offset.length() * s;
         d = clampZoomDistance(d);
@@ -856,6 +864,7 @@
         // the camera to snap-reaim at whatever point was under the cursor on
         // every scroll tick, causing a visible "swim" instead of a smooth zoom.
         view.position.copy(target).add(offset);
+        view.radius = radiusAfterDolly(view.radius, view.position.clone().sub(previousPosition).dot(forward));
         this.pivot.copy(view.getPivot());
       }
 

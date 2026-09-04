@@ -82,16 +82,16 @@ export function cameraFeatureImageUpBearing(feature) {
   const rotation = finiteTriplet(feature?.properties?.rotation);
   if (!rotation) return 0;
   const angle = Math.hypot(rotation[0], rotation[1], rotation[2]);
-  if (angle <= 1e-12) return 0;
+  if (angle <= 1e-12) return 180;
   // The 3D viewers apply the inverse WebODM angle-axis vector. Apply that
-  // same rotation to local +Y, whose marker tab represents image-up.
+  // same rotation to local -Y: OpenSfM camera +Y is image-down.
   const kx = -rotation[0] / angle;
   const ky = -rotation[1] / angle;
   const kz = -rotation[2] / angle;
   const cosine = Math.cos(angle);
   const sine = Math.sin(angle);
-  const east = -kz * sine + kx * ky * (1 - cosine);
-  const north = cosine + ky * ky * (1 - cosine);
+  const east = kz * sine - kx * ky * (1 - cosine);
+  const north = -cosine - ky * ky * (1 - cosine);
   if (Math.hypot(east, north) <= 1e-9) return 0;
   const degrees = Math.atan2(east, north) * 180 / Math.PI;
   return (degrees + 360) % 360;

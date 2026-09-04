@@ -326,7 +326,7 @@ test('camera layer renders and highlights the shared four-component WebODM-inspi
   assert.match(main, /const CAMERA_MARKER_COMPONENTS = Object\.freeze\(\['body', 'face', 'cue', 'tab'\]\)/);
   assert.match(main, /camMarkerMeshes = CAMERA_MARKER_COMPONENTS\.map\(\(component, index\) => \{/);
   assert.match(main, /new THREE\.InstancedMesh\(geometries\[component\], material\(\), camFeatures\.length\)/);
-  assert.match(main, /new THREE\.MeshStandardMaterial\(\{[\s\S]*opacity: CAMERA_MARKER_OPACITY\.normal[\s\S]*side: THREE\.FrontSide/);
+  assert.match(main, /new THREE\.MeshBasicMaterial\(\{[\s\S]*opacity: CAMERA_MARKER_OPACITY\.normal[\s\S]*side: THREE\.FrontSide/);
   assert.match(main, /let cameraMarkerUserScale = DEFAULT_CAMERA_MARKER_SCALE/);
   assert.match(main, /let camDrawToSource = \[\], camSourceToDraw = null/);
   assert.match(main, /const visibleSources = selectCameraMarkerRepresentatives\(candidates/);

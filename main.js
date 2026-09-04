@@ -262,6 +262,9 @@ let camGroupParent, camMarkerMeshes = [], camFeatures = [];
 let raycaster, hoverRaycaster;
 let map, orthoLayers = null, demLayers = { dsm: null, dtm: null };
 let mapCameraLayer = null;
+let mapCameraFeatures = null;
+let mapCameraScale = null;
+let mapCameraSources = [];
 let mapViews = {};            // per-tab map center/zoom retention
 let mapMeasure = null;        // active Leaflet distance/area sketch
 let mapMeasurements = [];     // completed Leaflet layer groups
@@ -1572,9 +1575,8 @@ async function loadCameras() {
     }
 
     const geometries = buildCameraMarkerGeometries();
-    const material = () => new THREE.MeshStandardMaterial({
+    const material = () => new THREE.MeshBasicMaterial({
       transparent: true, opacity: CAMERA_MARKER_OPACITY.normal, side: THREE.FrontSide, depthWrite: false,
-      metalness: 0, roughness: 0.5
     });
     camMarkerMeshes = CAMERA_MARKER_COMPONENTS.map((component, index) => {
       const mesh = new THREE.InstancedMesh(geometries[component], material(), camFeatures.length);
@@ -1630,13 +1632,13 @@ function mapCameraGlyph(feature) {
   const bearing = cameraFeatureImageUpBearing(feature).toFixed(2);
   return L.divIcon({
     className: 'map-camera-marker',
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-    html: `<svg viewBox="0 0 24 24" aria-hidden="true" style="transform:rotate(${bearing}deg)">
-      <path d="M3 8.5 5 19h14l2-10.5z" fill="#6f7782" stroke="#3e4650" stroke-width="1"/>
-      <rect x="5.2" y="9.3" width="13.6" height="8.2" rx="1" fill="#d8dee6"/>
-      <circle cx="8.5" cy="13.4" r="1" fill="#f8cb2e"/><circle cx="12" cy="13.4" r="1" fill="#f8cb2e"/><circle cx="15.5" cy="13.4" r="1" fill="#f8cb2e"/>
-      <rect x="10" y="3" width="4" height="5.5" rx=".7" fill="#ee5007"/>
+    iconSize: [size, size * 4 / 3],
+    iconAnchor: [size / 2, size * 4 / 3],
+    html: `<svg viewBox="0 0 24 32" width="${size}" height="${size * 4 / 3}" aria-hidden="true">
+      <path d="M12 31C9 26 1 17 1 12a11 11 0 0 1 22 0c0 5-8 14-11 19Z" fill="#ee5007" stroke="#c73a0a"/>
+      <path d="M5 9h3l1.5-2h5L16 9h3v10H5Z" fill="#fff"/>
+      <circle cx="12" cy="14" r="3" fill="#ee5007"/>
+      <path d="M12 1.5 10 4.5h4Z" fill="#f8cb2e" transform="rotate(${bearing} 12 12)"/>
     </svg>`,
   });
 }
@@ -1652,25 +1654,23 @@ function refreshMapCameraLayer() {
     return false;
   }
   if (!mapCameraLayer) mapCameraLayer = L.layerGroup();
+  // Leaflet owns zoom/pan transforms. Reuse source-anchored markers instead of
+  // choosing a different photo per screen cell every time the map moves.
+  if (mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale) {
+    mapCameraLayer.addTo(map);
+    window.__ltdsMapCamDrawn = mapCameraSources.length;
+    window.__ltdsMapCamDrawToSource = mapCameraSources.slice();
+    return true;
+  }
   mapCameraLayer.clearLayers();
-  const viewport = map.getSize();
   const positions = new Map();
-  const candidates = [];
   for (let index = 0; index < camFeatures.length; index += 1) {
     const position = cameraFeatureMapPosition(camFeatures[index], { projectedToLatLon: utmToLatLon });
     if (!position) continue;
     const latlng = L.latLng(position[0], position[1]);
-    const point = map.latLngToContainerPoint(latlng);
     positions.set(index, latlng);
-    candidates.push({ index, x: point.x, y: point.y, depth: 1 });
   }
-  const representatives = selectCameraMarkerRepresentatives(candidates, {
-    width: viewport.x,
-    height: viewport.y,
-    cellPixels: 26,
-    maxVisible: 1200,
-    margin: 20,
-  });
+  const representatives = [...positions.keys()];
   for (const source of representatives) {
     const marker = L.marker(positions.get(source), {
       icon: mapCameraGlyph(camFeatures[source]),
@@ -1684,6 +1684,9 @@ function refreshMapCameraLayer() {
     marker.addTo(mapCameraLayer);
   }
   mapCameraLayer.addTo(map);
+  mapCameraFeatures = camFeatures;
+  mapCameraScale = cameraMarkerUserScale;
+  mapCameraSources = representatives;
   window.__ltdsMapCamDrawn = representatives.length;
   window.__ltdsMapCamDrawToSource = representatives.slice();
   return true;
@@ -1861,20 +1864,24 @@ function highlightCam(idx) {
 const photoView = {
   scale: 1, tx: 0, ty: 0, dragging: false,
   sx: 0, sy: 0, stx: 0, sty: 0, moved: false,
-  naturalWidth: 4, naturalHeight: 3, presentation: 'docked',
+  naturalWidth: 4, naturalHeight: 3, baseWidth: 0, baseHeight: 0, presentation: 'docked',
 };
 
 function photoTransformBounds() {
   return {
-    baseWidth: dom.photoImg.offsetWidth || dom.photoImgwrap.clientWidth,
-    baseHeight: dom.photoImg.offsetHeight || dom.photoImgwrap.clientHeight,
+    baseWidth: photoView.baseWidth,
+    baseHeight: photoView.baseHeight,
     viewportWidth: dom.photoImgwrap.clientWidth,
     viewportHeight: dom.photoImgwrap.clientHeight,
   };
 }
 
 function applyPhotoTransform() {
-  dom.photoImg.style.transform = `translate(${photoView.tx}px, ${photoView.ty}px) scale(${photoView.scale})`;
+  // Paint the source at its zoomed layout size. Scaling a permanently promoted
+  // fit-sized layer can magnify its low-resolution compositor raster instead.
+  dom.photoImg.style.width = `${photoView.baseWidth * photoView.scale}px`;
+  dom.photoImg.style.height = `${photoView.baseHeight * photoView.scale}px`;
+  dom.photoImg.style.transform = `translate(${photoView.tx}px, ${photoView.ty}px)`;
   dom.photoImgwrap.classList.toggle('zoomed', photoView.presentation === 'expanded' && photoView.scale > 1);
 }
 
@@ -1891,9 +1898,9 @@ function resetPhotoView() {
 function layoutPhotoViewer() {
   if (dom.photoModal.style.display !== 'flex') return;
   const expanded = photoView.presentation === 'expanded';
-  const maxWidth = expanded ? window.innerWidth * 0.90 : Math.min(380, window.innerWidth - 28);
+  const maxWidth = expanded ? window.innerWidth : Math.min(380, window.innerWidth - 48);
   const maxHeight = expanded
-    ? window.innerHeight * 0.76
+    ? window.innerHeight
     : Math.min(420, Math.max(180, window.innerHeight - (window.innerWidth <= 640 ? 180 : 120)));
   const box = fitPhotoBox({
     naturalWidth: photoView.naturalWidth,
@@ -1902,9 +1909,11 @@ function layoutPhotoViewer() {
     maxHeight,
   });
   const frameWidth = Math.min(maxWidth, Math.max(expanded ? 280 : 220, box.width));
-  dom.photoFrame.style.width = `${frameWidth}px`;
-  dom.photoImgwrap.style.width = `${box.width}px`;
-  dom.photoImgwrap.style.height = `${box.height}px`;
+  photoView.baseWidth = box.width;
+  photoView.baseHeight = box.height;
+  dom.photoFrame.style.width = expanded ? '' : `${frameWidth + 22}px`;
+  dom.photoImgwrap.style.width = `${expanded ? maxWidth : box.width}px`;
+  dom.photoImgwrap.style.height = `${expanded ? maxHeight : box.height}px`;
   dom.photoImgwrap.style.alignSelf = 'center';
   clampAndApplyPhotoView();
 }
@@ -1925,15 +1934,12 @@ function openPhoto(idx) {
   if (!feat) return;
   const photoKey = normalizeCameraPhotoKey(feat.properties?.photoKey);
   const fn = photoKey ? photoKey.split('/').at(-1) : '';
-  const geometryAltitude = Number(feat.geometry?.coordinates?.[2]);
-  const translationAltitude = Number(feat.properties?.translation?.[2]);
-  const altitude = formatElevation(Number.isFinite(geometryAltitude) ? geometryAltitude
-    : (Number.isFinite(translationAltitude) ? translationAltitude : 0), DISPLAY_UNITS);
   const time = feat.properties.capture_time
     ? new Date(feat.properties.capture_time * 1000).toLocaleString()
     : '';
   dom.photoTitle.textContent = fn || 'Camera photo';
-  dom.photoMeta.textContent = `Altitude ${altitude} MSL${time ? '  ·  ' + time : ''}`;
+  dom.photoTitle.title = dom.photoTitle.textContent;
+  dom.photoMeta.textContent = time;
   dom.photoModal.style.display = 'flex';
   dom.photoModal.setAttribute('aria-hidden', 'false');
   photoView.naturalWidth = 4;
@@ -1964,7 +1970,7 @@ function openPhoto(idx) {
     layoutPhotoViewer();
     dom.photoSpinner.style.display = 'none';
     dom.photoImg.style.opacity = '1';
-    if (SHARE_PERMISSIONS.download) dom.photoDownload.style.display = '';
+    if (SHARE_PERMISSIONS.download || SHARE_PERMISSIONS.cameraPhotoDownload === true) dom.photoDownload.style.display = '';
   };
   dom.photoImg.onerror = () => {
     dom.photoSpinner.style.display = 'none';

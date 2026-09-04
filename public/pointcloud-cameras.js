@@ -4,15 +4,15 @@
   if (root) root.LtdsPointCloudCameras = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function createPointCloudCameraModule() {
   const CAMERA_MARKER_COLORS = Object.freeze({
-    body: 0x6F7782,
-    face: 0xD8DEE6,
+    body: 0xD8DEE6,
+    face: 0xEE5007,
     cue: 0xF8CB2E,
     tab: 0xEE5007,
   });
 
   const CAMERA_MARKER_OPACITY = Object.freeze({ normal: 0.82, hover: 1 });
   const DEFAULT_CAMERA_MARKER_SCALE = 0.5;
-  const CAMERA_MARKER_STYLE = Object.freeze({ width: Math.hypot(1.48, 1.13, 0.41), maxPixels: 10, cellPixels: 18, maxVisible: 4000, pickRadius: 12 });
+  const CAMERA_MARKER_STYLE = Object.freeze({ width: Math.hypot(1.48, 1.13, 0.42), maxPixels: 10, maxVisible: Infinity, pickRadius: 12 });
   const CAMERA_MARKER_COMPONENTS = Object.freeze(['body', 'face', 'cue', 'tab']);
 
   function cameraMarkerScaleForView({ baseScale = DEFAULT_CAMERA_MARKER_SCALE } = {}) {
@@ -21,28 +21,23 @@
     return Math.max(0.1, Math.min(4, requested));
   }
 
-  function selectCameraMarkerRepresentatives(candidates, { width, height, cellPixels = CAMERA_MARKER_STYLE.cellPixels, maxVisible = CAMERA_MARKER_STYLE.maxVisible, margin = CAMERA_MARKER_STYLE.maxPixels } = {}) {
-    const viewportWidth = Number(width), viewportHeight = Number(height), cellSize = Number(cellPixels);
+  function selectCameraMarkerRepresentatives(candidates, { width, height, maxVisible = CAMERA_MARKER_STYLE.maxVisible, margin = CAMERA_MARKER_STYLE.maxPixels } = {}) {
+    const viewportWidth = Number(width), viewportHeight = Number(height);
     const limit = Math.max(0, Math.floor(Number(maxVisible)) || 0);
     const viewportMargin = Math.max(0, Number(margin) || 0);
-    if (!Array.isArray(candidates) || viewportWidth <= 0 || viewportHeight <= 0
-      || !Number.isFinite(cellSize) || cellSize <= 0 || limit === 0) return [];
-    const cells = new Map();
+    if (!Array.isArray(candidates) || !Number.isFinite(viewportWidth) || !Number.isFinite(viewportHeight)
+      || viewportWidth <= 0 || viewportHeight <= 0 || limit === 0) return [];
+    // Match the model: retain real source identities, even when they overlap.
+    const sources = new Set();
     for (const candidate of candidates) {
       const index = Number(candidate?.index), x = Number(candidate?.x), y = Number(candidate?.y), depth = Number(candidate?.depth);
       if (!Number.isInteger(index) || index < 0 || !Number.isFinite(x) || !Number.isFinite(y)
         || !Number.isFinite(depth) || depth <= 0
         || x < -viewportMargin || x > viewportWidth + viewportMargin
         || y < -viewportMargin || y > viewportHeight + viewportMargin) continue;
-      const key = `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}`;
-      const current = cells.get(key);
-      if (!current || depth < current.depth || (depth === current.depth && index < current.index)) cells.set(key, { index, depth });
+      sources.add(index);
     }
-    return [...cells.values()]
-      .sort((left, right) => left.depth - right.depth || left.index - right.index)
-      .slice(0, limit)
-      .map((candidate) => candidate.index)
-      .sort((left, right) => left - right);
+    return [...sources].sort((left, right) => left - right).slice(0, limit);
   }
 
   function pushTriangle(target, a, b, c) { target.push(...a, ...b, ...c); }
@@ -74,7 +69,7 @@
       pushQuad(target, front[0], front[1], front[2], front[3]);
     }
   }
-  function pushDisc(target, centerX, centerY, z, radius, segments = 20) {
+  function pushDisc(target, centerX, centerY, z, radius, segments = 8) {
     for (let index = 0; index < segments; index += 1) {
       const angle0 = index / segments * Math.PI * 2;
       const angle1 = (index + 1) / segments * Math.PI * 2;
@@ -86,15 +81,21 @@
   }
 
   function cameraMarkerGeometryData() {
+    // OpenSfM: +Y is image-down and +Z forward. The tab follows -Y/image-up
+    // through the original shot rotation, including upside-down captures.
     const body = [];
     pushFrustumShell(body, { backX:0.74, backY:0.48, backZ:-0.26, frontX:0.58, frontY:0.40, frontZ:0.12 });
-    pushQuad(body, [-0.74,-0.48,-0.26],[-0.74,0.48,-0.26],[0.74,0.48,-0.26],[0.74,-0.48,-0.26]);
+    pushBox(body, -0.74, -0.64, -0.48, 0.48, -0.26, -0.20);
+    pushBox(body, 0.64, 0.74, -0.48, 0.48, -0.26, -0.20);
+    pushBox(body, -0.64, 0.64, -0.48, -0.38, -0.26, -0.20);
+    pushBox(body, -0.64, 0.64, 0.38, 0.48, -0.26, -0.20);
+    pushQuad(body, [-0.58,-0.40,0.12],[0.58,-0.40,0.12],[0.58,0.40,0.12],[-0.58,0.40,0.12]);
     const face = [];
-    pushQuad(face, [-0.56,-0.38,0.13],[0.56,-0.38,0.13],[0.56,0.38,0.13],[-0.56,0.38,0.13]);
+    pushQuad(face, [-0.64,-0.38,-0.27],[-0.64,0.38,-0.27],[0.64,0.38,-0.27],[0.64,-0.38,-0.27]);
     const cue = [];
-    for (const centerX of [-0.16, 0, 0.16]) pushDisc(cue, centerX, 0, 0.15, 0.055);
+    pushDisc(cue, 0, 0, 0.15, 0.24);
     const tab = [];
-    pushBox(tab, -0.13, 0.13, 0.38, 0.65, -0.04, 0.10);
+    pushBox(tab, 0.40, 0.60, -0.65, -0.46, -0.25, -0.10);
     return { body, face, cue, tab };
   }
 

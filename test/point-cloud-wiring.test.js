@@ -80,10 +80,9 @@ test('sparse cloud navigation rejects broad or distant background picks', () => 
   assert.match(pointCloudShell, /isPlausibleAnchorDistance\(camera\.position\.distanceTo\(hit\), referenceDistance\)/);
   assert.match(pointCloudShell, /_cloudBounds\(\)[\s\S]*this\.viewer\.scene\.getBoundingBox\(pointclouds\)/);
   assert.match(pointCloudShell, /paddedBounds = bounds\.clone\(\)\.expandByScalar\([\s\S]*this\._ray\(px\)\.intersectBox\(paddedBounds/);
-  assert.match(pointCloudShell, /boundsHit && canUseOverviewAnchor\(\{ point: depthAnchor, bounds, referenceDistance, cloudDiameter \}\)/,
-    'the exact returned focal-plane pivot must remain inside the cloud footprint');
-  assert.doesNotMatch(pointCloudShell, /canUseOverviewAnchor\(\{ point: boundsHit/,
-    'validating a different ray-box point must not authorize an out-of-bounds pivot');
+  assert.match(pointCloudShell, /const fallback = canUseOverviewAnchor\(\{ point: depthAnchor, bounds, referenceDistance, cloudDiameter \}\)\s*\? depthAnchor : boundsHit/);
+  assert.match(pointCloudShell, /canUseOverviewAnchor\(\{ point: fallback, bounds, referenceDistance, cloudDiameter \}\)\s*\? fallback\.clone\(\) : null/,
+    'the exact returned pivot remains inside the cloud footprint even at sparse oblique edges');
   assert.match(pointCloudShell, /orbitRadiansForPixels\(dx, h, gainScale\)/);
   assert.match(pointCloudShell, /worldUnitsPerPixel\(this\._screenRef, fov, h\)/);
   assert.match(pointCloudShell, /maxPanStep\(this\.view\.position\.distanceTo\(cur\)\)/);
@@ -128,7 +127,7 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(cameraRuntime, /for \(const mesh of componentMeshes\) \{\s*mesh\.count = visibleSources\.length/);
   assert.match(cameraRuntime, /if \(mesh\.instanceColor\) mesh\.instanceColor\.needsUpdate = true/);
   assert.match(cameraRuntime, /new THREE\.MeshBasicMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide[^}]*depthTest: false[^}]*depthWrite: false/);
-  assert.match(mainSource, /new THREE\.MeshStandardMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
+  assert.match(mainSource, /new THREE\.MeshBasicMaterial\(\{[^}]*opacity: CAMERA_MARKER_OPACITY\.normal[^}]*side: THREE\.FrontSide/);
   assert.match(cameraRuntime, /return drawToSource\[hit\.instanceId\]/);
   assert.match(cameraRuntime, /let hoveredSource = -1/);
   assert.match(cameraRuntime, /function setHovered\(sourceIndex\)/);
@@ -148,7 +147,7 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC \|\| mode === 'ortho'\)/);
   assert.match(mainSource, /async function loadCameras\(\) \{\s*if \(state\.camerasLoaded \|\| state\.camerasLoading \|\| !SHOTS_URL \|\| !SHARE_PERMISSIONS\.cameras\) return;/);
   assert.match(mainSource, /const visible = state\.activeMode === 'ortho' && state\.camerasVisible\s*&& state\.camerasLoaded && SHARE_PERMISSIONS\.cameras/);
-  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*state\.activeMode === 'ortho'[\s\S]*cameraFeatureMapPosition[\s\S]*selectCameraMarkerRepresentatives[\s\S]*openPhoto\(source\)/);
+  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*state\.activeMode === 'ortho'[\s\S]*mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale[\s\S]*cameraFeatureMapPosition[\s\S]*const representatives = \[\.\.\.positions\.keys\(\)\][\s\S]*openPhoto\(source\)/);
   assert.match(mainSource, /function localCameraRendererActive\(\)[\s\S]*state\.activeMode === 'model'[\s\S]*state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
   assert.match(mainSource, /function onPointerUp\(e\) \{\s*if \(!localCameraRendererActive\(\)\) return;/);
   assert.match(mainSource, /if \(state\.activeTool !== 'none'\) \{\s*if \(state\.activeMode !== 'model'\) return;/);

@@ -274,6 +274,8 @@ test('published v4 sessions validate with the unpublished OBJ proof without expo
   });
   assert.equal(response.status, 200);
   const current = await response.json();
+  assert.equal(current.permissions.cameraPhotoDownload, true, 'staff published sessions offer original-photo download');
+  assert.equal(current.permissions.download, false, 'general model downloads remain disabled');
   assert.ok(current.model.assets.tiles);
   assert.equal(current.model.assets.obj, null);
   assert.equal(current.model.lodProvenanceVerified, true);

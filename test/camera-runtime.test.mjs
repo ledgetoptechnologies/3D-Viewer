@@ -59,14 +59,15 @@ test('camera markers use a shared WebODM-inspired body, front cue, and LTDS imag
   const [cueX, cueY, cueZ] = bounds(geometry.cue);
   const [tabX, tabY, tabZ] = bounds(geometry.tab);
   assert.ok(bodyZ.min < 0 && bodyZ.max > 0, 'shallow body contains the camera position');
-  assert.ok(faceZ.min > bodyZ.max, 'light face marks local +Z/front');
-  assert.ok(cueZ.min > faceZ.max, 'amber samples sit visibly in front of the face');
+  assert.ok(faceZ.max < bodyZ.min, 'orange panel faces backward along local -Z');
+  assert.ok(cueZ.min > bodyZ.max, 'amber octagon sits visibly in front of the light frame');
+  assert.equal(geometry.cue.length, 8 * 9, 'one eight-sided forward cue');
   assert.ok(cueX.min > faceX.min && cueX.max < faceX.max);
   assert.ok(cueY.min > faceY.min && cueY.max < faceY.max);
-  assert.ok(tabY.max > bodyY.max && tabY.min >= faceY.max, 'orange tab protrudes along local +Y/image-up');
+  assert.ok(tabY.min < bodyY.min && tabY.max < 0, 'orange tab protrudes along local -Y/image-up');
   assert.ok(tabX.min > bodyX.min && tabX.max < bodyX.max);
-  assert.ok(tabZ.min >= bodyZ.min && tabZ.max <= faceZ.max);
-  assert.deepEqual(CAMERA_MARKER_COLORS, { body: 0x6F7782, face: 0xD8DEE6, cue: 0xF8CB2E, tab: 0xEE5007 });
+  assert.ok(tabZ.min >= bodyZ.min && tabZ.max <= bodyZ.max);
+  assert.deepEqual(CAMERA_MARKER_COLORS, { body: 0xD8DEE6, face: 0xEE5007, cue: 0xF8CB2E, tab: 0xEE5007 });
   assert.deepEqual(CAMERA_MARKER_OPACITY, { normal: 0.82, hover: 1 });
   assert.equal(DEFAULT_CAMERA_MARKER_SCALE, 0.5);
   const componentBounds = [geometry.body, geometry.face, geometry.cue, geometry.tab].map(bounds);
@@ -81,8 +82,7 @@ test('camera markers use a shared WebODM-inspired body, front cue, and LTDS imag
   assert.deepEqual(CAMERA_MARKER_STYLE, {
     width: markerDiameter,
     maxPixels: 10,
-    cellPixels: 18,
-    maxVisible: 4000,
+    maxVisible: Infinity,
     pickRadius: 12,
   });
 });
@@ -93,8 +93,32 @@ test('orthophoto camera placement prefers geographic geometry and otherwise uses
   const projected = { geometry: { type: 'Point', coordinates: [500000, 4800000, 220] }, properties: { translation: [500000, 4800000, 220], rotation: [0, 0, Math.PI / 2] } };
   assert.deepEqual(cameraFeatureMapPosition(projected, { projectedToLatLon: (e, n) => [n / 100000, e / 100000] }), [48, 5]);
   assert.equal(cameraFeatureMapPosition({ properties: {} }, { projectedToLatLon: () => [0, 0] }), null);
-  assert.equal(cameraFeatureImageUpBearing(geographic), 0);
-  assert.ok(Math.abs(cameraFeatureImageUpBearing(projected) - 90) < 1e-9, 'map tab follows the same inverse angle-axis transform as 3D');
+  assert.equal(cameraFeatureImageUpBearing(geographic), 180);
+  assert.ok(Math.abs(cameraFeatureImageUpBearing(projected) - 270) < 1e-9, 'map tab follows inverse angle-axis applied to image-up (-Y)');
+});
+
+test('image-up follows shot roll and pitch rather than being forced world-up', async () => {
+  const { Vector3, Quaternion } = await import('three');
+  for (const rotation of [[0, 0, 0], [0, 0, Math.PI], [Math.PI / 2, 0, 0], [0.7, -0.4, 1.2]]) {
+    const angle = Math.hypot(...rotation);
+    const quaternion = angle ? new Quaternion().setFromAxisAngle(new Vector3(...rotation).multiplyScalar(-1 / angle), angle) : new Quaternion();
+    const up = new Vector3(0, -1, 0).applyQuaternion(quaternion);
+    const forward = new Vector3(0, 0, 1).applyQuaternion(quaternion);
+    assert.ok(Math.abs(up.dot(forward)) < 1e-12, 'image-up remains perpendicular to optical direction');
+    const expected = Math.hypot(up.x, up.y) <= 1e-9 ? 0 : (Math.atan2(up.x, up.y) * 180 / Math.PI + 360) % 360;
+    assert.ok(Math.abs(cameraFeatureImageUpBearing({ properties: { rotation } }) - expected) < 1e-9);
+  }
+  assert.equal(cameraFeatureImageUpBearing({ properties: { rotation: [0, 0, Math.PI] } }), 0, 'a rolled shot reverses the tab bearing');
+});
+
+test('front octagon and rear orange panel have opposite outward triangle winding', () => {
+  const geometry = cameraMarkerGeometryData();
+  const normalZ = (positions) => {
+    const [ax, ay, , bx, by, , cx, cy] = positions;
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  };
+  assert.ok(normalZ(geometry.face) < 0, 'rear panel is visible from behind');
+  assert.ok(normalZ(geometry.cue) > 0, 'front cue is visible in the capture direction');
 });
 
 test('camera marker scale remains fixed in world space across zoom and depth', () => {
@@ -111,7 +135,7 @@ test('camera marker scale remains fixed in world space across zoom and depth', (
   assert.equal(cameraMarkerScaleForView({ baseScale: 10, depth: 10, fovDegrees: 60, zoom: 1, viewportHeight: 900 }), 4);
 });
 
-test('dense camera projections keep the nearest stable representative in each screen cell', () => {
+test('dense camera projections retain every overlapping capture in stable source order', () => {
   const candidates = [
     { index: 0, x: 5, y: 5, depth: 20 },
     { index: 1, x: 7, y: 7, depth: 10 },
@@ -121,11 +145,35 @@ test('dense camera projections keep the nearest stable representative in each sc
     { index: 5, x: 50, y: 50, depth: -1 },
     { index: 6, x: Number.NaN, y: 10, depth: 1 },
   ];
-  assert.deepEqual(selectCameraMarkerRepresentatives(candidates, { width: 100, height: 100 }), [1, 2, 3]);
+  assert.deepEqual(selectCameraMarkerRepresentatives(candidates, { width: 100, height: 100 }), [0, 1, 2, 3]);
   assert.deepEqual(
     selectCameraMarkerRepresentatives(candidates, { width: 100, height: 100, maxVisible: 2 }),
-    [1, 3],
-    'the nearest representatives survive the global cap while output remains source-index stable',
+    [0, 1],
+    'an explicit cap uses source identity rather than nearest-depth winners',
   );
   assert.deepEqual(selectCameraMarkerRepresentatives(candidates, { width: 0, height: 100 }), []);
+  assert.deepEqual(selectCameraMarkerRepresentatives(candidates, { width: Infinity, height: 100 }), []);
+});
+
+test('tiny pans, cell-boundary crossings, and orbit depth swaps never replace in-view cameras', () => {
+  const candidates = [
+    { index: 7, x: 17.9, y: 18.1, depth: 5 },
+    { index: 3, x: 18.1, y: 17.9, depth: 5.1 },
+    { index: 8, x: 18, y: 18, depth: 6 },
+  ];
+  for (const pan of [-8, -4, -2, -1, 0, 1, 2, 4, 8]) {
+    const moved = candidates.map((candidate, index) => ({
+      ...candidate, x: candidate.x + pan, y: candidate.y - pan,
+      depth: index === 0 ? 20 : 4,
+    })).reverse();
+    assert.deepEqual(selectCameraMarkerRepresentatives(moved, { width: 100, height: 100 }), [3, 7, 8]);
+  }
+});
+
+test('default marker inclusion has no hidden 4000-camera cap and deduplicates source IDs', () => {
+  const candidates = Array.from({ length: 4500 }, (_, index) => ({ index, x: 50, y: 50, depth: 1 + index }));
+  assert.deepEqual(
+    selectCameraMarkerRepresentatives([...candidates, candidates[0]], { width: 100, height: 100 }),
+    candidates.map(candidate => candidate.index),
+  );
 });
