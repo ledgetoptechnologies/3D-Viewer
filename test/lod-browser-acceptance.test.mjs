@@ -7,6 +7,7 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { createServer as createViteServer } from 'vite';
 import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
@@ -14,6 +15,18 @@ import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
 const GiB = 1024 * 1024 * 1024;
+
+// Use the production server's actual header expression, not a permissive test
+// approximation. Importing index.js would also start its DB and HTTP listener.
+function productionCspHeader() {
+  const source = readFileSync(path.join(root, 'server/index.js'), 'utf8');
+  const match = source.match(/res\.setHeader\('Content-Security-Policy', (\[[\s\S]*?\]\.join\('; '\))\);/);
+  assert.ok(match, 'Production CSP header layout changed; update the exact browser test adapter');
+  const header = runInNewContext(match[1], { frameAncestors: "'self'" });
+  assert.match(header, /'wasm-unsafe-eval'/);
+  assert.doesNotMatch(header, /(?:^|\s)'unsafe-eval'(?:\s|;|$)/);
+  return header;
+}
 
 async function removeBrowserProfile(profile) {
   if (!profile) return;
@@ -215,7 +228,7 @@ function foregroundAcceptanceFixture({
 // The near wall stays in view while a pitch reveals a tall, cold rear wall.
 // gltfUpAxis=Z keeps content and bounds in the same authored frame; the inverse
 // pi-X coordinates below account for the Viewer's tilesParent transform.
-function depthStackedAcceptanceFixture({ sameOwner = false } = {}) {
+function depthStackedAcceptanceFixture({ sameOwner = false, twoNear = false } = {}) {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   const local = ([x, y, z]) => [x, -y, -z];
   const rectangle = (left, right, bottom, top, z) => [
@@ -235,22 +248,32 @@ function depthStackedAcceptanceFixture({ sameOwner = false } = {}) {
     logicalMiB[uri] = miB;
     return { uri };
   };
-  const nearTriangles = rectangle(-6, 6, -3, 3, 0);
-  const near = {
-    boundingVolume: bounds(-6, 6, -3, 3, 0),
-    geometricError: 0.5,
-    refine: 'REPLACE',
-    content: addContent('near/region.b3dm', nearTriangles, sameOwner ? 32 : 64),
-    children: Array.from({ length: 4 }, (_, index) => {
-      const left = -6 + index * 3;
-      return {
-        boundingVolume: bounds(left, left + 3, -3, 3, 0),
-        geometricError: 0,
-        refine: 'REPLACE',
-        content: addContent(`near/fine-${index}.b3dm`, rectangle(left, left + 3, -3, 3, 0), 160),
-      };
-    }),
-  };
+  const nearTriangles = [];
+  const nearPoints = [];
+  const nearRegions = (twoNear ? [[-12, -6], [6, 12]] : [[-6, 6]]).map(([leftEdge, rightEdge], regionIndex) => {
+    const name = regionIndex === 0 ? 'near' : 'near-right';
+    const triangles = rectangle(leftEdge, rightEdge, -3, 3, 0);
+    nearTriangles.push(...triangles);
+    return {
+      boundingVolume: bounds(leftEdge, rightEdge, -3, 3, 0),
+      geometricError: 0.5,
+      refine: 'REPLACE',
+      content: addContent(`${name}/region.b3dm`, triangles, sameOwner ? 32 : 64),
+      children: Array.from({ length: 4 }, (_, index) => {
+        const width = (rightEdge - leftEdge) / 4;
+        const left = leftEdge + index * width;
+        // Do not place the multi-wall ray probes exactly on each rectangle's
+        // triangle diagonal: floating-point edge hits can miss both triangles.
+        nearPoints.push(twoNear ? [left + width * 0.37, 0.4, 0] : [left + width / 2, 0, 0]);
+        return {
+          boundingVolume: bounds(left, left + width, -3, 3, 0),
+          geometricError: 0,
+          refine: 'REPLACE',
+          content: addContent(`${name}/fine-${index}.b3dm`, rectangle(left, left + width, -3, 3, 0), 160),
+        };
+      }),
+    };
+  });
   const rearTriangles = [];
   const rear = [55, 67].flatMap((centerY, row) => [-12, -6, 0, 6, 12].map((centerX, column) => {
     const name = `rear-${row}-${column}`;
@@ -275,11 +298,12 @@ function depthStackedAcceptanceFixture({ sameOwner = false } = {}) {
     };
   }));
   const allTriangles = [...nearTriangles, ...rearTriangles];
-  const regions = [near, ...rear];
+  const regions = [...nearRegions, ...rear];
   return {
     assetBodies,
     logicalMiB,
-    nearUris: near.children.map(tile => tile.content.uri),
+    nearUris: nearRegions.flatMap(region => region.children.map(tile => tile.content.uri)),
+    nearPoints,
     rearPoints: [55, 67].flatMap(y => [-12, -6, 0, 6, 12].map(x => [x, y, -60])),
     tilesetJson: {
       asset: { version: '1.0', gltfUpAxis: 'Z' },
@@ -317,8 +341,10 @@ async function startFixture(tileRoot, {
   assetAliases = {},
   assetBodies = {},
   configureConfig = null,
+  contentSecurityPolicy = null,
+  productionBuild = false,
 } = {}) {
-  const vite = await createViteServer({
+  const vite = productionBuild ? null : await createViteServer({
     root,
     appType: 'spa',
     logLevel: 'silent',
@@ -331,6 +357,7 @@ async function startFixture(tileRoot, {
   const requests = [];
   config.assets.ortho = '/fixtures/orthophoto.tif';
   const server = createServer((request, reply) => {
+    if (contentSecurityPolicy) reply.setHeader('Content-Security-Policy', contentSecurityPolicy);
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     requests.push(url.pathname);
     if (url.pathname === '/api/v1/health') {
@@ -419,6 +446,17 @@ async function startFixture(tileRoot, {
       const delayMs = Math.max(0, Number(assetDelayMs(relative)) || 0);
       if (delayMs > 0) setTimeout(sendAsset, delayMs);
       else sendAsset();
+      return;
+    }
+    if (productionBuild) {
+      const dist = path.join(root, 'dist');
+      const file = path.resolve(dist, '.' + (url.pathname === '/' ? '/index.html' : url.pathname));
+      if (!file.startsWith(dist + path.sep) || !existsSync(file) || !statSync(file).isFile()) {
+        reply.writeHead(404); reply.end('not found'); return;
+      }
+      const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.wasm': 'application/wasm' };
+      reply.writeHead(200, { 'Content-Type': types[path.extname(file)] || contentType(file) });
+      createReadStream(file).pipe(reply);
       return;
     }
     vite.middlewares(request, reply);
@@ -3240,8 +3278,8 @@ test('depth-stacked cross-owner cached regional fallback preserves A foreground 
   }
 });
 
-for (const sameOwner of [false, true]) {
-  test(`depth-stacked ${sameOwner ? 'same-owner regional' : 'different-owner'} LOD preserves the near fine surface through sustained pitch and orbit`, { timeout: 180_000 }, async (t) => {
+for (const { sameOwner, twoNear } of [{ sameOwner: false }, { sameOwner: true }, { sameOwner: true, twoNear: true }]) {
+  test(`depth-stacked ${twoNear ? 'two-near-wall ' : ''}${sameOwner ? 'same-owner regional' : 'different-owner'} LOD preserves the near fine surface through sustained pitch and orbit`, { timeout: 180_000 }, async (t) => {
     const executable = browserPath();
     if (!executable) {
       t.skip('Chrome or Edge is required for depth-stacked LOD acceptance.');
@@ -3250,7 +3288,7 @@ for (const sameOwner of [false, true]) {
     const releaseLock = await acquireBrowserHarnessLock({ root });
     let browser, profile, server, vite, client;
     try {
-      const data = depthStackedAcceptanceFixture({ sameOwner });
+      const data = depthStackedAcceptanceFixture({ sameOwner, twoNear });
       const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'), {
         ...data,
         forceOptimizeDeps: true,
@@ -3347,8 +3385,8 @@ for (const sameOwner of [false, true]) {
         const Vector3 = camera.position.constructor;
         const Raycaster = window.__ltds.controls()._raycaster.constructor;
         const raycaster = new Raycaster(); raycaster.firstHitOnly = true;
-        const points = [-4.5, -1.5, 1.5, 4.5].map(x => {
-          const ndc = new Vector3(x, 0, 0).project(camera);
+        const points = ${JSON.stringify(data.nearPoints)}.map(([x, y, z]) => {
+          const ndc = new Vector3(x, y, z).project(camera);
           const onScreen = Math.abs(ndc.x) < 0.98 && Math.abs(ndc.y) < 0.98 && Math.abs(ndc.z) < 1;
           raycaster.setFromCamera({ x: ndc.x, y: ndc.y }, camera);
           const hit = raycaster.intersectObjects(visibleScenes, true)[0];
@@ -3388,7 +3426,9 @@ for (const sameOwner of [false, true]) {
       // continuous gesture exceeds the old two-second recent-cut TTL.
       const gesture = await client.evaluate(`(() => {
         const bounds = window.__ltds.controls().dom.getBoundingClientRect();
-        return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+        const ndc = ${JSON.stringify(twoNear ? baseline.points[1].ndc : [0, 0])};
+        return { x: bounds.left + bounds.width * (ndc[0] + 1) / 2,
+          y: bounds.top + bounds.height * (1 - ndc[1]) / 2 };
       })()`);
       await client.command('Input.dispatchMouseEvent', {
         type: 'mousePressed', ...gesture, button: 'left', buttons: 1, clickCount: 1,
@@ -3403,7 +3443,7 @@ for (const sameOwner of [false, true]) {
         await sample(`pitch-${5 + step * 0.5}`);
       }
       for (let step = 0; step <= 30; step++) {
-        const yaw = (5 + step * 0.5) * Math.PI / 180;
+        const yaw = (twoNear ? 0.5 * Math.sin(step / 5) : 5 + step * 0.5) * Math.PI / 180;
         await setView(client, [Math.sin(yaw) * 20, 0, Math.cos(yaw) * 20], [0, Math.tan(20 * Math.PI / 180) * 20, 0]);
         await new Promise(resolve => setTimeout(resolve, 100));
         await sample(`orbit-${5 + step * 0.5}`);
@@ -3451,6 +3491,13 @@ for (const sameOwner of [false, true]) {
       assert.ok(peakMiB >= 2_500 || pressureEvents > 0,
         `weighted depth test never exercised substantial residency or admission pressure: ${peakMiB} MiB`);
       assert.ok(stable >= 5, `depth-stacked selected frontier did not converge: ${JSON.stringify(final && summarize(final))}`);
+      if (twoNear) {
+        assert.equal(final.diagnostics.regionalFallback.nearRegionCount, 2,
+          'both equally near walls must receive bounded regional protection');
+        assert.ok(final.rows.some(row => /^rear-.*\/region\.b3dm$/.test(row.uri)
+          && row.visible && row.effectiveTarget > final.diagnostics.rawErrorTarget),
+        'delayed far background must retain relaxed coarse coverage under pressure');
+      }
       const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown'
         && !event.params.exceptionDetails?.url?.includes('/@vite/client'));
       assert.deepEqual(exceptions, []);
@@ -3529,7 +3576,7 @@ test('browser defaults to orthophoto when LOD is unavailable and tears down poin
   }
 });
 
-test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile path', { timeout: 90_000 }, async (t) => {
+test('browser decodes Obj2Tiles KTX2 B3DM textures under the production CSP without unsafe-eval', { timeout: 90_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) {
     t.skip('Chrome or Edge is required for KTX2 browser acceptance.');
@@ -3539,8 +3586,15 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
   const releaseLock = await acquireBrowserHarnessLock({ root });
   let browser, profile, server, vite, client;
   try {
-    const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'));
+    const csp = productionCspHeader();
+    assert.ok(existsSync(path.join(root, 'dist/index.html')), 'Build the production viewer before this browser test');
+    assert.deepEqual(readFileSync(path.join(root, 'dist/basis/basis_transcoder.js')),
+      readFileSync(path.join(root, 'public/basis/basis_transcoder.js')), 'Rebuild stale production Basis assets');
+    const fixture = await startFixture(path.join(root, 'test', 'fixtures', 'ktx2-tiles'), {
+      contentSecurityPolicy: csp, productionBuild: true,
+    });
     ({ server, vite } = fixture);
+    assert.equal((await fetch(fixture.origin)).headers.get('content-security-policy'), csp);
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-ktx2-browser-'));
     const devToolsPort = await reserveDevToolsPort();
     browser = spawn(executable, [
@@ -3587,6 +3641,8 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
         const materials = object.material ? (Array.isArray(object.material) ? object.material : [object.material]) : [];
         for (const material of materials) if (material.map) maps.push({
           compressed: Boolean(material.map.isCompressedTexture),
+          format: material.map.format,
+          mipCount: material.map.mipmaps?.length || 0,
           width: material.map.image?.width || 0,
           height: material.map.image?.height || 0,
         });
@@ -3600,10 +3656,17 @@ test('browser decodes Obj2Tiles KTX2 B3DM textures through the production tile p
     assert.equal(state.errorPanel, 'none');
     assert.ok(state.maps.length > 0, JSON.stringify(state));
     assert.equal(state.maps.every(map => map.compressed && map.width > 0 && map.height > 0), true, JSON.stringify(state));
+    assert.ok(state.maps.every(map => map.format > 1000 && map.format !== 1023 && map.mipCount > 0),
+      'KTX2 must reach a real compressed GPU format, not uncompressed RGBA fallback: ' + JSON.stringify(state));
     assert.ok(state.cacheBytes > 0, JSON.stringify(state));
+    assert.ok(fixture.requests.includes('/basis/basis_transcoder.js'), 'Viewer must request the installed CSP-safe glue');
+    assert.ok(fixture.requests.includes('/basis/basis_transcoder.wasm'), 'Viewer must request the paired pinned WASM');
     const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown'
       && !event.params.exceptionDetails?.url?.includes('/@vite/client'));
     assert.deepEqual(exceptions, []);
+    const cspFailures = client.events.filter(event => event.method === 'Log.entryAdded'
+      && /content security policy|unsafe-eval|EvalError/i.test(event.params.entry?.text || ''));
+    assert.deepEqual(cspFailures, [], 'Production CSP must not block decoder workers');
   } finally {
     if (client) {
       await client.command('Page.close', {}, 2_000).catch(() => {});

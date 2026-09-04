@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FAILED, LOADED, QUEUED, UNLOADED } from '3d-tiles-renderer/core';
+import { runTraversal } from '3d-tiles-renderer/src/core/renderer/tiles/traverseFunctions.js';
 import { createLodRegionalFallbackCoordinator } from '../lod-regional-fallback.mjs';
 
 function fixture(options = {}) {
@@ -319,7 +320,8 @@ test('leaf-only, non-renderable, incomplete and virtual covers are rejected', ()
 test('refused admission cannot spin requests and normal queued work is not duplicated', () => {
   const f = fixture();
   f.renderer.requestTileContents = tile => f.requests.push(tile);
-  assert.equal(f.update().reason, 'admission-refused');
+  assert.equal(f.update().reason, 'awaiting-admission');
+  assert.equal(f.a.__ltdsRegionalCoverPreparing, true);
   f.update({ now: 100 });
   assert.equal(f.requests.length, 1);
   const g = fixture();
@@ -333,8 +335,131 @@ test('hard cache cap and known prospective allocation refuse optional admission'
   const f = fixture();
   f.renderer.lruCache.maxBytesSize = 250;
   f.a.children[0].knownBytes = 100;
-  assert.equal(f.update().reason, 'admission-refused');
+  assert.equal(f.update().reason, 'awaiting-admission');
+  assert.equal(f.coordinator.snapshot().admissionDeferred, true);
   assert.equal(f.requests.length, 0);
+});
+
+test('full cache keeps a safe gate through traversal and admits proxies before speculative fine queues', () => {
+  const f = fixture();
+  f.renderer.lruCache.maxBytesSize = 400;
+  f.a.children.forEach(tile => { tile.knownBytes = 100; });
+  const speculative = f.a.children[0].children[0];
+  f.complete(speculative, 200);
+  assert.equal(f.renderer.lruCache.cachedBytes, 400);
+  const blocked = f.update();
+  assert.equal(blocked.reason, 'awaiting-admission');
+  assert.equal(blocked.preparationGated, true);
+  assert.equal(f.requests.length, 0);
+
+  // Run the installed patched traversal, not a hand-written gate simulation.
+  // The cached fine tile is hidden, so holding the coarse owner loses no
+  // visible detail and stops keeping its speculative descendant in the LRU.
+  Object.assign(f.root, {
+    parent: null, content: { uri: 'root.b3dm' }, refine: 'REPLACE', geometricError: 4,
+    internal: { hasContent: true, hasRenderableContent: true, hasUnrenderableContent: false,
+      loadingState: UNLOADED, depth: 0, virtualChildCount: 0 },
+    traversal: { lastFrameVisited: -1 },
+  });
+  const setup = (tile, depth) => {
+    tile.internal.depth = depth;
+    tile.internal.hasContent = true;
+    tile.internal.virtualChildCount = 0;
+    tile.traversal.lastFrameVisited = -1;
+    for (const child of tile.children) setup(child, depth + 1);
+  };
+  setup(f.root, 0);
+  const ordinaryQueue = [];
+  Object.assign(f.renderer, {
+    frameCount: 1, errorTarget: 5.481, maxDepth: Infinity,
+    loadAncestors: false, loadSiblings: false, displayActiveTiles: false,
+    stats: { used: 0, inFrustum: 0, active: 0, visible: 0 },
+    ensureChildrenArePreprocessed() {},
+    calculateTileViewErrorWithPlugin(tile, target) {
+      target.inView = tile !== f.b;
+      target.error = tile.children.length ? 100 : 0;
+      target.distanceFromCamera = 10;
+    },
+    queueTileForDownload(tile) { ordinaryQueue.push(tile); },
+    invokeOnePlugin(callback) {
+      callback({ setTileActive() {}, setTileVisible() {}, setEmptyTileVisible() {} });
+    },
+  });
+  f.used.clear();
+  runTraversal(f.root, f.renderer);
+  assert.equal(f.a.traversal.visible, true);
+  assert.equal(speculative.traversal.visible, undefined);
+  assert.equal(f.used.has(speculative), false, 'hidden fine demand is released by real traversal');
+  assert.equal(ordinaryQueue.includes(speculative), false);
+  assert.equal(f.cacheItems.has(speculative), true, 'coordinator does not manually dispose content');
+
+  // Model normal LRU eviction of that now-unused allocation between frames.
+  // The next prune boundary occurs BEFORE ordinary queued downloads in the
+  // real renderer, so it must claim the newly available space for the cover.
+  f.cacheItems.delete(speculative);
+  speculative.internal.loadingState = UNLOADED;
+  delete speculative.engineData.scene;
+  assert.equal(f.renderer.removeUnusedPendingTiles(), 'original-result');
+  assert.deepEqual(f.requests, [f.a.children[0]]);
+  assert.equal(f.coordinator.snapshot().admissionDeferred, false);
+  assert.equal(f.renderer.lruCache.cachedBytes, 300);
+  f.complete(f.a.children[0], 100);
+  f.update({ now: 20 });
+  assert.deepEqual(f.requests, f.a.children);
+  assert.equal(f.renderer.lruCache.cachedBytes, 400, 'hard cap is unchanged and obeyed');
+  f.complete(f.a.children[1], 100);
+  const ready = f.update({ now: 40 });
+  assert.equal(ready.reason, 'complete-cover');
+  assert.equal(ready.preparationGated, false);
+  assert.deepEqual([...f.renderer.lodFallbackTiles], [f.a, f.b, ...f.a.children]);
+});
+
+test('unchanged refusal is bounded and clears its gate without needing camera input', () => {
+  const f = fixture({ requestTimeoutMs: 500 });
+  f.renderer.requestTileContents = tile => f.requests.push(tile);
+  assert.equal(f.update().admissionDeferred, true);
+  for (const now of [1, 100, 250, 499]) {
+    f.renderer.removeUnusedPendingTiles();
+    const waiting = f.update({ now });
+    assert.equal(waiting.reason, 'awaiting-admission');
+    assert.equal(waiting.admissionWaitMs, now);
+  }
+  assert.equal(f.requests.length, 1, 'no repeat admission scans without a changed cache state');
+  const failed = f.update({ now: 500 });
+  assert.equal(failed.reason, 'request-timeout');
+  assert.equal(failed.phase, 'cooldown');
+  assert.equal(failed.preparationGated, false);
+  assert.equal(f.a.__ltdsRegionalCoverPreparing, undefined);
+  assert.deepEqual([...f.renderer.lodFallbackTiles], [f.a, f.b]);
+});
+
+test('a full cache never turns an existing visible fine cut into a new preparation gate', () => {
+  const f = fixture();
+  const fine = f.a.children[0].children[0];
+  f.complete(fine, 200);
+  fine.traversal.visible = true;
+  f.renderer.visibleTiles = new Set([fine]);
+  f.renderer.lruCache.maxBytesSize = 400;
+  const blocked = f.update();
+  assert.equal(blocked.reason, 'admission-refused');
+  assert.equal(blocked.phase, 'cooldown');
+  assert.equal(blocked.preparationGated, false);
+  assert.equal(f.a.__ltdsRegionalCoverPreparing, undefined);
+  assert.equal(fine.traversal.visible, true);
+  assert.equal(f.cacheItems.has(fine), true);
+  assert.equal(f.requests.length, 0);
+});
+
+test('a changed cache limit retries deferred cover promptly without waiting for cooldown', () => {
+  const f = fixture();
+  f.renderer.lruCache.maxBytesSize = 250;
+  f.a.children[0].knownBytes = 100;
+  assert.equal(f.update().admissionDeferred, true);
+  f.renderer.lruCache.maxBytesSize = 300;
+  f.renderer.removeUnusedPendingTiles();
+  assert.deepEqual(f.requests, [f.a.children[0]]);
+  assert.equal(f.coordinator.snapshot().admissionDeferred, false);
+  assert.equal(f.renderer.lruCache.cachedBytes, 300);
 });
 
 test('parse rejection, tile failure, and timeout release incomplete cover', () => {
@@ -394,4 +519,22 @@ test('an exact known allocation at the hard cap remains admissible', () => {
   f.a.children[0].knownBytes = 100;
   assert.equal(f.update().phase, 'prefetch');
   assert.equal(f.requests.length, 1);
+});
+
+test('complete regional cover protects equally near regions within deduplicated whole-cut budget', () => {
+  const f = fixture();
+  f.a.children.forEach((tile, index) => {
+    tile.traversal.distanceFromCamera = 10 + index;
+    f.complete(tile, 100);
+    tile.children[0].knownBytes = 200;
+  });
+  f.renderer.visibleTiles = new Set([f.a, f.b, ...f.a.children]);
+  const ready = f.update();
+  assert.equal(ready.nearRegionCount, 2);
+  assert.equal(ready.nearCutBytes, 400);
+  assert.equal(ready.nearCutBudgetBytes, 1_400, 'base/proxy tiles visible in both collections are charged once');
+  assert.equal(ready.nearCutEstimatedBytes, 0);
+  assert.equal(f.a.__ltdsRegionalNearRegions.has(f.a.children[1]), true);
+  f.coordinator.dispose();
+  assert.equal(f.a.__ltdsRegionalNearRegions, undefined);
 });

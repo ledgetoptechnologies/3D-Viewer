@@ -7,6 +7,7 @@ import { LRUCache, TilesRenderer } from '3d-tiles-renderer';
 import { resolveLodMemoryProfile } from '../lod-memory-profile.mjs';
 import { Group, PerspectiveCamera, Sphere, Vector3 } from 'three';
 import {
+  selectLodNearRegions,
   advanceLodMemoryPressure,
   configureLodRenderer,
   DEFAULT_LOD_DETAIL,
@@ -1824,6 +1825,103 @@ test('locked focal owner and all descendants retain raw requested SSE metadata',
   assert.equal(lodTileInLockedFocalOwner(grandchild), false);
   assert.ok(lodPeripheralErrorTarget(5.481, grandchild, state, 1_000, 4) > 5.481,
     'active memory-pressure policy resumes once the owner replacement cut attaches');
+  plugin.dispose();
+});
+
+test('whole-cut near selection charges known and estimated leaves and declines unaffordable expansion', () => {
+  const region = (name, distance, proxyBytes, leafBytes) => ({
+    content: { uri: name }, bytes: proxyBytes, geometricError: 10,
+    traversal: { inFrustum: true, distanceFromCamera: distance },
+    children: leafBytes.map((bytes, index) => ({
+      content: { uri: `${name}/${index}` }, bytes, geometricError: 0, children: [],
+    })),
+  });
+  const primary = region('primary', 10, 25, [100, 100, 100, 100]);
+  const neighbor = region('neighbor', 11, 25, [0, 0, 0, 0]);
+  const far = region('far', 50, 25, [1, 1, 1, 1]);
+  const options = { primary, getBytes: tile => tile.bytes, maxBytes: 1_199 };
+  const rejected = selectLodNearRegions([primary, neighbor, far], options);
+  assert.deepEqual([...rejected.selected.keys()], [primary]);
+  const fits = selectLodNearRegions([primary, neighbor, far], { ...options, maxBytes: 1_200 });
+  assert.deepEqual([...fits.selected.keys()], [primary, neighbor]);
+  assert.equal(fits.knownBytes, 400);
+  assert.equal(fits.estimatedBytes, 800, 'four unknown leaves charged twice the largest measured leaf each');
+  assert.equal(fits.totalBytes, 1_200);
+  assert.equal(fits.unknownLeaves, 4);
+  assert.equal(fits.selected.has(far), false, 'spare budget does not label distant geometry near');
+  const unknown = selectLodNearRegions([primary, neighbor], { primary, maxBytes: 10_000 });
+  assert.deepEqual([...unknown.selected.keys()], [primary], 'no byte evidence cannot authorize extra quality locks');
+  assert.equal(unknown.primaryOverBudget, true);
+  neighbor.children[0].geometricError = 2;
+  assert.deepEqual([...selectLodNearRegions([primary, neighbor], { ...options, maxBytes: 10_000 }).selected.keys()], [primary],
+    'an unresolved/nonterminal cut cannot be priced as a complete leaf cut');
+});
+
+test('near-region distance and time hysteresis survives tiny motion but releases stale surfaces', () => {
+  const region = distance => ({
+    traversal: { inFrustum: true, distanceFromCamera: distance }, geometricError: 1,
+    children: [{ content: { uri: 'fine' }, geometricError: 0, children: [] }],
+  });
+  const primary = region(10), neighbor = region(13), far = region(30);
+  const options = { primary, maxBytes: 10_000, getBytes: () => 100 };
+  const initial = selectLodNearRegions([primary, neighbor, far], options);
+  assert.deepEqual([...initial.selected.keys()], [primary, neighbor]);
+  neighbor.traversal.distanceFromCamera = 17;
+  const retained = selectLodNearRegions([primary, neighbor, far], { ...options, previous: initial.selected, now: 100 });
+  assert.equal(retained.selected.has(neighbor), true, 'exit band is wider than acquisition band');
+  neighbor.traversal.distanceFromCamera = 18;
+  const grace = selectLodNearRegions([primary, neighbor, far], { ...options, previous: retained.selected, now: 2_099 });
+  assert.equal(grace.selected.has(neighbor), true);
+  const expired = selectLodNearRegions([primary, neighbor, far], { ...options, previous: grace.selected, now: 2_100 });
+  assert.equal(expired.selected.has(neighbor), false);
+  neighbor.traversal.distanceFromCamera = 11;
+  const stale = selectLodNearRegions([primary, neighbor, far], {
+    ...options, isInView: tile => tile === primary,
+  });
+  assert.deepEqual([...stale.selected.keys()], [primary], 'stale previous-frame visibility cannot acquire new protection');
+  assert.equal(selectLodNearRegions([primary, neighbor, far], { ...options, maxRegions: 1 }).selected.size, 1);
+});
+
+test('two equal-near off-center walls retain raw targets while delayed distant geometry remains peripheral', () => {
+  const camera = new PerspectiveCamera(90, 1, 0.1, 100);
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  const region = (name, x, z) => {
+    const make = children => ({
+      content: { uri: name }, refine: 'REPLACE', geometricError: children.length ? 10 : 0,
+      children, traversal: { inFrustum: true, distanceFromCamera: Math.hypot(x, z) },
+      engineData: { boundingVolume: { getSphere: target => target.set(new Vector3(x, 0, z), 0.1) } },
+    });
+    const leaf = make([]), parent = make([leaf]);
+    leaf.parent = parent;
+    return parent;
+  };
+  const left = region('left', -6, -10), right = region('right', 6, -10), far = region('far', 18, -30);
+  const owner = { children: [left, right, far], __ltdsFocalOwnerLocked: true,
+    __ltdsRegionalCoverReady: true, __ltdsRegionalFocusRegion: right };
+  for (const tile of owner.children) tile.parent = owner;
+  const selection = selectLodNearRegions(owner.children, { primary: right, maxBytes: 1_000, getBytes: () => 100 });
+  owner.__ltdsRegionalNearRegions = new Set(selection.selected.keys());
+  assert.equal(owner.__ltdsRegionalNearRegions.size, 2);
+  const renderer = { frameCount: 1, errorTarget: 5.481, __ltdsPeripheralPressureScale: 4 };
+  const state = { activeMotion: false, focalNdc: { x: -1, y: -1 } };
+  const plugin = createLodFocusPriorityPlugin(camera, () => state);
+  plugin.init(renderer);
+  for (const yaw of [0, 0.01, -0.01, 0]) {
+    camera.rotation.y = yaw;
+    camera.updateMatrixWorld(true);
+    renderer.frameCount++;
+    state.focalNdc = { x: -state.focalNdc.x, y: -state.focalNdc.y };
+    for (const tile of [left, right, far, ...left.children, ...right.children, ...far.children]) {
+      plugin.calculateTileViewError(tile);
+    }
+    assert.equal(left.__ltdsForegroundOverlap, 0);
+    assert.equal(right.__ltdsForegroundOverlap, 0);
+    assert.equal(left.__ltdsPeripheralErrorTarget, 5.481);
+    assert.equal(right.__ltdsPeripheralErrorTarget, 5.481);
+    assert.equal(far.__ltdsPeripheralErrorTarget, 21.924);
+    assert.equal(far.children[0].__ltdsPeripheralErrorTarget, 21.924);
+  }
   plugin.dispose();
 });
 

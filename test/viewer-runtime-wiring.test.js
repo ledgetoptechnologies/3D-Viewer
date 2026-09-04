@@ -299,7 +299,10 @@ test('LOD memory pressure preserves camera-driven quality and resets on explicit
     'cache pressure must not lower the camera-driven global Detail target');
   assert.doesNotMatch(pressureChangeBlock, /tilesRenderer\.errorTarget\s*=/,
     'cache pressure must not inflate the global SSE target');
-  assert.match(main, /focused Detail \$\{lodRuntimeProfileState\.activeDetail\}/);
+  assert.match(main, /memory-limited, target Detail \$\{lodRuntimeProfileState\.requestedDetail\}/,
+    'memory-limited status must identify the requested target, not claim completed visible quality');
+  assert.match(main, /pendingLabel = memoryLimited && pendingCount > 0/,
+    'the limited-quality label must include its outstanding replacement work');
   assert.match(main, /function retryLodForChangedView\(\)/);
   assert.match(main, /lodViewChangeRequiresRetry\(lodPressureView, currentView\)/);
   const loadModelStart = loadBlock.indexOf("addEventListener('load-model'");

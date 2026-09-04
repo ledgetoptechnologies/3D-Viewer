@@ -1,4 +1,5 @@
 import { FAILED, LOADED, UNLOADED } from '3d-tiles-renderer/core';
+import { selectLodNearRegions } from './lod-policy.mjs';
 
 const finiteBytes = value => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
 const uri = tile => tile?.content?.uri || tile?.content?.url || '';
@@ -56,6 +57,7 @@ export function createLodRegionalFallbackCoordinator(renderer, {
     if (owner) {
       delete owner.__ltdsRegionalCoverReady;
       delete owner.__ltdsRegionalFocusRegion;
+      delete owner.__ltdsRegionalNearRegions;
     }
     for (const tile of owned) {
       if (!base.has(tile)) renderer?.lodFallbackTiles?.delete?.(tile);
@@ -101,6 +103,7 @@ export function createLodRegionalFallbackCoordinator(renderer, {
       && current.tiles.every(tile => ready(tile) && bytes(tile) > 0)) {
       historical.set(current.owner, {
         tiles: current.tiles, registered, focusRegion: current.focusRegion,
+        nearSelection: current.nearSelection,
       });
       registered = new Set();
       pruneHistorical();
@@ -126,6 +129,85 @@ export function createLodRegionalFallbackCoordinator(renderer, {
     for (const tile of retainedTiles()) renderer.markTileUsed?.(tile);
   }
 
+  const admissionState = tile => ({
+    tile,
+    bytes: finiteBytes(cache?.cachedBytes),
+    items: cache?.itemSet?.size ?? null,
+    used: cache?.usedSet?.size ?? renderer?.usedSet?.size ?? null,
+    hardLimit: finiteBytes(cache?.maxBytesSize),
+    itemLimit: cache?.maxSize ?? null,
+    full: cache?.isFull?.() === true,
+    additionalBytes: resident(tile) ? 0 : bytes(tile),
+  });
+  const sameAdmissionState = (a, b) => Boolean(a && b
+    && Object.keys(a).every(key => a[key] === b[key]));
+
+  function deferAdmission(tile) {
+    // Only a branch which had no visible fine cut may hold its preparation
+    // gate across refusal. A full cache often consists of that branch's still
+    // hidden descendants; the *next* traversal must stop demanding them before
+    // the normal LRU can reclaim them. Clearing the gate immediately prevents
+    // that traversal from ever happening and repeats the same deadlock.
+    if (!current?.gated) {
+      fail('admission-refused');
+      return;
+    }
+    if (clock - current.progressAt >= Math.max(1, requestTimeoutMs)) {
+      fail('request-timeout');
+      return;
+    }
+    current.request = null;
+    current.admissionSince ??= clock;
+    current.admissionDeferred = admissionState(tile);
+    phase = 'prefetch';
+    reason = 'awaiting-admission';
+    markRetained();
+    // Use the renderer/application retention hook. Do not directly evict here:
+    // the coordinator does not own the other visible/recent frontier's pins.
+    cache?.scheduleUnload?.();
+  }
+
+  function requestNextCoverTile() {
+    if (!current || current.request || validCover(current.owner)) return;
+    const measurement = measurements();
+    if (measurement.knownBytes > budget) { fail('cover-over-budget'); return; }
+    if (measurement.pendingCount > 0) return;
+    const next = current.tiles.find(tile => !ready(tile));
+    if (!next) return;
+    if (next.internal.loadingState !== UNLOADED) {
+      fail('tile-not-requestable');
+      return;
+    }
+    const nextAdmission = admissionState(next);
+    if (sameAdmissionState(current.admissionDeferred, nextAdmission)) return;
+    if (cache.isFull?.() === true || !nextAdmission.hardLimit
+      || nextAdmission.bytes >= nextAdmission.hardLimit
+      || nextAdmission.bytes + nextAdmission.additionalBytes > nextAdmission.hardLimit) {
+      deferAdmission(next);
+      return;
+    }
+    current.admissionDeferred = null;
+    current.admissionSince = null;
+    current.request = next;
+    current.requestAt = clock;
+    requests += 1;
+    try {
+      const result = renderer.requestTileContents(next);
+      // The renderer normally handles failures itself. Guard custom adapters'
+      // rejected promises without resurrecting a released or replaced cover.
+      if (result?.catch) result.catch(() => {
+        if (current?.request === next) fail('tile-failed');
+      });
+    } catch {
+      fail('tile-failed');
+      return;
+    }
+    if (current?.request === next && (!resident(next) || next.internal.loadingState === UNLOADED)) {
+      deferAdmission(next);
+    }
+    markRetained();
+  }
+
   // The renderer clears its used set before traversal and prunes queued tiles
   // before the application's post-traversal update. Protect just this cover's
   // cache entries at that boundary, without changing traversal.used/inFrustum.
@@ -134,7 +216,14 @@ export function createLodRegionalFallbackCoordinator(renderer, {
     ? function (...args) {
       pruneHistorical();
       markRetained();
-      return originalRemoveUnused.apply(this, args);
+      const result = originalRemoveUnused.apply(this, args);
+      // After the gated traversal releases unused speculative work, give the
+      // next bounded proxy first admission into any recovered headroom. Doing
+      // this only in the application's later update lets ordinary fine queues
+      // consume that space again before the cover can ever progress.
+      if (current?.admissionDeferred && current.gated
+        && current.owner.traversal?.inFrustum !== false) requestNextCoverTile();
+      return result;
     }
     : null;
   if (removeUnusedWrapper) renderer.removeUnusedPendingTiles = removeUnusedWrapper;
@@ -174,6 +263,17 @@ export function createLodRegionalFallbackCoordinator(renderer, {
       owner: current ? label(current.owner) : null,
       focusRegion: current?.focusRegion ? label(current.focusRegion) : null,
       preparationGated: current?.gated === true,
+      admissionDeferred: Boolean(current?.admissionDeferred),
+      admissionWaitMs: current?.admissionSince === null || !current
+        ? 0 : Math.max(0, clock - current.admissionSince),
+      nearRegionCount: current?.nearSelection?.selected.size || 0,
+      nearCutBytes: Number.isFinite(current?.nearSelection?.totalBytes)
+        ? current.nearSelection.totalBytes : null,
+      nearCutKnownBytes: current?.nearSelection?.knownBytes || 0,
+      nearCutEstimatedBytes: current?.nearSelection?.estimatedBytes || 0,
+      nearCutUnknownLeaves: current?.nearSelection?.unknownLeaves || 0,
+      nearCutBudgetBytes: current?.nearSelection?.maxBytes || 0,
+      nearCutOverBudget: current?.nearSelection?.primaryOverBudget === true,
       ...measurements(),
       maxBytes: budget,
       cooldownUntil,
@@ -250,6 +350,8 @@ export function createLodRegionalFallbackCoordinator(renderer, {
         owner: candidateOwner, tiles: [...candidateOwner.children], request: null,
         requestAt: 0, progressAt: clock, readyCount: 0, gated: !existingCut, existingCut,
         focusRegion: previous?.focusRegion || null, regionOutsideSince: null,
+        admissionDeferred: null, admissionSince: null,
+        nearSelection: previous?.nearSelection || null,
       };
       phase = 'prefetch';
       if (current.gated) candidateOwner.__ltdsRegionalCoverPreparing = true;
@@ -294,7 +396,7 @@ export function createLodRegionalFallbackCoordinator(renderer, {
     if (current.request) {
       if (ready(current.request)) current.request = null;
       else if (!resident(current.request) || current.request.internal.loadingState === UNLOADED) {
-        fail('admission-refused');
+        deferAdmission(current.request);
         return snapshot();
       } else if (clock - current.requestAt >= Math.max(1, requestTimeoutMs)) {
         fail('request-timeout');
@@ -313,8 +415,33 @@ export function createLodRegionalFallbackCoordinator(renderer, {
         renderer.lodFallbackTiles.add(tile);
       }
       clearPreparationGate();
+      // Base coverage and other visible surfaces must fit alongside this
+      // owner's complete near cuts. Spare speculative residency is reclaimable;
+      // charging the whole full cache would prevent any quality expansion.
+      const reserved = new Set([...base, ...current.tiles]);
+      for (const tile of renderer.visibleTiles || []) {
+        let ancestor = tile;
+        const seen = new Set();
+        while (ancestor && ancestor !== current.owner && !seen.has(ancestor)) {
+          seen.add(ancestor);
+          ancestor = ancestor.parent;
+        }
+        if (ancestor !== current.owner) reserved.add(tile);
+      }
+      const reservedBytes = [...reserved].reduce((sum, tile) => sum + bytes(tile), 0);
+      const hardBytes = finiteBytes(cache.maxBytesSize);
+      const nearBudget = Math.max(0, hardBytes * 0.90 - reservedBytes);
+      current.nearSelection = selectLodNearRegions(current.tiles, {
+        primary: current.focusRegion,
+        previous: current.nearSelection?.selected || new Map(),
+        now: clock,
+        maxBytes: nearBudget,
+        getBytes: bytes,
+        isInView: regionInView,
+      });
       current.owner.__ltdsRegionalCoverReady = true;
       current.owner.__ltdsRegionalFocusRegion = current.focusRegion;
+      current.owner.__ltdsRegionalNearRegions = new Set(current.nearSelection.selected.keys());
       phase = 'ready';
       reason = 'complete-cover';
       markRetained();
@@ -331,42 +458,12 @@ export function createLodRegionalFallbackCoordinator(renderer, {
 
     removeRegistration();
     phase = 'prefetch';
-    reason = current.existingCut ? 'existing-cut' : 'building-cover';
+    reason = current.admissionDeferred ? 'awaiting-admission'
+      : current.existingCut ? 'existing-cut' : 'building-cover';
     markRetained();
     // Serialize optional requests, including unknown decoded allocations. A
     // normal renderer request already in flight for this cover also counts.
-    if (current.request || measurement.pendingCount > 0) return snapshot();
-    const next = current.tiles.find(tile => !ready(tile));
-    if (!next || next.internal.loadingState !== UNLOADED) {
-      fail('tile-not-requestable');
-      return snapshot();
-    }
-    const hardLimit = finiteBytes(cache.maxBytesSize);
-    const additionalBytes = resident(next) ? 0 : bytes(next);
-    if (cache.isFull?.() === true || !hardLimit
-      || finiteBytes(cache.cachedBytes) >= hardLimit
-      || finiteBytes(cache.cachedBytes) + additionalBytes > hardLimit) {
-      fail('admission-refused');
-      return snapshot();
-    }
-    current.request = next;
-    current.requestAt = clock;
-    requests += 1;
-    try {
-      const result = renderer.requestTileContents(next);
-      // The renderer normally handles failures itself. Guard custom adapters'
-      // rejected promises without resurrecting a released or replaced cover.
-      if (result?.catch) result.catch(() => {
-        if (current?.request === next) fail('tile-failed');
-      });
-    } catch {
-      fail('tile-failed');
-      return snapshot();
-    }
-    if (current?.request === next && (!resident(next) || next.internal.loadingState === UNLOADED)) {
-      fail('admission-refused');
-    }
-    markRetained();
+    requestNextCoverTile();
     return snapshot();
   }
 

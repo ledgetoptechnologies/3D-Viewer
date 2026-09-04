@@ -138,7 +138,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       controllerOrigin: 'https://ops.example.test',
       session: {
         id: 'browser-session', subject: 'ops:browser-audit', displayUnits: 'imperial',
-        permissions: ['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage'],
+        permissions: runtime.permissions || ['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage'],
         expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
       },
     });
@@ -153,7 +153,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/presets' && method === 'GET') return json({ presets: fixtures.presets });
   if (pathname === '/api/v1/processing/presets' && method === 'POST') return json({ preset: { id: 'preset-new', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', ...body } }, 201);
   if (pathname.startsWith('/api/v1/processing/presets/') && ['PATCH', 'DELETE'].includes(method)) return method === 'DELETE' ? { status: 204, body: Buffer.alloc(0), type: 'application/json' } : json({ preset: { ...fixtures.presets[0], ...body } });
-  if (pathname === '/api/v1/processing/outputs') return json({ outputs: fixtures.outputs, nextCursor: null });
+  if (pathname === '/api/v1/processing/outputs') return json({ outputs: runtime.outputs, nextCursor: null });
   if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
   if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/99999999-8888-4777-8666-555555555555' }, 201);
   if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ grant: '11111111-2222-4333-8444-555555555555', sessionMode: 'review', sessionTtlSeconds: 1800, attemptId: 'attempt-quarry', modelId: 'model-quarry', modelVersionId: 'output-quarry-ready', embedUrl: '/session/11111111-2222-4333-8444-555555555555', assetKinds: ['glb', 'ortho', 'report'] }, 201);
@@ -207,6 +207,23 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     runtime.operations = [{ ...queued, status: 'leased', phase: 'validating_source', progress: .25, attemptCount: 1, heartbeatAt: new Date().toISOString(), processingAttemptId: 'attempt-recovery-new' }, ...runtime.operations];
     return json({ operation: queued }, 202);
   }
+  if (pathname === '/api/v1/processing/outputs/output-johnson/companion-repair-attempts' && method === 'POST') {
+    if (runtime.rejectCompanionRepair) return json({ error: 'companion_source_changed', message: 'Retained companion source verification failed.' }, 409);
+    const operation = {
+      id: 'operation-companion', type: 'lod_recovery', companionRepair: true, sourceOutputId: 'output-johnson',
+      projectId: 'project-johnson', status: 'queued', phase: 'queued', progress: 0,
+      source: { kind: 'existing_model', browserTransferRequired: false, transferComplete: true },
+      attemptCount: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    runtime.operations = [operation, ...runtime.operations];
+    return json({ operation }, 202);
+  }
+  if (pathname === '/api/v1/operations/operation-companion/retry' && method === 'POST') {
+    runtime.operations = runtime.operations.map(operation => operation.id === 'operation-companion'
+      ? { ...operation, status: 'queued', phase: 'queued', progress: 0, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() }
+      : operation);
+    return json({ operation: runtime.operations.find(operation => operation.id === 'operation-companion') }, 202);
+  }
   if (pathname === '/api/v1/operations/operation-failed/retry' && method === 'POST') {
     runtime.operations = runtime.operations.map(operation => operation.id === 'operation-failed' ? { ...operation, status: 'queued', phase: 'queued', progress: 0, heartbeatAt: null, errorCode: null, errorMessage: null, updatedAt: new Date().toISOString() } : operation);
     return json({ operation: runtime.operations.find(operation => operation.id === 'operation-failed') }, 202);
@@ -226,7 +243,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       averageGsdM: 0.021, surveyedAreaM2: 18000, sourceImageCount: 48, reconstructedPointCount: 1250000,
       georeferencingCrs: 'EPSG:32616', processingDurationMs: 240000, processingStatus: 'running', outputCount: 1,
       taskDiskUsageBytes: 9437184,
-    }, outputs: fixtures.outputs } });
+    }, outputs: runtime.outputs } });
   }
   if (pathname === '/api/v1/tasks/task-quarry') return json({ task: { ...fixtures.tasks[1], status: runtime.archivedTasks.has('task-quarry')?'archived':'ready_for_review', metrics: { sourceImageCount: 12, processingStatus: 'ready_for_review', outputCount: 1 }, outputs: [fixtures.outputs[2]] } });
   if (pathname === '/api/v1/tasks/task-johnson/storage') return json({ task: { totalBytes: 9437184 } });
@@ -297,7 +314,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], requests: [], archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -766,6 +783,129 @@ test('project-first workspace is interactive and overflow-free in real desktop a
     } finally {
       releaseBrowserLock();
     }
+    if (server) await new Promise(resolve => server.close(resolve));
+    await removeBrowserProfile(profile, t);
+  }
+});
+
+test('companion product restore is explicit, immutable-version scoped, and permission-safe in a real browser', { timeout: 120_000 }, async t => {
+  const executable = browserPath();
+  if (!executable) { t.skip('Chrome or Edge is required for companion repair browser QA.'); return; }
+  const releaseBrowserLock = await acquireBrowserHarnessLock({ root });
+  let server, runtime, origin, profile, browser;
+  try {
+    ({ server, runtime, origin } = await startFixtureServer());
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
+    ], { windowsHide: true, stdio: 'ignore' });
+    const devTools = await waitForDevTools(profile);
+    const endpoint = '/api/v1/processing/outputs/output-johnson/companion-repair-attempts';
+    const readOnly = ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read'];
+    const cases = [
+      { name: 'explicit new-version restore', click: 'create' },
+      { name: 'pending restore suppresses duplicate creation', status: 'queued' },
+      { name: 'failed restore retries its existing operation', status: 'failed', click: 'retry' },
+      { name: 'legacy companion operation still retries correctly', status: 'failed', click: 'retry', legacy: true },
+      { name: 'read-only does not expose creation', readOnly: true },
+      { name: 'read-only does not expose failed-operation retry', status: 'failed', readOnly: true },
+      { name: 'exhausted retry remains failed without offering another version', status: 'failed', retryable: false },
+      { name: 'source rejection restores an actionable control', click: 'create', reject: true },
+    ];
+    for (const scenario of cases) await t.test(scenario.name, async () => {
+      runtime.requests = [];
+      runtime.permissions = scenario.readOnly ? readOnly : null;
+      runtime.rejectCompanionRepair = Boolean(scenario.reject);
+      runtime.derivatives = [];
+      runtime.outputs = structuredClone(fixtures.outputs);
+      Object.assign(runtime.outputs[0], {
+        assetKinds: ['tiles'], lod: { status: 'available' },
+        companionRepairAction: { kind: 'new_version', eligible: true, endpoint, missingAssetKinds: ['ortho', 'dsm', 'dtm', 'ept'] },
+      });
+      runtime.operations = scenario.status ? [{
+        id: 'operation-companion', type: scenario.legacy ? 'companion_repair' : 'lod_recovery',
+        companionRepair: !scenario.legacy, projectId: 'project-johnson',
+        sourceOutputId: 'output-johnson', status: scenario.status, phase: scenario.status,
+        retryable: scenario.retryable !== false, progress: 0,
+        errorMessage: scenario.status === 'failed' ? 'Retained companion source verification failed.' : null,
+        source: { kind: 'existing_model', browserTransferRequired: false, transferComplete: true },
+        attemptCount: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      }] : [];
+      const originalOutput = structuredClone(runtime.outputs[0]);
+      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      const client = await CdpClient.connect(target.webSocketDebuggerUrl);
+      try {
+        await client.command('Page.enable');
+        await client.command('Runtime.enable');
+        await client.command('Page.addScriptToEvaluateOnNewDocument', {
+          source: `sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(token)});`,
+        });
+        await client.command('Page.navigate', { url: `${origin}/workspace?section=dashboard&project=project-johnson&task=task-johnson` });
+        await waitFor(client, `Boolean(document.querySelector('.task-quick-actions')) && !document.querySelector('#workspace').hasAttribute('aria-busy')`, 'Task output actions did not load');
+        assert.equal(runtime.requests.filter(request => request.method === 'POST').length, 0, 'Page load must never create/retry/import/publish work');
+        const actions = await client.evaluate(`Array.from(document.querySelectorAll('.task-quick-actions button'), button => ({ text: button.textContent, action: button.dataset.action, disabled: button.disabled, title: button.title }))`);
+        if (scenario.readOnly) {
+          assert.equal(actions.some(button => ['restore-products', 'retry-operation'].includes(button.action)), false, JSON.stringify(actions));
+        } else if (scenario.status === 'queued') {
+          assert.ok(actions.some(button => button.text === 'Restoring products…' && button.disabled), JSON.stringify(actions));
+          assert.equal(actions.some(button => button.action === 'restore-products'), false);
+        } else if (scenario.retryable === false) {
+          assert.ok(actions.some(button => button.text === 'Product restore failed' && button.disabled), JSON.stringify(actions));
+        } else if (scenario.click === 'retry') {
+          assert.ok(actions.some(button => button.action === 'retry-operation' && button.text === 'Retry product restore'), JSON.stringify(actions));
+          await client.evaluate(`document.querySelector('.task-quick-actions [data-action="retry-operation"]').click()`);
+          await waitForRequest(runtime, 0, 'POST', '/api/v1/operations/operation-companion/retry');
+          assert.equal(runtime.requests.some(request => request.path === endpoint), false, 'Retry must not create a second restore version');
+        } else {
+          assert.ok(actions.some(button => button.action === 'restore-products' && button.title.includes('new version')), JSON.stringify(actions));
+          await client.evaluate(`(() => { const button=document.querySelector('.task-quick-actions [data-action="restore-products"]');button.click();button.click();return true; })()`);
+          await waitForRequest(runtime, 0, 'POST', endpoint);
+          const mutations = runtime.requests.filter(request => request.method === 'POST');
+          assert.equal(mutations.length, 1, 'A double click must submit only one version-bound repair');
+          assert.equal(mutations[0].path, endpoint);
+          assert.deepEqual(mutations[0].body, {}, 'The browser must not supply filesystem paths or trusted hashes');
+          assert.match(mutations[0].idempotencyKey, /^[0-9a-f-]{36}$/i);
+          if (scenario.reject) {
+            await waitFor(client, `document.querySelector('#workspace-toast')?.textContent.includes('verification failed')`, 'Source failure was not exposed');
+            assert.equal(await client.evaluate(`document.querySelector('.task-quick-actions [data-action="restore-products"]').disabled`), false);
+            assert.equal(runtime.operations.length, 0, 'Failed admission must not enqueue a fake repair');
+          } else {
+            await waitFor(client, `document.querySelector('#workspace-toast')?.textContent.includes('Existing versions and publications are unchanged')`, 'New-version safety message was absent');
+            assert.equal(runtime.operations.length, 1);
+            assert.equal(runtime.operations[0].type, 'lod_recovery');
+            assert.equal(runtime.operations[0].companionRepair, true);
+            assert.equal(runtime.operations[0].sourceOutputId, originalOutput.id);
+          }
+        }
+        assert.deepEqual(runtime.outputs[0], originalOutput, 'The source version and its publication must remain unchanged');
+        await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
+        await waitFor(client, `Boolean(document.querySelector('#import-activity'))`, 'Background work did not load');
+        if (runtime.operations.length) {
+          const row = await client.evaluate(`document.querySelector('[data-operation-id="operation-companion"]')?.textContent`);
+          assert.ok(row.includes('Restore missing products'), row);
+          if (scenario.readOnly || scenario.retryable === false || runtime.operations[0].status !== 'failed') {
+            assert.equal(await client.evaluate(`Boolean(document.querySelector('[data-operation-id="operation-companion"] [data-action="retry-operation"]'))`), false);
+          }
+        }
+        const unexpectedMutations = runtime.requests.filter(request => request.method !== 'GET'
+          && ![endpoint, '/api/v1/operations/operation-companion/retry'].includes(request.path));
+        assert.deepEqual(unexpectedMutations, [], 'No provider restart, re-import, publication or deletion is allowed');
+        const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown');
+        assert.deepEqual(exceptions, []);
+      } finally {
+        await client.command('Page.close').catch(() => {});
+        client.close();
+      }
+    });
+  } finally {
+    try {
+      if (browser) {
+        const exited = new Promise(resolve => browser.once('exit', resolve));
+        browser.kill();
+        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+      }
+    } finally { releaseBrowserLock(); }
     if (server) await new Promise(resolve => server.close(resolve));
     await removeBrowserProfile(profile, t);
   }

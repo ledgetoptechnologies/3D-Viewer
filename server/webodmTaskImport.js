@@ -7,6 +7,7 @@ const { pipeline } = require('node:stream/promises');
 const { extractZipDescriptor } = require('./safeZip');
 const { matchesSourceSnapshot, openImportFolderSource, openImportZipSource } = require('./importSourceSnapshot');
 const { buildRetainedManifest } = require('./retainedManifest');
+const { retainedChunkVerifier } = require('./retainedChunkVerifier');
 const { discoverAssets } = require('./catalogImport');
 const { validateImportSelection } = require('./importBrowser');
 const { hashTree } = require('./storageManager');
@@ -86,7 +87,7 @@ async function stageSource(operation, { processing, storage, config }, signal, p
   return { payload, request, source, staging, stagingRelative, stagingCleanupRelative };
 }
 
-async function copyRetainedClosure(sourceRoot,destination,manifest,{signal=null,progress=async()=>{}}={}){
+async function copyRetainedClosure(sourceRoot,destination,manifest,{signal=null,progress=async()=>{},syncDirectoryTree=true}={}){
   const root=fs.realpathSync.native(sourceRoot),same=(left,right)=>left&&right&&left.dev===right.dev&&left.ino===right.ino&&left.mode===right.mode&&left.size===right.size&&left.ctimeNs===right.ctimeNs&&left.mtimeNs===right.mtimeNs;
   if(manifest.sourceRootPath!==root||!same(manifest.sourceRootIdentity,fs.lstatSync(root,{bigint:true})))throw Object.assign(new Error('retained source root changed before materialization'),{code:'source_changed'});
   const sourceSegments=(value)=>{const raw=String(value||'');if(!raw||raw.includes('\\')||raw.startsWith('/')||raw.split('/').some(segment=>!segment||segment==='.'||segment==='..'))throw Object.assign(new Error('retained source path is unsafe'),{code:'retained_dependency_unsafe'});return raw.split('/');};
@@ -94,6 +95,7 @@ async function copyRetainedClosure(sourceRoot,destination,manifest,{signal=null,
   let rootFd;try{rootFd=fs.openSync(root,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);}catch(error){throw Object.assign(new Error('retained source root cannot be opened safely'),{code:'source_changed',cause:error});}
   const rootIdentity=fs.fstatSync(rootFd,{bigint:true});fs.mkdirSync(destination,{recursive:true});
   try{
+    if(!same(manifest.sourceRootIdentity,rootIdentity))throw Object.assign(new Error('retained source root changed while opening'),{code:'source_changed'});
     for(let index=0;index<manifest.files.length;index+=1){
       if(signal?.aborted)throw Object.assign(new Error('retained materialization cancelled'),{code:'lease_lost'});
       const item=manifest.files[index],segments=sourceSegments(item.sourceRelativePath),fileName=segments.pop(),held=[];let directoryFd=rootFd,input=null,output=null,target;
@@ -103,12 +105,13 @@ async function copyRetainedClosure(sourceRoot,destination,manifest,{signal=null,
         try{input=fs.openSync(source,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC);}catch(error){throw Object.assign(new Error('retained source changed before materialization'),{code:'source_changed',cause:error});}
         const opened=fs.fstatSync(input,{bigint:true});if(!same(before,opened))throw Object.assign(new Error('retained source changed before materialization'),{code:'source_changed'});
         const targetSegments=sourceSegments(item.relativePath);target=path.join(destination,...targetSegments);const destinationRoot=path.resolve(destination);if(target!==destinationRoot&&!target.startsWith(`${destinationRoot}${path.sep}`))throw Object.assign(new Error('retained destination path is unsafe'),{code:'retained_dependency_unsafe'});fs.mkdirSync(path.dirname(target),{recursive:true});output=fs.openSync(target,fs.constants.O_WRONLY|fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_NOFOLLOW|fs.constants.O_CLOEXEC,0o600);
-        const hash=crypto.createHash('sha256'),buffer=Buffer.allocUnsafe(1024*1024);let position=0;while(position<item.byteSize){if(signal?.aborted)throw Object.assign(new Error('retained materialization cancelled'),{code:'lease_lost'});const count=await new Promise((resolve,reject)=>fs.read(input,buffer,0,Math.min(buffer.length,item.byteSize-position),position,(error,bytes)=>error?reject(error):resolve(bytes)));if(count<=0)throw Object.assign(new Error('retained source was truncated'),{code:'source_changed'});hash.update(buffer.subarray(0,count));let written=0;while(written<count){const countWritten=await new Promise((resolve,reject)=>fs.write(output,buffer,written,count-written,position+written,(error,bytes)=>error?reject(error):resolve(bytes)));if(countWritten<=0)throw Object.assign(new Error('retained destination write made no progress'),{code:'retained_materialization_failed'});written+=countWritten;}position+=count;}
+        const chunkProof=retainedChunkVerifier(item.chunks,item.byteSize),hash=crypto.createHash('sha256'),buffer=Buffer.allocUnsafe(1024*1024);let position=0;while(position<item.byteSize){if(signal?.aborted)throw Object.assign(new Error('retained materialization cancelled'),{code:'lease_lost'});const count=await new Promise((resolve,reject)=>fs.read(input,buffer,0,Math.min(buffer.length,item.byteSize-position),position,(error,bytes)=>error?reject(error):resolve(bytes)));if(count<=0)throw Object.assign(new Error('retained source was truncated'),{code:'source_changed'});hash.update(buffer.subarray(0,count));chunkProof.update(buffer.subarray(0,count));let written=0;while(written<count){const countWritten=await new Promise((resolve,reject)=>fs.write(output,buffer,written,count-written,position+written,(error,bytes)=>error?reject(error):resolve(bytes)));if(countWritten<=0)throw Object.assign(new Error('retained destination write made no progress'),{code:'retained_materialization_failed'});written+=countWritten;}position+=count;}
+        chunkProof.finish();
         if(hash.digest('hex')!==item.sha256||!same(opened,fs.fstatSync(input,{bigint:true})))throw Object.assign(new Error('retained source changed during materialization'),{code:'source_changed'});for(const directory of held)if(!same(directory.identity,fs.fstatSync(directory.fd,{bigint:true})))throw Object.assign(new Error('retained source directory changed during materialization'),{code:'source_changed'});if(!same(rootIdentity,fs.fstatSync(rootFd,{bigint:true})))throw Object.assign(new Error('retained source root changed during materialization'),{code:'source_changed'});fs.fchmodSync(output,0o440);fs.fsyncSync(output);
       }finally{if(output!==null)fs.closeSync(output);if(input!==null)fs.closeSync(input);for(let heldIndex=held.length-1;heldIndex>=0;heldIndex-=1)fs.closeSync(held[heldIndex].fd);}
       await progress((index+1)/manifest.files.length);
     }
-    fsyncDirectoryTree(destination,{code:'retained_materialization_failed'});
+    if(syncDirectoryTree)fsyncDirectoryTree(destination,{code:'retained_materialization_failed'});
   }finally{fs.closeSync(rootFd);}
 }
 

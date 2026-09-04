@@ -1004,10 +1004,13 @@ function loadTiles() {
       rendererInstance.requestTileContents(rendererInstance.root);
     } else {
       // External/delegating roots have no single renderable overview. Preserve
-      // the existing staged path for those manifests instead of blocking on a
-      // root scene that can never exist.
+      // direct camera-driven traversal instead of blocking on a root scene
+      // that can never exist. This path bypasses finishLodPrefetch, so it must
+      // also release the bootstrap depth cap; leaving it at two permanently
+      // prevents a delegated hierarchy from reaching its detailed content.
       lodBootstrapPhase = 'complete';
       lodWarmupComplete = lodRuntimeProfileState.reduced;
+      rendererInstance.maxDepth = Infinity;
       rendererInstance.errorTarget = detailToErrorTarget(lodRuntimeProfileState.activeDetail);
       state.lodRuntimeProfile = {
         ...state.lodRuntimeProfile,
@@ -4043,14 +4046,16 @@ function updateLodQualityStatus(now = performance.now(), force = false) {
   if (lodBootstrapPhase === 'root') label = 'loading complete overview';
   else if (lodBootstrapPhase === 'prefetch') label = 'building stable overview';
   else if (lodBootstrapPhase === 'root-only') label = 'complete overview (detail shell unavailable)';
-  else if (memoryLimited) label = `focused Detail ${lodRuntimeProfileState.activeDetail}`;
+  else if (memoryLimited) label = `memory-limited, target Detail ${lodRuntimeProfileState.requestedDetail}`;
   else if (lodRuntimeProfileState.reduced) label = `reduced-memory Detail ${lodRuntimeProfileState.activeDetail}`;
   else if (lodDetailRequestPending(lodRuntimeProfileState)) label = `warming Detail ${lodRuntimeProfileState.activeDetail}`;
   else if (quality.fullDetail) label = 'full-detail';
   else label = queuesActive || snapshot.pendingRequiredTiles > 0 || snapshot.pendingHierarchyNodes > 0
     ? `streaming Detail ${lodRuntimeProfileState.activeDetail}`
     : `Detail ${lodRuntimeProfileState.activeDetail}`;
-  dom.lodStatus.textContent = `LOD: ${label} (${visibleCount} tile${visibleCount === 1 ? '' : 's'})`;
+  const pendingCount = Math.max(0, Number(snapshot.pendingRequiredTiles) || 0);
+  const pendingLabel = memoryLimited && pendingCount > 0 ? `, ${pendingCount} pending` : '';
+  dom.lodStatus.textContent = `LOD: ${label} (${visibleCount} tile${visibleCount === 1 ? '' : 's'}${pendingLabel})`;
   return { snapshot, frontier, quality };
 }
 

@@ -6,6 +6,7 @@ const { spawn } = require('node:child_process');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { hashTree } = require('./storageManager');
 const { verifyLodProvenance } = require('./lodProvenance');
+const { verifyRecoveryCompanionPlan } = require('./lodRecoveryCompanions');
 const {
   discoverMeshDerivativeInput,
   discoverPointDerivativeInput,
@@ -509,7 +510,20 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
         const source = storage.resolve(glb.root_key, glb.relative_path, { mustExist: true });
         try {
           derivativePhase(processing, job, owner, 'auditing');
-          await run(process.execPath, [audit, tiles, source, '--external-source'], { signal: controller.signal });
+          let reusedManifest = null;
+          if (request.reuseVerifiedProvenance === true) {
+            const operation = processing.database.prepare("SELECT payload_json FROM dataset_operations WHERE processing_attempt_id=? AND status='awaiting_derivatives'").get(attempt.id);
+            const payload = JSON.parse(operation?.payload_json || '{}');
+            const repair = payload.companionRepair && processing.companionRepairCandidate(payload.sourceOutputId, { replacementAttemptId: attempt.id });
+            if (!repair || repair.sourceVersionId !== payload.companionSourceOutputId
+              || payload.ids?.versionId !== attempt.resultModelVersionId || tilesRootKey !== 'models'
+              || request.tilesRelativePath !== `${payload.targetRelativePath}/recovery-companions/tiles`) {
+              throw Object.assign(new Error('verified mesh reuse has no authorized companion-repair lineage'), { code: 'lod_provenance_invalid' });
+            }
+            reusedManifest = verifyRecoveryCompanionPlan(processing.database, payload.sourceVersionId, payload.reusedTiles, { meshTilesOnly: true });
+          } else {
+            await run(process.execPath, [audit, tiles, source, '--external-source'], { signal: controller.signal });
+          }
           derivativePhase(processing, job, owner, 'verifying');
           const verified = await verifiedLodAsset({
             versionId: attempt.resultModelVersionId,
@@ -520,6 +534,9 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
             byteSize: fs.statSync(path.join(tiles, 'tileset.json')).size,
             attemptId: attempt.id,
           }, tiles, source);
+          if (reusedManifest && verified.asset.manifestSha256 !== reusedManifest.assets[0]?.manifestSha256) {
+            throw Object.assign(new Error('copied verified mesh artifacts changed before registration'), { code: 'lod_provenance_invalid' });
+          }
           derivativePhase(processing, job, owner, 'registering');
           if (!processing.registerVerifiedLodAsset(job.id, owner, verified.asset, verified.provenance, { leaseToken: job.lease_token })) {
             throw Object.assign(new Error('derivative lease was lost before verified tile registration'), { code: 'lease_lost' });

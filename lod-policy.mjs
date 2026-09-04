@@ -240,6 +240,115 @@ export function lodTileInLockedFocalOwner(tile) {
   return false;
 }
 
+// A complete regional cover may protect more than one nearby surface. Charge
+// whole terminal cuts, not only currently loaded/visible leaves: otherwise an
+// apparently cheap neighbor can expand into an unaffordable atomic REPLACE cut.
+// Unknown decoded allocations are estimates, never permission to exceed the
+// renderer's prospective hard cap.
+export function selectLodNearRegions(regions, {
+  primary = null,
+  previous = new Map(),
+  now = 0,
+  maxBytes = 0,
+  maxRegions = 4,
+  entryRatio = 1.35,
+  exitRatio = 1.75,
+  exitDelayMs = 2_000,
+  getBytes = () => 0,
+  getDistance = lodTileCameraDistance,
+  isInView = tile => tile?.traversal?.inFrustum === true,
+} = {}) {
+  const candidates = Array.from(new Set(regions || []));
+  const finiteBytes = tile => Math.max(0, Number(getBytes(tile)) || 0);
+  const cuts = new Map();
+  let largestKnownLeaf = 0;
+  for (const region of candidates) {
+    const leaves = [];
+    const stack = [...(region.children || [])];
+    const seen = new Set();
+    let valid = stack.length > 0;
+    while (stack.length && valid) {
+      const tile = stack.pop();
+      if (!tile || seen.has(tile) || seen.size >= 4_096) { valid = false; break; }
+      seen.add(tile);
+      if (tile.children?.length) stack.push(...tile.children);
+      else {
+        if (Number(tile.geometricError) !== 0 || !contentUri(tile)) { valid = false; break; }
+        const known = finiteBytes(tile);
+        largestKnownLeaf = Math.max(largestKnownLeaf, known);
+        leaves.push({ tile, known });
+      }
+    }
+    cuts.set(region, { leaves, valid });
+  }
+  const costs = new Map();
+  for (const region of candidates) {
+    const cut = cuts.get(region);
+    // Use the larger observed leaf/proxy allocation with a 2x heuristic for
+    // unknown leaves; this is not a guaranteed upper bound. Actual admission
+    // still enforces the hard cap. No byte evidence means no expansion.
+    const unknownEstimate = 2 * Math.max(finiteBytes(region), largestKnownLeaf);
+    const knownBytes = cut.leaves.reduce((sum, leaf) => sum + leaf.known, 0);
+    const unknownLeaves = cut.leaves.filter(leaf => leaf.known <= 0).length;
+    const estimatedBytes = unknownLeaves * unknownEstimate;
+    const cost = cut.valid && (!unknownLeaves || unknownEstimate > 0)
+      ? knownBytes + estimatedBytes : Infinity;
+    costs.set(region, { cost, knownBytes, estimatedBytes, unknownLeaves });
+  }
+  const distance = region => {
+    const measured = Number(getDistance(region));
+    return Number.isFinite(measured) && measured >= 0 ? measured : Infinity;
+  };
+  const visible = candidates.filter(region => isInView(region) && Number.isFinite(distance(region)))
+    .sort((a, b) => distance(a) - distance(b));
+  const nearest = visible[0] || null;
+  const nearestDistance = nearest ? distance(nearest) : Infinity;
+  // Bounding-volume distance can be zero inside a tile. Use that nearest
+  // region's measured bound scale, not a world-unit constant, for the band.
+  const distanceScale = nearestDistance > 0 ? nearestDistance
+    : Math.max(0, Number(nearest?.__ltdsFocusReferenceDistance) || 0,
+      Number(nearest?.geometricError) || 0);
+  const entryDistance = distanceScale * Math.max(1, Number(entryRatio) || 1);
+  const exitDistance = distanceScale * Math.max(Number(entryRatio) || 1, Number(exitRatio) || 1);
+  const eligible = new Map();
+  for (const region of candidates) {
+    if (isInView(region) && distance(region) <= (previous.has(region) ? exitDistance : entryDistance)) {
+      eligible.set(region, Number(now));
+    } else if (previous.has(region) && Number(now) - Number(previous.get(region)) < exitDelayMs) {
+      eligible.set(region, previous.get(region));
+    }
+  }
+  const selected = new Map();
+  let totalBytes = 0, knownBytes = 0, estimatedBytes = 0, unknownLeaves = 0;
+  const include = region => {
+    selected.set(region, eligible.get(region) ?? Number(now));
+    const cost = costs.get(region);
+    totalBytes += cost.cost;
+    knownBytes += cost.knownBytes;
+    estimatedBytes += cost.estimatedBytes;
+    unknownLeaves += cost.unknownLeaves;
+  };
+  // Preserve the existing acquired primary even when an unusually large cut
+  // cannot fit. Expansion must not secretly lower its requested quality.
+  if (candidates.includes(primary)) include(primary);
+  const budget = Math.max(0, Number(maxBytes) || 0);
+  const limit = Math.max(1, Math.min(candidates.length, Number(maxRegions) || 1));
+  const ranked = [...eligible.keys()].filter(region => region !== primary).sort((a, b) => (
+    Number(previous.has(b)) - Number(previous.has(a)) || distance(a) - distance(b)
+  ));
+  for (const region of ranked) {
+    const cost = costs.get(region).cost;
+    if (selected.size >= limit || !Number.isFinite(cost) || totalBytes + cost > budget) continue;
+    include(region);
+  }
+  return {
+    selected,
+    totalBytes, knownBytes, estimatedBytes, unknownLeaves,
+    maxBytes: budget,
+    primaryOverBudget: totalBytes > budget,
+  };
+}
+
 function lodTileInLockedQualityOwner(tile) {
   let current = tile;
   let child = null;
@@ -249,7 +358,8 @@ function lodTileInLockedQualityOwner(tile) {
   // raw merely because their shared coarse ancestor still owns queue priority.
   for (let depth = 0; current && depth < 256; depth += 1) {
     if (child && current.__ltdsRegionalCoverReady === true
-      && current.__ltdsRegionalFocusRegion !== child) return false;
+      && current.__ltdsRegionalFocusRegion !== child
+      && current.__ltdsRegionalNearRegions?.has?.(child) !== true) return false;
     if (current.__ltdsFocalOwnerLocked === true) return true;
     child = current;
     current = current.parent;
