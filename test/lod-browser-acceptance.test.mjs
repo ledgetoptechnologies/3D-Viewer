@@ -17,6 +17,9 @@ import { makeB3dm, makeGlb } from './helpers/lod-fixture.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureId = 'lod-browser-fixture';
 const GiB = 1024 * 1024 * 1024;
+// Historical raw-SSE/focal/retention cases explicitly use lodDistanceDemand=0
+// so their original quality assertions remain intact. Default-on behavior is
+// covered separately by the depth-separated integration A/B below.
 
 // Lossless one-source-pixel stripes expose enlargement of a fit-sized raster.
 // A 1x1 fixture can verify routing, but cannot verify photo detail at native size.
@@ -1036,7 +1039,7 @@ test('browser camera-centered focal owner reacquires A across A -> B -> A views'
       width: 1200, height: 800, deviceScaleFactor: 1, mobile: false,
       screenWidth: 1200, screenHeight: 800,
     });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
     await waitFor(client, `window.__ltds?.tiles?.()?.root?.children?.length === 2`,
       'two-owner fixture hierarchy did not load');
     await client.evaluate(`(() => {
@@ -1168,7 +1171,7 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await client.command('Network.enable');
     await client.command('Log.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false, screenWidth: 1440, screenHeight: 900 });
-    await client.command('Page.navigate', { url: `${origin}/?project=${fixtureId}` });
+    await client.command('Page.navigate', { url: `${origin}/?project=${fixtureId}&lodDistanceDemand=0` });
     await waitFor(client, `location.search.includes('view=model') && document.querySelector('#tab-model')?.classList.contains('active')`, 'verified LOD was not selected over the available orthophoto');
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, 'window.__ltds.state?.lodManifestReport?.valid === true', 'REPLACE manifest did not validate');
@@ -1705,7 +1708,7 @@ test('browser close view refines at the default Detail and small motion retains 
       width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
       screenWidth: 1440, screenHeight: 900,
     });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
 
     await waitFor(client, `(() => {
@@ -1855,7 +1858,7 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     await client.command('Runtime.enable');
     await client.command('Log.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root && window.__ltds.tiles().group.children.length)', 'no LOD tile attached');
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
       'camera-layer fixture did not finish bounded LOD prefetch');
@@ -2049,7 +2052,7 @@ test('browser hides the coarse root when every visible branch meets the active D
     await client.command('Log.enable');
     await client.command('Network.enable');
     await client.command('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
     await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.engineData?.scene)', 'coarse root did not load');
     await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
       '16-leaf fixture did not finish its initial bounded prefetch', 180_000);
@@ -2336,7 +2339,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     await client.command('Page.enable');
     await client.command('Runtime.enable');
     await client.command('Network.enable');
-    await client.command('Page.navigate', { url: `${fixture.origin}/session/active/refresh-session` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/session/active/refresh-session?lodDistanceDemand=0` });
     await waitFor(client, `document.querySelector('#layer-tiles')?.textContent === 'Streaming LOD unavailable'`, 'initial unavailable LOD state did not render');
     assert.equal(await client.evaluate(`document.querySelector('#loading-overlay')?.classList.contains('hidden')`), true, 'unavailable tiles left the workspace blocked by its initializing overlay');
     const refreshDeadline = Date.now() + 15_000;
@@ -2816,7 +2819,7 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
       width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
       screenWidth: 1440, screenHeight: 900,
     });
-    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model` });
+    await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
     await waitFor(client, `Boolean(window.__ltds?.tiles()?.root?.children?.length === ${shellCount})`,
       'production-weighted hierarchy did not initialize', 20_000);
 
@@ -3448,7 +3451,7 @@ for (const { sameOwner, twoNear } of [{ sameOwner: false }, { sameOwner: true },
         width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
         screenWidth: 1440, screenHeight: 900,
       });
-      await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model` });
+      await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&view=model&lodDistanceDemand=0` });
       await waitFor(client, 'Boolean(window.__ltds?.tiles()?.root?.children?.length)', 'depth-stacked hierarchy did not initialize', 20_000);
       await setView(client, [0, 0, 20], [0, 0, 0]);
       await client.evaluate(`(() => {
@@ -3815,7 +3818,7 @@ test('browser camera photo fills the window and preserves source pixels through 
   }
 });
 
-test('browser opt-in distance demand protects nearby surfaces and exposes bounded timing without changing queue limits', { timeout: 90_000 }, async (t) => {
+test('browser default distance demand and explicit overrides protect nearby surfaces with bounded timing and unchanged queue limits', { timeout: 90_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) { t.skip('Chrome or Edge is required for evaluation-switch integration acceptance.'); return; }
   const releaseLock = await acquireBrowserHarnessLock({ root });
@@ -3869,8 +3872,12 @@ test('browser opt-in distance demand protects nearby surfaces and exposes bounde
     await client.command('Page.enable'); await client.command('Runtime.enable');
     await client.command('Emulation.setDeviceMetricsOverride',{width:1440,height:900,deviceScaleFactor:1,mobile:false});
     const results=[];
-    for (const enabled of [false,true]) {
-      await client.command('Page.navigate',{url:`${fixture.origin}/?project=${fixtureId}${enabled?'&lodDistanceDemand=1&lodLoadingTiming=1':''}`});
+    for (const {enabled,query} of [
+      {enabled:false,query:'&lodDistanceDemand=0'},
+      {enabled:true,query:'&lodLoadingTiming=1'},
+      {enabled:true,query:'&lodDistanceDemand=1&lodLoadingTiming=1'},
+    ]) {
+      await client.command('Page.navigate',{url:`${fixture.origin}/?project=${fixtureId}${query}`});
       await waitFor(client, `window.__ltds?.state?.lodRuntimeProfile?.bootstrapPhase==='complete'`, 'evaluation fixture bootstrap did not complete',20_000);
       await client.evaluate(`(() => {const tiles=window.__ltds.tiles(),cam=window.__ltds.camera(),V=cam.position.constructor;
         tiles.group.updateWorldMatrix(true,false);
@@ -3911,6 +3918,9 @@ test('browser opt-in distance demand protects nearby surfaces and exposes bounde
       results.push(result);
     }
     assert.deepEqual(results[1].limits,results[0].limits,'evaluation changed concurrency or memory budget');
+    assert.deepEqual(results[2].limits,results[0].limits,'explicit-on changed concurrency or memory budget');
+    const selection = value => value.branches.map(({name,target,parentVisible,leafVisible})=>({name,target,parentVisible,leafVisible}));
+    assert.deepEqual(selection(results[2]),selection(results[1]),'explicit-on differs from default-on at the same pose');
     assert.equal(results[1].limits.workers,2);
   } finally {
     if(client){await client.command('Page.close',{},2_000).catch(()=>{});client.close();}

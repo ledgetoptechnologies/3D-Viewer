@@ -1,16 +1,18 @@
-# Hermes follow-up: medium-distance demand candidate
+# Hermes follow-up: pre-production medium-distance demand
 
 ## Scope and status
 
 Candidate branch: `codex/hermes-medium-demand-evaluation`.
-Implementation commit: `413a00ca39bde77c3193dd0af20c05625807d442`.
-The branch and image are local-only; they have not been pushed to origin or a
-registry. Hermes needs access to this candidate checkout or an explicitly arranged
-transfer before running the comparison; fetching origin alone will not obtain it.
+Initial implementation commit: `413a00ca39bde77c3193dd0af20c05625807d442`.
+The owner subsequently approved enabling distance demand by default and releasing
+to main for pre-production testing. The explicit per-page off switch is retained.
+The initial image identity below describes the opt-in candidate; check the release
+revision and image-publication result for the later default-on build.
 Baseline: `26643bec38765f1af1d447a90afd87bb89fde70d`.
 The candidate also contains local photo/camera/navigation commit `c2c2148`;
 see `PHOTO_CAMERA_NAVIGATION_QA.md` for those separate changes.
-This is not a production release or proof that the Church angles are fixed.
+The default-on rollout is owner-approved pre-production testing, not proof that
+the Church angles are fixed or that customer-facing visual acceptance has passed.
 No Operations changes, production imports/retries, asset replacement, or Rome
 restoration were performed. Do not modify production for this evaluation.
 
@@ -41,12 +43,15 @@ machine. Its original evidence directory remains on Hermes's host.
 
 ## Implemented candidate
 
-### Default-off distance-demand experiment
+### Default-on pre-production distance demand
 
-Use `lodDistanceDemand=1` on the actual Viewer document URL. Without that exact
-query value, selection behavior is unchanged. No preference is persisted.
-Do not put the switch after `#`; append it to existing query parameters.
-The memory panel labels the enabled experiment.
+Normal Viewer sessions now enable distance demand. Use `lodDistanceDemand=0` on
+the actual Viewer document URL to restore baseline selection, or `lodDistanceDemand=1`
+to enable it explicitly. Only the exact value `0` disables it; other values use
+the default. No preference is persisted. Do not put the switch after `#`; append
+it to existing query parameters. If the viewer is embedded, the parameter belongs
+on its document URL, not only its containing workspace. The memory panel labels
+the enabled experiment.
 
 - Distance is camera-to-bound, not mouse position or screen-center ownership.
   Tight authored bounds are used for rigid/uniformly scaled scenes. Unsupported
@@ -62,8 +67,8 @@ The memory panel labels the enabled experiment.
   download/parse/texture-worker counts, retention policy, and strict REPLACE
   hierarchy are not changed. No ADD underlay, forced visibility, or occlusion
   assumption is introduced.
-- This intentionally permits coarser medium/far content. Enabling it by default
-  requires real near-surface visual proof. Loose bounds or many locked owners can
+- This intentionally permits coarser medium/far content. The owner authorized a
+  pre-production default-on trial before real near-surface visual proof. Loose bounds or many locked owners can
   still overprotect background branches; report that rather than weakening safety.
 
 ### Opt-in stage timing
@@ -111,8 +116,8 @@ write credentials or expose copied private assets on a public interface.
 
 Compare the same candidate build with:
 
-1. Baseline: `lodLoadingTiming=1` only.
-2. Experiment: `lodLoadingTiming=1&lodDistanceDemand=1`.
+1. Baseline: `lodLoadingTiming=1&lodDistanceDemand=0`.
+2. New default: `lodLoadingTiming=1` (or also `lodDistanceDemand=1`).
 3. If instrumentation overhead is material, repeat both with timing disabled.
 
 Keep viewport, DPR, browser/GPU, camera, memory profile, detail, tile/worker limits,
