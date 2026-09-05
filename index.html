@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Viewer · Local Demo</title>
+  <link rel="stylesheet" href="/demo.css" />
+</head>
+<body>
+  <header>
+    <div><strong>Viewer</strong><span class="badge">LOCAL DEMO</span><p>Synthetic assets only · no account, uploads or backend</p></div>
+    <nav aria-label="Viewer controls">
+      <label>View <select id="mode"><option value="mesh">Textured mesh / KTX2</option><option value="cloud">Point cloud</option></select></label>
+      <label>Detail <input id="detail" type="range" min="2" max="24" value="20" /><output id="detail-value">20</output></label>
+      <label>Memory <select id="memory"><option value="auto">Auto</option><option value="balanced">Balanced</option><option value="high">High</option></select></label>
+      <button id="home" type="button">Reset view</button>
+    </nav>
+  </header>
+  <main id="viewport" aria-label="Interactive 3D viewport"></main>
+  <aside>Left drag: orbit · Right / middle drag: pan · Wheel: zoom<br />The textured fixture is a flat synthetic checker surface, not a customer model.</aside>
+  <footer><output id="status" aria-live="polite">Verifying bundled fixtures…</output></footer>
+  <script type="module" src="/demo.mjs"></script>
+</body>
+</html>
