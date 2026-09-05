@@ -57,6 +57,7 @@ import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAU
 import { clampPhotoView, fitPhotoBox, panPhotoView, zoomPhotoView } from './camera-photo-view.mjs';
 import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
+import { createDemUpdateQueue } from './dem-update-queue.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
 import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
@@ -1101,12 +1102,16 @@ function loadTiles() {
     });
     emitLodDebugSnapshot('load-error', true);
     if (failure.kind === 'authorization' && VIEW_MODE === 'session') {
+      recordSessionAccessFailure('tile', failure.status);
       lodTileRecoveryPending = true;
-      dom.lodStatus.textContent = 'LOD: renewing access';
       // Expired capability URLs fail concurrently. Once one failure has
       // started renewal, every other 401/403 must keep the fallback renderer
       // alive instead of interpreting the coalesced request as a failure.
-      if (sessionRenewalPending || requestSessionRenewal('tile-authorization')) return;
+      if (!sessionRenewalPending) requestSessionRenewal('tile-authorization');
+      // Repeated denials may arrive after renewal has been blocked. Report the
+      // actual controller state, never a renewal that was not started.
+      dom.lodStatus.textContent = sessionAccessLabel()
+        || 'LOD: access unavailable — reopen this model from the Viewer workspace';
       // Preserve resident geometry while the access status explains recovery.
       return;
     }
@@ -1230,6 +1235,7 @@ const SESSION_RENEWAL_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 300_000];
 let sessionAllowedOrigins = [];
 let sessionAccessState = 'active';
 let sessionAccessReason = null;
+let lastSessionAccessFailure = null;
 let sessionRenewalBlocked = false;
 const reviewControllerCandidate = new URLSearchParams(location.hash.replace(/^#/, '')).get('reviewController');
 const REVIEW_CONTROLLER_ID = window.parent === window && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reviewControllerCandidate || '')
@@ -1349,6 +1355,21 @@ function setSessionAccessState(next, reason = null) {
   else if (next === 'active' && previous !== 'active' && state.activeMode === 'cloud') dom.cloudStatus.textContent = 'Cloud: access renewed';
 }
 
+function recordSessionAccessFailure(source, status = null) {
+  // Bounded, credential-free attribution for failures reported after a mode
+  // switch. Do not include asset URLs, model/session IDs, or capabilities.
+  lastSessionAccessFailure = {
+    source,
+    mode: state.activeMode,
+    status: status === 401 || status === 403 ? status : null,
+    modeEpoch,
+    accessGeneration: sessionAccessGeneration,
+    expiresInSeconds: activeViewerSession ? Math.round((Date.parse(activeViewerSession.expiresAt) - Date.now()) / 1000) : null,
+    renewalPending: sessionRenewalPending,
+    renewalBlocked: sessionRenewalBlocked,
+  };
+}
+
 function sessionDiagnostics() {
   return {
     mode: activeViewerSession?.sessionMode || null,
@@ -1359,6 +1380,7 @@ function sessionDiagnostics() {
     renewalPending: sessionRenewalPending,
     renewalBlocked: sessionRenewalBlocked,
     tileRecoveryPending: lodTileRecoveryPending,
+    lastFailure: lastSessionAccessFailure ? { ...lastSessionAccessFailure } : null,
   };
 }
 
@@ -1507,6 +1529,15 @@ async function bootstrapSession() {
 }
 
 async function handleSessionRenewalMessage(data, { reviewChannel = false } = {}) {
+  if (reviewChannel && VIEW_MODE === 'session' && reviewSessionChannel
+    && data?.version === 1 && data.type === 'ltds-viewer:controller-ready'
+    && data.channelId === REVIEW_CONTROLLER_ID && data.modelId === PROJECT?.id
+    && Object.keys(data).sort().join('\n') === ['version','type','channelId','modelId'].sort().join('\n')) {
+    // A returning workspace may accelerate the next due request, never grant
+    // access, interrupt redemption, or undo an authoritative blocked state.
+    if (!sessionRenewalBlocked && !sessionRenewalPending) requestSessionRenewalIfDue('controller-ready');
+    return;
+  }
   if (reviewChannel && VIEW_MODE === 'session' && data?.version === 1
     && data.type === 'ltds-viewer:session-unavailable'
     && pendingReviewRenewalRequestId && data.requestId === pendingReviewRenewalRequestId
@@ -1730,7 +1761,7 @@ function mapCameraGlyph(feature) {
 
 function refreshMapCameraLayer() {
   if (!map) return false;
-  const visible = state.activeMode === 'ortho' && state.camerasVisible
+  const visible = isMapMode() && state.camerasVisible
     && state.camerasLoaded && SHARE_PERMISSIONS.cameras && Boolean(SHOTS_URL);
   if (!visible) {
     if (mapCameraLayer && map.hasLayer(mapCameraLayer)) map.removeLayer(mapCameraLayer);
@@ -2245,6 +2276,7 @@ function syncMeasureButtons() {
   document.querySelectorAll('#panel-measure .tool-btn').forEach((b) => {
     b.classList.toggle('active', b.dataset.tool === state.activeTool);
   });
+  syncMapVolumeAvailability();
 }
 
 function projectedMapPoints(points) {
@@ -2410,7 +2442,7 @@ async function calculateMapVolume(latLngPoints) {
 
 function syncMapVolumeAvailability() {
   const options = document.getElementById('map-volume-options');
-  if (options) options.style.display = isMapMode() ? 'block' : 'none';
+  if (options) options.style.display = isMapMode() && (state.activeMode === 'ortho' || state.activeTool === 'volume') ? 'block' : 'none';
   const surface = document.getElementById('map-volume-surface');
   if (!surface) return;
   surface.querySelector('option[value="dsm"]').disabled = !DSM_URL;
@@ -3021,7 +3053,7 @@ function warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, la
         data[o]   = Math.min(255, rgb[0] * z);
         data[o+1] = Math.min(255, rgb[1] * z);
         data[o+2] = Math.min(255, rgb[2] * z);
-        data[o+3] = 240;
+        data[o+3] = 255;
       }
     }
   }
@@ -3074,7 +3106,7 @@ function renderDemTile(raster, w, h, ds, warp) {
       img.data[i*4] = Math.min(255, rgb[0] * z);
       img.data[i*4+1] = Math.min(255, rgb[1] * z);
       img.data[i*4+2] = Math.min(255, rgb[2] * z);
-      img.data[i*4+3] = 240;
+      img.data[i*4+3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -3165,9 +3197,9 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
       if (epoch !== modeEpoch || state.activeMode !== type) return;
       const ov = await overviewCanvas(ds, renderDemTile, 2048, signal);
       if (epoch !== modeEpoch || state.activeMode !== type) return;
-      const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 0.94 });
+      const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
       const grid = new GeoTiffGridLayer(ds, renderDemTile, {
-        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 0.94, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
+        tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 1, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
       });
       demLayers[type] = { overlay, grid, ds };
       syncMapVolumeAvailability();
@@ -3224,19 +3256,26 @@ function applyDemOpacity() {
   });
 }
 
-async function applyDemSettings() {
+const demUpdateQueue = createDemUpdateQueue(applyDemSettings, { onError: (error) => {
+  if (error?.name !== 'AbortError') showError('Could not update elevation colors. Try Reset to defaults.');
+} });
+
+async function applyDemSettings(isCurrent = () => true) {
   const signal = modeAbortController?.signal;
   demSettings.cmap = dom.demColormap.value;
   demSettings.shade = parseFloat(dom.demShading.value);
   const mn = dom.demMin.value.trim(), mx = dom.demMax.value.trim();
-  demSettings.minFt = mn === '' ? null : parseFloat(mn);
-  demSettings.maxFt = mx === '' ? null : parseFloat(mx);
+  const min = mn === '' ? null : Number(mn), max = mx === '' ? null : Number(mx);
+  if ((min !== null && !Number.isFinite(min)) || (max !== null && !Number.isFinite(max)) || (min !== null && max !== null && min >= max)) return;
+  demSettings.minFt = min;
+  demSettings.maxFt = max;
   demSettings.steps = parseInt(document.getElementById('dem-steps').value, 10) || 0;
 
   for (const t of ['dsm', 'dtm']) {
     const dl = demLayers[t];
     if (!dl) continue;
     const ov = await overviewCanvas(dl.ds, renderDemTile, 2048, signal);   // warped; raster from ds._ovCache
+    if (!isCurrent() || signal?.aborted) return;
     dl.overlay.setUrl(ov.canvas.toDataURL('image/png'));
     dl.grid.redraw();
   }
@@ -3252,9 +3291,10 @@ function resetDemSettings() {
   dom.demMin.value = '';
   dom.demMax.value = '';
   document.getElementById('dem-steps').value = '0';
-  document.getElementById('dem-opacity').value = '95';
-  document.getElementById('dem-opacity-val').textContent = '95%';
-  applyDemSettings();
+  document.getElementById('dem-opacity').value = '100';
+  document.getElementById('dem-opacity-val').textContent = '100%';
+  applyDemOpacity();
+  demUpdateQueue.request({ immediate: true });
 }
 
 function removeMapOverlays() {
@@ -3589,6 +3629,7 @@ window.addEventListener('message', (event) => {
     dom.cloudStatus.textContent = `Cloud: unavailable (${code}; ref ${DIAGNOSTIC_CORRELATION_ID.slice(0, 8)})`;
     viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code, stage });
     if (VIEW_MODE === 'session' && code === 'authorization_required') {
+      recordSessionAccessFailure('pointcloud');
       if (!sessionRenewalPending && !requestSessionRenewal('pointcloud-authorization')) pcApi()?.accessUnavailable?.();
       dom.cloudStatus.textContent = sessionAccessLabel('Cloud') || 'Cloud: renewing access';
     } else if (VIEW_MODE === 'session' && code === 'authorization_unavailable') {
@@ -3639,6 +3680,80 @@ function syncCameraLayer() {
   return true;
 }
 
+// Keep color-range intent in the parent: Potree is destroyed when hidden.
+// State is scoped to a model, while values are always canonical world metres.
+let pcElevationModelId = null;
+let pcElevationRange = null;
+let pcElevationDomain = null;
+
+function syncPcElevationControls({ keepTypedValues = false } = {}) {
+  if (pcElevationModelId !== PROJECT?.id) {
+    pcElevationModelId = PROJECT?.id;
+    pcElevationRange = null;
+    pcElevationDomain = null;
+  }
+  const wrap = document.getElementById('pc2-elevation-controls');
+  if (!wrap) return;
+  wrap.hidden = document.getElementById('pc2-color').value !== 'elevation';
+  const suffix = DISPLAY_UNITS === 'metric' ? 'm' : 'ft';
+  const factor = DISPLAY_UNITS === 'metric' ? 1 : METERS_TO_FT;
+  document.getElementById('pc2-elevation-min-label').textContent = `Min ${suffix}`;
+  document.getElementById('pc2-elevation-max-label').textContent = `Max ${suffix}`;
+  const snapshot = pcApi()?.getElevationState?.();
+  const ready = snapshot?.available && snapshot?.range && snapshot?.bounds;
+  for (const id of ['min', 'max', 'low', 'high', 'reset']) {
+    document.getElementById(`pc2-elevation-${id}`).disabled = !ready;
+  }
+  if (!ready) {
+    document.getElementById('pc2-elevation-status').textContent = 'Waiting for point-cloud elevation bounds.';
+    return;
+  }
+  const range = snapshot.range;
+  pcElevationDomain = {
+    min: Math.min(snapshot.bounds.min, range.min),
+    max: Math.max(snapshot.bounds.max, range.max),
+  };
+  const displayValue = value => String(Number((value * factor).toFixed(6)));
+  if (!keepTypedValues) {
+    document.getElementById('pc2-elevation-min').value = displayValue(range.min);
+    document.getElementById('pc2-elevation-max').value = displayValue(range.max);
+  }
+  for (const [id, value] of [['low', range.min], ['high', range.max]]) {
+    const slider = document.getElementById(`pc2-elevation-${id}`);
+    slider.min = displayValue(pcElevationDomain.min);
+    slider.max = displayValue(pcElevationDomain.max);
+    slider.step = 'any';
+    slider.value = displayValue(value);
+    slider.setAttribute('aria-valuetext', `${displayValue(value)} ${suffix}`);
+  }
+  document.getElementById('pc2-elevation-status').textContent = `${snapshot.automatic ? 'Automatic' : 'Custom'} color range: ${formatElevation(range.min, DISPLAY_UNITS)} to ${formatElevation(range.max, DISPLAY_UNITS)}.`;
+}
+
+function applyPcElevationInputs(source) {
+  const api = pcApi();
+  if (!api?.getElevationState?.()?.available) return;
+  const minInput = document.getElementById('pc2-elevation-min');
+  const maxInput = document.getElementById('pc2-elevation-max');
+  let min = elevationInputMeters(minInput.valueAsNumber);
+  let max = elevationInputMeters(maxInput.valueAsNumber);
+  if (source === 'low' || source === 'high') {
+    const current = api.getElevationState().range;
+    min = current.min; max = current.max;
+    const slider = document.getElementById(`pc2-elevation-${source}`);
+    const value = elevationInputMeters(slider.valueAsNumber);
+    const gap = Math.max(0.000001, (pcElevationDomain.max - pcElevationDomain.min) * 0.000001);
+    if (source === 'low') min = Math.min(value, max - gap);
+    else max = Math.max(value, min + gap);
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max - min < 0.000001
+    || !api.setElevationRange(min, max)) {
+    document.getElementById('pc2-elevation-status').textContent = 'Enter a finite minimum below the maximum. The last valid colors remain active.';
+    return;
+  }
+  pcElevationRange = { min, max };
+  syncPcElevationControls({ keepTypedValues: source === 'number' });
+}
+
 function bindPcPanel() {
   const budget = document.getElementById('pc2-budget');
   budget.addEventListener('input', (e) => {
@@ -3655,6 +3770,18 @@ function bindPcPanel() {
   });
   document.getElementById('pc2-color').addEventListener('change', (e) => {
     const api = pcApi(); if (api) api.setColor(e.target.value);
+    syncPcElevationControls();
+  });
+  for (const id of ['min', 'max']) {
+    document.getElementById(`pc2-elevation-${id}`).addEventListener('input', () => applyPcElevationInputs('number'));
+  }
+  for (const id of ['low', 'high']) {
+    document.getElementById(`pc2-elevation-${id}`).addEventListener('input', () => applyPcElevationInputs(id));
+  }
+  document.getElementById('pc2-elevation-reset').addEventListener('click', () => {
+    pcElevationRange = null;
+    pcApi()?.resetElevationRange?.();
+    syncPcElevationControls();
   });
   document.getElementById('pc2-edl').addEventListener('change', (e) => {
     const api = pcApi(); if (api) api.setEDL(e.target.checked);
@@ -3776,8 +3903,10 @@ function bindUI() {
   });
   dom.demShading.addEventListener('input', (e) => {
     document.getElementById('dem-shading-val').textContent = parseFloat(e.target.value).toFixed(1);
+    demUpdateQueue.request();
   });
-  document.getElementById('dem-apply').addEventListener('click', applyDemSettings);
+  for (const input of [dom.demColormap, document.getElementById('dem-steps')]) input.addEventListener('change', () => demUpdateQueue.request({ immediate: true }));
+  for (const input of [dom.demMin, dom.demMax]) input.addEventListener('input', () => demUpdateQueue.request());
   document.getElementById('dem-reset').addEventListener('click', resetDemSettings);
   bindPcPanel();
 
@@ -3971,7 +4100,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   // sidebar panel visibility per tab
   const isDem = mode === 'dsm' || mode === 'dtm';
   document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
-  document.getElementById('panel-camera-positions').style.display = (is3D || isPC || mode === 'ortho') && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
+  document.getElementById('panel-camera-positions').style.display = (is3D || isPC || isMapMode(mode)) && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';
   document.getElementById('panel-camera').style.display = is3D ? 'block' : 'none';
@@ -4014,6 +4143,12 @@ function applyPcPanelState() {
   api.setSize(parseFloat(document.getElementById('pc2-size').value));
   api.setSizing(document.getElementById('pc2-sizing').value);
   api.setColor(document.getElementById('pc2-color').value);
+  if (pcElevationModelId !== PROJECT?.id) {
+    pcElevationModelId = PROJECT?.id;
+    pcElevationRange = null;
+  }
+  if (pcElevationRange) api.setElevationRange?.(pcElevationRange.min, pcElevationRange.max);
+  syncPcElevationControls();
   api.setEDL(document.getElementById('pc2-edl').checked);
   return true;
 }

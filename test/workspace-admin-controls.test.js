@@ -50,8 +50,8 @@ test('node administration supports metadata credential and capability-bound pres
 
 test('trash lifecycle keeps permanent deletion behind exact typed confirmation',()=>{
   assert.match(source,/data-action="purge-trash"|(?:button|dangerButton)\('purge-trash'/);
-  assert.match(source,/typed!==entityId/);
-  assert.match(source,/body:\{typedId:typed\}/);
+  assert.match(source,/name:'typedId'[^}]*exact:entityId/);
+  assert.match(source,/body:\{typedId:input\.typedId\}/);
   assert.match(source,/Permanent deletion cannot be undone/);
   assert.match(source,/\['trash','♲','Recycle Bin'\]/);
   assert.match(source,/View Recycle Bin/);

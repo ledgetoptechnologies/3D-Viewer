@@ -5,6 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {buildStorageSupersessionManifest,inventoryTree,verifyRetainedClosure,storageSupersessionInventoryIdentity}=require('./retainedManifest');
 const {applyStorageMutation}=require('./storageLifecycle');
+const {POLICY_REVISION,recoveryPreservation,recoveryRegistrationIdentity}=require('./outputPreservation');
 const sha=value=>crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const parse=value=>{try{return JSON.parse(value||'{}');}catch{return{};}};
 const within=(value,base)=>value===base||value.startsWith(`${base}/`);
@@ -30,6 +31,29 @@ function contentSuperset(source,target) {
     const prefix=file.relativePath.slice(0,file.relativePath.length-first.relativePath.length);
     return source.files.every(original=>{const copy=available.get(`${prefix}${original.relativePath}`);return copy?.byteSize===original.byteSize&&copy?.sha256===original.sha256;});
   });
+}
+
+async function preservation(processing,operation,state,sourceProof,targetProof,sourceRoot,signal){
+  if(contentSuperset(sourceProof,targetProof))return{preserved:true,method:'whole_tree_prefix',details:{}};
+  return recoveryPreservation(processing.database,parse(operation.payload_json),state.source,state.target,sourceProof,targetProof,sourceRoot,{signal});
+}
+
+// Full-tree proofs are disk-intensive. Do not compete with active imports,
+// conversions or cleanup. Recheck between bounded hash reads, not just startup.
+function maintenanceSignal(processing,external){
+  let lastCheck=-Infinity,busy=false;
+  return{get aborted(){
+    if(external?.aborted)return true;
+    const now=Date.now();if(now-lastCheck>=250){lastCheck=now;busy=Object.values(processing.workerWorkCounts()).some(value=>Number(value)>0);}
+    return busy;
+  }};
+}
+
+function cleanupMessage(reason,details){
+  if(reason==='retired')return 'Redundant output moved to recoverable trash for 7 days.';
+  if(details.proofFailureReason==='unmapped_source_files')return `Old output retained: ${details.unmappedFileCount} files (${details.unmappedByteSize} bytes) have no verified replacement mapping.`;
+  const labels={content_not_fully_preserved:'not every original file and its dependencies have a verified replacement',output_accounting_mismatch:'on-disk bytes differ from registered output accounting',registered_integrity_mismatch:'registered file hashes or sizes no longer match',source_in_use:'a session or active task still depends on the output',source_published:'the source still has published products',derivative_or_retry_dependency:'a derivative or retry still depends on these files',shared_asset_dependency:'another model still references these files',verification_deferred:'verification is deferred; no files were removed',explicit_restore_preserved:'the owner explicitly restored this output'};
+  return `Old output retained: ${labels[reason]||reason.replaceAll('_',' ')}${details.proofFailureReason?` (${details.proofFailureReason.replaceAll('_',' ')})`:''}.`;
 }
 
 function sharedAssetDependency(processing,source,storage=null){
@@ -81,7 +105,7 @@ function candidateState(processing,operation,sourceId,{storage=null,allowTrashed
     ||![payload.sourceOutputId,payload.companionSourceOutputId].includes(source.id)
     ||source.taskId!==target.taskId||source.modelId!==target.modelId||source.projectId!==target.projectId
     ||payload.ids?.attemptId!==target.attemptId||operation.processing_attempt_id!==target.attemptId)return result;
-  result.fingerprint=sha({revision:1,operation:operation.id,payload,source:[source.id,source.updatedAt,source.byteSize,source.assetCount],target:[target.id,target.updatedAt,target.byteSize,target.assetCount]});
+  result.fingerprint=sha({revision:POLICY_REVISION,operation:operation.id,payload,source:[source.id,source.updatedAt,source.byteSize,source.assetCount],target:[target.id,target.updatedAt,target.byteSize,target.assetCount]});
   if(source.storageMode!=='managed'||target.storageMode!=='managed'||source.rootKey!=='models'||target.rootKey!=='models')return{...result,reason:'storage_not_exclusively_managed'};
   if(!(allowTrashed?['trashed']:['ready','archived']).includes(source.status)||!['ready','published'].includes(target.status))return{...result,reason:'output_not_retirable'};
   if(db.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='output' AND entity_id=? AND mutation_type='restore' AND status='complete' LIMIT 1").get(source.id))return{...result,reason:'explicit_restore_preserved'};
@@ -105,13 +129,17 @@ function candidateState(processing,operation,sourceId,{storage=null,allowTrashed
 
 function record(processing,state,reason,details={}) {
   processing.insertAudit({actorType:'system',actorId:'viewer-output-maintenance',action:'output.supersession_evaluated',entityType:'model_output',entityId:state.source.id,details:{replacementOutputId:state.target.id,operationId:state.operationId,fingerprint:state.fingerprint,reason,...details}});
-  processing.recordProcessingEvent({id:`supersession:${state.fingerprint}:${reason}`,attemptId:state.target.attemptId,operationId:state.operationId,eventType:'output.supersession_evaluated',phase:'storage_cleanup',severity:reason==='retired'?'info':'warning',message:reason==='retired'?'Redundant output moved to recoverable trash for 14 days.':'Old output retained: automatic cleanup safety proof is incomplete.',details:{sourceOutputId:state.source.id,replacementOutputId:state.target.id,reason,...details}});
+  // Each actual evaluation is a new event; daily deferred retries legitimately
+  // have different times/evidence. The scan's fingerprint/cooldown gates bound
+  // frequency, rather than reusing an event ID with conflicting payloads.
+  processing.recordProcessingEvent({attemptId:state.target.attemptId,operationId:state.operationId,eventType:'output.supersession_evaluated',phase:'storage_cleanup',severity:reason==='retired'?'info':'warning',message:cleanupMessage(reason,details),details:{sourceOutputId:state.source.id,replacementOutputId:state.target.id,reason,policyRevision:POLICY_REVISION,...details}});
 }
 
 // Bounded maintenance, not a processing retry and never an Operations write.
 // A blocked immutable pair is recorded once; another successful replacement
 // creates a new key. Transient session/provider dependencies are retried later.
 async function retireSupersededOutputs(processing,storage,{limit=1,signal=null}={}) {
+  signal=maintenanceSignal(processing,signal);
   if(signal?.aborted)return [];
   const cursor=parse(processing.database.prepare("SELECT details_json FROM audit_events WHERE action='output.supersession_scan_cursor' ORDER BY created_at DESC,rowid DESC LIMIT 1").get()?.details_json);
   const query="SELECT * FROM dataset_operations WHERE status='succeeded' AND json_extract(payload_json,'$.lodRecovery')=1";
@@ -150,8 +178,9 @@ async function retireSupersededOutputs(processing,storage,{limit=1,signal=null}=
         if(!registeredProofMatches(processing.database,state.source,sourceProof)||!registeredProofMatches(processing.database,state.target,targetProof)){
           record(processing,state,'registered_integrity_mismatch');results.push({sourceOutputId:sourceId,status:'blocked',reason:'registered_integrity_mismatch'});continue;
         }
-        if(!contentSuperset(sourceProof,targetProof)) {
-          record(processing,state,'content_not_fully_preserved',{sourceManifestSha256:sourceProof.manifestSha256,targetManifestSha256:targetProof.manifestSha256});
+        const contentProof=await preservation(processing,operation,state,sourceProof,targetProof,sourceRoot,signal);
+        if(!contentProof.preserved) {
+          record(processing,state,'content_not_fully_preserved',{sourceManifestSha256:sourceProof.manifestSha256,targetManifestSha256:targetProof.manifestSha256,...contentProof.details});
           results.push({sourceOutputId:sourceId,status:'blocked',reason:'content_not_fully_preserved'});continue;
         }
         // Reopen every path securely against its hash, then re-inventory to
@@ -164,7 +193,9 @@ async function retireSupersededOutputs(processing,storage,{limit=1,signal=null}=
         const mutation=processing.beginOutputTrashMutation(sourceId,'viewer-output-maintenance',state.source.status,{archiveInactiveReady:true,validate:()=>{
           const current=processing.database.prepare('SELECT * FROM dataset_operations WHERE id=?').get(operation.id),fresh=candidateState(processing,current,sourceId,{storage});
           if(!fresh.eligible||fresh.fingerprint!==state.fingerprint)return false;
-          processing.insertAudit({actorType:'system',actorId:'viewer-output-maintenance',action:'output.supersession_proved',entityType:'model_output',entityId:sourceId,details:{replacementOutputId:state.target.id,operationId:state.operationId,fingerprint:state.fingerprint,sourceManifestSha256:sourceProof.manifestSha256,targetManifestSha256:targetProof.manifestSha256,sourceFileCount:sourceProof.files.length,targetFileCount:targetProof.files.length}});
+          if(!registeredProofMatches(processing.database,state.source,sourceProof)||!registeredProofMatches(processing.database,state.target,targetProof)
+            ||(contentProof.registrationSha256&&contentProof.registrationSha256!==recoveryRegistrationIdentity(processing.database,state.source.id,state.target.id)))return false;
+          processing.insertAudit({actorType:'system',actorId:'viewer-output-maintenance',action:'output.supersession_proved',entityType:'model_output',entityId:sourceId,details:{replacementOutputId:state.target.id,operationId:state.operationId,fingerprint:state.fingerprint,sourceManifestSha256:sourceProof.manifestSha256,targetManifestSha256:targetProof.manifestSha256,sourceFileCount:sourceProof.files.length,targetFileCount:targetProof.files.length,preservationMethod:contentProof.method,preservationSha256:contentProof.preservationSha256||null,policyRevision:POLICY_REVISION}});
           return true;
         }});
         if(!mutation){results.push({sourceOutputId:sourceId,status:'deferred',reason:'dependency_changed'});continue;}
@@ -179,6 +210,7 @@ async function retireSupersededOutputs(processing,storage,{limit=1,signal=null}=
 }
 
 async function purgeSupersededOutputs(processing,storage,{limit=1,signal=null}={}){
+  signal=maintenanceSignal(processing,signal);
   const results=[];
   if(signal?.aborted)return results;
   for(const item of processing.expiredTrash()){
@@ -193,13 +225,18 @@ async function purgeSupersededOutputs(processing,storage,{limit=1,signal=null}={
       if(!state.eligible||state.target.id!==proof.replacementOutputId)throw Object.assign(new Error('replacement is no longer available for final cleanup'),{code:state.reason||'replacement_unavailable'});
       const oldRoot=storage.resolve('trash',item.relativePath,{mustExist:true}),targetRoot=storage.resolve('models',state.target.relativePath,{mustExist:true});
       const sourceManifest=await buildStorageSupersessionManifest(oldRoot,{signal}),targetManifest=await buildStorageSupersessionManifest(targetRoot,{signal});
-      if(sourceManifest.manifestSha256!==proof.sourceManifestSha256||targetManifest.manifestSha256!==proof.targetManifestSha256||!contentSuperset(sourceManifest,targetManifest)
+      const contentProof=await preservation(processing,operation,state,sourceManifest,targetManifest,oldRoot,signal);
+      if(sourceManifest.manifestSha256!==proof.sourceManifestSha256||targetManifest.manifestSha256!==proof.targetManifestSha256||!contentProof.preserved
+        ||(proof.preservationMethod&&proof.preservationMethod!==contentProof.method)
+        ||(proof.preservationSha256&&proof.preservationSha256!==contentProof.preservationSha256)
         ||!registeredProofMatches(processing.database,state.source,sourceManifest)||!registeredProofMatches(processing.database,state.target,targetManifest))throw Object.assign(new Error('replacement preservation proof changed'),{code:'supersession_content_changed'});
       await verifyRetainedClosure(oldRoot,sourceManifest.files,{signal});await verifyRetainedClosure(targetRoot,targetManifest.files,{signal});
       if(signal?.aborted)return results;
       if(storageSupersessionInventoryIdentity(inventoryTree(oldRoot))!==sourceManifest.inventoryIdentitySha256||storageSupersessionInventoryIdentity(inventoryTree(targetRoot))!==targetManifest.inventoryIdentitySha256)throw Object.assign(new Error('output changed during final cleanup verification'),{code:'source_changed'});
       const fresh=candidateState(processing,processing.database.prepare('SELECT * FROM dataset_operations WHERE id=?').get(operation.id),item.entityId,{storage,allowTrashed:true});
       if(!fresh.eligible||fresh.fingerprint!==state.fingerprint)throw Object.assign(new Error('cleanup dependency changed'),{code:'dependency_changed'});
+      if(!registeredProofMatches(processing.database,state.source,sourceManifest)||!registeredProofMatches(processing.database,state.target,targetManifest)
+        ||(contentProof.registrationSha256&&contentProof.registrationSha256!==recoveryRegistrationIdentity(processing.database,state.source.id,state.target.id)))throw Object.assign(new Error('cleanup registry changed during verification'),{code:'dependency_changed'});
       const mutation=processing.beginPurgeMutation(item.id,'viewer-output-maintenance');
       if(!mutation)throw Object.assign(new Error('purge journal unavailable'),{code:'lifecycle_conflict'});
       const complete=applyStorageMutation(processing,storage,mutation,{supersessionProof:authorizeMutation(mutation)});

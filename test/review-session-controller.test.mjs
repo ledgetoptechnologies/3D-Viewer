@@ -51,6 +51,93 @@ function expiring(channel, overrides = {}) {
   });
 }
 
+function continuityStorage(){const values=new Map();return{getItem:key=>values.get(key)||null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key),values};}
+
+test('same authenticated subject restores non-secret channels after workspace bounce and reissues through server',async()=>{
+  const storage=continuityStorage(),first=harness({storage});first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,CONTEXT);await ready(first.channels[0]);
+  const saved=JSON.parse([...storage.values.values()][0]);
+  assert.deepEqual(Object.keys(saved).sort(),['records','subject']);assert.deepEqual(Object.keys(saved.records[0]).sort(),['channelId','context','updatedAt']);
+  assert.doesNotMatch(JSON.stringify(saved),/accessToken|Bearer|grant|permissions|embedUrl/);
+  first.controller.suspend({preserve:true});
+  const restored=harness({storage});assert.equal(restored.channels.length,0,'browser metadata alone creates no authority or channel');
+  restored.controller.setAuthenticatedSubject('ops:one');assert.equal(restored.controller.has(CHANNEL_ID),true);assert.equal(restored.calls.length,0);
+  assert.deepEqual(restored.channels[0].posts[0],{version:1,type:'ltds-viewer:controller-ready',channelId:CHANNEL_ID,modelId:CONTEXT.modelId});
+  assert.equal(await expiring(restored.channels[0]),true);
+  assert.deepEqual(restored.calls,[CONTEXT]);assert.equal(restored.channels[0].posts.at(-1).grant,GRANT);
+});
+
+test('restored channels reject early/foreign requests and exact issued scope changes',async()=>{
+  const storage=continuityStorage(),first=harness({storage});first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,CONTEXT);first.controller.suspend({preserve:true});
+  const restored=harness({storage,issueGrant:async()=>({sessionMode:'review',...CONTEXT,modelVersionId:'changed-version',grant:GRANT})});restored.controller.setAuthenticatedSubject('ops:one');const channel=restored.channels[0];
+  assert.equal(await expiring(channel,{modelId:'other'}),false);assert.equal(await expiring(channel,{expiresAt:NEXT_EXPIRY}),false);assert.equal(await expiring(channel),false);
+  assert.equal(channel.posts.at(-1).reason,'scope-changed');assert.equal(channel.posts.some(message=>message.type==='ltds-viewer:renew-session'),false);
+  assert.equal(JSON.parse([...storage.values.values()][0]).records.length,0);
+});
+
+test('changed subject, explicit sign-out, denial and aged/poisoned descriptors cannot restore model channels',async()=>{
+  for(const reason of ['subject','signout','denial','aged','poisoned']){
+    const storage=continuityStorage(),first=harness({storage});first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,CONTEXT);
+    if(reason==='signout')first.controller.dispose();
+    else if(reason==='denial'){await ready(first.channels[0]);first.controller.issueGrant=async()=>{throw Object.assign(Error('revoked'),{status:403});};await expiring(first.channels[0]);}
+    else first.controller.suspend({preserve:true});
+    if(reason==='aged'||reason==='poisoned'){const [key,text]=[...storage.values][0],saved=JSON.parse(text);if(reason==='aged')saved.records[0].updatedAt=NOW-86400001;else saved.records[0].context.accessToken='must-not-be-restored';storage.setItem(key,JSON.stringify(saved));}
+    const restored=harness({storage});restored.controller.setAuthenticatedSubject(reason==='subject'?'ops:other':'ops:one');
+    assert.equal(restored.controller.records.size,0,reason);assert.equal(restored.calls.length,0,reason);
+  }
+});
+
+test('restored published scope and expired viewer request remain exact and server-authorized',async()=>{
+  const storage=continuityStorage(),context={sessionMode:'published',outputId:'version-one',modelId:'model-one',modelVersionId:'version-one',sessionTtlSeconds:1800},first=harness({storage});
+  first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,context);first.controller.suspend({preserve:true});
+  const restored=harness({storage,issueGrant:async issued=>({...issued,grant:GRANT})});restored.controller.setAuthenticatedSubject('ops:one');
+  assert.equal(await expiring(restored.channels[0],{expiresAt:new Date(NOW-60000).toISOString()}),true);
+  assert.equal(restored.channels[0].posts.at(-1).type,'ltds-viewer:renew-session');
+});
+
+test('suspended issuance completion cannot deliver grants or schedule stale retry work',async()=>{
+  let reject;
+  const context=harness({issueGrant:()=>new Promise((_resolve,fail)=>{reject=fail;})});context.controller.track(CHANNEL_ID,CONTEXT);await ready(context.channels[0]);
+  const pending=expiring(context.channels[0]);context.controller.suspend({preserve:true});reject(Error('late network failure'));await pending;
+  assert.equal(context.timers.length,0);assert.equal(context.channels[0].posts.length,0);
+});
+
+test('storage quota failure retires stale descriptors without disrupting active channels',()=>{
+  const storage=continuityStorage(),first=harness({storage});first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,CONTEXT);
+  storage.setItem=()=>{throw Error('quota exceeded');};
+  assert.doesNotThrow(()=>first.controller.untrack(CHANNEL_ID));assert.equal(storage.values.size,0);
+  const restored=harness({storage});assert.doesNotThrow(()=>restored.controller.setAuthenticatedSubject('ops:one'));assert.equal(restored.controller.records.size,0);
+  assert.equal(restored.controller.track(CHANNEL_ID,CONTEXT),true,'unavailable persistence must not prevent a new authorized launch');
+});
+
+test('channel creation and advisory failures are isolated from authenticated workspace installation',()=>{
+  for(const failure of ['creation','advisory']){
+    const storage=continuityStorage(),first=harness({storage});first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,CONTEXT);first.controller.suspend({preserve:true});
+    const restored=harness({storage,createChannel:()=>{if(failure==='creation')throw Error('unavailable');return{postMessage(){throw Error('closed')},close(){throw Error('already closed')}};}});
+    assert.doesNotThrow(()=>restored.controller.setAuthenticatedSubject('ops:one'),failure);
+    assert.equal(restored.controller.subject,'ops:one');assert.equal(restored.controller.records.size,0);
+    assert.equal(JSON.parse([...storage.values.values()][0]).records.length,0);
+  }
+});
+
+test('normal same-subject refresh preserves live controllers even when storage becomes unavailable',()=>{
+  const storage=continuityStorage(),context=harness({storage});context.controller.setAuthenticatedSubject('ops:one');context.controller.track(CHANNEL_ID,CONTEXT);const record=context.controller.records.get(CHANNEL_ID);
+  storage.getItem=()=>{throw Error('denied');};storage.setItem=()=>{throw Error('denied');};
+  assert.equal(context.controller.setAuthenticatedSubject('ops:one'),true);assert.equal(context.controller.records.get(CHANNEL_ID),record);assert.equal(record.channel.closed,false);
+});
+
+test('authoritative denial retires persistence even if posting the denial fails',async()=>{
+  const storage=continuityStorage(),context=harness({storage,issueGrant:async()=>{throw Object.assign(Error('revoked'),{status:403});}});
+  context.controller.setAuthenticatedSubject('ops:one');context.controller.track(CHANNEL_ID,CONTEXT);await ready(context.channels[0]);
+  context.channels[0].postMessage=()=>{throw Error('closed');};
+  assert.equal(await expiring(context.channels[0]),false);assert.equal(context.controller.records.size,0);assert.equal(JSON.parse([...storage.values.values()][0]).records.length,0);
+});
+
+test('more than 32 live launches remain possible while continuity keeps only the last 32 descriptors',()=>{
+  const storage=continuityStorage(),context=harness({storage});context.controller.setAuthenticatedSubject('ops:one');
+  for(let index=0;index<40;index++)assert.equal(context.controller.track(`${index.toString(16).padStart(8,'0')}-bbbb-4ccc-8ddd-eeeeeeeeeeee`,CONTEXT),true);
+  assert.equal(context.controller.records.size,40);const saved=JSON.parse([...storage.values.values()][0]);assert.equal(saved.records.length,32);assert.equal(saved.records[0].channelId.startsWith('00000008'),true);
+});
+
 test('isolated review channel navigates and issues one expiry-bound renewal grant', async () => {
   const { controller, channels, calls } = harness();
   assert.equal(controller.track(CHANNEL_ID, CONTEXT), true);

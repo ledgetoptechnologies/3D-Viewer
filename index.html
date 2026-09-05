@@ -541,12 +541,11 @@
            </div>
            <div class="slider-row">
              <span>Opacity</span>
-             <input type="range" id="dem-opacity" min="10" max="100" step="5" value="95">
-             <span class="val" id="dem-opacity-val">95%</span>
+             <input type="range" id="dem-opacity" min="10" max="100" step="5" value="100">
+             <span class="val" id="dem-opacity-val">100%</span>
            </div>
            <div class="tool-grid" style="margin-top:10px;">
-             <button class="tool-btn" id="dem-apply">Apply</button>
-             <button class="tool-btn" id="dem-reset">Reset</button>
+             <button class="tool-btn full" id="dem-reset">Reset to defaults</button>
            </div>
            <div class="hint" style="margin-top:10px;">Narrow the Min/Max range to stretch colors over less elevation (more sensitivity). Bands quantize the scale so each color covers a labeled elevation range.</div>
          </div>
@@ -579,6 +578,25 @@
                <option value="intensity">Intensity</option>
                <option value="classification">Classification</option>
              </select>
+           </div>
+           <div id="pc2-elevation-controls" hidden>
+             <div class="slider-row">
+               <label for="pc2-elevation-min" id="pc2-elevation-min-label">Min ft</label>
+               <input type="number" id="pc2-elevation-min" step="any" placeholder="auto" style="width:75px;min-width:0;">
+               <label for="pc2-elevation-max" id="pc2-elevation-max-label">Max ft</label>
+               <input type="number" id="pc2-elevation-max" step="any" placeholder="auto" style="width:75px;min-width:0;">
+             </div>
+             <div class="slider-row">
+               <label for="pc2-elevation-low">Lower</label>
+               <input type="range" id="pc2-elevation-low" min="0" max="1000" step="1" value="0" aria-label="Lower elevation color bound">
+             </div>
+             <div class="slider-row">
+               <label for="pc2-elevation-high">Upper</label>
+               <input type="range" id="pc2-elevation-high" min="0" max="1000" step="1" value="1000" aria-label="Upper elevation color bound">
+             </div>
+             <div class="tool-grid"><button type="button" class="tool-btn full" id="pc2-elevation-reset">Reset elevation range to auto</button></div>
+             <div class="hint" id="pc2-elevation-status" role="status">Waiting for point-cloud elevation bounds.</div>
+             <div class="hint">Range adjusts elevation colors only. Points outside the range remain visible. Narrow the range for more color sensitivity.</div>
            </div>
            <div class="slider-row">
              <span>EDL Shading</span>

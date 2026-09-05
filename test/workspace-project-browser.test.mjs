@@ -11,6 +11,16 @@ import { acquireBrowserHarnessLock } from './browser-lock.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const token = 'browser_workspace_token_1234567890abcdef';
+const manualFixture = process.env.LTDS_WORKSPACE_MANUAL_QA === '1';
+const manualFixtureGrant = 'local_fixture_grant_00000000000000000000';
+// Manual mode serves only the synthetic API/compiled UI; it never launches a browser.
+// Browser interaction remains with the user's selected in-app browser.
+if (manualFixture) setImmediate(async () => {
+  const fixture = await startFixtureServer();
+  console.log(`Synthetic workspace QA: ${fixture.origin}/workspace/${manualFixtureGrant}`);
+  const stop = () => fixture.server.close(() => process.exit(0));
+  process.on('SIGINT', stop); process.on('SIGTERM', stop);
+});
 const orthophotoFixture = Buffer.from(writeArrayBuffer(new Uint8Array([
   238,80,7, 255,150,48,
   34,97,74, 109,190,140,
@@ -154,7 +164,28 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/presets' && method === 'POST') return json({ preset: { id: 'preset-new', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', ...body } }, 201);
   if (pathname.startsWith('/api/v1/processing/presets/') && ['PATCH', 'DELETE'].includes(method)) return method === 'DELETE' ? { status: 204, body: Buffer.alloc(0), type: 'application/json' } : json({ preset: { ...fixtures.presets[0], ...body } });
   if (pathname === '/api/v1/processing/outputs') return json({ outputs: runtime.outputs, nextCursor: null });
-  if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
+  const shareMatch = pathname.match(/^\/api\/v1\/processing\/outputs\/([^/]+)\/shares$/);
+  if (shareMatch) {
+    const output = runtime.outputs.find(item => item.id === shareMatch[1]);
+    if (!output) return json({ error: 'output_not_found' }, 404);
+    if (method === 'GET') return json({ shares: runtime.shares.filter(item => item.outputId === output.id),
+      publicationRequired: !output.activePublished, existingAccessUpdateRequired: false,
+      eligibleAssetKinds: output.assetKinds.filter(kind => kind !== 'report') });
+    if (manualFixture && method === 'POST') {
+      if (!output.activePublished && body.publishIfReady !== true) return json({ error: 'publication_confirmation_required' }, 409);
+      output.activePublished = true; output.status = 'published';
+      const share = { id: `synthetic-share-${runtime.shares.length + 1}`, outputId: output.id,
+        label: body.label, hasPassword: Boolean(body.password), revokedAt: null };
+      runtime.shares.push(share);
+      return json({ share, viewUrl: 'https://example.invalid/synthetic-viewer-demo-link' }, 201);
+    }
+  }
+  if (manualFixture && pathname.startsWith('/api/v1/processing/shares/') && method === 'DELETE') {
+    const share = runtime.shares.find(item => pathname.endsWith(`/${item.id}`));
+    if (!share) return json({ error: 'share_not_found' }, 404);
+    share.revokedAt = new Date().toISOString();
+    return json({ share });
+  }
   if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ grant: '99999999-8888-4777-8666-555555555555', sessionMode: 'published', sessionTtlSeconds: 1800, modelId: 'model-johnson', modelVersionId: 'output-johnson', embedUrl: '/session/99999999-8888-4777-8666-555555555555' }, 201);
   if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ grant: '11111111-2222-4333-8444-555555555555', sessionMode: 'review', sessionTtlSeconds: 1800, attemptId: 'attempt-quarry', modelId: 'model-quarry', modelVersionId: 'output-quarry-ready', embedUrl: '/session/11111111-2222-4333-8444-555555555555', assetKinds: ['glb', 'ortho', 'report'] }, 201);
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
@@ -174,6 +205,9 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
         models: { total: 20 * 1024 ** 2, available: 12 * 1024 ** 2, reserve: 1024 },
         cache: { total: 30 * 1024 ** 2, available: 18 * 1024 ** 2, reserve: 1024 },
         trash: { total: 40 * 1024 ** 2, available: 24 * 1024 ** 2, reserve: 1024 },
+      }, usage: { status: 'complete', measuredAt: '2026-09-05T12:00:00.000Z', totalBytes: 40 * 1024 ** 2,
+        categories: Object.fromEntries(['sources', 'products', 'cache', 'trash', 'other'].map((name, index) => [name, { bytes: [4, 8, 12, 16, 0][index] * 1024 ** 2, files: index + 1 }])),
+        filesystems: [{ availableBytes: 60 * 1024 ** 2, totalBytes: 100 * 1024 ** 2, roots: ['datasets', 'models', 'cache', 'trash'] }],
       }, trash: { items: [{ id: 'trash-johnson', entityId: 'dataset-trash', entityType: 'dataset', displayName: 'Discarded draft', byteSize: 0, purgeAfter: '2026-10-02T00:00:00.000Z' }], nextCursor: 'trash-page-two' } });
   }
   if (pathname === '/api/v1/storage/mutations') return json({ mutations: [{ id: 'mutation-failed', type: 'restore', entityType: 'output', entityId: 'output-conflict', status: 'failed', errorCode: 'storage_conflict', errorMessage: 'destination conflicts with the recorded item' }], nextCursor: null });
@@ -187,6 +221,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/diagnostics/runs' && method === 'GET') return url.searchParams.get('cursor')
     ? json({ runs: [{ attemptId: 'attempt-global-older', attemptNumber: 1, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', status: 'succeeded', phase: 'complete', derivativeCount: 1, failedDerivativeCount: 0, createdAt: '2026-08-16T12:00:00.000Z', updatedAt: '2026-08-16T12:05:00.000Z', completedAt: '2026-08-16T12:05:00.000Z' }], nextCursor: null })
     : json({ runs: [
+      { attemptId: 'attempt-johnson', attemptNumber: 2, taskId: 'task-johnson', taskDisplayName: 'Johnson reconstruction', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', status: 'running', phase: 'processing', derivativeCount: 0, failedDerivativeCount: 0, createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:04:00.000Z' },
       { attemptId: 'attempt-johnson-old', attemptNumber: 1, taskId: 'task-johnson', taskDisplayName: 'Johnson reconstruction', projectId: 'project-johnson', projectDisplayName: 'Johnson Road Survey', status: 'failed', phase: 'obj2tiles_generate', error: { code: 'obj2tiles_exit_nonzero', message: 'Textured tile conversion failed.' }, derivativeCount: 1, failedDerivativeCount: 1, createdAt: '2026-08-17T12:00:00.000Z', updatedAt: '2026-08-17T12:04:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' },
       { attemptId: 'attempt-global-flaky', attemptNumber: 2, taskId: 'task-quarry', taskDisplayName: 'Quarry reconstruction', projectId: 'project-quarry', projectDisplayName: 'Alpha Quarry', status: 'failed', phase: 'materializing_recovery', error: { code: 'recovery_failed', message: 'Recovery diagnostics are available.' }, derivativeCount: 0, failedDerivativeCount: 0, createdAt: '2026-08-18T12:00:00.000Z', updatedAt: '2026-08-18T12:03:00.000Z', completedAt: '2026-08-18T12:03:00.000Z' },
     ], nextCursor: 'diagnostic-page-two' });
@@ -314,13 +349,18 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 }
 
 function startFixtureServer() {
-  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
+  const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
     if (url.pathname.startsWith('/api/')) {
-      if (request.headers.authorization !== `Bearer ${token}`) result = json({ error: 'authorization_required' }, 401);
+      if (manualFixture && url.pathname === '/api/v1/admin-sessions/redeem' && request.method === 'POST') {
+        const chunks = []; for await (const chunk of request) chunks.push(chunk);
+        let body = {}; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {}
+        const session = apiResponse(new URL('/api/v1/admin-sessions/current', url), runtime, 'GET', {});
+        result = body.grant === manualFixtureGrant ? json({ ...JSON.parse(session.body.toString()), accessToken: token }) : json({ error: 'invalid_fixture_grant' }, 401);
+      } else if (request.headers.authorization !== `Bearer ${token}`) result = json({ error: 'authorization_required' }, 401);
       else {
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
@@ -328,10 +368,11 @@ function startFixtureServer() {
         let body = {};
         if (raw) try { body = JSON.parse(raw); } catch {}
         runtime.requests.push({ method: request.method, path: url.pathname, body, idempotencyKey: request.headers['idempotency-key']||null });
+        if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
         result = apiResponse(url, runtime, request.method, body);
       }
     } else {
-      const relative = url.pathname === '/workspace' || url.pathname === '/' ? 'workspace.html' : decodeURIComponent(url.pathname.slice(1));
+      const relative = url.pathname === '/workspace' || url.pathname === '/' || (manualFixture && url.pathname === `/workspace/${manualFixtureGrant}`) ? 'workspace.html' : decodeURIComponent(url.pathname.slice(1));
       const absolute = path.resolve(builtRoot, relative);
       if (!absolute.startsWith(builtRoot + path.sep) || !existsSync(absolute)) result = json({ error: 'not_found' }, 404);
       else {
@@ -454,6 +495,41 @@ async function waitForDevTools(profile) {
   throw new Error('Browser did not expose a DevTools endpoint');
 }
 
+// Drive the shipped in-app dialog in the isolated CI browser; never bypass its
+// cancel/typed-identifier validation with native confirm/prompt replacements.
+async function confirmAppAction(client, runtime, selector, { title, fields = {}, cancelFirst = false, invalidFields } = {}) {
+  const mutations = () => runtime.requests.filter(item => item.method !== 'GET').length;
+  const before = mutations();
+  const open = async () => {
+    await client.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    await waitFor(client, 'Boolean(document.querySelector("dialog.workspace-decision[open]"))', `Confirmation did not open: ${selector}`);
+    if (title) assert.equal(await client.evaluate('document.querySelector(".workspace-decision h2").textContent'), title);
+    assert.equal(mutations(), before, 'Opening a confirmation must not mutate state');
+  };
+  const submit = async values => client.evaluate(`(() => {
+    const form=document.querySelector('.workspace-decision[open] form');
+    for(const [name,value] of Object.entries(${JSON.stringify(values)})) {
+      form.elements.namedItem(name).value=value;
+      form.elements.namedItem(name).dispatchEvent(new Event('input',{bubbles:true}));
+    }
+    form.querySelector('button[type="submit"]').click();
+  })()`);
+  await open();
+  if (cancelFirst) {
+    await client.evaluate(`document.querySelector('.workspace-decision [aria-label="Cancel and close dialog"]').click()`);
+    await waitFor(client, '!document.querySelector(".workspace-decision")', 'Cancel did not close the confirmation');
+    assert.equal(mutations(), before, 'Cancelling must not mutate state');
+    await open();
+  }
+  if (invalidFields) {
+    await submit(invalidFields);
+    await waitFor(client, `Boolean(document.querySelector('.workspace-decision [aria-invalid="true"]'))`, 'Invalid identifier was not rejected');
+    assert.equal(mutations(), before, 'Invalid confirmation must not issue a mutation');
+  }
+  await submit(fields);
+  await waitFor(client, '!document.querySelector(".workspace-decision")', 'Confirmation did not close after valid submit');
+}
+
 async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
@@ -478,9 +554,6 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       source: `
         sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(token)});
         window.__viewerActions=[];
-        window.__promptValue='dataset-trash';
-        window.confirm=()=>true;
-        window.prompt=()=>window.__promptValue;
         window.__broadcastChannels=new Map();
         window.BroadcastChannel=class FakeBroadcastChannel{
           constructor(name){this.name=name;this.onmessage=null;this.closed=false;const channels=window.__broadcastChannels.get(name)||[];channels.push(this);window.__broadcastChannels.set(name,channels)}
@@ -538,32 +611,36 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && Number(document.querySelector('#background-work-count')?.textContent) >= 1", `${viewport.name}: modal import did not update the background work count`);
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
-    await waitFor(client, "document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: task details did not expand`);
+    await waitFor(client, "document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: task details did not expand`);
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Retry recovery', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts did not route the existing failed recovery in place`);
-    await client.evaluate(`document.querySelector('[data-task-disclosure="history"] summary').click()`);
-    await waitFor(client, "document.querySelector('[data-action=\"load-more-attempts\"]') !== null", `${viewport.name}: attempt history did not expose its pagination cursor`);
-    assert.equal(await client.evaluate(`document.querySelector('.attempt-history')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
-    await client.evaluate(`document.querySelector('[data-action="load-more-attempts"]').click()`);
-    await waitFor(client, "document.querySelector('[data-attempt-id=\"attempt-johnson-old\"]') !== null", `${viewport.name}: older run page did not append`);
-    await client.evaluate(`document.querySelector('[data-attempt-id="attempt-johnson-old"] [data-action="open-attempt-diagnostics"]').click()`);
-    await waitFor(client, "document.querySelector('[data-attempt-id=\"attempt-johnson-old\"] .attempt-diagnostic')?.textContent.includes('Obj2Tiles exited with code 1')", `${viewport.name}: historical run diagnostics did not load`);
-    const runDiagnosticText = await client.evaluate(`document.querySelector('[data-attempt-id="attempt-johnson-old"] .attempt-diagnostic').textContent`);
+      ['View', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
+    await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
+    assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
+    await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-johnson-old')?.textContent.includes('Obj2Tiles exited with code 1')", `${viewport.name}: historical run diagnostics did not load`);
+    const runDiagnosticText = await client.evaluate(`document.querySelector('#global-attempt-diagnostic-attempt-johnson-old').textContent`);
     for (const expected of ['obj2tiles_exit_nonzero', 'obj2tiles generate', 'diag-browser-41', '[REDACTED PATH]']) assert.equal(runDiagnosticText.toLowerCase().includes(expected.toLowerCase()), true, `${viewport.name}: missing run diagnostic ${expected}`);
     await waitForRequest(runtime, requestStart, 'GET', '/api/v1/attempts/attempt-johnson-old/diagnostics');
-    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="retry-operation"][data-id="operation-recovery-failed"]').click()`);
+    await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click(); history.back()`);
+    await waitFor(client, "document.querySelector('[data-action=\"task-settings\"]') !== null", `${viewport.name}: returning from Diagnostics did not restore task tools`);
+    await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='settings' && document.querySelector('[data-action=\"retry-operation\"][data-id=\"operation-recovery-failed\"]') !== null", `${viewport.name}: Settings did not expose retry of the existing recovery`);
+    await client.evaluate(`document.querySelector('[data-action="retry-operation"][data-id="operation-recovery-failed"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/operations/operation-recovery-failed/retry');
     assert.equal(runtime.requests.some(item => item.method === 'POST' && item.path === '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts'), false,
       `${viewport.name}: failed recovery quick action created a second immutable version instead of retrying in place`);
     await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('existing model remains safe')", `${viewport.name}: recovery retry confirmation did not preserve the old-version safety message`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null", `${viewport.name}: Settings back did not restore the compact task`);
     await client.evaluate(`document.querySelector('[data-section="background"]').click()`);
     await waitFor(client, "document.querySelector('[data-operation-id=\"operation-recovery-failed\"]')?.textContent.includes('queued')", `${viewport.name}: failed recovery retry did not return to queued`);
     const recoveryActivity = await client.evaluate(`document.querySelector('[data-operation-id="operation-recovery-failed"]').textContent`);
     for (const expected of ['3D tile recovery version', 'Existing model', 'queued']) assert.ok(recoveryActivity.includes(expected), `${viewport.name}: missing recovery activity ${expected}`);
     await client.evaluate(`history.back()`);
-    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"derivative-status\"]')?.textContent.includes('Recovery queued')", `${viewport.name}: returning from recovery activity did not restore the queued recovery context`);
+    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('.task-lod-notice')?.textContent.includes('Preparing streaming tiles')", `${viewport.name}: returning from recovery activity did not restore the unobtrusive streaming status`);
     assert.equal(await client.evaluate(`document.querySelectorAll('button button').length`), 0, `${viewport.name}: task shortcuts were nested inside a button`);
     assert.equal(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].every(button=>button.getBoundingClientRect().height>=44)`), true, `${viewport.name}: task shortcuts have sub-44px targets`);
     await client.evaluate(`history.back()`);
@@ -571,18 +648,19 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`history.forward()`);
     await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"toggle-task\"][data-id=\"task-johnson\"]')?.getAttribute('aria-expanded')==='true'", `${viewport.name}: browser Forward did not restore the task`);
     await client.command('Page.reload');
-    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('.task-detail .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: refresh did not restore the selected project and expanded task`);
-    assert.equal(await client.evaluate(`document.querySelector('[data-task-disclosure="logs"]').open`), false, `${viewport.name}: task output was not progressively disclosed`);
-    await client.evaluate(`document.querySelector('[data-task-disclosure="logs"] summary').click()`);
-    await waitFor(client, "document.querySelector('[data-task-disclosure=\"logs\"]')?.open === true", `${viewport.name}: task output disclosure did not open`);
-    const firstLog = await client.evaluate(`document.querySelector('.task-detail .log-tail').textContent`);
-    await waitFor(client, `document.querySelector('.task-detail .log-tail')?.textContent !== ${JSON.stringify(firstLog)}`, `${viewport.name}: running-task log tail did not refresh`, 7_000);
+    await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: refresh did not restore the selected project and expanded task`);
+    assert.equal(await client.evaluate(`document.querySelector('.task-detail .log-tail') === null`), true, `${viewport.name}: compact task must not embed diagnostic logs`);
+    // Live detail polling remains active, while log presentation is now on Diagnostics.
+    const firstLog = runtime.logSequence;
+    const refreshStart = runtime.requests.length;
+    await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
+    assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: expanded task overflows horizontally`);
     await waitFor(client, "document.querySelector('.task-ortho-preview canvas')?.getAttribute('aria-label') === 'Published orthophoto preview' || document.querySelector('.task-ortho-preview img') !== null", `${viewport.name}: real orthophoto preview did not render`);
     assert.equal(await client.evaluate(`(() => { const canvas=document.querySelector('.task-ortho-preview canvas'); if(!canvas)return true; return [...canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data].some(value=>value>0) })()`), true, `${viewport.name}: orthophoto preview canvas is empty`);
 
-    await client.evaluate(`document.querySelector('[data-task-disclosure="gcp"] summary').click()`);
-    await waitFor(client, "document.querySelector('[data-task-disclosure=\"gcp\"]')?.open === true", `${viewport.name}: GCP disclosure did not open`);
+    await client.evaluate(`document.querySelector('[data-action="task-gcp"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='gcp' && document.querySelector('.task-workspace-page') !== null", `${viewport.name}: dedicated GCP page did not open`);
     await waitFor(client, "document.querySelector('[data-action=\"gcp-open-image\"][data-id=\"image-1\"]') !== null", `${viewport.name}: GCP image candidates did not load`);
     await client.evaluate(`document.querySelector('[data-action="gcp-open-image"][data-id="image-1"]').click()`);
     await waitFor(client, "document.querySelector('.gcp-mark-form') !== null", `${viewport.name}: private GCP image did not open`);
@@ -590,9 +668,11 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 12, y 14')", `${viewport.name}: GCP correspondence was not created`);
     await client.evaluate(`(() => { const form=document.querySelector('.gcp-mark-form'); form.elements.pixelX.value='13'; form.elements.pixelY.value='15'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "document.querySelector('.gcp-mark-row')?.textContent.includes('x 13, y 15')", `${viewport.name}: GCP correspondence was not updated`);
-    await client.evaluate(`document.querySelector('[data-action="gcp-delete-mark"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="gcp-delete-mark"]', { title: 'Delete image mark', cancelFirst: true });
     await waitFor(client, "document.querySelector('.gcp-mark-row') === null", `${viewport.name}: GCP correspondence was not deleted`);
 
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, "!new URL(location.href).searchParams.has('panel') && document.querySelector('.task-quick-actions') !== null", `${viewport.name}: GCP Back to task did not restore shortcuts`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="download-report"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="view-output"]').click()`);
@@ -601,30 +681,36 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.share-form')?.dataset.outputId === 'output-johnson'", `${viewport.name}: task Share shortcut did not target the published output`);
     await client.evaluate(`document.querySelector('.modal-close').click()`);
 
-    await client.evaluate(`document.querySelector('[data-task-disclosure="outputs"] summary').click()`);
-    await waitFor(client, "document.querySelector('[data-task-disclosure=\"outputs\"]')?.open === true", `${viewport.name}: output disclosure did not open`);
+    await client.evaluate(`document.querySelector('[data-action="task-files"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='files' && document.querySelector('.task-workspace-page')?.textContent.includes('Model files')", `${viewport.name}: dedicated Files page did not open`);
 
-    await client.evaluate(`document.querySelector('[data-action="trash-output"][data-id="output-johnson"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="trash-output"][data-id="output-johnson"]', { title: 'Move to Recycle Bin', cancelFirst: true });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/outputs/output-johnson');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output delete did not settle`);
-    await client.evaluate(`document.querySelector('[data-action="trash-output"][data-id="output-johnson-archived"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="trash-output"][data-id="output-johnson-archived"]', { title: 'Move to Recycle Bin' });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/outputs/output-johnson-archived');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: output trash did not settle`);
-    await client.evaluate(`document.querySelector('[data-task-disclosure="advanced"] summary').click()`);
-    await waitFor(client, "document.querySelector('[data-task-disclosure=\"advanced\"]')?.open === true", `${viewport.name}: advanced task controls did not open`);
-    await client.evaluate(`document.querySelector('[data-action="trash-dataset"][data-id="dataset-johnson"]').click()`);
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click(); document.querySelector('[data-action="task-settings"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='settings' && document.querySelector('[data-action=\"trash-dataset\"]') !== null", `${viewport.name}: dedicated Task settings did not open`);
+    await confirmAppAction(client, runtime, '[data-action="trash-dataset"][data-id="dataset-johnson"]', { title: 'Move to Recycle Bin' });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/datasets/dataset-johnson');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
 
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry project'", `${viewport.name}: terminal project selection failed`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Generate 3D tiles', 'Download', 'Report'], `${viewport.name}: ready output did not expose review/tile/download/report shortcuts or exposed Share before publish`);
-    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="generate-tiles"]').click()`);
+      ['View', 'Download', 'Report', 'Share'], `${viewport.name}: ready output did not expose focused View, download, report, and Share shortcuts`);
+    await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"task-settings\"]') !== null", `${viewport.name}: ready task tools did not load`);
+    await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"generate-tiles\"]') !== null", `${viewport.name}: Task settings did not expose tile generation`);
+    await client.evaluate(`document.querySelector('[data-action="generate-tiles"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-quarry-ready/derivatives/tiles');
-    await waitFor(client, "document.querySelector('.task-quick-actions')?.textContent.includes('3D tiles queued')", `${viewport.name}: queued tile derivative did not replace the generate action`);
+    await waitFor(client, "document.querySelector('.task-workspace-page')?.textContent.includes('3D tiles queued')", `${viewport.name}: queued tile derivative did not replace the generate action`);
+    await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="open-review"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/11111111-2222-4333-8444-555555555555#reviewController='))", `${viewport.name}: ready output View did not open its isolated review session`);
     await client.evaluate(`(() => {
@@ -642,13 +728,17 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
       const grantsAfterBlockedPopup = runtime.requests.filter(item => item.method === 'POST' && item.path === '/api/v1/attempts/attempt-quarry/review-sessions').length;
       assert.equal(grantsAfterBlockedPopup, grantsBeforeBlockedPopup, `${viewport.name}: blocked popup minted a review grant before readiness`);
     }
-    await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
+    await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"trash-task\"][data-id=\"task-quarry\"]') !== null", `${viewport.name}: terminal task Delete was not reachable`);
-    await client.evaluate(`document.querySelector('[data-action="trash-task"][data-id="task-quarry"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="trash-task"][data-id="task-quarry"]', { title: 'Move to Recycle Bin', cancelFirst: true });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/tasks/task-quarry');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: task Delete did not settle`);
+    assert.equal(runtime.archivedTasks.has('task-quarry'), true, `${viewport.name}: fixture did not archive the deleted task`);
+    const remainingTasks = JSON.parse(apiResponse(new URL('/api/v1/tasks', origin), runtime).body).tasks;
+    assert.equal(remainingTasks.some(task => task.id === 'task-quarry'), false, `${viewport.name}: deleted task remained in the active task list`);
+    await waitFor(client, "new URL(location.href).searchParams.get('project')==='project-quarry' && !new URL(location.href).searchParams.has('task') && !new URL(location.href).searchParams.has('panel') && document.querySelector('.task-workspace-page') === null", `${viewport.name}: deleting the selected task did not leave Settings and restore its project`);
     await waitFor(client, "document.querySelector('[data-action=\"trash-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project Delete was not reachable`);
-    await client.evaluate(`document.querySelector('[data-action="trash-project"][data-id="project-quarry"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="trash-project"][data-id="project-quarry"]', { title: 'Move to Recycle Bin' });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/projects/project-quarry');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: project Delete did not settle`);
     await waitFor(client, "document.querySelector('#workspace-toast .toast-action')?.textContent === 'View Recycle Bin'", `${viewport.name}: Delete did not expose a direct Recycle Bin action`);
@@ -676,18 +766,20 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#preset-form') !== null", `${viewport.name}: preset form did not open`);
     await client.evaluate(`(() => { const form=document.querySelector('#preset-form'); form.elements.displayName.value='Browser preset'; form.elements.options.value='{}'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"delete-preset\"]') !== null", `${viewport.name}: preset creation did not return to node detail`);
-    await client.evaluate(`document.querySelector('[data-action="delete-preset"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="delete-preset"]', { title: 'Delete preset', cancelFirst: true });
+    await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/presets/preset-fast');
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: preset deletion did not return to node detail`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: provider modal overflows horizontally`);
 
     await client.evaluate(`document.querySelector('.modal-close').click(); document.querySelector('[data-section="diagnostics"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-trash\"]') !== null", `${viewport.name}: diagnostics did not link to the dedicated Recycle Bin`);
-    assert.deepEqual(await client.evaluate(`Object.fromEntries([...document.querySelectorAll('.metric-card')].slice(0,4).map(card=>[card.querySelector('p').textContent,{used:card.querySelector('strong').textContent,available:card.querySelector('small').textContent}]))`), {
-      datasets: { used: '4.0 MB', available: '6.0 MB available' },
-      models: { used: '8.0 MB', available: '12.0 MB available' },
-      cache: { used: '12.0 MB', available: '18.0 MB available' },
-      trash: { used: '16.0 MB', available: '24.0 MB available' },
-    }, `${viewport.name}: diagnostics did not derive used storage from total minus available`);
+    assert.deepEqual(await client.evaluate(`Object.fromEntries([...document.querySelectorAll('#storage-usage-cards .metric-card')].slice(0,6).map(card=>[card.querySelector('p').textContent,card.querySelector('strong').textContent]))`), {
+      'Total Viewer files': '40.0 MB', 'Original photos & source inputs': '4.0 MB',
+      'Model products': '8.0 MB', 'Temporary cache & import ZIPs': '12.0 MB',
+      'Recycle Bin files': '16.0 MB', 'Other retained files': '0 B',
+    }, `${viewport.name}: diagnostics did not show non-overlapping measured file usage`);
+    const storageText = await client.evaluate(`document.querySelector('#storage-usage-cards').textContent`);
+    for (const expected of ['Shared filesystem 1', '60.0 MB free', 'not a folder subtotal', 'Categories do not overlap', 'snapshots']) assert.ok(storageText.includes(expected), `${viewport.name}: storage accounting omitted ${expected}`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.diagnostic-project-group>h3')].map(item=>item.textContent)`), ['Johnson Road Survey', 'Alpha Quarry'], `${viewport.name}: global diagnostic runs were not grouped by project`);
     assert.equal(await client.evaluate(`document.querySelectorAll('.diagnostic-task-group').length`), 2, `${viewport.name}: global diagnostic runs were not grouped by task`);
     await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
@@ -715,10 +807,13 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="restore-trash"][data-id="trash-johnson"]').click()`);
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/trash/trash-johnson/restore');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: trash restore did not settle`);
-    assert.deepEqual(await client.evaluate(`({ entityId: document.querySelector('[data-action="purge-trash"]').dataset.entityId, promptValue: window.prompt('test') })`),
-      { entityId: 'dataset-trash', promptValue: 'dataset-trash' }, `${viewport.name}: trash confirmation contract`);
-    await client.evaluate(`document.querySelector('[data-action="purge-trash"]').click()`);
+    assert.equal(await client.evaluate(`document.querySelector('[data-action="purge-trash"][data-id="trash-johnson"]').dataset.entityId`), 'dataset-trash', `${viewport.name}: trash confirmation must bind the exact entity identifier`);
+    await confirmAppAction(client, runtime, '[data-action="purge-trash"][data-id="trash-johnson"]', {
+      title: 'Permanently delete item', cancelFirst: true,
+      invalidFields: { typedId: 'wrong-id' }, fields: { typedId: 'dataset-trash' },
+    });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/storage/trash/trash-johnson');
+    assert.deepEqual(runtime.requests.slice(requestStart).find(item => item.method === 'DELETE' && item.path === '/api/v1/storage/trash/trash-johnson').body, { typedId: 'dataset-trash' });
 
     const recent = runtime.requests.slice(requestStart);
     for (const expected of [
@@ -750,7 +845,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   }
 }
 
-test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 180_000 }, async t => {
+test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 180_000, skip: manualFixture }, async t => {
   const executable = browserPath();
   if (!executable) {
     t.skip('Set CHROME_PATH or EDGE_PATH to a Chromium-family browser to run the real browser verification.');
@@ -788,7 +883,7 @@ test('project-first workspace is interactive and overflow-free in real desktop a
   }
 });
 
-test('companion product restore is explicit, immutable-version scoped, and permission-safe in a real browser', { timeout: 120_000 }, async t => {
+test('companion product restore is explicit, immutable-version scoped, and permission-safe in a real browser', { timeout: 120_000, skip: manualFixture }, async t => {
   const executable = browserPath();
   if (!executable) { t.skip('Chrome or Edge is required for companion repair browser QA.'); return; }
   const releaseBrowserLock = await acquireBrowserHarnessLock({ root });
@@ -844,7 +939,12 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         await client.command('Page.navigate', { url: `${origin}/workspace?section=dashboard&project=project-johnson&task=task-johnson` });
         await waitFor(client, `Boolean(document.querySelector('.task-quick-actions')) && !document.querySelector('#workspace').hasAttribute('aria-busy')`, 'Task output actions did not load');
         assert.equal(runtime.requests.filter(request => request.method === 'POST').length, 0, 'Page load must never create/retry/import/publish work');
-        const actions = await client.evaluate(`Array.from(document.querySelectorAll('.task-quick-actions button'), button => ({ text: button.textContent, action: button.dataset.action, disabled: button.disabled, title: button.title }))`);
+        assert.equal(await client.evaluate(`Boolean(document.querySelector('.task-quick-actions [data-action="restore-products"], .task-quick-actions [data-action="retry-operation"]'))`), false, 'Recovery actions belong in Task settings, not beside View');
+        await waitFor(client, `Boolean(document.querySelector('[data-action="task-settings"]'))`, 'Task settings navigation did not load');
+        await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
+        await waitFor(client, `new URL(location.href).searchParams.get('panel')==='settings' && Boolean(document.querySelector('.task-workspace-page'))`, 'Task settings route did not load');
+        assert.equal(runtime.requests.filter(request => request.method === 'POST').length, 0, 'Opening settings must never create/retry/import/publish work');
+        const actions = await client.evaluate(`Array.from(document.querySelectorAll('.task-workspace-page button'), button => ({ text: button.textContent, action: button.dataset.action, disabled: button.disabled, title: button.title }))`);
         if (scenario.readOnly) {
           assert.equal(actions.some(button => ['restore-products', 'retry-operation'].includes(button.action)), false, JSON.stringify(actions));
         } else if (scenario.status === 'queued') {
@@ -854,12 +954,12 @@ test('companion product restore is explicit, immutable-version scoped, and permi
           assert.ok(actions.some(button => button.text === 'Product restore failed' && button.disabled), JSON.stringify(actions));
         } else if (scenario.click === 'retry') {
           assert.ok(actions.some(button => button.action === 'retry-operation' && button.text === 'Retry product restore'), JSON.stringify(actions));
-          await client.evaluate(`document.querySelector('.task-quick-actions [data-action="retry-operation"]').click()`);
+          await client.evaluate(`document.querySelector('.task-workspace-page [data-action="retry-operation"]').click()`);
           await waitForRequest(runtime, 0, 'POST', '/api/v1/operations/operation-companion/retry');
           assert.equal(runtime.requests.some(request => request.path === endpoint), false, 'Retry must not create a second restore version');
         } else {
           assert.ok(actions.some(button => button.action === 'restore-products' && button.title.includes('new version')), JSON.stringify(actions));
-          await client.evaluate(`(() => { const button=document.querySelector('.task-quick-actions [data-action="restore-products"]');button.click();button.click();return true; })()`);
+          await client.evaluate(`(() => { const button=document.querySelector('.task-workspace-page [data-action="restore-products"]');button.click();button.click();return true; })()`);
           await waitForRequest(runtime, 0, 'POST', endpoint);
           const mutations = runtime.requests.filter(request => request.method === 'POST');
           assert.equal(mutations.length, 1, 'A double click must submit only one version-bound repair');
@@ -868,7 +968,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
           assert.match(mutations[0].idempotencyKey, /^[0-9a-f-]{36}$/i);
           if (scenario.reject) {
             await waitFor(client, `document.querySelector('#workspace-toast')?.textContent.includes('verification failed')`, 'Source failure was not exposed');
-            assert.equal(await client.evaluate(`document.querySelector('.task-quick-actions [data-action="restore-products"]').disabled`), false);
+            assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page [data-action="restore-products"]').disabled`), false);
             assert.equal(runtime.operations.length, 0, 'Failed admission must not enqueue a fake repair');
           } else {
             await waitFor(client, `document.querySelector('#workspace-toast')?.textContent.includes('Existing versions and publications are unchanged')`, 'New-version safety message was absent');

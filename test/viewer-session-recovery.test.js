@@ -16,9 +16,11 @@ function fixture({ controller = true } = {}) {
     model: { id: 'model-one' }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
   const context = vm.createContext({
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
+    REVIEW_CONTROLLER_ID: REQUEST,
     activeViewerSession: session, sessionAccessGeneration: 0, PROJECT: session.model, TILES_URL: '/stable/tileset.json', EPT_URL: '/stable/ept.json',
     sessionStorage: { setItem() {} }, SESSION_STORAGE_PREFIX: 'test:', sessionStorageKey: 'test:session-id',
     sessionAllowedOrigins: [], sessionAccessState: 'active', sessionAccessReason: null,
+    lastSessionAccessFailure: null, modeEpoch: 0,
     sessionRenewalBlocked: false, sessionRenewalPending: false, sessionRenewalAttempt: null,
     sessionRenewalResponseTimer: null, sessionRenewalTimer: null, pendingReviewRenewalRequestId: null,
     sessionRenewalBackoffIndex: 0, sessionRenewalMinimumDelayMs: 1000,
@@ -120,4 +122,72 @@ test('proactive renewal clears the cloud access label even without a denied EPT 
   await f.context.handleSessionRenewalMessage({ version: 1, type: 'ltds-viewer:renew-session',
     requestId: REQUEST, grant: '11111111-2222-4333-8444-555555555555' }, { reviewChannel: true });
   assert.equal(f.context.dom.cloudStatus.textContent, 'Cloud: access renewed');
+});
+
+test('returning controller advisory accelerates only a due exact-channel model request and coalesces duplicates',async()=>{
+  const f=fixture(),message={version:1,type:'ltds-viewer:controller-ready',channelId:REQUEST,modelId:'model-one'};
+  await f.context.handleSessionRenewalMessage(message,{reviewChannel:true});
+  assert.equal(f.posts.length,1);assert.equal(f.posts[0].type,'ltds-viewer:session-expiring');
+  const attempt=f.context.sessionRenewalAttempt;
+  await f.context.handleSessionRenewalMessage(message,{reviewChannel:true});
+  assert.equal(f.posts.length,1);assert.equal(f.context.sessionRenewalAttempt,attempt);
+  assert.equal(f.context.sessionAccessGeneration,0);assert.deepEqual(f.resets,[],'advisory alone renews no resources');
+});
+
+test('controller advisory ignores spoofed shape/channel/model, wrong mode, early and blocked sessions',async()=>{
+  for(const scenario of ['shape','channel','model','mode','early','blocked','transport','disposed']){
+    const f=fixture({controller:scenario!=='disposed'}),message={version:1,type:'ltds-viewer:controller-ready',channelId:REQUEST,modelId:'model-one'};
+    if(scenario==='shape')message.extra=true;if(scenario==='channel')message.channelId='old-controller';if(scenario==='model')message.modelId='other';if(scenario==='mode')f.context.VIEW_MODE='public';if(scenario==='early')f.context.activeViewerSession.expiresAt=new Date(Date.now()+1800000).toISOString();if(scenario==='blocked')f.context.sessionRenewalBlocked=true;
+    await f.context.handleSessionRenewalMessage(message,{reviewChannel:scenario!=='transport'});
+    assert.equal(f.posts.length,0,scenario);assert.equal(f.context.sessionRenewalPending,false,scenario);assert.deepEqual(f.resets,[],scenario);
+    if(scenario==='blocked')assert.equal(f.context.sessionRenewalBlocked,true);
+  }
+});
+
+function tileFailureListener(f) {
+  let listener;
+  Object.assign(f.context, {
+    rendererInstance: f.context.tilesRenderer,
+    classifyTileLoadFailure: () => ({ kind: 'authorization', status: 403 }),
+    lodTileLastFailureAt: 0,
+    emitLodDebugSnapshot() {},
+    console: { error() {} },
+  });
+  f.context.rendererInstance.addEventListener = (name, callback) => { listener = callback; };
+  const start = source.indexOf("  rendererInstance.addEventListener('load-error',");
+  const end = source.indexOf('  tilesParent.add(rendererInstance.group);', start);
+  assert.ok(start >= 0 && end > start);
+  vm.runInContext(source.slice(start, end), f.context);
+  return listener;
+}
+
+test('additional denied tiles do not replace a blocked-access warning with fictitious renewal', () => {
+  const f = fixture();
+  f.context.activeViewerSession.expiresAt = new Date(Date.now() + 1_800_000).toISOString();
+  const fail = tileFailureListener(f);
+  fail({});
+  assert.equal(f.context.sessionRenewalBlocked, true);
+  assert.match(f.context.dom.lodStatus.textContent, /access unavailable/);
+  fail({});
+  assert.match(f.context.dom.lodStatus.textContent, /access unavailable/);
+  assert.equal(f.context.sessionRenewalPending, false);
+  assert.equal(f.posts.length, 0, 'a current-generation denial cannot bypass authorization');
+  const attribution = f.context.sessionDiagnostics().lastFailure;
+  assert.equal(attribution.source, 'tile');
+  assert.equal(attribution.mode, 'model');
+  assert.equal(attribution.status, 403);
+  assert.equal(attribution.renewalBlocked, true);
+  assert.doesNotMatch(JSON.stringify(attribution), /private-token|session-id|model-one|\/stable/);
+});
+
+test('disposed model errors cannot block access after switching modes or replacing the renderer', () => {
+  for (const replacement of [null, {}]) {
+    const f = fixture();
+    const fail = tileFailureListener(f);
+    f.context.tilesRenderer = replacement;
+    f.context.state.activeMode = replacement ? 'model' : 'cloud';
+    fail({});
+    assert.equal(f.context.sessionAccessState, 'active');
+    assert.equal(f.posts.length, 0);
+  }
 });

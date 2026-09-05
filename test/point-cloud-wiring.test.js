@@ -72,12 +72,14 @@ test('pre-metadata mesh view remains exact when the cloud finishes loading', () 
   assert.match(pointCloudShell, /viewer\.fitToScreen\(0\.7\)/);
 });
 
-test('sparse cloud navigation rejects broad or distant background picks', () => {
+test('sparse cloud navigation keeps narrow picks and repairs stale focal depth', () => {
   assert.match(pointCloudShell, /<script src="\/pointcloud-navigation\.js"><\/script>/);
   assert.match(pointCloudShell, /POINT_PICK_WINDOW,[\s\S]*NAVIGATION_POLICY,[\s\S]*orbitRadiansForPixels,[\s\S]*wheelZoomScale,[\s\S]*worldUnitsPerPixel,[\s\S]*maxPanStep,[\s\S]*canUseOverviewAnchor/);
   assert.match(pointCloudShell, /pointcloud\.pick\(this\.viewer, camera, ray, \{[\s\S]*pickWindowSize: POINT_PICK_WINDOW/);
   assert.match(pointCloudShell, /_depthAnchor\(px\)[\s\S]*camera\.getWorldDirection\(normal\)[\s\S]*setFromNormalAndCoplanarPoint\(normal, pivot\)/);
-  assert.match(pointCloudShell, /isPlausibleAnchorDistance\(camera\.position\.distanceTo\(hit\), referenceDistance\)/);
+  assert.match(pointCloudShell, /if \(this\._adoptSurfaceDepth\(hit\)\) return hit/);
+  assert.doesNotMatch(pointCloudShell, /isPlausibleAnchorDistance\(camera\.position\.distanceTo\(hit\), referenceDistance\)/,
+    'an earlier focal plane is not a rejection limit for a real decoded point');
   assert.match(pointCloudShell, /_cloudBounds\(\)[\s\S]*this\.viewer\.scene\.getBoundingBox\(pointclouds\)/);
   assert.match(pointCloudShell, /paddedBounds = bounds\.clone\(\)\.expandByScalar\([\s\S]*this\._ray\(px\)\.intersectBox\(paddedBounds/);
   assert.match(pointCloudShell, /const fallback = canUseOverviewAnchor\(\{ point: depthAnchor, bounds, referenceDistance, cloudDiameter \}\)\s*\? depthAnchor : boundsHit/);
@@ -90,7 +92,7 @@ test('sparse cloud navigation rejects broad or distant background picks', () => 
   assert.doesNotMatch(pointCloudShell, /_anchor\(px\)[\s\S]{0,900}this\._bboxMidZ\(\)/);
 });
 
-test('point-cloud orbit accepts only a plausible point or bounded overview fallback', () => {
+test('point-cloud orbit accepts only a forward decoded point or bounded overview fallback', () => {
   assert.match(pointCloudShell, /_surfaceAnchor\(px, depthAnchor = this\._depthAnchor\(px\)\)/);
   assert.match(pointCloudShell, /const pivot = this\._surfaceAnchor\(this\._px\(e\)\);\s*if \(!pivot\) \{ this\._mode = 'none'; return; \}/);
   assert.match(pointCloudShell, /this\.pivot\.copy\(pivot\);\s*this\._showPivot\(\);\s*this\._mode = 'orbit'/);
@@ -144,10 +146,10 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(mainSource, /api\.setCameras\(cameraPayload\)/);
   assert.match(mainSource, /api\.setCameraVisibility\(state\.camerasVisible\)/);
   assert.match(mainSource, /message\.type === 'camera-open'[\s\S]*openPhoto\(message\.index\)/);
-  assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC \|\| mode === 'ortho'\)/);
+  assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC \|\| isMapMode\(mode\)\)/);
   assert.match(mainSource, /async function loadCameras\(\) \{\s*if \(state\.camerasLoaded \|\| state\.camerasLoading \|\| !SHOTS_URL \|\| !SHARE_PERMISSIONS\.cameras\) return;/);
-  assert.match(mainSource, /const visible = state\.activeMode === 'ortho' && state\.camerasVisible\s*&& state\.camerasLoaded && SHARE_PERMISSIONS\.cameras/);
-  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*state\.activeMode === 'ortho'[\s\S]*mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale[\s\S]*cameraFeatureMapPosition[\s\S]*const representatives = \[\.\.\.positions\.keys\(\)\][\s\S]*openPhoto\(source\)/);
+  assert.match(mainSource, /const visible = isMapMode\(\) && state\.camerasVisible\s*&& state\.camerasLoaded && SHARE_PERMISSIONS\.cameras/);
+  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*isMapMode\(\)[\s\S]*mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale[\s\S]*cameraFeatureMapPosition[\s\S]*const representatives = \[\.\.\.positions\.keys\(\)\][\s\S]*openPhoto\(source\)/);
   assert.match(mainSource, /function localCameraRendererActive\(\)[\s\S]*state\.activeMode === 'model'[\s\S]*state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
   assert.match(mainSource, /function onPointerUp\(e\) \{\s*if \(!localCameraRendererActive\(\)\) return;/);
   assert.match(mainSource, /if \(state\.activeTool !== 'none'\) \{\s*if \(state\.activeMode !== 'model'\) return;/);

@@ -2,6 +2,9 @@ const CHANNEL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9
 const GRANT_PATTERN = CHANNEL_ID_PATTERN;
 const RENEWAL_LEAD_MS = 5 * 60 * 1000;
 const CLOCK_SKEW_MS = 60 * 1000;
+const CONTINUITY_KEY = 'ltds-viewer-model-controller-contexts-v1';
+const MAX_CONTEXTS = 32;
+const CONTEXT_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function exactKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -43,6 +46,7 @@ export class ReviewSessionController {
     retryDelays = [2_000, 5_000, 15_000],
     setTimer = (handler, delay) => setTimeout(handler, delay),
     clearTimer = timer => clearTimeout(timer),
+    storage = null,
   }) {
     if (typeof origin !== 'string' || !origin || new URL(origin).origin !== origin) throw new Error('invalid review controller origin');
     if (typeof issueGrant !== 'function' || typeof createChannel !== 'function') throw new Error('review channel dependencies are required');
@@ -54,12 +58,75 @@ export class ReviewSessionController {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.records = new Map();
+    this.storage = storage;
+    this.subject = null;
   }
 
-  track(channelId, context) {
+  // These descriptors are routing hints, never credentials. Restoration is
+  // enabled only after the workspace server authenticates the same subject.
+  setAuthenticatedSubject(subject) {
+    if (typeof subject !== 'string' || !/^[A-Za-z0-9._:@-]{1,200}$/.test(subject)) return false;
+    if (this.subject === subject) return true;
+    this.suspend({ preserve: true });
+    this.subject = subject;
+    let saved;
+    try {
+      const text = this.storage?.getItem(CONTINUITY_KEY);
+      if (text?.length > 32_768) throw new Error('oversized continuity data');
+      saved = text ? JSON.parse(text) : null;
+    } catch { saved = null; }
+    const now = this.now();
+    if (exactKeys(saved, ['subject','records']) && saved.subject === subject
+      && Array.isArray(saved.records) && saved.records.length <= MAX_CONTEXTS) {
+      for (const item of saved.records) {
+        const context = item?.context;
+        const contextKeys = context?.sessionMode === 'published'
+          ? ['sessionMode','outputId','modelId','modelVersionId','sessionTtlSeconds']
+          : ['attemptId','modelId','modelVersionId','sessionTtlSeconds'];
+        if (!exactKeys(item, ['channelId','context','updatedAt']) || !exactKeys(context, contextKeys)
+          || !Number.isFinite(item.updatedAt) || now - item.updatedAt < 0 || now - item.updatedAt > CONTEXT_RETENTION_MS) continue;
+        if (this.track(item.channelId, context, { restoring: true })) {
+          this.records.get(item.channelId).updatedAt = item.updatedAt;
+        }
+      }
+    }
+    this.persistContexts();
+    for (const record of this.records.values()) {
+      try {
+        record.channel.postMessage({ version: 1, type: 'ltds-viewer:controller-ready',
+          channelId: record.channelId, modelId: record.context.modelId });
+      } catch { this.untrack(record.channelId); }
+    }
+    return true;
+  }
+
+  persistContexts() {
+    if (!this.storage || !this.subject) return;
+    try {
+      this.storage.setItem(CONTINUITY_KEY, JSON.stringify({ subject: this.subject,
+        records: [...this.records.values()].slice(-MAX_CONTEXTS).map(record => ({
+          channelId: record.channelId, context: record.context, updatedAt: record.updatedAt,
+        })),
+      }));
+    } catch {
+      // A failed write must not leave a previously revoked/untracked descriptor
+      // eligible for restoration. Storage denial still cannot grant authority.
+      try { this.storage.removeItem(CONTINUITY_KEY); } catch {}
+    }
+  }
+
+  suspend({ preserve = false } = {}) {
+    if (preserve && this.records.size) this.persistContexts();
+    for (const channelId of [...this.records.keys()]) this.untrack(channelId, { persist: false });
+    this.subject = null;
+    if (!preserve) try { this.storage?.removeItem(CONTINUITY_KEY); } catch {}
+  }
+
+  track(channelId, context, { restoring = false } = {}) {
     if (!CHANNEL_ID_PATTERN.test(channelId || '') || !validContext(context)) return false;
-    this.untrack(channelId);
-    const channel = this.createChannel(`ltds-viewer-review:${channelId}`);
+    this.untrack(channelId, { persist: false });
+    let channel;
+    try { channel = this.createChannel(`ltds-viewer-review:${channelId}`); } catch { return false; }
     if (!channel || typeof channel.postMessage !== 'function' || typeof channel.close !== 'function') return false;
     const record = {
       channelId,
@@ -81,9 +148,12 @@ export class ReviewSessionController {
       retryIndex: 0,
       retryTimer: null,
       renewedTimer: null,
+      restored: restoring,
+      updatedAt: this.now(),
     };
     channel.onmessage = event => this.handleMessage(channelId, event?.data);
     this.records.set(channelId, record);
+    if (!restoring) this.persistContexts();
     return true;
   }
 
@@ -102,24 +172,27 @@ export class ReviewSessionController {
     return true;
   }
 
-  untrack(channelId) {
+  untrack(channelId, { persist = true } = {}) {
     const record = this.records.get(channelId);
     if (!record) return false;
     if (record.retryTimer) this.clearTimer(record.retryTimer);
     if (record.renewedTimer) this.clearTimer(record.renewedTimer);
     record.channel.onmessage = null;
-    record.channel.close();
+    try { record.channel.close(); } catch {}
     this.records.delete(channelId);
+    if (persist) this.persistContexts();
     return true;
   }
 
   unavailable(record, reason) {
     if (this.records.get(record.channelId) !== record) return;
-    record.channel.postMessage({
-      version: 1, type: 'ltds-viewer:session-unavailable',
-      requestId: record.activeRequestId, modelId: record.context.modelId, reason,
-    });
-    this.untrack(record.channelId);
+    try {
+      record.channel.postMessage({
+        version: 1, type: 'ltds-viewer:session-unavailable',
+        requestId: record.activeRequestId, modelId: record.context.modelId, reason,
+      });
+    } catch { /* The denial still retires the record if its channel closed. */ }
+    finally { this.untrack(record.channelId); }
   }
 
   async handleMessage(channelId, data) {
@@ -131,6 +204,9 @@ export class ReviewSessionController {
       && validSessionExpiry(data.expiresAt, record, now)) {
       record.expiresAt = data.expiresAt;
       record.expiresAtMs = Date.parse(data.expiresAt);
+      record.updatedAt = now;
+      record.restored = false;
+      this.persistContexts();
       return true;
     }
     if (exactKeys(data, ['version', 'type', 'requestId', 'modelId', 'expiresAt'])
@@ -149,6 +225,8 @@ export class ReviewSessionController {
       record.awaitingRenewed = false;
       record.activeRequestId = null;
       record.retryIndex = 0;
+      record.updatedAt = now;
+      this.persistContexts();
       if (record.renewedTimer) this.clearTimer(record.renewedTimer);
       record.renewedTimer = null;
       return true;
@@ -166,6 +244,21 @@ export class ReviewSessionController {
       record.awaitingRenewed = false;
       record.activeRequestId = null;
       return true;
+    }
+    // A surviving model need not reload after its workspace returns. Learn its
+    // expiry once on a restored random channel, then use the normal exact
+    // request checks. Only the authenticated issueGrant endpoint grants access;
+    // validIssuedGrant still pins mode/model/version to the saved descriptor.
+    if (record.restored && exactKeys(data, ['version','type','requestId','modelId','expiresAt'])
+      && data.version === 1 && data.type === 'ltds-viewer:session-expiring'
+      && data.modelId === record.context.modelId && CHANNEL_ID_PATTERN.test(data.requestId || '')) {
+      const expiresAtMs = Date.parse(data.expiresAt || '');
+      if (Number.isFinite(expiresAtMs) && expiresAtMs >= now - CONTEXT_RETENTION_MS
+        && expiresAtMs <= now + RENEWAL_LEAD_MS) {
+        record.expiresAt = data.expiresAt;
+        record.expiresAtMs = expiresAtMs;
+        record.restored = false;
+      }
     }
     if (!exactKeys(data, ['version', 'type', 'requestId', 'modelId', 'expiresAt'])
       || data.version !== 1 || data.type !== 'ltds-viewer:session-expiring'
@@ -204,6 +297,7 @@ export class ReviewSessionController {
       }, 35_000);
       return true;
     } catch (error) {
+      if (this.records.get(record.channelId) !== record) return false;
       if (error?.status === 401 || error?.status === 403 || error?.status === 410) {
         this.unavailable(record, 'authorization-required');
         return false;
@@ -219,6 +313,6 @@ export class ReviewSessionController {
   }
 
   dispose() {
-    for (const channelId of [...this.records.keys()]) this.untrack(channelId);
+    this.suspend();
   }
 }

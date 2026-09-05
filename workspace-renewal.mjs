@@ -76,6 +76,7 @@ export class WorkspaceSessionRenewal {
     this.responseTimer = null;
     this.retryTimer = null;
     this.pendingRequestId = null;
+    this.redemptionAttempt = null;
     this.retryAttempt = 0;
     this.disposed = false;
     this.boundMessage = (event) => this.handleMessage(event);
@@ -100,6 +101,7 @@ export class WorkspaceSessionRenewal {
   }
 
   schedule() {
+    if (this.disposed) return;
     for (const timer of [this.renewalTimer, this.expiryTimer]) if (timer) this.clearTimer(timer);
     const remaining = this.expiresAtMs - this.now();
     if (remaining <= 0) {
@@ -126,7 +128,10 @@ export class WorkspaceSessionRenewal {
 
   requestRenewal(reason) {
     if (this.disposed || this.pendingRequestId || !this.controllerWindow) return false;
-    if (this.retryAttempt >= RETRY_DELAYS_MS.length) return false;
+    if (this.retryAttempt >= RETRY_DELAYS_MS.length) {
+      if (this.expiresAtMs <= this.now()) this.expire('expired');
+      return false;
+    }
     if (this.retryTimer) this.clearTimer(this.retryTimer);
     this.retryTimer = null;
     const requestId = this.randomUUID();
@@ -140,6 +145,7 @@ export class WorkspaceSessionRenewal {
       expiresAt: this.session.expiresAt,
     })) {
       this.pendingRequestId = null;
+      if (this.expiresAtMs <= this.now()) this.expire('expired');
       return false;
     }
     this.responseTimer = this.setTimer(() => {
@@ -153,7 +159,11 @@ export class WorkspaceSessionRenewal {
   }
 
   scheduleRetry() {
-    if (this.disposed || this.retryAttempt >= RETRY_DELAYS_MS.length) return;
+    if (this.disposed) return;
+    if (this.retryAttempt >= RETRY_DELAYS_MS.length) {
+      if (this.expiresAtMs <= this.now()) this.expire('expired');
+      return;
+    }
     if (this.retryTimer) this.clearTimer(this.retryTimer);
     const delay = RETRY_DELAYS_MS[this.retryAttempt - 1];
     this.retryTimer = this.setTimer(() => this.requestRenewal('retry'), delay);
@@ -163,19 +173,29 @@ export class WorkspaceSessionRenewal {
     if (this.disposed || event.source !== this.controllerWindow || event.origin !== this.controllerOrigin) return;
     const message = event.data;
     if (!exactKeys(message, ['version','type','requestId','grant']) || message.version !== this.protocolVersion || message.type !== 'ltds-viewer:renew-workspace-session') return;
-    if (message.requestId !== this.pendingRequestId || !GRANT_PATTERN.test(message.grant || '')) return;
+    if (message.requestId !== this.pendingRequestId || this.redemptionAttempt || !GRANT_PATTERN.test(message.grant || '')) return;
     const requestId = this.pendingRequestId;
-    this.pendingRequestId = null;
     if (this.responseTimer) this.clearTimer(this.responseTimer);
-    this.responseTimer = null;
+    const attempt = { requestId, abortController: new AbortController() };
+    this.redemptionAttempt = attempt;
+    this.responseTimer = this.setTimer(() => {
+      if (this.disposed || this.redemptionAttempt !== attempt) return;
+      attempt.abortController.abort();
+      this.finishRequest(requestId);
+      this.postFailure('workspace grant redemption timed out', true, requestId);
+      this.scheduleRetry();
+    }, RESPONSE_TIMEOUT_MS);
     try {
       const response = await this.fetchImpl('/api/v1/admin-sessions/redeem', {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ grant: message.grant }),
+        signal: attempt.abortController.signal,
       });
       const body = await response.json().catch(() => ({}));
+      if (this.disposed || this.redemptionAttempt !== attempt) return;
       if (response.status === 401) {
+        this.finishRequest(requestId);
         this.postFailure('workspace authorization expired', false, requestId);
         this.expire('unauthorized');
         return;
@@ -187,6 +207,7 @@ export class WorkspaceSessionRenewal {
         subject: this.session.subject,
         accessToken: this.accessToken,
       });
+      this.finishRequest(requestId);
       this.session = checked.session;
       this.expiresAtMs = checked.expiresAtMs;
       this.retryAttempt = 0;
@@ -202,9 +223,20 @@ export class WorkspaceSessionRenewal {
         expiresAt: this.session.expiresAt,
       });
     } catch (error) {
+      if (this.disposed || this.redemptionAttempt !== attempt) return;
+      this.finishRequest(requestId);
       this.postFailure(String(error?.message || error), true, requestId);
       this.scheduleRetry();
     }
+  }
+
+  finishRequest(requestId) {
+    if (this.pendingRequestId !== requestId) return false;
+    if (this.responseTimer) this.clearTimer(this.responseTimer);
+    this.responseTimer = null;
+    this.pendingRequestId = null;
+    this.redemptionAttempt = null;
+    return true;
   }
 
   postFailure(error, retryable, requestId) {
@@ -225,6 +257,8 @@ export class WorkspaceSessionRenewal {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.redemptionAttempt?.abortController.abort();
+    this.redemptionAttempt = null;
     for (const timer of [this.renewalTimer, this.expiryTimer, this.responseTimer, this.retryTimer]) if (timer) this.clearTimer(timer);
     this.windowRef.removeEventListener('message', this.boundMessage);
     this.windowRef.removeEventListener('focus', this.boundFocus);

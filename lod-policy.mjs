@@ -205,6 +205,11 @@ function lodTileCameraDistance(tile) {
   return Number.isFinite(value) ? value : Infinity;
 }
 
+function lodQueueCameraDistance(tile) {
+  const distance = tile?.traversal?.distanceFromCamera;
+  return Number.isFinite(distance) && distance >= 0 ? distance : Infinity;
+}
+
 function lodTileFocusReferenceDistance(tile) {
   const surfaceDistance = lodTileCameraDistance(tile);
   if (surfaceDistance > 0 && Number.isFinite(surfaceDistance)) return surfaceDistance;
@@ -426,11 +431,13 @@ export function lodBranchBlockerGroups(visibleTiles, {
     owner,
     ownerIndex: index,
     blockers: [],
+    queueDistanceFromCamera: Infinity,
     focusOverlap: lodTileFocusOverlap(owner),
     distanceFromCamera: lodTileCameraDistance(owner),
     focusActivityTime: Number(owner?.__ltdsFocusActivityTime) || 0,
   }]));
   const assignmentByTile = new Map();
+  const frontierAssignmentByTile = new Map();
   let encounterIndex = 0;
 
   for (const owner of owners) {
@@ -443,6 +450,13 @@ export function lodBranchBlockerGroups(visibleTiles, {
         continue;
       }
       if (tile.internal?.hasRenderableContent || contentUri(tile)) {
+        // Scheduling needs the whole selected replacement frontier, including
+        // ready siblings. Do not reuse the owner sphere or cold-only minimum:
+        // either can make a far owner win or demote a nearly completed cut.
+        const frontierOwner = frontierAssignmentByTile.get(tile);
+        if (!frontierOwner || depth < frontierOwner.depth) {
+          frontierAssignmentByTile.set(tile, { owner, depth });
+        }
         if (!isReady(tile)) {
           const existing = assignmentByTile.get(tile);
           if (!existing || depth < existing.depth) {
@@ -457,6 +471,13 @@ export function lodBranchBlockerGroups(visibleTiles, {
       }
       stack.push(...(tile.children || []).map(child => ({ tile: child, depth: depth + 1 })));
     }
+  }
+
+  for (const [tile, assignment] of frontierAssignmentByTile) {
+    const group = groupsByOwner.get(assignment.owner);
+    if (group) group.queueDistanceFromCamera = Math.min(
+      group.queueDistanceFromCamera, lodQueueCameraDistance(tile),
+    );
   }
 
   for (const [tile, assignment] of assignmentByTile) {
@@ -611,11 +632,13 @@ export function lodBranchBlockerGroups(visibleTiles, {
     group.rank = rank;
     group.focal = group === focalGroup;
     group.owner.__ltdsOwnerRank = rank;
+    group.owner.__ltdsOwnerQueueDistance = group.queueDistanceFromCamera;
     group.owner.__ltdsOwnerPendingBlockers = group.blockers.length;
     for (const tile of group.blockers) {
       tile.__ltdsBranchBlocker = true;
       tile.__ltdsFallbackOwner = group.owner;
       tile.__ltdsOwnerRank = rank;
+      tile.__ltdsOwnerQueueDistance = group.queueDistanceFromCamera;
       tile.__ltdsOwnerFocusOverlap = group.focusOverlap;
       tile.__ltdsFocalOwnerPending = group.focal;
       tile.__ltdsFocusPending = true;
@@ -1080,33 +1103,60 @@ export function createLodFocusPriorityPlugin(camera, interactionStateProvider) {
 }
 
 export function createLodFocusPriorityCallback(interactionStateProvider, nowProvider = () => performance.now()) {
+  const structuralPriority = tile => {
+    if (tile?.internal?.hasRenderableContent !== true
+      || tile.internal.hasUnrenderableContent === true) return 0;
+    if (tile.parent == null && tile.internal.depth === 0) return 2;
+    const owner = tile.parent;
+    // This flag is held only for a validated, bounded regional cover whose
+    // owner has no existing fine cut. Only its immediate children are needed;
+    // treating every descendant as structural recreates global demand bias.
+    return owner?.__ltdsRegionalCoverPreparing === true
+      && String(owner.refine).toUpperCase() === 'REPLACE'
+      && owner.children?.includes(tile) ? 1 : 0;
+  };
+  const ownerRank = tile => Number.isFinite(tile?.__ltdsOwnerRank)
+    ? tile.__ltdsOwnerRank : Infinity;
+  const schedulingDistance = (tile, blocker) => blocker
+    && Number.isFinite(tile?.__ltdsOwnerQueueDistance)
+    && tile.__ltdsOwnerQueueDistance >= 0
+    ? tile.__ltdsOwnerQueueDistance : lodQueueCameraDistance(tile);
   return (a, b) => {
     const base = screenSpaceErrorPriority(a, b);
+    if ((a?.priority ?? 0) !== (b?.priority ?? 0)) return base;
     const at = a?.traversal;
     const bt = b?.traversal;
-    if (!at || !bt || at.inFrustum !== bt.inFrustum || at.used !== bt.used) return base;
+    if (!at || !bt) return !at && !bt ? base : at ? 1 : -1;
+    const aStructural = structuralPriority(a);
+    const bStructural = structuralPriority(b);
+    if (aStructural !== bStructural) return aStructural > bStructural ? 1 : -1;
+    if (at.inFrustum !== bt.inFrustum || at.used !== bt.used) return base;
+    if (Boolean(a?.internal?.hasUnrenderableContent)
+      !== Boolean(b?.internal?.hasUnrenderableContent)) return base;
     const aBlocker = a?.__ltdsBranchBlocker === true;
     const bBlocker = b?.__ltdsBranchBlocker === true;
+    const aDistance = schedulingDistance(a, aBlocker);
+    const bDistance = schedulingDistance(b, bBlocker);
+    if (aDistance !== bDistance) return aDistance < bDistance ? 1 : -1;
+    // Finish a useful nearby atomic cut before unrelated medium-distance
+    // work, without allowing a distant screen-center owner to monopolize the
+    // queue. Existing focus/quality locks and owner ranks are not changed.
     if (aBlocker !== bBlocker) return aBlocker ? 1 : -1;
     if (aBlocker && bBlocker) {
-      const aOwnerRank = Number.isFinite(Number(a?.__ltdsOwnerRank))
-        ? Number(a.__ltdsOwnerRank)
-        : Infinity;
-      const bOwnerRank = Number.isFinite(Number(b?.__ltdsOwnerRank))
-        ? Number(b.__ltdsOwnerRank)
-        : Infinity;
+      const aOwnerRank = ownerRank(a);
+      const bOwnerRank = ownerRank(b);
       if (aOwnerRank !== bOwnerRank) return aOwnerRank < bOwnerRank ? 1 : -1;
     }
     const state = interactionStateProvider?.();
-    const aDistance = Number.isFinite(at.distanceFromCamera) ? at.distanceFromCamera : Infinity;
-    const bDistance = Number.isFinite(bt.distanceFromCamera) ? bt.distanceFromCamera : Infinity;
     const now = nowProvider();
-    // Blockers within one owner are a single atomic replacement cut. Owner
-    // rank above guarantees the focal cut completes before another spatial
-    // group; distance keeps ordering deterministic within that group.
-    const aScore = aDistance * (aBlocker ? 1 : lodFocusPriorityPenalty(a, state, now));
-    const bScore = bDistance * (bBlocker ? 1 : lodFocusPriorityPenalty(b, state, now));
+    // Focus still breaks equal-distance ties, but never expands selected
+    // quality or lets farther peripheral work outrank a nearer surface.
+    const aScore = aBlocker ? 1 : lodFocusPriorityPenalty(a, state, now);
+    const bScore = bBlocker ? 1 : lodFocusPriorityPenalty(b, state, now);
     if (aScore !== bScore) return aScore > bScore ? -1 : 1;
+    const aMemberDistance = lodQueueCameraDistance(a);
+    const bMemberDistance = lodQueueCameraDistance(b);
+    if (aMemberDistance !== bMemberDistance) return aMemberDistance < bMemberDistance ? 1 : -1;
     return base;
   };
 }

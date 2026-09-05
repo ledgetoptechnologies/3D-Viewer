@@ -140,3 +140,40 @@ test('malformed controller configuration fails closed before registering a messa
     documentRef: { addEventListener() {}, removeEventListener() {} },
   }), /invalid workspace controller response/);
 });
+
+test('workspace redemption stays single-flight through fetch/body and has a bounded abort deadline',async()=>{
+  let resolveFetch,signal;
+  const context=harness({fetchImpl:async(_url,init)=>{signal=init.signal;return new Promise(resolve=>{resolveFetch=resolve;});}});
+  context.renewal.start();context.renewal.requestRenewal('timer');
+  const request=context.posted.at(-1).message;
+  const data={version:1,type:'ltds-viewer:renew-workspace-session',requestId:request.requestId,grant:GRANT};
+  const pending=context.renewal.handleMessage({source:context.controllerWindow,origin:ORIGIN,data});
+  assert.equal(context.renewal.requestRenewal('focus'),false);
+  await context.renewal.handleMessage({source:context.controllerWindow,origin:ORIGIN,data});
+  assert.equal(context.renewal.pendingRequestId,request.requestId);
+  const watchdog=context.timers.findLast(timer=>timer.delay===10000&&!timer.cleared);
+  assert.ok(watchdog);watchdog.handler();
+  assert.equal(signal.aborted,true);assert.equal(context.renewal.pendingRequestId,null);
+  resolveFetch({ok:true,status:200,json:async()=>context.envelope});await pending;
+  assert.equal(context.sessions.length,0,'late successful completion cannot install a timed-out generation');
+  assert.ok(context.timers.some(timer=>timer.delay===2000&&!timer.cleared));
+});
+
+test('disposed workspace redemption never installs session callbacks or new timers',async()=>{
+  let resolveFetch,signal;
+  const context=harness({fetchImpl:async(_url,init)=>{signal=init.signal;return new Promise(resolve=>{resolveFetch=resolve;});}});
+  context.renewal.start();context.renewal.requestRenewal('timer');const request=context.posted.at(-1).message;
+  const pending=context.renewal.handleMessage({source:context.controllerWindow,origin:ORIGIN,data:{version:1,type:'ltds-viewer:renew-workspace-session',requestId:request.requestId,grant:GRANT}});
+  context.renewal.dispose();const timerCount=context.timers.length;
+  resolveFetch({ok:true,status:200,json:async()=>context.envelope});await pending;
+  assert.equal(signal.aborted,true);assert.equal(context.sessions.length,0);assert.equal(context.timers.length,timerCount);
+  assert.ok(context.timers.every(timer=>timer.cleared));
+});
+
+test('closed controller and exhausted retry budget expire only after actual workspace expiry',()=>{
+  for(const reason of ['closed','exhausted']){
+    const context=harness();context.renewal.start();context.renewal.now=()=>Date.parse(context.envelope.session.expiresAt)+1;
+    if(reason==='closed')context.controllerWindow.closed=true;else context.renewal.retryAttempt=5;
+    assert.equal(context.renewal.requestRenewal('expiry'),false);assert.equal(context.expired(),'expired');
+  }
+});

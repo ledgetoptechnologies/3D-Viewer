@@ -2124,21 +2124,114 @@ test('active pan and orbit timing cannot deselect an already-loaded peripheral b
     'orbit timing must leave the same refined REPLACE branch selected');
 });
 
-test('owner-grouped priority completes the focal cut before peripheral blockers', () => {
-  const tile = (distanceFromCamera, ownerRank) => ({
-    __ltdsBranchBlocker: true,
-    __ltdsOwnerRank: ownerRank,
+function queueTile(distanceFromCamera, extra = {}) {
+  return {
+    content: { uri: 'synthetic.b3dm' },
+    internal: { hasRenderableContent: true, hasUnrenderableContent: false, depth: 2 },
     traversal: { used: true, inFrustum: true, distanceFromCamera },
-  });
-  const focalFar = tile(100, 0);
-  const focalNear = tile(10, 0);
-  const peripheralNear = tile(1, 1);
+    ...extra,
+  };
+}
+
+function queueOwner(children, focusOverlap = 0) {
+  const owner = queueTile(0, { refine: 'REPLACE', geometricError: 8, children,
+    __ltdsFocusOverlap: focusOverlap });
+  for (const tile of children) tile.parent = owner;
+  return owner;
+}
+
+test('nearby owner scheduling precedes a distant focal owner without changing focus or quality', () => {
+  const distant = queueTile(100, { __ltdsPeripheralErrorTarget: 5.481 });
+  const nearby = queueTile(1, { __ltdsPeripheralErrorTarget: 21.924 });
+  const farOwner = queueOwner([distant], 1), nearOwner = queueOwner([nearby], 0.1);
+  const groups = lodBranchBlockerGroups([farOwner, nearOwner]);
+  assert.deepEqual(groups.map(group => group.owner), [farOwner, nearOwner],
+    'existing focus ranking must not be repurposed as distance ranking');
+  assert.equal(farOwner.__ltdsFocalOwnerLocked, true);
+  assert.equal(distant.__ltdsOwnerRank, 0); assert.equal(nearby.__ltdsOwnerRank, 1);
+  assert.equal(distant.__ltdsOwnerQueueDistance, 100);
+  assert.equal(nearby.__ltdsOwnerQueueDistance, 1,
+    'broad owner bounds with zero distance must not erase frontier proximity');
+  const compare = createLodFocusPriorityCallback(() => ({ activeMotion: true }), () => 10_000);
+  assert.ok(compare(nearby, distant) > 0); assert.ok(compare(distant, nearby) < 0);
+  assert.equal(farOwner.__ltdsFocalOwnerLocked, true);
+  assert.equal(distant.__ltdsOwnerRank, 0); assert.equal(nearby.__ltdsOwnerRank, 1);
+  assert.equal(distant.__ltdsPeripheralErrorTarget, 5.481);
+  assert.equal(nearby.__ltdsPeripheralErrorTarget, 21.924);
+});
+
+test('the entire near atomic cut completes before medium work even after its nearest sibling is ready', () => {
+  const near = queueTile(1), farSibling = queueTile(100), medium = queueTile(20);
+  const nearOwner = queueOwner([near, farSibling], 0.1), mediumOwner = queueOwner([medium], 1);
+  const ready = new Set(), compare = createLodFocusPriorityCallback(() => ({ activeMotion: false }), () => 10_000);
+  lodBranchBlockerGroups([nearOwner, mediumOwner], { isReady: tile => ready.has(tile) });
+  assert.ok(compare(near, farSibling) > 0);
+  assert.ok(compare(farSibling, medium) > 0,
+    'a far sibling required to reveal a near wall is not independent background demand');
+  ready.add(near);
+  const groups = lodBranchBlockerGroups([nearOwner, mediumOwner], { isReady: tile => ready.has(tile) });
+  assert.deepEqual(groups.find(group => group.owner === nearOwner).blockers, [farSibling]);
+  assert.equal(farSibling.__ltdsOwnerQueueDistance, 1);
+  assert.ok(compare(farSibling, medium) > 0, 'ready near sibling keeps its unfinished atomic group nearby');
+  assert.ok(compare(farSibling, queueTile(20)) > 0);
+});
+
+test('near ordinary work beats unrelated far blockers and distance precedes motion focus penalty', () => {
+  const far = queueTile(100, { __ltdsFocusOverlap: 1 });
+  lodBranchBlockerGroups([queueOwner([far], 1)]);
+  const nearby = queueTile(1, { __ltdsFocusOverlap: 0 });
+  const compare = createLodFocusPriorityCallback(() => ({ activeMotion: true }), () => 10_000);
+  assert.ok(compare(nearby, far) > 0); assert.ok(compare(far, nearby) < 0);
+  assert.ok(compare(queueTile(10, { __ltdsFocusOverlap: 0 }), queueTile(20, { __ltdsFocusOverlap: 1 })) > 0);
+});
+
+test('explicit tile priorities and external hierarchy prerequisites survive proximity scheduling', () => {
+  const compare = createLodFocusPriorityCallback(() => ({ activeMotion: true }), () => 10_000);
+  const near = queueTile(1, { __ltdsBranchBlocker: true, __ltdsOwnerRank: 0 });
+  const urgent = queueTile(100, { priority: 100 });
+  assert.ok(compare(urgent, near) > 0); assert.ok(compare(near, urgent) < 0);
+  const external = queueTile(100, { internal: { hasUnrenderableContent: true, hasRenderableContent: false } });
+  assert.ok(compare(external, near) > 0); assert.ok(compare(near, external) < 0);
+  const outside = queueTile(0.1, { traversal: { used: true, inFrustum: false, distanceFromCamera: 0.1 } });
+  assert.ok(compare(near, outside) > 0, 'ordinary off-view work retains normal frustum precedence');
+});
+
+test('only initialized root and immediate gated regional-cover children get structural priority', () => {
   const compare = createLodFocusPriorityCallback(() => ({ activeMotion: false }), () => 10_000);
-  assert.ok(compare(focalFar, peripheralNear) > 0,
-    'every tile in the focal owner cut outranks a nearer peripheral owner');
-  assert.ok(compare(peripheralNear, focalFar) < 0);
-  assert.ok(compare(focalNear, focalFar) > 0,
-    'distance is deterministic only after owner rank has been satisfied');
+  const root = queueTile(500, { parent: null, internal: { depth: 0, hasRenderableContent: true } });
+  const cover = queueTile(100, { traversal: { used: false, inFrustum: false, distanceFromCamera: 100 } });
+  const owner = queueOwner([cover]); owner.__ltdsRegionalCoverPreparing = true;
+  const descendant = queueTile(100); cover.children = [descendant]; descendant.parent = cover;
+  const near = queueTile(1);
+  assert.ok(compare(root, cover) > 0);
+  assert.ok(compare(cover, near) > 0,
+    'the coordinator intentionally requests a bounded complete cover outside ordinary traversal');
+  assert.ok(compare(near, descendant) > 0, 'grandchildren are not cover prerequisites');
+  owner.__ltdsRegionalCoverPreparing = false;
+  assert.ok(compare(near, cover) > 0, 'cover priority ends immediately when the preparation gate clears');
+  const uninitialized = queueTile(100, { parent: null });
+  assert.ok(compare(near, uninitialized) > 0, 'missing parent alone does not prove a root');
+});
+
+test('priority ties are stable, antisymmetric and transitive across owners and prerequisites', () => {
+  const compare = createLodFocusPriorityCallback(() => ({ activeMotion: true }), () => 10_000);
+  const a = queueTile(1), b = queueTile(100), c = queueTile(1), d = queueTile(50);
+  lodBranchBlockerGroups([queueOwner([a, b], 1), queueOwner([c, d], 0.5)]);
+  const sameA = queueTile(10), sameB = queueTile(10);
+  const malformed = [undefined, null, Number.NaN, -1, Infinity].map(distance => queueTile(distance));
+  const items = [a, b, c, d, sameA, sameB, queueTile(0.5), ...malformed,
+    queueTile(100, { priority: 5 }), queueTile(100, { internal: { hasUnrenderableContent: true } })];
+  assert.equal(compare(sameA, sameB), 0);
+  assert.deepEqual([sameA, sameB].sort(compare), [sameA, sameB]);
+  for (const tile of malformed) assert.ok(compare(sameA, tile) > 0);
+  for (const left of items) for (const right of items) {
+    assert.equal(Math.sign(compare(left, right)) + Math.sign(compare(right, left)), 0);
+    for (const next of items) {
+      if (compare(left, right) > 0 && compare(right, next) > 0) assert.ok(compare(left, next) > 0);
+    }
+  }
+  assert.ok(compare(a, b) > 0); assert.ok(compare(b, c) > 0,
+    'equal-distance atomic groups retain deterministic owner-rank order');
 });
 
 test('overview retention pins only the captured coarse frontier in the LRU', () => {

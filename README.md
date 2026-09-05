@@ -780,6 +780,23 @@ verify both the EPT view and close-range LOD frontier on representative desktop
 and mobile hardware. Raw LAS/LAZ fallback is intentionally limited to LAS 1.3
 and below and loads the whole file; large field clouds should use EPT.
 
+## Direct sharing
+
+Ready models remain private until an explicit Share action creates a public
+link. That action atomically activates verified derivatives and creates a
+revocable link; a separate Review/Publish ceremony is not required. Passwords
+are optional and download controls default off. Existing-access updates require
+confirmation. Model links follow the latest activated version; whole-project
+links include future activated tasks and require an explicit scope opt-in.
+
+Authenticated Operations client access remains separate from public links. An
+individual model grant requires an exact existing Operations model association,
+uses task scope, and never includes future tasks implicitly. **Direct client
+sharing of a private ready output is not yet integrated:** activating it and
+creating its Operations association/grant needs the Operations contract. The UI
+explains this gap rather than creating a public link as a workaround or granting
+an entire client project. See [the implementation contract](docs/DIRECT_SHARING_IMPLEMENTATION_REVIEW.md).
+
 ## Pitfalls learned
 
 - `3d-tiles-renderer@0.5.x`: use `addEventListener('load-tileset'|'load-model')`,

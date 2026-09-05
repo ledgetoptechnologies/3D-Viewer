@@ -107,6 +107,7 @@
   <script src="/pointcloud-health.js"></script>
   <script src="/pointcloud-access.js"></script>
   <script src="/pointcloud-navigation.js"></script>
+  <script src="/pointcloud-elevation.js"></script>
   <script src="/pointcloud-cameras.js"></script>
   <script src="/pointcloud-measurements.js"></script>
   <script>
@@ -293,6 +294,10 @@
     // Control API consumed by the parent app's sidebar.
     // --------------------------------------------------------------------
     function eachMat(fn) { for (const pc of viewer.scene.pointclouds) fn(pc.material); }
+    const pointCloudElevation = window.LtdsPointCloudElevation.createElevationRangeController({
+      getBounds: () => viewer.scene.pointclouds.length ? viewer.scene.getBoundingBox(viewer.scene.pointclouds) : null,
+      getMaterials: () => viewer.scene.pointclouds.map(pc => pc.material),
+    });
     window.__pcApi = {
       renewAccess(eptUrl) { pointCloudAccess?.renewed(eptUrl); },
       accessUnavailable() { pointCloudAccess?.unavailable(); },
@@ -319,6 +324,9 @@
         });
       },
       setColor(a) { eachMat(mat => { mat.activeAttributeName = a; }); },
+      getElevationState() { return pointCloudElevation.state(); },
+      setElevationRange(min, max) { return pointCloudElevation.setRange(min, max); },
+      resetElevationRange() { return pointCloudElevation.reset(); },
       setEDL(b) { viewer.setEDLEnabled(!!b); },
       setCameras(markers) { return pointCloudCameraLayer.setMarkers(markers); },
       setCameraVisibility(visible) { pointCloudCameraLayer.setVisible(visible); },
@@ -546,13 +554,15 @@
         let closest = null;
         let closestDistance = Infinity;
         for (const pointcloud of pcs) {
+          if (pointcloud.visible === false) continue;
           try {
             const point = pointcloud.pick(this.viewer, camera, ray, {
               x: mouse.x,
               y: this.dom.clientHeight - mouse.y,
               pickWindowSize: POINT_PICK_WINDOW,
             });
-            if (!point?.position) continue;
+            if (!point?.position || ![point.position.x, point.position.y, point.position.z].every(Number.isFinite)) continue;
+            if (point.position.clone().sub(camera.position).dot(ray.direction) <= 0) continue;
             const distance = camera.position.distanceTo(point.position);
             if (distance < closestDistance) {
               closest = point.position.clone();
@@ -584,16 +594,30 @@
         const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, pivot);
         return this._planeHit(px, plane, 0.1) || pivot.clone();
       }
+      // A decoded hit in the narrow pick window is stronger evidence than
+      // Potree's current focal radius. That radius describes an earlier view
+      // plane, not the surface now under the cursor. Rejecting deeper hits
+      // against it made orbit permanently stop after a few dolly steps.
+      // Rebase depth only; never lookAt(hit), which would snap the heading.
+      _adoptSurfaceDepth(hit) {
+        if (!hit || ![hit.x, hit.y, hit.z].every(Number.isFinite)) return false;
+        const camera = this._cam();
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        const depth = hit.clone().sub(this.view.position).dot(forward);
+        if (!Number.isFinite(depth) || depth <= 0 || depth > NAVIGATION_POLICY.maxZoomDistance) return false;
+        this.view.radius = clampZoomDistance(depth);
+        return true;
+      }
       // Prefer the exact point hit. At overview distance coarse EPT nodes can
       // leave gaps wider than the deliberately narrow pick window, so admit a
       // focal-plane pivot only when it remains inside the visible cloud bounds.
       _surfaceAnchor(px, depthAnchor = this._depthAnchor(px)) {
         const hit = this._pointPick(px);
-        if (hit && !depthAnchor) return hit;
+        if (this._adoptSurfaceDepth(hit)) return hit;
         if (!depthAnchor) return null;
         const camera = this._cam();
         const referenceDistance = camera.position.distanceTo(depthAnchor);
-        if (hit && isPlausibleAnchorDistance(camera.position.distanceTo(hit), referenceDistance)) return hit;
         const bounds = this._cloudBounds();
         if (!bounds) return null;
         const cloudDiameter = bounds.getSize(new THREE.Vector3()).length();
@@ -860,6 +884,8 @@
       }
 
       _zoomTowards(target, s) {
+        if (!target || ![target.x, target.y, target.z].every(Number.isFinite)
+          || !Number.isFinite(s) || s <= 0) return;
         const view = this.view;
         const previousPosition = view.position.clone();
         const forward = view.getPivot().sub(previousPosition).normalize();
@@ -966,6 +992,7 @@
       mat.activeAttributeName = 'rgba';
 
       viewer.scene.addPointCloud(pc);
+      pointCloudElevation.refresh();
       if (!window.__pcViewReady) {
         viewer.fitToScreen(0.7);
       }

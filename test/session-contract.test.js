@@ -33,7 +33,10 @@ test('Viewer catches up after tab suspension and recovers failed authenticated t
   assert.match(source, /requestSessionRenewalIfDue\('pageshow'\)/);
   assert.match(source, /document\.visibilityState === 'visible'/);
   assert.match(source, /scheduleSessionRenewalRetry\('response-timeout'\)/);
-  assert.match(source, /sessionRenewalPending \|\| requestSessionRenewal\('tile-authorization'\)/);
+  // Starting a request is not proof that one remains pending: an authoritative
+  // denial must retain the blocked label, covered by the executed recovery tests.
+  assert.match(source, /if \(!sessionRenewalPending\) requestSessionRenewal\('tile-authorization'\)/);
+  assert.match(source, /dom\.lodStatus\.textContent = sessionAccessLabel\(\)/);
   assert.match(source, /SESSION_RENEWAL_BACKOFF_MS = \[10_000, 30_000, 60_000, 120_000, 300_000\]/);
   assert.match(source, /sessionRenewalAttempt !== attempt/);
   assert.match(source, /failure\.kind === 'authorization'[\s\S]*requestSessionRenewal\('tile-authorization'\)/);

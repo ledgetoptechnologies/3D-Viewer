@@ -6,6 +6,8 @@ const {ViewerRepository}=require('../server/repository');
 const {StorageManager}=require('../server/storageManager');
 const {purgeExpiredTrash,applyStorageMutation}=require('../server/storageLifecycle');
 const {candidateState,contentSuperset,retireSupersededOutputs,purgeSupersededOutputs}=require('../server/outputSupersession');
+const {collectRecoveryCompanions,ownedRecoveryCompanions}=require('../server/lodRecoveryCompanions');
+const {recoveryPreservation}=require('../server/outputPreservation');
 const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
 const linux={skip:process.platform==='win32'};
 
@@ -89,11 +91,12 @@ test('atomic archive+trash intent rejects dependency changes without modifying o
   assert.equal(c.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(c.target.modelId).active_version_id,c.target.id);
 });
 
-test('verified supersession is recoverable for 14 days then purges only redundant old output',linux,async t=>{
+test('verified supersession is recoverable for 7 days then purges only redundant old output',linux,async t=>{
   const c=fixture(t),result=await retireSupersededOutputs(c.processing,c.storage);
   assert.equal(result[0]?.status,'retired');
   const trash=c.processing.getTrash(result[0].trashId);
-  assert.ok(new Date(trash.purgeAfter)-Date.now()>13.9*86400_000);
+  assert.ok(new Date(trash.purgeAfter)-Date.now()>6.9*86400_000);
+  assert.ok(new Date(trash.purgeAfter)-Date.now()<=7*86400_000);
   assert.equal(c.processing.getModelOutput(c.source.id).status,'trashed');
   assert.equal(fs.readFileSync(c.storage.resolve('models',`${c.target.relativePath}/model.glb`),'utf8'),'same original');
   assert.equal((await retireSupersededOutputs(c.processing,c.storage)).length,0);
@@ -222,4 +225,158 @@ test('worker shutdown aborts both supersession passes and joins maintenance befo
   for(const method of ['retireSupersededOutputs','purgeSupersededOutputs'])assert.ok(worker.includes(`${method}(processing,storage,{limit:1,signal:maintenanceAbort.signal})`));
   assert.ok(worker.includes('await maintenancePending;db.close()'));
   assert.match(worker,/async function maintenanceStep\(name,run\)\{if\(stopped\)return null/);
+});
+
+function remappedFixture(t,{mesh=true}={}){
+  const c=fixture(t),sourceFiles=[],targetFiles=[];
+  const write=(output,relativePath,bytes,list)=>{
+    const absolute=c.storage.resolve('models',`${output.relativePath}/${relativePath}`);fs.mkdirSync(path.dirname(absolute),{recursive:true});fs.writeFileSync(absolute,bytes);
+    const file={relativePath,sourceRelativePath:relativePath,byteSize:Buffer.byteLength(bytes),sha256:digest(bytes)};list.push(file);return file;
+  };
+  const original={relativePath:'model.glb',byteSize:13,sha256:digest('same original')};
+  let meshAssets=[];
+  if(mesh){
+    sourceFiles.push(original);targetFiles.push(original);
+    for(const [relative,bytes] of [['model.obj','mtllib material.mtl\nv 0 0 0\n'],['material.mtl','newmtl wall\nmap_Kd textures/wall.jpg\n'],['textures/wall.jpg','mesh texture']]){
+      write(c.source,relative,bytes,sourceFiles);write(c.target,relative,bytes,targetFiles);
+    }
+    meshAssets=sourceFiles.filter(file=>/\.(obj|glb)$/.test(file.relativePath)).map(file=>({kind:path.extname(file.relativePath).slice(1),rootKey:'models',relativePath:`${c.source.relativePath}/${file.relativePath}`,byteSize:file.byteSize,sha256:file.sha256,published:false}));
+  }else{
+    fs.unlinkSync(c.storage.resolve('models',`${c.source.relativePath}/model.glb`));fs.unlinkSync(c.storage.resolve('models',`${c.target.relativePath}/model.glb`));
+  }
+  const shots=write(c.source,'camera/shots.geojson','{}',sourceFiles),photo=write(c.source,'images/DJI_0001.jpg','original photo bytes',sourceFiles);
+  const ept=write(c.source,'cloud/ept.json','{"dataType":"laszip"}',sourceFiles);write(c.source,'cloud/ept-data/0-0-0-0.laz','point bytes',sourceFiles);
+  const members=sourceFiles.filter(file=>file.relativePath.startsWith('cloud/')).map(file=>({relativePath:file.relativePath.slice(6),byteSize:file.byteSize,sha256:file.sha256})).sort((a,b)=>a.relativePath.localeCompare(b.relativePath));
+  const assets=[...meshAssets,{kind:'shots',rootKey:'models',relativePath:`${c.source.relativePath}/${shots.relativePath}`,byteSize:shots.byteSize,sha256:shots.sha256,published:false},{kind:'ept',rootKey:'models',relativePath:`${c.source.relativePath}/${ept.relativePath}`,byteSize:ept.byteSize,sha256:ept.sha256,manifestSha256:digest(JSON.stringify(members)),manifestFiles:members,published:false}];
+  const cameraPhotos=[{filename:'DJI_0001.jpg',rootKey:'models',relativePath:`${c.source.relativePath}/${photo.relativePath}`,contentType:'image/jpeg',byteSize:photo.byteSize,sha256:photo.sha256}];
+  c.repository.upsertModelVersion({modelId:c.source.modelId,versionId:c.source.id,provider:'webodm',providerModelId:c.task.id,providerVersionId:'old',displayName:'old',status:'ready',makeActive:false,assets,cameraPhotos});
+  const plan=collectRecoveryCompanions(c.database,c.source.id),owned=ownedRecoveryCompanions(plan,c.target.relativePath,c.target.attemptId);
+  for(const file of plan.files){const bytes=fs.readFileSync(c.storage.resolve(file.rootKey,file.sourceRelativePath));write(c.target,file.relativePath,bytes,targetFiles);}
+  const targetMesh=meshAssets.map(asset=>({...asset,relativePath:asset.relativePath.replace(`${c.source.relativePath}/`,`${c.target.relativePath}/`)}));
+  c.repository.upsertModelVersion({modelId:c.target.modelId,versionId:c.target.id,provider:'webodm',providerModelId:c.task.id,providerVersionId:'replacement',displayName:'replacement',status:'ready',makeActive:true,assets:[...targetMesh,...owned.assets],cameraPhotos:owned.cameraPhotos});
+  for(const [output,files] of [[c.source,sourceFiles],[c.target,targetFiles]])c.database.prepare('UPDATE model_outputs SET byte_size=? WHERE id=?').run(files.reduce((sum,file)=>sum+file.byteSize,0),output.id);
+  const payload={...JSON.parse(c.operation().payload_json),targetRelativePath:c.target.relativePath,companions:plan};
+  c.database.prepare('UPDATE dataset_operations SET payload_json=? WHERE id=?').run(JSON.stringify(payload),c.operation().id);
+  return{...c,payload,sourceFiles,targetFiles,sourceProof:{files:sourceFiles},targetProof:{files:targetFiles}};
+}
+
+test('trusted per-product recovery maps photos and a complete EPT tree without basename guessing',async t=>{
+  const c=remappedFixture(t,{mesh:false});
+  assert.equal(contentSuperset(c.sourceProof,c.targetProof),false);
+  const proof=await recoveryPreservation(c.database,c.payload,c.source,c.target,c.sourceProof,c.targetProof,'unused');
+  assert.equal(proof.preserved,true);assert.equal(proof.method,'registered_recovery_groups');assert.match(proof.preservationSha256,/^[a-f0-9]{64}$/);
+  assert.equal(proof.details.preservedFileCount,4);
+});
+
+test('recovery proof refuses an unbound plan, unknown originals, changed bytes and relocated dependencies',async t=>{
+  const c=remappedFixture(t,{mesh:false}),check=(payload=c.payload,source=c.sourceProof,target=c.targetProof)=>recoveryPreservation(c.database,payload,c.source,c.target,source,target,'unused');
+  assert.equal((await check({...c.payload,targetRelativePath:'wrong'})).details.proofFailureReason,'recovery_destination_unbound');
+  assert.equal((await check({...c.payload,companions:{...c.payload.companions,manifestSha256:'a'.repeat(64)}})).details.proofFailureReason,'recovery_companion_manifest_changed');
+  const unknown={relativePath:'private-original.bin',byteSize:123,sha256:'a'.repeat(64)};
+  const missing=await check(c.payload,{files:[...c.sourceFiles,unknown]});assert.equal(missing.details.proofFailureReason,'unmapped_source_files');assert.equal(missing.details.unmappedByteSize,123);
+  const changed={files:c.targetFiles.map(file=>file.relativePath.endsWith('.laz')?{...file,sha256:'b'.repeat(64)}:file)};
+  assert.equal((await check(c.payload,c.sourceProof,changed)).details.proofFailureReason,'recovery_mapped_file_changed');
+  const moved={files:c.targetFiles.map(file=>file.relativePath.endsWith('.laz')?{...file,relativePath:'elsewhere/0-0-0-0.laz'}:file)};
+  assert.equal((await check(c.payload,c.sourceProof,moved)).details.proofFailureReason,'recovery_mapped_file_changed');
+  c.database.prepare("DELETE FROM model_camera_photos WHERE version_id=?").run(c.target.id);
+  assert.equal((await check()).details.proofFailureReason,'recovery_photo_registration_changed');
+});
+
+test('remapped recovery plus secure mesh closure retires and purges with a bound group proof',linux,async t=>{
+  const c=remappedFixture(t),retired=(await retireSupersededOutputs(c.processing,c.storage))[0];assert.equal(retired?.status,'retired');
+  const proof=JSON.parse(c.database.prepare("SELECT details_json FROM audit_events WHERE action='output.supersession_proved'").get().details_json);
+  assert.equal(proof.preservationMethod,'registered_recovery_groups');assert.equal(proof.policyRevision,2);
+  c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',retired.trashId);
+  assert.equal((await purgeSupersededOutputs(c.processing,c.storage))[0]?.status,'complete');
+  assert.ok(fs.existsSync(c.storage.resolve('models',`${c.target.relativePath}/recovery-companions/camera-photos/DJI_0001.jpg`)));
+});
+
+test('missing raw mesh dependency blocks even when registered assets still match',linux,async t=>{
+  const c=remappedFixture(t);
+  fs.unlinkSync(c.storage.resolve('models',`${c.target.relativePath}/textures/wall.jpg`));
+  c.database.prepare('UPDATE model_outputs SET byte_size=byte_size-? WHERE id=?').run(Buffer.byteLength('mesh texture'),c.target.id);
+  assert.equal((await retireSupersededOutputs(c.processing,c.storage))[0]?.reason,'content_not_fully_preserved');
+  const detail=JSON.parse(c.database.prepare("SELECT details_json FROM audit_events WHERE action='output.supersession_evaluated'").get().details_json);
+  assert.equal(detail.proofFailureReason,'mesh_dependency_not_preserved');assert.equal(c.processing.getModelOutput(c.source.id).status,'ready');
+});
+
+test('remapped proof is rechecked at purge and owner restore remains a permanent opt-out',linux,async t=>{
+  const c=remappedFixture(t),retired=(await retireSupersededOutputs(c.processing,c.storage))[0];
+  c.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z',retired.trashId);
+  const payload=JSON.parse(c.operation().payload_json);payload.companions.manifestSha256='a'.repeat(64);
+  c.database.prepare('UPDATE dataset_operations SET payload_json=? WHERE id=?').run(JSON.stringify(payload),c.operation().id);
+  assert.equal((await purgeSupersededOutputs(c.processing,c.storage))[0]?.reason,'supersession_content_changed');
+  const restore=c.processing.beginRestoreMutation(retired.trashId,'operator');assert.ok(restore);applyStorageMutation(c.processing,c.storage,restore);
+  assert.equal(candidateState(c.processing,c.operation(),c.source.id,{storage:c.storage}).reason,'explicit_restore_preserved');
+});
+
+test('new proof policy reevaluates previously blocked immutable pairs',linux,async t=>{
+  const c=remappedFixture(t),payload=JSON.parse(c.operation().payload_json),source=c.processing.getModelOutput(c.source.id),target=c.processing.getModelOutput(c.target.id);
+  const oldFingerprint=digest(JSON.stringify({revision:1,operation:c.operation().id,payload,source:[source.id,source.updatedAt,source.byteSize,source.assetCount],target:[target.id,target.updatedAt,target.byteSize,target.assetCount]}));
+  c.processing.insertAudit({actorType:'system',action:'output.supersession_evaluated',entityType:'model_output',entityId:source.id,details:{fingerprint:oldFingerprint,reason:'content_not_fully_preserved'}});
+  assert.equal((await retireSupersededOutputs(c.processing,c.storage))[0]?.status,'retired');
+});
+
+test('active imports defer expensive retirement and purge without cooldown or mutations',async t=>{
+  const c=fixture(t);t.mock.method(c.processing,'workerWorkCounts',()=>({datasetOperations:1,processing:0,derivatives:0,events:0,importCleanups:0}));
+  assert.deepEqual(await retireSupersededOutputs(c.processing,c.storage),[]);assert.deepEqual(await purgeSupersededOutputs(c.processing,c.storage),[]);
+  assert.equal(c.database.prepare('SELECT count(*) n FROM storage_mutations').get().n,0);
+  assert.equal(c.database.prepare("SELECT count(*) n FROM audit_events WHERE action='output.supersession_evaluated'").get().n,0);
+});
+
+test('unregistered metadata still blocks remapped retirement even with a same-name copy',linux,async t=>{
+  const c=remappedFixture(t);
+  for(const output of [c.source,c.target]){
+    fs.writeFileSync(c.storage.resolve('models',`${output.relativePath}/custom-metadata.json`),'{}');
+    c.database.prepare('UPDATE model_outputs SET byte_size=byte_size+2 WHERE id=?').run(output.id);
+  }
+  assert.equal((await retireSupersededOutputs(c.processing,c.storage))[0]?.reason,'content_not_fully_preserved');
+  const event=c.database.prepare("SELECT message,details_json FROM processing_events WHERE event_type='output.supersession_evaluated'").get();
+  const detail=JSON.parse(event.details_json);assert.equal(detail.proofFailureReason,'unmapped_source_files');assert.equal(detail.unmappedFileCount,1);assert.equal(detail.unmappedByteSize,2);
+  assert.match(event.message,/1 files \(2 bytes\)/);
+});
+
+test('EPT referenced descendant cannot be omitted from the authorized group',async t=>{
+  const c=remappedFixture(t,{mesh:false}),plan=structuredClone(c.payload.companions);
+  plan.files=plan.files.filter(file=>!file.relativePath.endsWith('.laz'));
+  const proof=await recoveryPreservation(c.database,{...c.payload,companions:plan},c.source,c.target,c.sourceProof,c.targetProof,'unused');
+  assert.equal(proof.preserved,false);assert.equal(proof.details.proofFailureReason,'recovery_companion_manifest_changed');
+});
+
+test('bytes on disk are insufficient when a target EPT descendant is no longer registered',async t=>{
+  const c=remappedFixture(t,{mesh:false});
+  c.database.prepare("DELETE FROM model_asset_files WHERE asset_id IN (SELECT id FROM model_assets WHERE version_id=? AND kind='ept') AND relative_path LIKE '%.laz'").run(c.target.id);
+  const proof=await recoveryPreservation(c.database,c.payload,c.source,c.target,c.sourceProof,c.targetProof,'unused');
+  assert.equal(proof.preserved,false);assert.equal(proof.details.proofFailureReason,'recovery_product_registration_changed');
+});
+
+test('maintenance cooperatively stops when another import starts during hashing',linux,async t=>{
+  const c=fixture(t),read=fs.read;let reads=0,busy=false,clock=Date.now();
+  t.mock.method(Date,'now',()=>clock);
+  t.mock.method(c.processing,'workerWorkCounts',()=>({datasetOperations:busy?1:0}));
+  t.mock.method(fs,'read',function(...args){const callback=args.pop();return read.call(this,...args,(...result)=>{reads++;busy=true;clock+=300;callback(...result);});});
+  assert.deepEqual(await retireSupersededOutputs(c.processing,c.storage),[]);assert.equal(reads,1);
+  assert.equal(c.database.prepare('SELECT count(*) n FROM storage_mutations').get().n,0);
+  assert.equal(c.database.prepare("SELECT count(*) n FROM audit_events WHERE action='output.supersession_evaluated'").get().n,0);
+});
+
+test('daily deferred verification retries create separate bounded diagnostic events',linux,async t=>{
+  const c=fixture(t);t.mock.method(fs,'read',(...args)=>args.at(-1)(Object.assign(new Error('temporary test failure'),{code:'EIO'})));
+  assert.equal((await retireSupersededOutputs(c.processing,c.storage))[0]?.status,'deferred');
+  assert.deepEqual(await retireSupersededOutputs(c.processing,c.storage),[],'same-day retry is suppressed');
+  const previous=c.database.prepare("SELECT id,details_json FROM audit_events WHERE action='output.supersession_evaluated'").get(),details=JSON.parse(previous.details_json);
+  details.retryAfter='2000-01-01T00:00:00.000Z';c.database.prepare('UPDATE audit_events SET details_json=? WHERE id=?').run(JSON.stringify(details),previous.id);
+  assert.equal((await retireSupersededOutputs(c.processing,c.storage))[0]?.status,'deferred','a later evaluation does not conflict with an earlier event identity');
+  assert.equal(c.database.prepare("SELECT count(*) n FROM processing_events WHERE event_type='output.supersession_evaluated'").get().n,2);
+});
+
+test('changed replacement registry between hash proof and durable intent blocks retirement',linux,async t=>{
+  const c=remappedFixture(t),begin=c.processing.beginOutputTrashMutation.bind(c.processing);
+  t.mock.method(c.processing,'beginOutputTrashMutation',(...args)=>{
+    c.database.prepare('DELETE FROM model_camera_photos WHERE version_id=?').run(c.target.id);
+    return begin(...args);
+  });
+  const result=await retireSupersededOutputs(c.processing,c.storage);
+  assert.equal(result[0]?.reason,'dependency_changed');assert.equal(c.processing.getModelOutput(c.source.id).status,'ready');
+  assert.equal(c.database.prepare('SELECT count(*) n FROM storage_mutations').get().n,0);
 });

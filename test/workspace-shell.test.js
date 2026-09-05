@@ -23,7 +23,9 @@ test('workspace keeps imports and access modes explicit',()=>{
 });
 test('workspace client grants are responsive, project-filtered, and preserve public links',()=>{
   assert.match(source,/client-grant-form/);
-  assert.match(source,/option\.dataset\.projectId!==projectId/);
+  assert.match(source,/associationModelId\(item\)!==output\.modelId/);
+  assert.match(source,/scopeType:onlyOutputId\?'task':'project'/);
+  assert.match(source,/includeFuturePublished:!onlyOutputId&&form\.elements\.includeFuturePublished\.checked/);
   assert.match(source,/revoke-client-grant/);
   assert.doesNotMatch(source,/ops\.ledgetopdroneservices\.com\/data/);
   assert.match(source,/share-form/);

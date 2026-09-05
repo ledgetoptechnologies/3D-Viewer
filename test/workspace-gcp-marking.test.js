@@ -43,7 +43,7 @@ test('image clicks and numeric fields create update and delete exact corresponde
   assert.match(source, /\/api\/v1\/gcp-correspondences\/\$\{encodeURIComponent\(existing\.id\)\}/);
   assert.match(source, /method:'PATCH',body:\{pixelX,pixelY\}/);
   assert.match(source, /method:'DELETE'/);
-  assert.match(source, /confirm\('Delete this saved image correspondence\?'\)/);
+  assert.match(source, /await dialogs\.confirm\('Delete this saved image correspondence\?',/);
 });
 
 test('marking layout is bounded responsive and preserves exact import provenance confirmation', () => {

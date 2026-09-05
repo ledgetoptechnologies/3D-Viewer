@@ -37,10 +37,11 @@ test('workspace route preserves the section project and expanded task across his
 });
 
 test('project detail owns import processing GCP outputs review and sharing',()=>{
-  for(const value of ['project-import','project-process','project-share','gcp-import-form','Outputs and review','Review & publish','client-grant-form','share-form'])assert.ok(source.includes(value),value);
+  for(const value of ['project-import','project-process','project-share','gcp-import-form','Model files','Create public link','client-grant-form','share-form'])assert.ok(source.includes(value),value);
+  assert.doesNotMatch(source,/Review & publish/);
   for(const permission of ['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'])assert.match(source,new RegExp(`'${permission.replaceAll('.','\\.')}'`));
   assert.match(source,/\['viewer\.shares\.create','viewer\.shares\.read','viewer\.shares\.revoke','viewer\.client_grants\.manage'\]\.some\(can\)/);
-  assert.match(source,/if\(can\('viewer\.shares\.read'\)\|\|can\('viewer\.shares\.revoke'\)\)/);
+  assert.match(source,/can\('viewer\.shares\.read'\)\|\|can\('viewer\.shares\.revoke'\)/);
   assert.match(source,/const list=mayRead\|\|mayRevoke\?/);
   assert.match(source,/This device/);
   assert.match(source,/Server import folder/);
@@ -60,7 +61,8 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/Unavailable means the processing API did not provide an authoritative value/);
   assert.match(source,/class="task-facts"/);
   assert.doesNotMatch(source,/class="task-metrics"/);
-  for(const disclosure of ['Details and controls','Processing history','Ground control points','Outputs and review','Task output'])assert.ok(source.includes(disclosure),disclosure);
+  for(const destination of ['Task settings','Processing history','Ground control points','Model files','Task files'])assert.ok(source.includes(destination),destination);
+  for(const action of ['task-gcp','task-settings','task-files','task-history'])assert.ok(source.includes(action),action);
   assert.match(source,/aria-controls=/);
   assert.match(css,/prefers-reduced-motion/);
   assert.match(source,/logLimit=100/);
@@ -73,12 +75,12 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/activePublished&&item\.status==='published'\)\|\|outputs\.find\(item=>item\.status==='ready'&&item\.attemptId\)/);
   assert.match(source,/output\.status==='ready'&&output\.attemptId&&can\('viewer\.processing\.publish'\)/);
   assert.match(source,/button\('open-review',output\.attemptId,'View',true\)/);
-  assert.match(source,/if\(published&&\(can\('viewer\.shares\.create'\)\|\|can\('viewer\.client_grants\.manage'\)\)\)/);
+  assert.match(source,/if\(canShareOutput\(output\)\)/);
   for(const label of ["'View'","'Download'","'Report'","'Share'"])assert.ok(source.includes(label),label);
   assert.match(source,/class="task-quick-actions row-actions"/);
   assert.match(source,/class="task-summary-toggle"/);
   assert.match(css,/\.task-quick-actions .*min-height:46px/);
-  for(const field of ['averageGsdM','surveyedAreaM2','sourceImageCount','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
+  for(const field of ['averageGsdM','surveyedAreaM2','taskImageInventory','reconstructedPointCount','georeferencingCrs','processingDurationMs','processingStatus','outputCount','taskDiskUsageBytes'])assert.ok(processingApi.includes(field),field);
   assert.ok(source.includes('formatGsd(metrics.averageGsdM,units)'));
   assert.ok(source.includes('formatArea(metrics.surveyedAreaM2,units)'));
   assert.match(source,/groupedNumber\(value\)/);
@@ -181,13 +183,15 @@ test('providers are master-detail and diagnostics owns storage health and trash'
   assert.match(source,/Queue & provider health/);
 });
 
-test('diagnostic storage cards consume the authoritative space DTO safely',()=>{
+test('diagnostic storage cards use measured usage, with filesystem capacity separate',()=>{
   assert.match(source,/function storageSpaceMetrics/);
   assert.match(source,/typeof value==='number'&&Number\.isFinite\(value\)&&value>=0/);
   assert.match(source,/available<=total\?total-available/);
   assert.match(source,/finiteStorageNumber\(item\.available\)/);
-  assert.match(source,/bytes\(values\.usedBytes\)/);
-  assert.match(source,/bytes\(values\.availableBytes\)/);
+  assert.match(source,/storageUsageCards\(state\.storage\?\.usage\)/);
+  assert.match(source,/bytes\(usage\.totalBytes\)/);
+  assert.match(source,/bytes\(space\.availableBytes\)/);
+  assert.match(source,/not a folder subtotal/);
 });
 
 test('diagnostics provides grouped paginated global runs with retained logs and accessible retry',()=>{
