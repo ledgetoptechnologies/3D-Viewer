@@ -797,7 +797,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelector('#global-attempt-diagnostic-attempt-global-older')?.textContent.includes('Audit acceptance: gray-zone')", `${viewport.name}: successful v4 gray-zone audit acceptance was not exposed`);
     const acceptedAuditText = await client.evaluate(`document.querySelector('#global-attempt-diagnostic-attempt-global-older').textContent`);
     for (const expected of ['areaRelativeDelta', '0.000010618457348535776', 'ltds-controlled-surface-policy-v4']) assert.ok(acceptedAuditText.includes(expected), `${viewport.name}: successful v4 diagnostics omitted ${expected}`);
-    await client.evaluate(`document.querySelector('[data-action="retry-storage-mutation"][data-id="mutation-failed"]').click()`);
+    await confirmAppAction(client, runtime, '[data-action="retry-storage-mutation"][data-id="mutation-failed"]', { title: 'Confirm action', cancelFirst: true });
     await waitForRequest(runtime, requestStart, 'POST', '/api/v1/storage/mutations/mutation-failed/retry');
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: lifecycle retry did not settle`);
     await client.evaluate(`document.querySelector('[data-action="open-trash"]').click()`);
