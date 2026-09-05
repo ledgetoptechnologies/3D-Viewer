@@ -14,7 +14,7 @@ function markApplied(processing,mutation,options){
   throw conflict('lifecycle journal changed while applying filesystem effect');
 }
 
-function applyStorageMutation(processing,storage,input,{faultAt=null}={}){
+function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null}={}){
   const mutation=typeof input==='string'?processing.getStorageMutation(input):input;
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
@@ -24,12 +24,12 @@ function applyStorageMutation(processing,storage,input,{faultAt=null}={}){
       if(mutation.type==='trash'||mutation.type==='restore'){
         const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
         if(sourceExists&&destinationExists)throw conflict('lifecycle source and destination both exist');
-        if(sourceExists&&!destinationExists)storage.moveExact(mutation.sourceRootKey,mutation.sourceRelativePath,mutation.destinationRootKey,mutation.destinationRelativePath);
+        if(sourceExists&&!destinationExists){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.moveExact(mutation.sourceRootKey,mutation.sourceRelativePath,mutation.destinationRootKey,mutation.destinationRelativePath);}
         else if(!sourceExists&&!destinationExists&&!mutation.allowAbsentSource)throw conflict('lifecycle source and destination are both absent');
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation,{destinationRelativePath:!sourceExists&&!destinationExists?'':mutation.destinationRelativePath});
       }else if(mutation.type==='purge'){
-        if(exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath))storage.removeExact(mutation.sourceRootKey,mutation.sourceRelativePath);
+        if(exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath)){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.removeExact(mutation.sourceRootKey,mutation.sourceRelativePath);}
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation);
       }
@@ -59,6 +59,7 @@ function purgeExpiredTrash(processing,storage,{actor='storage-maintenance',limit
   const results=[];
   for(const item of processing.expiredTrash().slice(0,Math.max(1,Math.min(Number(limit)||20,100)))){
     try{
+      if(item.entityType==='output'&&require('./outputSupersession').automaticSupersessionTrash(processing,item.id)){results.push({trashId:item.id,status:'deferred',errorCode:'supersession_reverification_required'});continue;}
       if(item.entityType==='project'||item.entityType==='task'){
         const {purgeContainerTrash}=require('./containerLifecycle');
         const purged=purgeContainerTrash(processing,storage,item.id,actor);

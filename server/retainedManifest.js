@@ -109,4 +109,15 @@ async function verifyRetainedClosure(root, files, { signal = null } = {}) {
     if (!sameIdentity(rootIdentity, fs.fstatSync(rootFd, { bigint: true }))) fail('source_changed');
   } finally { if (rootFd !== undefined) fs.closeSync(rootFd); }
 }
-module.exports={MAX_FILES,buildRetainedManifest,buildMeshRecoveryManifest,inventoryTree,verifyRetainedClosure};
+// Whole-output supersession is stricter than import retention: no disposable
+// path filter is allowed because an unknown original must block retirement.
+async function buildStorageSupersessionManifest(root,{signal=null}={}) {
+  const inventory=inventoryTree(root),files=[];
+  for(const file of inventory.files) files.push({relativePath:file.relativePath,sourceRelativePath:file.relativePath,byteSize:file.byteSize,sha256:await hashSelectedFile(file,{signal})});
+  return{files,manifestSha256:crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex'),inventoryIdentitySha256:storageSupersessionInventoryIdentity(inventory)};
+}
+function storageSupersessionInventoryIdentity(inventory){
+  const identity=stat=>['dev','ino','mode','size','ctimeNs','mtimeNs'].map(key=>String(stat[key]));
+  return crypto.createHash('sha256').update(JSON.stringify({root:identity(inventory.rootIdentity),files:inventory.files.map(file=>[file.relativePath,...identity(file.identity)])})).digest('hex');
+}
+module.exports={MAX_FILES,buildRetainedManifest,buildMeshRecoveryManifest,inventoryTree,verifyRetainedClosure,buildStorageSupersessionManifest,storageSupersessionInventoryIdentity};

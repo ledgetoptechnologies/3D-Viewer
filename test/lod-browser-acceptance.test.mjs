@@ -1042,6 +1042,12 @@ test('browser camera-centered focal owner reacquires A across A -> B -> A views'
     await client.command('Page.navigate', { url: `${fixture.origin}/?project=${fixtureId}&lodDistanceDemand=0` });
     await waitFor(client, `window.__ltds?.tiles?.()?.root?.children?.length === 2`,
       'two-owner fixture hierarchy did not load');
+    // Hierarchy JSON arrives before asynchronous child preprocessing. A camera
+    // pose derived from authored bounds must wait for those bounds, not merely
+    // the existence of the JSON child objects.
+    await waitFor(client, `window.__ltds.tiles().root.children.every(tile =>
+      Boolean(tile.engineData?.boundingVolume))`,
+      'two-owner fixture bounding volumes did not initialize');
     await client.evaluate(`(() => {
       const slider = document.querySelector('#lod-detail');
       slider.value = '24';
@@ -3052,8 +3058,19 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
         attachedFine: leaves.filter(attached).length,
         cachedFine: leaves.filter(tile => tiles.lruCache.has(tile)).length,
         cachedFineUris: leaves
-          .filter(tile => tiles.lruCache.has(tile))
+          // LRU also contains queued/loading reservations. Only completed
+          // scenes are warm cache: cancelled peripheral work may retry before
+          // it has ever become decoded content. Keep the no-refetch contract
+          // for every actually decoded baseline tile, not only the focal owner.
+          .filter(tile => tiles.lruCache.has(tile)
+            && tile.internal?.loadingState === 4 && Boolean(tile.engineData?.scene))
           .map(tile => tile.content?.uri || tile.content?.url || ''),
+        cachedFineStates: leaves.filter(tile => tiles.lruCache.has(tile)).map(tile => ({
+          uri: tile.content?.uri || tile.content?.url || '',
+          loading: tile.internal?.loadingState,
+          scene: Boolean(tile.engineData?.scene),
+          attached: attached(tile),
+        })),
         selectedFine: leaves.filter(tile => tile.traversal?.used === true && tile.traversal?.inFrustum === true).length,
         centerRows,
         ownerRows: tiles.root.children.map(owner => ({
@@ -3193,7 +3210,7 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
       'tiny camera movement discarded or recreated the warm focal scenes');
     for (const [uri, before] of requestCountsBefore) {
       const after = fixture.requests.filter(requestPath => requestPath.endsWith(`/${uri}`)).length;
-      assert.equal(after, before, `tiny movement re-fetched cached ${uri}`);
+      assert.equal(after, before, `tiny movement re-fetched cached ${uri}: ${JSON.stringify(beforeMotion.cachedFineStates.find(row => row.uri === uri))}`);
     }
 
     const finalRecoveryDeadline = Date.now() + 8_000;
@@ -3889,12 +3906,16 @@ test('browser default distance demand and explicit overrides protect nearby surf
       const result=await client.evaluate(`(() => {const t=window.__ltds.tiles();return {
         options:window.__ltds.lodEvaluation(),note:!document.querySelector('#lod-evaluation-note').hidden,
         timing:window.__ltds.lodLoadingTiming(),owner:window.__ltds.lodOwnerDiagnostics(),raw:t.errorTarget,
+        loadingSamples:window.__ltds.lodTrace().map(entry=>entry.snapshot.loadingBudget).filter(Boolean),
         limits:{downloads:t.downloadQueue.maxJobs,parses:t.parseQueue.maxJobs,
           workers:t.plugins.find(p=>p.ktxLoader)?.ktxLoader.workerPool.pool,soft:t.lruCache.minBytesSize,hard:t.lruCache.maxBytesSize},
         branches:t.root.children.map(b=>({name:b.name,target:b.__ltdsPeripheralErrorTarget,sse:b.traversal.error,
           demand:b.__ltdsDistanceDemand,parentVisible:t.visibleTiles.has(b),leafVisible:t.visibleTiles.has(b.children[0]),refine:b.refine}))
       };})()`);
       assert.deepEqual(result.options,{distanceDemand:enabled,loadingTiming:enabled});
+      assert.ok(result.loadingSamples.length > 0, 'real-browser loading admission telemetry is required');
+      assert.ok(result.loadingSamples.every(sample => sample.enabled && sample.inFlight <= sample.maxInFlight && sample.maxInFlight <= 8),
+        'whole download/body/parse lifetimes exceeded the bounded loading window');
       assert.equal(result.note,enabled); assert.equal(result.owner.distanceDemandEnabled,enabled);
       assert.ok(Math.abs(result.raw-5.481)<0.01);
       if (!enabled) {

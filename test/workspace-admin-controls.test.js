@@ -18,7 +18,8 @@ test('staff output actions keep the admin bearer on downloads and mint published
   assert.match(launcher,/windowRef\.open\(launcherUrl, windowName, 'noopener'\)/);
   assert.doesNotMatch(source,/window\.open\('about:blank'/);
   assert.match(source,/reviewSessionController\.track\(launch\.channelId,\{attemptId:result\.attemptId,modelId:result\.modelId,modelVersionId:result\.modelVersionId,sessionTtlSeconds:result\.sessionTtlSeconds\}\)/);
-  assert.match(source,/launch\.navigate\(result\.embedUrl,\{renewable:false\}\)/);
+  assert.match(source,/sessionMode:'published',outputId:id,modelId:result\.modelId,modelVersionId:result\.modelVersionId/);
+  assert.doesNotMatch(source,/launch\.navigate\(result\.embedUrl,\{renewable:false\}\)/);
   assert.match(source,/output\.activePublished.*button\('share-output'/);
   assert.match(source,/state\.outputs\.filter\(output=>output\.activePublished\)/);
   assert.doesNotMatch(source,/<a[^>]+href="\$\{esc\(output\.(?:download|report)Url\)\}/);

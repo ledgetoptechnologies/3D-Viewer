@@ -6,6 +6,8 @@
   'use strict';
 
   const FAILURES = Object.freeze({
+    authorization_required: 'Point-cloud access needs renewal. Reopen this model from the Viewer workspace if access does not recover.',
+    authorization_unavailable: 'Point-cloud access could not be renewed. Reopen this model from the Viewer workspace.',
     startup_timeout: 'The point-cloud viewer did not start in time. Retry, then check the Viewer service if this continues.',
     load_timeout: 'Point-cloud metadata did not arrive in time. Check access to the published EPT data, then retry.',
     node_timeout: 'Point-cloud metadata loaded, but no points arrived. Check the EPT node files and byte-range responses, then retry.',
@@ -43,6 +45,7 @@
     let timer = null;
     let phase = 'starting';
     let failureCode = null;
+    let phaseBeforeAccess = null;
 
     function stableStage() {
       if (phase === 'starting') return 'startup';
@@ -121,7 +124,7 @@
       // diagnostic watchdog. Recover from that one observational timeout when
       // Potree supplies positive evidence; all structural/runtime failures stay
       // terminal until an explicit retry.
-      if (phase === 'ready' || (phase === 'failed' && failureCode !== 'node_timeout')) return;
+      if (phase === 'access-required' || phase === 'ready' || (phase === 'failed' && failureCode !== 'node_timeout')) return;
       phase = 'ready';
       failureCode = null;
       diagnostic('points_visible', null, 'nodes');
@@ -139,7 +142,34 @@
       reload();
     });
 
-    return { beginStartup, beginLoad, metadataReady, pointsVisible, fail, phase: () => phase };
+    function accessRequired() {
+      if (phase === 'access-required') return;
+      phaseBeforeAccess = phase;
+      const stage = stableStage();
+      phase = 'access-required';
+      clearWatchdog();
+      if (status) status.textContent = 'Point cloud: renewing access…';
+      if (phaseBeforeAccess !== 'ready') showLoading('Renewing point-cloud access…');
+      notify('error', 'authorization_required', stage);
+    }
+
+    function accessRestored() {
+      if (phase !== 'access-required') return;
+      phase = phaseBeforeAccess;
+      if (phase === 'ready') {
+        if (status) status.textContent = 'Point cloud: access renewed';
+        notify('ready', 'points_visible', 'nodes');
+      } else if (phase === 'loading-nodes') metadataReady();
+      else beginLoad();
+    }
+
+    function accessUnavailable() {
+      phase = 'access-required';
+      fail('authorization_unavailable', { retryable: false });
+    }
+
+    return { beginStartup, beginLoad, metadataReady, pointsVisible, fail,
+      accessRequired, accessRestored, accessUnavailable, phase: () => phase };
   }
 
   return { FAILURES, createPointCloudHealth, hasVisiblePointCloudNodes };

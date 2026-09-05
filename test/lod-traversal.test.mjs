@@ -78,6 +78,28 @@ function nextFrame(renderer) {
   Object.assign(renderer.stats, { used: 0, inFrustum: 0, active: 0, visible: 0 });
 }
 
+for (const nestedWrapper of [false, true]) {
+  test(`failed replacement retains scoped fallback without ancestor loading${nestedWrapper ? ' through an external wrapper' : ''}`, () => {
+    const failed = makeTile({ name: 'failed', error: 0, loadingState: FAILED, depth: nestedWrapper ? 3 : 2 });
+    const wrapper = makeTile({ name: 'wrapper', error: 60, loadingState: LOADED, depth: 2, children: [failed] });
+    Object.assign(wrapper.internal, { hasRenderableContent: false, hasUnrenderableContent: true });
+    const shell = makeTile({ name: 'shell', error: 80, loadingState: LOADED, depth: 1, children: [nestedWrapper ? wrapper : failed] });
+    const root = makeTile({ name: 'root', error: 100, loadingState: LOADED, depth: 0, children: [shell] });
+    const renderer = makeRenderer(new Map([[root, 100], [shell, 80], [wrapper, 60], [failed, 0]]));
+    renderer.loadAncestors = false;
+    renderer.lodFallbackTiles = new Set([shell]);
+    runTraversal(root, renderer);
+    assert.equal(shell.traversal.visible, true, 'FAILED never counts as a visible replacement');
+    assert.equal(failed.traversal.visible, false);
+    assert.equal(root.traversal.visible, false, 'strict replacement prevents coarse overlap');
+    failed.internal.loadingState = LOADED;
+    nextFrame(renderer);
+    runTraversal(root, renderer);
+    assert.equal(shell.traversal.visible, false);
+    assert.equal(failed.traversal.visible, true);
+  });
+}
+
 test('bounded regional preparation holds a loaded owner then promotes strict regional replacement', () => {
   assert.equal(LOADED, 4, 'built traversal patch pins the public LOADED constant');
   const near = makeTile({ name: 'near', error: 0, loadingState: LOADED, depth: 3 });

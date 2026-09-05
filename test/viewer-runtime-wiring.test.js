@@ -26,6 +26,7 @@ test('viewer 3D mode is streaming-only and keeps original mesh access outside la
 test('viewer keeps gap-free REPLACE traversal and stages desktop detail through complete frontiers', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const materials = fs.readFileSync(path.join(__dirname, '..', 'lod-materials.mjs'), 'utf8');
+  const resources = fs.readFileSync(path.join(__dirname, '..', 'lod-resource-lifecycle.mjs'), 'utf8');
   const lodPolicy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
   assert.doesNotMatch(main, /enableTransientRootLodBackdrop|syncTransientRootLodBackdrop|releaseStaleLodDetails|transientRootBackdropEnabled/);
   assert.doesNotMatch(lodPolicy, /root\.refine\s*=\s*['"]ADD['"]/);
@@ -51,13 +52,14 @@ test('viewer keeps gap-free REPLACE traversal and stages desktop detail through 
   assert.doesNotMatch(rootHandler, /if \(!homeView\)/);
   assert.match(main, /if \(tilesRenderer !== rendererInstance\) return;/);
   assert.match(main, /import \{ homeViewForBounds, tilesetWorldBounds \} from '\.\/viewer-framing\.mjs'/);
-  assert.match(main, /import \{ preserveLodMaterials \} from '\.\/lod-materials\.mjs'/);
+  assert.match(main, /import \{ installLodResourceLifecycle \} from '\.\/lod-resource-lifecycle\.mjs'/);
+  assert.match(main, /lodResources = installLodResourceLifecycle\(rendererInstance\)/);
   assert.match(materials, /function preserveLodMaterials\(source\)/);
   assert.match(materials, /const originals = Array\.isArray\(source\) \? source : \[source\]/);
   assert.match(materials, /const replacements = originals\.map\(\(material\) => unlitLodMaterial\(material\)\)/);
   assert.match(materials, /map,\s*lightMap: source\?\.lightMap/);
   assert.match(materials, /vertexColors: Boolean\(source\?\.vertexColors\)/);
-  assert.match(main, /c\.material = preserveLodMaterials\(c\.material\)/);
+  assert.match(resources, /object\.material = preserveLodMaterials\(object\.material\)/);
   assert.doesNotMatch(main, /updateLodReplacementFallbacks/);
   assert.match(main, /addEventListener\('load-model',[\s\S]*?hideLoading\(\)/);
   assert.match(main, /function maybeAdvanceLodBootstrap\(\)/);
@@ -253,9 +255,9 @@ test('production installs the exact renderer and applies the scoped ancestor pat
   assert.equal(packageJson.scripts.postinstall,
     'node scripts/patch-3d-tiles-renderer.mjs && node scripts/install-basis-transcoder.mjs');
   assert.equal(
-    [...dockerfile.matchAll(/COPY scripts\/patch-3d-tiles-renderer\.mjs scripts\/install-basis-transcoder\.mjs \.\/scripts\/\s+RUN npm ci/g)].length,
+    [...dockerfile.matchAll(/COPY scripts\/patch-3d-tiles-renderer\.mjs scripts\/install-basis-transcoder\.mjs \.\/scripts\/\s+COPY scripts\/lib \.\/scripts\/lib\s+RUN npm ci/g)].length,
     2,
-    'build and runtime installs must receive both postinstall prerequisites before npm ci',
+    'build and runtime installs must receive postinstall scripts and their patch modules before npm ci',
   );
   assert.match(rendererPatch, /lodFallbackTiles\?\.has/,
     'the pinned renderer patch must preserve only captured overview fallbacks without loadAncestors');

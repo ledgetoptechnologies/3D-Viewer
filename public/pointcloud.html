@@ -105,6 +105,7 @@
   </script>
 
   <script src="/pointcloud-health.js"></script>
+  <script src="/pointcloud-access.js"></script>
   <script src="/pointcloud-navigation.js"></script>
   <script src="/pointcloud-cameras.js"></script>
   <script src="/pointcloud-measurements.js"></script>
@@ -123,6 +124,14 @@
     });
     window.__pointCloudHealth = pointCloudHealth;
     pointCloudHealth.beginStartup();
+    const accessParams = new URLSearchParams(location.search);
+    const accessEptUrl = accessParams.get('renewal') === 'session' ? accessParams.get('ept') : null;
+    const pointCloudAccess = accessEptUrl ? window.LtdsPointCloudAccess.installPointCloudAccess({
+      window, eptUrl: accessEptUrl,
+      onRequired: () => pointCloudHealth.accessRequired(),
+      onRestored: () => pointCloudHealth.accessRestored(),
+      onUnavailable: () => pointCloudHealth.accessUnavailable(),
+    }) : null;
   </script>
 
   <script src="/potree/libs/jquery/jquery-3.1.1.min.js"></script>
@@ -285,6 +294,8 @@
     // --------------------------------------------------------------------
     function eachMat(fn) { for (const pc of viewer.scene.pointclouds) fn(pc.material); }
     window.__pcApi = {
+      renewAccess(eptUrl) { pointCloudAccess?.renewed(eptUrl); },
+      accessUnavailable() { pointCloudAccess?.unavailable(); },
       setBudget(m) {
         const v = Math.max(1, Math.min(20, Number(m))) * 1e6;
         budgetState.target = v;

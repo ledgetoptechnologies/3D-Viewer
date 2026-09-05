@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { patchLodLoadingBudget } from './lib/patch-lod-loading-budget.mjs';
+import { patchLodMaterialArrays } from './lib/patch-lod-material-arrays.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const packageRoot = path.join(root, 'node_modules', '3d-tiles-renderer');
@@ -48,6 +50,14 @@ function restoreExact(file, desired, legacy, label) {
 }
 
 const sourceFile = path.join(packageRoot, 'src', 'core', 'renderer', 'tiles', 'traverseFunctions.js');
+// A failed download is terminal for scheduling, but is never a renderable
+// replacement. Keep the resident REPLACE fallback until real content is ready.
+patchExact(
+  sourceFile,
+  'return ! canUnconditionallyRefine( tile ) && ( ! tile.internal.hasContent || isDownloadFinished( tile.internal.loadingState ) );',
+  'return ! canUnconditionallyRefine( tile ) && ( ! tile.internal.hasContent || tile.internal.loadingState === LOADED );',
+  '3d-tiles-renderer source failed replacement readiness',
+);
 patchExact(
   sourceFile,
   '( renderer.loadSiblings || renderer.loadAncestors )',
@@ -205,10 +215,24 @@ let queuedAdmissionGuardChunks = 0;
 let queuedAdmissionReservationChunks = 0;
 let prospectiveAdmissionChunks = 0;
 let foveatedTraversalChunks = 0;
+let failedReplacementReadinessChunks = 0;
 for (const name of chunks) {
   const file = path.join(buildDirectory, name);
   let source = fs.readFileSync(file, 'utf8');
   const originalSource = source;
+  const failedReadinessUpstream = /return !([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\) && \(!\2\.internal\.hasContent \|\| ([A-Za-z_$][\w$]*)\(\2\.internal\.loadingState\)\);/g;
+  const failedReadinessPatched = /return !([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\) && \(!\2\.internal\.hasContent \|\| \2\.internal\.loadingState === 4\);/g;
+  const failedUpstreamMatches = [...source.matchAll(failedReadinessUpstream)];
+  const failedPatchedMatches = [...source.matchAll(failedReadinessPatched)];
+  if (failedPatchedMatches.length === 1 && failedUpstreamMatches.length === 0) {
+    failedReplacementReadinessChunks += 1;
+  } else if (failedUpstreamMatches.length === 1 && failedPatchedMatches.length === 0) {
+    const [match, refineFunction, tileVariable] = failedUpstreamMatches[0];
+    source = source.replace(match, `return !${refineFunction}(${tileVariable}) && (!${tileVariable}.internal.hasContent || ${tileVariable}.internal.loadingState === 4);`);
+    failedReplacementReadinessChunks += 1;
+  } else if (failedUpstreamMatches.length || failedPatchedMatches.length) {
+    throw new Error(`${name}: ambiguous built failed replacement readiness block`);
+  }
   const upstream = /\(([A-Za-z_$][\w$]*)\.loadSiblings \|\| \1\.loadAncestors\)/g;
   const patched = /\(([A-Za-z_$][\w$]*)\.loadSiblings \|\| \(\1\.loadAncestors && \1\.loadAncestorSiblings !== false\)\)/g;
   const upstreamMatches = [...source.matchAll(upstream)];
@@ -401,3 +425,8 @@ function patchOneOf(file, legacyVariants, patched, label) {
 if (foveatedTraversalChunks !== 1) {
   throw new Error(`expected one built renderer foveated-traversal chunk, patched ${foveatedTraversalChunks}`);
 }
+if (failedReplacementReadinessChunks !== 1) {
+  throw new Error(`expected one built failed replacement readiness chunk, patched ${failedReplacementReadinessChunks}`);
+}
+patchLodLoadingBudget(packageRoot);
+patchLodMaterialArrays(packageRoot, patchExact);

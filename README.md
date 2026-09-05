@@ -645,6 +645,13 @@ WGS84 UTM 16N
   only fully peripheral selection up to 4×; the locked foreground branch keeps
   the requested raw SSE and automatically converges when headroom returns.
 
+  Completed Viewer tiles release the GLTF parser reference and its source-buffer
+  caches after parsing; scene metadata, attribution, feature tables, textures,
+  and geometry remain available. Eviction disposes the unlit materials used for
+  rendering and cancels pending BVH work. These cleanup rules reduce unnecessary
+  retention but do not establish a measured browser-heap reduction or a total
+  process-memory ceiling.
+
   `LOD: full-detail` is shown only when every visible tile is on the declared
   zero-error frontier. Invalid hierarchy, provenance, or tile-load failures stay
   unavailable until a verified streaming derivative exists; original GLB/OBJ

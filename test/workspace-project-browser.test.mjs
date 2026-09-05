@@ -155,7 +155,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname.startsWith('/api/v1/processing/presets/') && ['PATCH', 'DELETE'].includes(method)) return method === 'DELETE' ? { status: 204, body: Buffer.alloc(0), type: 'application/json' } : json({ preset: { ...fixtures.presets[0], ...body } });
   if (pathname === '/api/v1/processing/outputs') return json({ outputs: runtime.outputs, nextCursor: null });
   if (pathname === '/api/v1/processing/outputs/output-johnson/shares') return json({ shares: [] });
-  if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ embedUrl: '/session/99999999-8888-4777-8666-555555555555' }, 201);
+  if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ grant: '99999999-8888-4777-8666-555555555555', sessionMode: 'published', sessionTtlSeconds: 1800, modelId: 'model-johnson', modelVersionId: 'output-johnson', embedUrl: '/session/99999999-8888-4777-8666-555555555555' }, 201);
   if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ grant: '11111111-2222-4333-8444-555555555555', sessionMode: 'review', sessionTtlSeconds: 1800, attemptId: 'attempt-quarry', modelId: 'model-quarry', modelVersionId: 'output-quarry-ready', embedUrl: '/session/11111111-2222-4333-8444-555555555555', assetKinds: ['glb', 'ortho', 'report'] }, 201);
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho') return { status: 200, body: orthophotoFixture, type: 'image/tiff' };
@@ -596,7 +596,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="download-report"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="view-output"]').click()`);
-    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/99999999-8888-4777-8666-555555555555#launchController='))", `${viewport.name}: published output session did not open`);
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/99999999-8888-4777-8666-555555555555#reviewController='))", `${viewport.name}: renewable published output session did not open`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="share-output"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.share-form')?.dataset.outputId === 'output-johnson'", `${viewport.name}: task Share shortcut did not target the published output`);
     await client.evaluate(`document.querySelector('.modal-close').click()`);

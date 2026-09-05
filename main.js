@@ -13,6 +13,7 @@ import { lodEvaluationOptions, formatJsHeap } from './lod-evaluation-options.mjs
 import { createLodOwnerDiagnostics } from './lod-owner-diagnostics.mjs';
 import { createLodRegionalFallbackCoordinator } from './lod-regional-fallback.mjs';
 import { installLodAdmissionThrottle } from './lod-admission-throttle.mjs';
+import { installLodLoadingBudget } from './lod-loading-budget.mjs';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import {
   advanceLodMemoryPressure,
@@ -58,10 +59,10 @@ import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthoph
 import { integrateElevationVolume } from './map-volume.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
-import { preserveLodMaterials } from './lod-materials.mjs';
+import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
-import { classifyTileLoadFailure } from './lod-load-recovery.mjs';
+import { classifyTileLoadFailure, releaseFailedTileReservations, createRenewedTileFetcher } from './lod-load-recovery.mjs';
 import {
   parseLodMemoryMode,
   resolveLodMemoryProfile,
@@ -208,6 +209,7 @@ let lodBranchBlockers = new Set();
 let lodOwnerDebug = null;
 let lodRegionalFallback = null;
 let lodAdmissionThrottle = null;
+let lodLoadingBudget = null;
 const LOD_RECENT_FRONTIER_TTL_MS = 2_000;
 const LOD_RECENT_FRONTIER_MAX_TILES = 128;
 const LOD_RECENT_FRONTIER_MAX_BYTES = 384 * 1024 * 1024;
@@ -283,7 +285,7 @@ const demSettings = {
 let geoDatasets = {};        // url -> { tiff, images[], ... }
 let geoPool = null;
 let lastFps = performance.now(), frames = 0;
-let bvhQueue = [];
+let lodResources = null;
 let homeView = null;
 let modeEpoch = 0;
 let modeAbortController = null;
@@ -308,6 +310,7 @@ const DIAGNOSTIC_EVENTS = new Set([
 const DIAGNOSTIC_REASONS = new Set(['navigation', 'history', 'startup', 'superseded', 'unavailable']);
 const DIAGNOSTIC_STAGES = new Set(['startup', 'metadata', 'nodes', 'fetch', 'decode', 'runtime']);
 const POINT_CLOUD_FAILURE_CODES = new Set([
+  'authorization_required', 'authorization_unavailable',
   'startup_timeout', 'load_timeout', 'node_timeout', 'resource_failed',
   'runtime_unavailable', 'metadata_failed', 'runtime_error', 'not_configured',
 ]);
@@ -897,18 +900,6 @@ function pickSurface(ndc) {
   return hits.length ? hits[0].point : null;
 }
 
-function queueBVH(mesh) {
-  if (!mesh.geometry || mesh.geometry.boundsTree) return;
-  bvhQueue.push(mesh);
-}
-function drainBVH() {
-  if (!bvhQueue.length) return;
-  const mesh = bvhQueue.shift();
-  if (mesh.geometry && !mesh.geometry.boundsTree) {
-    try { mesh.geometry.computeBoundsTree(); } catch (e) { /* non-indexed edge case */ }
-  }
-}
-
 // ───────────────────────────────────────────────────────────────
 // 3D Tiles (default LOD mesh — streams low-res far, full-res close)
 // ───────────────────────────────────────────────────────────────
@@ -940,10 +931,16 @@ function loadTiles() {
   lodTileRetryTimer = null;
   updateLoading('Streaming LOD tiles...', '');
   const rendererInstance = new TilesRenderer(TILES_URL);
+  if (VIEW_MODE === 'session') {
+    rendererInstance.fetchData = createRenewedTileFetcher(
+      rendererInstance.fetchData.bind(rendererInstance), () => sessionAccessGeneration,
+    );
+  }
   rendererInstance.__ltdsDistanceDemand = LOD_EVALUATION.distanceDemand ? { enabled: true } : null;
   const evaluationNote = document.getElementById('lod-evaluation-note');
   if (evaluationNote) evaluationNote.hidden = !LOD_EVALUATION.distanceDemand;
   tilesRenderer = rendererInstance;
+  lodResources = installLodResourceLifecycle(rendererInstance);
   lodLoadingTiming?.dispose();
   lodLoadingTiming = LOD_EVALUATION.loadingTiming
     ? installLodLoadingTiming(rendererInstance, { enabled: true, capacity: 256 }) : null;
@@ -981,6 +978,8 @@ function loadTiles() {
   lodRuntimeProfileState.peripheralPressureScale = 1;
   lodAdmissionThrottle?.dispose();
   lodAdmissionThrottle = installLodAdmissionThrottle(rendererInstance);
+  lodLoadingBudget?.dispose();
+  lodLoadingBudget = installLodLoadingBudget(rendererInstance);
   lodRegionalFallback?.dispose();
   lodRegionalFallback = createLodRegionalFallbackCoordinator(rendererInstance);
   if (restoreLodOverviewRetention) restoreLodOverviewRetention();
@@ -1086,19 +1085,6 @@ function loadTiles() {
   rendererInstance.addEventListener('load-model', (ev) => {
     if (tilesRenderer !== rendererInstance) return;
     if (lodPendingAdmissionTile === ev.tile) clearLodPendingAdmission();
-    ev.scene.traverse((c) => {
-      if (c.isMesh) {
-        // B3DM tiles come in as PBR (metalness=1) and render black without an
-        // environment map. Convert to unlit like the GLB (KHR_materials_unlit).
-        // FrontSide (backface culling) matches WebODM: from below, the ground
-        // is see-through so you can inspect undersides of structures.
-        // Preserve every primitive's texture assignment. WebODM/Obj2Tiles can
-        // emit a material array; treating it as one material drops every map
-        // and renders the streamed mesh white.
-        c.material = preserveLodMaterials(c.material);
-        queueBVH(c);
-      }
-    });
     // External tilesets often produce a usable child before their wrapper root.
     // Enter the viewer as soon as any streamed model can be displayed.
     hideLoading();
@@ -1121,6 +1107,8 @@ function loadTiles() {
       // started renewal, every other 401/403 must keep the fallback renderer
       // alive instead of interpreting the coalesced request as a failure.
       if (sessionRenewalPending || requestSessionRenewal('tile-authorization')) return;
+      // Preserve resident geometry while the access status explains recovery.
+      return;
     }
     if (failure.kind === 'transient') {
       lodTileRecoveryPending = true;
@@ -1139,6 +1127,8 @@ function disposeTiles() {
   lodLoadingTiming = null;
   lodRegionalFallback?.dispose();
   lodRegionalFallback = null;
+  lodLoadingBudget?.dispose();
+  lodLoadingBudget = null;
   lodAdmissionThrottle?.dispose();
   lodAdmissionThrottle = null;
   lodOwnerDebug?.dispose();
@@ -1171,6 +1161,8 @@ function disposeTiles() {
   if (restoreLodOverviewRetention) restoreLodOverviewRetention();
   restoreLodOverviewRetention = null;
   if (!tilesRenderer) {
+    lodResources?.dispose();
+    lodResources = null;
     lodKtx2Support?.dispose();
     lodKtx2Support = null;
     return;
@@ -1179,6 +1171,8 @@ function disposeTiles() {
   try {
     tilesRenderer.dispose();
   } finally {
+    lodResources?.dispose();
+    lodResources = null;
     lodKtx2Support?.dispose();
     lodKtx2Support = null;
   }
@@ -1194,7 +1188,6 @@ function disposeTiles() {
   lodTraceEntries = [];
   state.lodRuntimeProfile = null;
   state.lodRootBackdrop = null;
-  bvhQueue.length = 0;
 }
 
 function scheduleLodTileRetry(rendererInstance) {
@@ -1209,6 +1202,7 @@ function scheduleLodTileRetry(rendererInstance) {
     lodTileRetryTimer = null;
     if (tilesRenderer !== rendererInstance) return;
     lodTileRecoveryPending = false;
+    releaseFailedTileReservations(rendererInstance);
     rendererInstance.resetFailedTiles();
   }, delay);
 }
@@ -1219,6 +1213,7 @@ function recoverFailedLodTiles() {
   lodTileRetryAttempt = 0;
   if (lodTileRetryTimer) clearTimeout(lodTileRetryTimer);
   lodTileRetryTimer = null;
+  releaseFailedTileReservations(tilesRenderer);
   tilesRenderer.resetFailedTiles();
   dom.lodStatus.textContent = 'LOD: access renewed';
 }
@@ -1226,12 +1221,16 @@ function recoverFailedLodTiles() {
 let sessionRenewalTimer = null;
 let sessionRenewalResponseTimer = null;
 let activeViewerSession = null;
+let sessionAccessGeneration = 0;
 let sessionRenewalPending = false;
 let sessionRenewalAttempt = null;
 let sessionRenewalBackoffIndex = 0;
 let sessionRenewalMinimumDelayMs = 1_000;
 const SESSION_RENEWAL_BACKOFF_MS = [10_000, 30_000, 60_000, 120_000, 300_000];
 let sessionAllowedOrigins = [];
+let sessionAccessState = 'active';
+let sessionAccessReason = null;
+let sessionRenewalBlocked = false;
 const reviewControllerCandidate = new URLSearchParams(location.hash.replace(/^#/, '')).get('reviewController');
 const REVIEW_CONTROLLER_ID = window.parent === window && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reviewControllerCandidate || '')
   ? reviewControllerCandidate : null;
@@ -1321,8 +1320,10 @@ function sessionControllerOrigins() {
 
 function postToAllowedController(message) {
   if (reviewSessionChannel) {
-    reviewSessionChannel.postMessage(message);
-    return true;
+    try {
+      reviewSessionChannel.postMessage(message);
+      return true;
+    } catch { return false; }
   }
   const controller = sessionControlWindow();
   if (!controller) return false;
@@ -1331,8 +1332,46 @@ function postToAllowedController(message) {
   return origins.length > 0;
 }
 
-function requestSessionRenewal(_reason = 'timer') {
-  if (VIEW_MODE !== 'session' || !activeViewerSession || sessionRenewalPending) return false;
+function sessionAccessLabel(prefix = 'LOD') {
+  if (VIEW_MODE !== 'session' || sessionAccessState === 'active') return null;
+  if (sessionAccessState === 'renewing') return `${prefix}: renewing access`;
+  if (sessionAccessState === 'retrying') return `${prefix}: retrying access renewal`;
+  return `${prefix}: access unavailable — reopen this model from the Viewer workspace`;
+}
+
+function setSessionAccessState(next, reason = null) {
+  const previous = sessionAccessState;
+  sessionAccessState = next;
+  sessionAccessReason = reason;
+  const label = sessionAccessLabel();
+  if (label && tilesRenderer) dom.lodStatus.textContent = label;
+  if (label && state.activeMode === 'cloud') dom.cloudStatus.textContent = sessionAccessLabel('Cloud');
+  else if (next === 'active' && previous !== 'active' && state.activeMode === 'cloud') dom.cloudStatus.textContent = 'Cloud: access renewed';
+}
+
+function sessionDiagnostics() {
+  return {
+    mode: activeViewerSession?.sessionMode || null,
+    access: sessionAccessState,
+    reason: sessionAccessReason,
+    expiresInSeconds: activeViewerSession ? Math.round((Date.parse(activeViewerSession.expiresAt) - Date.now()) / 1000) : null,
+    controller: reviewSessionChannel ? 'isolated' : sessionControlWindow() ? 'embedded' : 'none',
+    renewalPending: sessionRenewalPending,
+    renewalBlocked: sessionRenewalBlocked,
+    tileRecoveryPending: lodTileRecoveryPending,
+  };
+}
+
+function requestSessionRenewal(reason = 'timer') {
+  if (VIEW_MODE !== 'session' || !activeViewerSession || sessionRenewalPending || sessionRenewalBlocked) return false;
+  // The controller intentionally refuses early renewals. A denial using current,
+  // non-expiring access requires reopening authorization, not a silent timeout.
+  if (reason.endsWith('-authorization') && Date.parse(activeViewerSession.expiresAt) - Date.now() > 5 * 60 * 1000) {
+    sessionRenewalBlocked = true;
+    setSessionAccessState('unavailable', 'authorization-required');
+    pcApi()?.accessUnavailable?.();
+    return false;
+  }
   const requestId = reviewSessionChannel ? crypto.randomUUID() : null;
   const sent = postToAllowedController({
     version: 1,
@@ -1341,7 +1380,12 @@ function requestSessionRenewal(_reason = 'timer') {
     modelId: activeViewerSession.model.id,
     expiresAt: activeViewerSession.expiresAt,
   });
-  if (!sent) return false;
+  if (!sent) {
+    setSessionAccessState('unavailable', 'controller-unavailable');
+    pcApi()?.accessUnavailable?.();
+    return false;
+  }
+  setSessionAccessState('renewing');
   const attempt = { requestId, abortController: null };
   sessionRenewalAttempt = attempt;
   pendingReviewRenewalRequestId = requestId;
@@ -1353,6 +1397,7 @@ function requestSessionRenewal(_reason = 'timer') {
     postSessionRenewalFailure(requestId, true);
     clearSessionRenewalPending(attempt);
     sessionRenewalResponseTimer = null;
+    setSessionAccessState('unavailable', 'controller-timeout');
     scheduleSessionRenewalRetry('response-timeout');
   }, 30_000);
   return true;
@@ -1437,7 +1482,10 @@ function applyViewerSession(session, { initialize = false } = {}) {
   if (state.meshSource === 'lod-required') scheduleLodAvailabilityRefresh();
   else stopLodAvailabilityRefresh();
   scheduleSessionRenewal(session);
+  sessionRenewalBlocked = false;
+  setSessionAccessState('active');
   recoverFailedLodTiles();
+  pcApi()?.renewAccess?.(EPT_URL);
 }
 
 async function bootstrapSession() {
@@ -1459,6 +1507,20 @@ async function bootstrapSession() {
 }
 
 async function handleSessionRenewalMessage(data, { reviewChannel = false } = {}) {
+  if (reviewChannel && VIEW_MODE === 'session' && data?.version === 1
+    && data.type === 'ltds-viewer:session-unavailable'
+    && pendingReviewRenewalRequestId && data.requestId === pendingReviewRenewalRequestId
+    && data.modelId === PROJECT?.id
+    && ['authorization-required', 'scope-changed'].includes(data.reason)
+    && Object.keys(data).sort().join('\n') === ['version','type','requestId','modelId','reason'].sort().join('\n')) {
+    sessionRenewalAttempt?.abortController?.abort();
+    clearSessionRenewalPending();
+    sessionRenewalBlocked = true;
+    if (sessionRenewalTimer) clearTimeout(sessionRenewalTimer);
+    setSessionAccessState('unavailable', data.reason);
+    pcApi()?.accessUnavailable?.();
+    return;
+  }
   if (VIEW_MODE !== 'session' || !data || data.version !== 1 || data.type !== 'ltds-viewer:renew-session') return;
   if (reviewChannel && (!pendingReviewRenewalRequestId || data.requestId !== pendingReviewRenewalRequestId
     || Object.keys(data).sort().join('\n') !== ['version','type','requestId','grant'].sort().join('\n'))) return;
@@ -1473,6 +1535,7 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
     if (sessionRenewalAttempt !== attempt) return;
     if (!PROJECT || session.model.id !== PROJECT.id) throw new Error('renewal grant is scoped to a different model');
     const advanced = Date.parse(session.expiresAt) > Date.parse(activeViewerSession?.expiresAt || '');
+    sessionAccessGeneration += 1;
     clearSessionRenewalPending(attempt);
     if (advanced) {
       sessionRenewalBackoffIndex = 0;
@@ -1497,12 +1560,20 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
     // The parent can issue another one-time grant and retry in place.
     postSessionRenewalFailure(requestId, retryable, String(error.message || error));
     clearSessionRenewalPending(attempt);
+    setSessionAccessState(retryable ? 'retrying' : 'unavailable', 'redemption-failed');
     if (retryable) scheduleSessionRenewalRetry('redemption-failed');
+    else {
+      sessionRenewalBlocked = true;
+      pcApi()?.accessUnavailable?.();
+    }
   }
 }
 
 if (reviewSessionChannel) reviewSessionChannel.onmessage = event => { void handleSessionRenewalMessage(event.data, { reviewChannel: true }); };
-window.addEventListener('pagehide', () => reviewSessionChannel?.close(), { once: true });
+window.addEventListener('pagehide', event => {
+  // A persisted page resumes with its existing controller channel.
+  if (!event.persisted) reviewSessionChannel?.close();
+});
 window.addEventListener('focus', () => requestSessionRenewalIfDue('focus'));
 window.addEventListener('pageshow', () => requestSessionRenewalIfDue('pageshow'));
 document.addEventListener('visibilitychange', () => {
@@ -3469,6 +3540,7 @@ function showPointCloud() {
     const iframe = document.createElement('iframe');
     iframe.id = 'pc-iframe';
     const params = new URLSearchParams({ ept: EPT_URL || '', title: (PROJECT && PROJECT.title) || '' });
+    if (VIEW_MODE === 'session') params.set('renewal', 'session');
     params.set('units', DISPLAY_UNITS);
     params.set('correlation', DIAGNOSTIC_CORRELATION_ID);
     params.set('revision', VIEWER_BUILD_REVISION);
@@ -3480,7 +3552,7 @@ function showPointCloud() {
     iframe.dataset.correlationId = DIAGNOSTIC_CORRELATION_ID;
     viewerDiagnostic('pointcloud_start', { mode: 'cloud', stage: 'startup' });
   }
-  dom.cloudStatus.textContent = 'Cloud: connecting…';
+  dom.cloudStatus.textContent = sessionAccessLabel('Cloud') || 'Cloud: connecting…';
 }
 
 function stopPointCloudIframe(reason = 'superseded') {
@@ -3502,7 +3574,8 @@ window.addEventListener('message', (event) => {
   if (!message || message.source !== 'ltds-pointcloud') return;
   if (message.correlationId !== iframe.dataset.correlationId) return;
   if (message.type === 'ready' && message.code === 'points_visible') {
-    dom.cloudStatus.textContent = POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready';
+    dom.cloudStatus.textContent = sessionAccessLabel('Cloud')
+      || (POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready');
     viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
     applyPcPanelState();
     syncCameraLayer();
@@ -3515,6 +3588,12 @@ window.addEventListener('message', (event) => {
     const stage = DIAGNOSTIC_STAGES.has(message.stage) ? message.stage : 'runtime';
     dom.cloudStatus.textContent = `Cloud: unavailable (${code}; ref ${DIAGNOSTIC_CORRELATION_ID.slice(0, 8)})`;
     viewerDiagnostic('pointcloud_failure', { mode: 'cloud', code, stage });
+    if (VIEW_MODE === 'session' && code === 'authorization_required') {
+      if (!sessionRenewalPending && !requestSessionRenewal('pointcloud-authorization')) pcApi()?.accessUnavailable?.();
+      dom.cloudStatus.textContent = sessionAccessLabel('Cloud') || 'Cloud: renewing access';
+    } else if (VIEW_MODE === 'session' && code === 'authorization_unavailable') {
+      dom.cloudStatus.textContent = 'Cloud: access unavailable — reopen this model from the Viewer workspace';
+    }
   }
 });
 
@@ -4004,6 +4083,7 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
   const snapshot = lodDebugSnapshot(tilesRenderer, runtimeProfile, lodWarmupComplete);
   snapshot.regionalFallback = lodRegionalFallback?.snapshot() ?? null;
   snapshot.admission = lodAdmissionThrottle?.snapshot() ?? null;
+  snapshot.loadingBudget = lodLoadingBudget?.snapshot() ?? null;
   const signature = JSON.stringify(snapshot);
   if (!force && signature === lodDebugSignature) return snapshot;
   lodDebugSignature = signature;
@@ -4075,7 +4155,9 @@ function updateLodQualityStatus(now = performance.now(), force = false) {
     : `Detail ${lodRuntimeProfileState.activeDetail}`;
   const pendingCount = Math.max(0, Number(snapshot.pendingRequiredTiles) || 0);
   const pendingLabel = memoryLimited && pendingCount > 0 ? `, ${pendingCount} pending` : '';
-  dom.lodStatus.textContent = `LOD: ${label} (${visibleCount} tile${visibleCount === 1 ? '' : 's'}${pendingLabel})`;
+  dom.lodStatus.textContent = sessionAccessLabel()
+    || (lodTileRetryTimer ? `LOD: retrying tile (${lodTileRetryAttempt}/4)` : null)
+    || `LOD: ${label} (${visibleCount} tile${visibleCount === 1 ? '' : 's'}${pendingLabel})`;
   return { snapshot, frontier, quality };
 }
 
@@ -4438,7 +4520,7 @@ function startLoop() {
         updateLodRecentFrontier();
         updateLodQualityStatus(performance.now());
       }
-      drainBVH();
+      lodResources?.drainBVH();
 
       // scale measurement markers with camera distance
       measureRoot.traverse((o) => {
@@ -4550,11 +4632,13 @@ function updateStats() {
 window.__ltds = { scene: () => scene, camera: () => camera, controls: () => controls,
   tiles: () => tilesRenderer, state, worldToUtm, latLonToUtm, utmToLatLon,
   lodDiagnostics: () => emitLodDebugSnapshot('manual', true),
+  sessionDiagnostics,
   lodTrace: () => lodTraceEntries.map(entry => structuredClone(entry)),
   lodOwnerDiagnostics: (options) => lodOwnerDebug?.snapshot(options) ?? null,
   lodTileEvents: () => lodOwnerDebug?.trace() ?? [],
   lodEvaluation: () => ({ ...LOD_EVALUATION }),
   lodLoadingTiming: () => lodLoadingTiming?.snapshot() ?? null,
+  lodResources: () => lodResources?.snapshot() ?? null,
   cameraWorldPositions: () => camWorldPos ? Array.from(camWorldPos) : [],
   // Georeferencing self-test: latlon -> UTM -> source px -> linear window -> UTM -> latlon roundtrip.
   // Expect maxRoundtripM to be tiny (sub-mm); large values mean the warp mapping drifted.

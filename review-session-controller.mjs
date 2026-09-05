@@ -9,14 +9,17 @@ function exactKeys(value, keys) {
 }
 
 function validContext(value) {
-  return value && ['attemptId', 'modelId', 'modelVersionId'].every(key => (
+  const mode = value?.sessionMode || 'review';
+  const keys = mode === 'published' ? ['outputId', 'modelId', 'modelVersionId'] : ['attemptId', 'modelId', 'modelVersionId'];
+  return value && ['review', 'published'].includes(mode) && keys.every(key => (
     typeof value[key] === 'string' && value[key].length > 0 && value[key].length <= 200
-  )) && Number.isInteger(value.sessionTtlSeconds) && value.sessionTtlSeconds >= 60 && value.sessionTtlSeconds <= 86_400;
+  )) && (mode !== 'published' || value.outputId === value.modelVersionId)
+    && Number.isInteger(value.sessionTtlSeconds) && value.sessionTtlSeconds >= 60 && value.sessionTtlSeconds <= 86_400;
 }
 
 function validIssuedGrant(result, context) {
-  return result && result.sessionMode === 'review'
-    && result.attemptId === context.attemptId
+  return result && result.sessionMode === (context.sessionMode || 'review')
+    && ((context.sessionMode || 'review') !== 'review' || result.attemptId === context.attemptId)
     && result.modelId === context.modelId
     && result.modelVersionId === context.modelVersionId
     && result.sessionTtlSeconds === context.sessionTtlSeconds
@@ -62,7 +65,9 @@ export class ReviewSessionController {
       channelId,
       channel,
       context: Object.freeze({
-        attemptId: context.attemptId,
+        ...(context.sessionMode === 'published'
+          ? { sessionMode: 'published', outputId: context.outputId }
+          : { attemptId: context.attemptId }),
         modelId: context.modelId,
         modelVersionId: context.modelVersionId,
         sessionTtlSeconds: context.sessionTtlSeconds,
@@ -106,6 +111,15 @@ export class ReviewSessionController {
     record.channel.close();
     this.records.delete(channelId);
     return true;
+  }
+
+  unavailable(record, reason) {
+    if (this.records.get(record.channelId) !== record) return;
+    record.channel.postMessage({
+      version: 1, type: 'ltds-viewer:session-unavailable',
+      requestId: record.activeRequestId, modelId: record.context.modelId, reason,
+    });
+    this.untrack(record.channelId);
   }
 
   async handleMessage(channelId, data) {
@@ -175,7 +189,7 @@ export class ReviewSessionController {
     try {
       const result = await this.issueGrant(record.context);
       if (!validIssuedGrant(result, record.context) || this.records.get(record.channelId) !== record) {
-        this.untrack(record.channelId);
+        this.unavailable(record, 'scope-changed');
         return false;
       }
       record.retryIndex = 0;
@@ -191,7 +205,7 @@ export class ReviewSessionController {
       return true;
     } catch (error) {
       if (error?.status === 401 || error?.status === 403 || error?.status === 410) {
-        this.untrack(record.channelId);
+        this.unavailable(record, 'authorization-required');
         return false;
       }
       if (record.retryIndex < this.retryDelays.length) {

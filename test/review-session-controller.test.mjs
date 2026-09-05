@@ -184,4 +184,42 @@ test('transient issuance retries are bounded and workspace authorization failure
   assert.equal(attempts, 3);
   assert.equal(controller.has(CHANNEL_ID), false);
   assert.equal(channel.closed, true);
+  assert.equal(channel.posts.at(-1).type, 'ltds-viewer:session-unavailable');
+  assert.equal(channel.posts.at(-1).requestId, REQUEST_ID);
+  assert.equal(channel.posts.at(-1).reason, 'authorization-required');
+});
+
+test('published sessions renew through the same isolated channel with an immutable output scope', async () => {
+  const context = { sessionMode: 'published', outputId: 'version-one', modelId: 'model-one',
+    modelVersionId: 'version-one', sessionTtlSeconds: 1800 };
+  const calls = [];
+  const { controller, channels } = harness({ issueGrant: async value => {
+    calls.push(value);
+    return { grant: GRANT, sessionMode: 'published', modelId: context.modelId,
+      modelVersionId: context.modelVersionId, sessionTtlSeconds: context.sessionTtlSeconds };
+  } });
+  assert.equal(controller.track(CHANNEL_ID, { ...context, outputId: 'different-version' }), false);
+  assert.equal(controller.track(CHANNEL_ID, context), true);
+  const channel = channels[0];
+  await ready(channel);
+  assert.equal(await expiring(channel), true);
+  assert.deepEqual(calls, [context]);
+  assert.ok(Object.isFrozen(calls[0]));
+  assert.equal(channel.posts.at(-1).type, 'ltds-viewer:renew-session');
+  assert.equal(await channel.emit({ version: 1, type: 'ltds-viewer:session-renewed',
+    requestId: REQUEST_ID, modelId: context.modelId, expiresAt: NEXT_EXPIRY }), true);
+});
+
+test('published renewal refuses a new model version or a review grant', async () => {
+  for (const change of [{ modelVersionId: 'version-two' }, { sessionMode: 'review' }]) {
+    const context = { sessionMode: 'published', outputId: 'version-one', modelId: 'model-one',
+      modelVersionId: 'version-one', sessionTtlSeconds: 1800 };
+    const { controller, channels } = harness({ issueGrant: async () => ({ ...context, grant: GRANT, ...change }) });
+    controller.track(CHANNEL_ID, context);
+    await ready(channels[0]);
+    assert.equal(await expiring(channels[0]), false);
+    assert.equal(controller.has(CHANNEL_ID), false);
+    assert.equal(channels[0].posts.at(-1).reason, 'scope-changed');
+    assert.equal(channels[0].posts.some(message => message.grant), false);
+  }
 });

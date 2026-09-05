@@ -94,6 +94,23 @@ test('visible points clear the watchdog and notify only the same-origin parent',
   }]);
 });
 
+test('expired access after visible points is reported and renewal preserves the ready cloud', () => {
+  const f = fixture();
+  f.health.pointsVisible();
+  f.health.accessRequired();
+  f.health.accessRequired();
+  f.health.pointsVisible();
+  assert.equal(f.health.phase(), 'access-required');
+  assert.equal(f.elements['pc-loading'].classList.contains('hidden'), true);
+  assert.equal(f.messages.filter(({ message }) => message.code === 'authorization_required').length, 1);
+  f.health.accessRestored();
+  assert.equal(f.health.phase(), 'ready');
+  f.health.accessRequired();
+  f.health.accessUnavailable();
+  assert.equal(f.health.phase(), 'failed');
+  assert.equal(f.messages.at(-1).message.code, 'authorization_unavailable');
+});
+
 test('stale point totals cannot mark an empty black canvas ready', () => {
   assert.equal(hasVisiblePointCloudNodes({ numVisiblePoints: 1_192_224, visibleNodes: [] }), false);
   assert.equal(hasVisiblePointCloudNodes({
