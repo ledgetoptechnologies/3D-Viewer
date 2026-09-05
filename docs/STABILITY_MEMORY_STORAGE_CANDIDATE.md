@@ -1,5 +1,15 @@
 # Viewer stability, renewal and safe storage retirement
 
+## Released baseline and user acceptance
+
+The stability update was released to main as `ab6bcc766e102d549c1267717da02b46c9fdf522`. The [Viewer image workflow](https://github.com/ledgetoptechnologies/3D-Viewer/actions/runs/33937998464) passed, including exact-image verification and promotion to `ghcr.io/ledgetoptechnologies/3d-viewer:sha-ab6bcc7` and `:latest`.
+
+Published image digest: `sha256:dcbc24c44042339eb237dea7f8617851389e5cd27d43f31ededb525a5deabf3d`.
+
+On September 4, 2026 (America/Chicago), after testing this release, the user reported that the viewer aspect was working as it should. Record this as qualitative user acceptance of the viewing experience and preserve this release as the known-good comparison baseline for future LOD, memory and navigation changes.
+
+This acceptance does not establish a measured heap ceiling, completion of the full token-lifetime soak, or actual storage reclamation. Those checks remain separate; do not infer them from the successful viewing report.
+
 ## Scope and evidence
 
 Candidate based on `origin/main` at `92179ba66a5ddb7fd2a60ef2ef65ad21494743d6`.
@@ -69,4 +79,4 @@ Release confidence is based on these automated checks, not a claimed production 
 4. Leave the session open beyond its token lifetime, navigate to unloaded regions, then switch to point cloud. Confirm access renewal and continued streaming. Test loss of the workspace controller separately; it must show a clear recovery instruction.
 5. Inspect storage cleanup diagnostics and Recycle Bin. Retained outputs should have an explanation; never delete one manually just to make the dashboard smaller. Confirm original photos, point cloud, ortho, DSM and DTM remain available before and after retirement.
 
-At completion of local QA, this candidate had not been pushed or deployed and user production data remained unchanged. The user subsequently authorized publication to main. Confirm the release commit and its image-publishing workflow result before pulling; local candidate-image verification alone does not establish that the published image is ready.
+The local QA record above describes the pre-release candidate. Publication and subsequent user acceptance are recorded at the top of this document. No production files were manually deleted during development or release.

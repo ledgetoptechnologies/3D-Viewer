@@ -9,6 +9,12 @@ them to NodeODM/ClusterODM for native EPT, 3D Tiles, and GLB production.
 
 ## Architecture
 
+The viewer stability release `ab6bcc7` has passed automated release checks and
+received qualitative user acceptance after deployment. See the
+[stability release and acceptance record](docs/STABILITY_MEMORY_STORAGE_CANDIDATE.md)
+for the known-good baseline, QA evidence and remaining memory/session/storage
+measurements. This is not a general security or production-readiness certification.
+
 - **Frontend** (`index.html`, `main.js`, `earth-controls.js`,
   `public/pointcloud.html`) — the three.js/Potree viewer. Loads no
   project-specific data at build time; everything comes from `GET /api/models`
