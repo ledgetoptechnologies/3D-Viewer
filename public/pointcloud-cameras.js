@@ -158,6 +158,13 @@
     return Object.freeze({ pointerDown, pointerMove, pointerUp, pointerCancel });
   }
 
+  function canPickCameraHover(event, controls, insertion) {
+    return !event.buttons && event.pointerType !== 'touch'
+      && controls?._mode === 'none' && !controls?._inertia?.active
+      && (!controls?._touch?.mode || controls._touch.mode === 'none')
+      && !insertion?.m && !insertion?.v;
+  }
+
   function createPointCloudCameraLayer({ THREE, scene, dom, getCamera }) {
     if (!THREE?.InstancedMesh || !scene?.add || !dom?.getBoundingClientRect || typeof getCamera !== 'function') {
       throw new TypeError('invalid point-cloud camera layer dependencies');
@@ -265,6 +272,10 @@
     }
 
     function updateView(force = false) {
+      // Hidden cameras retain their source data, but must not project every
+      // shot or upload instance buffers as the point-cloud camera moves.
+      // setVisible(true) forces a fresh update at the current viewpoint.
+      if (!group.visible) return false;
       if (componentMeshes.length !== CAMERA_MARKER_COMPONENTS.length || !markerWorldPositions || !markerLocalPositions || !markerQuaternions) return false;
       const camera = getCamera();
       const rect = dom.getBoundingClientRect();
@@ -420,5 +431,5 @@
     });
   }
 
-  return Object.freeze({ CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerLocalFrame, cameraMarkerScaleForView, selectCameraMarkerRepresentatives, createCameraClickTracker, normalizeCameraMarkers, createPointCloudCameraLayer });
+  return Object.freeze({ CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerLocalFrame, cameraMarkerScaleForView, selectCameraMarkerRepresentatives, createCameraClickTracker, canPickCameraHover, normalizeCameraMarkers, createPointCloudCameraLayer });
 }));

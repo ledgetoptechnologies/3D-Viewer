@@ -95,3 +95,20 @@ Output-access and public-project-share regression tests also pass (2/2).
 Rendering every camera increases dense-marker overdraw and map DOM work. The 3D
 path remains instanced, but no production hardware performance claim is made for
 extremely large camera sets. These tests do not substitute for that measurement.
+
+## 2026-09-06 point-cloud navigation overhead fix
+
+- Hidden point-cloud camera markers no longer project source positions or upload
+  instance buffers on viewer updates. Showing markers forces a fresh update at
+  the current viewpoint; their positions and source identities are unchanged.
+- Camera-marker hover raycasts are suppressed while dragging, panning, coasting,
+  touching, or inserting a measurement. Stationary mouse hover and actual camera
+  clicks remain available. Point budgets, EDL shading and navigation math are unchanged.
+- Regression coverage uses 8,500 cameras and 120 hidden updates, asserting zero
+  camera/layout reads and zero instance-buffer uploads, followed by immediate
+  repopulation when shown. Navigation-state tests cover hover suppression.
+- Live pre-update inspection identified server revision `ad67868`. The cloud HUD
+  reported 5 FPS with 1.5M visible points and camera markers off. This observation
+  does not establish that camera overhead alone caused the reported slowdown;
+  a full frame trace was unavailable. Retest orbit, pan and zoom after deployment,
+  with markers off and on, before claiming the broader performance issue resolved.

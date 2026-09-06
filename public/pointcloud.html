@@ -953,7 +953,7 @@
     });
     viewer.renderer.domElement.addEventListener('pointermove', (event) => {
       cameraClickTracker.pointerMove(event);
-      if (insertionActive.m || insertionActive.v) {
+      if (!window.LtdsPointCloudCameras.canPickCameraHover(event, pcControls, insertionActive)) {
         pointCloudCameraLayer.setHovered(-1);
         return;
       }

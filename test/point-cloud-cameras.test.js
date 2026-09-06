@@ -14,9 +14,60 @@ const {
   cameraMarkerScaleForView,
   selectCameraMarkerRepresentatives,
   createCameraClickTracker,
+  canPickCameraHover,
   createPointCloudCameraLayer,
   normalizeCameraMarkers,
 } = require('../public/pointcloud-cameras.js');
+
+test('camera hover never raycasts during navigation, inertia, touch, or measurement insertion', () => {
+  const idle = { _mode: 'none', _inertia: { active: false }, _touch: { mode: 'none' } };
+  const mouse = { buttons: 0, pointerType: 'mouse' };
+  assert.equal(canPickCameraHover(mouse, idle, {}), true);
+  for (const buttons of [1, 2, 4]) assert.equal(canPickCameraHover({ ...mouse, buttons }, idle, {}), false);
+  for (const _mode of ['orbit', 'pan', 'screenpan']) assert.equal(canPickCameraHover(mouse, { ...idle, _mode }, {}), false);
+  assert.equal(canPickCameraHover(mouse, { ...idle, _inertia: { active: true } }, {}), false);
+  assert.equal(canPickCameraHover({ ...mouse, pointerType: 'touch' }, idle, {}), false);
+  assert.equal(canPickCameraHover(mouse, { ...idle, _touch: { mode: 'pinch' } }, {}), false);
+  assert.equal(canPickCameraHover(mouse, idle, { m: true }), false);
+  assert.equal(canPickCameraHover(mouse, idle, { v: true }), false);
+  const shell = fs.readFileSync(path.join(__dirname, '..', 'public', 'pointcloud.html'), 'utf8');
+  assert.match(shell, /if \(!window\.LtdsPointCloudCameras\.canPickCameraHover\(event, pcControls, insertionActive\)\)\s*\{\s*pointCloudCameraLayer\.setHovered\(-1\);\s*return;\s*\}\s*const hovered = pointCloudCameraLayer\.pick/);
+});
+
+test('8500 hidden cameras do no projection or instance uploads and show refreshes immediately', async () => {
+  const THREE = await import('three');
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  camera.lookAt(0, 0, -1);
+  camera.updateMatrixWorld(true);
+  let cameraReads = 0, rectReads = 0;
+  const dom = { getBoundingClientRect: () => { rectReads++; return { left: 0, top: 0, width: 100, height: 100 }; } };
+  const layer = createPointCloudCameraLayer({ THREE, scene, dom, getCamera: () => { cameraReads++; return camera; } });
+  layer.setMarkers(Array.from({ length: 8500 }, () => ({ translation: [0, 0, -2], rotation: [0, 0, 0] })));
+  layer.setScale(0.75);
+  for (let frame = 0; frame < 120; frame++) {
+    camera.position.x = frame / 1000;
+    assert.equal(layer.updateView(frame % 2 === 0), false);
+  }
+  assert.equal(cameraReads, 0);
+  assert.equal(rectReads, 0);
+  assert.equal(layer.drawnCount, 0);
+  for (const mesh of layer.group.children) assert.equal(mesh.instanceMatrix.version, 0);
+  layer.setVisible(true);
+  assert.equal(cameraReads, 1);
+  assert.equal(rectReads, 1);
+  assert.equal(layer.drawnCount, 8500);
+  const versions = layer.group.children.map(mesh => mesh.instanceMatrix.version);
+  layer.setVisible(false);
+  camera.position.x = 50;
+  camera.updateMatrixWorld(true);
+  assert.equal(layer.updateView(true), false);
+  assert.deepEqual(layer.group.children.map(mesh => mesh.instanceMatrix.version), versions);
+  layer.setVisible(true);
+  assert.equal(cameraReads, 2);
+  assert.equal(layer.drawnCount, 0, 'show uses the latest camera instead of the hidden-view draw list');
+  layer.dispose();
+});
 
 test('point-cloud cameras use the same compact WebODM-style marker as the model', async () => {
   const model = await import('../camera-markers.mjs');
