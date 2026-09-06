@@ -28,6 +28,28 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   let abort=null,preview=null,regionPreview=null,section=null,selected=null,chartBounds=null,retired=false,closed=false;
   const status=dialog.querySelector('[data-status]'),canvas=dialog.querySelector('[data-section-chart]'),plan=dialog.querySelector('[data-section-plan]');
   const field=name=>dialog.querySelector(`[name=${name}]`),value=name=>Number(field(name).value),format=v=>measurementValue(v,1,units);
+  function restoreSavedResult(){
+    const saved=record.results;
+    if(!saved||saved.status==='geometry-only')return;
+    const hasSurface=Number.isFinite(saved.cutM3)||Number.isFinite(saved.fillM3)||Number.isFinite(saved.netM3);
+    if(!hasSurface&&!Number.isFinite(saved.volumeM3))return;
+    const reference=saved.reference||{},referenceTypes=['boundary-triangulated','fitted-plane','lowest-boundary','highest-boundary','average-boundary','custom'];
+    if(referenceTypes.includes(reference.type)&&(reference.type!=='custom'||Number.isFinite(reference.elevationM))){
+      field('reference').value=reference.type;dialog.querySelector('[data-custom]').hidden=reference.type!=='custom';
+      if(reference.type==='custom')field('elevation').value=String(reference.elevationM/unit[1]);
+    }
+    if(Number.isFinite(reference.offsetM))field('offset').value=String(reference.offsetM/unit[1]);
+    const source=saved.sourceKind||saved.source?.kind;if(['dsm','dtm'].includes(source))field('source').value=source;
+    if(hasSurface){
+      for(const [name,key]of [['cut','cutM3'],['fill','fillM3'],['net','netM3']])dialog.querySelector(`[data-result=${name}]`).textContent=Number.isFinite(saved[key])?measurementValue(saved[key],3,units):'Unavailable';
+      dialog.querySelector('[data-result=coverage]').textContent=Number.isFinite(saved.coverage)&&saved.coverage>=0&&saved.coverage<=1?`${(saved.coverage*100).toFixed(3)}%`:'Unavailable';dialog.querySelector('[data-results]').hidden=false;
+    }
+    const warnings=Array.isArray(saved.warnings)?saved.warnings.filter(w=>typeof w==='string').join(' '):'';
+    status.dataset.state='saved';status.textContent=hasSurface?`Previously saved ${saved.status||'surface'} result. These totals have not been recalculated or revalidated against the current source. ${warnings}`:`Previously saved object volume: ${measurementValue(saved.volumeM3,3,units)}. This is a different calculation from surface cut/fill. ${warnings}`;
+    dialog.querySelector('[data-preview-content]').hidden=true;dialog.querySelector('[data-preview-empty]').hidden=false;
+    dialog.querySelector('[data-preview-empty]').textContent='Recalculate to rebuild the preview from the source. Review the surface and reference settings first. Opening this inspector does not run another calculation.';
+    dialog.querySelector('.surface-settings').open=true;dialog.setAttribute('data-calculated','true');
+  }
   function plot(){
     const ctx=canvas.getContext('2d'),pc=plan.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);pc.clearRect(0,0,plan.width,plan.height);if(!section)return;
     const span=section.extent[1]-section.extent[0],crossSpan=section.crossExtent[1]-section.crossExtent[0];
@@ -90,7 +112,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   // Native close events are queued. Retire synchronously before their dispatch
   // so a result settling in the intervening microtask cannot save private data.
   dialog.oncancel=()=>retire();
-  dialog.onclose=()=>{retire();if(closed)return;closed=true;dialog.remove();onClose();};document.body.append(dialog);dialog.showModal();
+  dialog.onclose=()=>{retire();if(closed)return;closed=true;dialog.remove();onClose();};if(!autoCalculate)restoreSavedResult();document.body.append(dialog);dialog.showModal();
   // Never autocheck units or guess a reference height. Missing metadata reopens settings.
   if(autoCalculate)dialog.querySelector('[data-calculate]').onclick();
   return {close};

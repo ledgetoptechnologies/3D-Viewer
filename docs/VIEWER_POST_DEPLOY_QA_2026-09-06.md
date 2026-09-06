@@ -79,6 +79,24 @@ unchanged; memory safety limits remain in force.
   `data/qa/unit-diagnostics-build-final.log` and
   `data/qa/unit-diagnostics-tests-final.log`.
 
+## Saved-result inspector follow-up
+
+The existing loopback-only synthetic fixture returned the expected 572 cubic
+meters (20,199.989 cubic feet), zero fill and 100% coverage. Keyboard inspection
+reported the actual sampled surface height of 2 meters above its zero base.
+The linked chart visibly marks the selected sample in the plan and side views
+and explicitly identifies its reduced-sample limitations. This fixture does
+not establish County Road D's units or accuracy.
+
+Reopening a saved result had misleadingly said no volume had been calculated.
+The inspector now displays the saved totals and status, labels them as not
+revalidated against the current source, and explains that recalculation rebuilds
+the preview. Valid saved source/base settings are restored, but unit confirmation
+is never silently enabled. Reopening does not calculate or save anything.
+This follow-up passed 34 targeted dialog, automatic-calculation, lifecycle and
+preview tests plus a Vite build; its saved-result state was verified in the
+in-app browser against the synthetic fixture. Production records were untouched.
+
 ## Remaining acceptance
 
 - Verify the exact County Road D band metadata before accepting its volume.

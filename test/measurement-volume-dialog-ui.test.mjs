@@ -7,14 +7,14 @@ import {buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercen
 
 const source=readFileSync(new URL('../measurement-volume-dialog.mjs',import.meta.url),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
-function fixture(calculate,{autoCalculate=false}={}){
+function fixture(calculate,{autoCalculate=false,record={name:'Pile A'}}={}){
   const nodes=new Map();let disposed=0,saved=0;
   const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
   const dialog={...element(),querySelector(s){if(!nodes.has(s)){const node=element();if(s==='[name=sectionWidth]')node.value='10';nodes.set(s,node);}return nodes.get(s);},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},remove(){this.removed=true;}};
   const scope=vm.createContext({document:{createElement:()=>dialog,body:{append(){}}},AbortController,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
-  const handle=scope.openSurfaceDialog({record:{name:'Pile A'},units:'metric',calculate,save:async()=>{saved++;},autoCalculate});
-  dialog.querySelector('[name=reference]').value='boundary-triangulated';dialog.querySelector('[name=source]').value='dsm';
+  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate});
+  if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';dialog.querySelector('[name=source]').value='dsm';}
   return{dialog,handle,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
 const result={status:'calculated',cutM3:12345.678912,fillM3:0,netM3:12345.678912,coverage:1,preview:{samples:[[0,0,2,0],[1,1,2,0]]}};
@@ -70,4 +70,19 @@ test('queued native close event cannot leave a window to save a completed calcul
     assert.equal(f.saved(),0,`${action}: no save while native close is queued`);
     queued();assert.equal(f.dialog.removed,true);queued();
   }
+});
+
+test('reopening an existing surface result shows saved totals honestly without another calculation or fake preview',()=>{
+  let calculated=0;const saved={...result,preview:undefined,reference:{type:'custom',elevationM:100,offsetM:.5},sourceKind:'dtm',warnings:['Missing cells remain excluded.']};
+  const f=fixture(()=>{calculated++;return result;},{record:{name:'Saved pile',results:saved}});
+  assert.equal(calculated,0);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'saved');assert.match(f.dialog.querySelector('[data-status]').textContent,/Previously saved.*not been recalculated/);assert.match(f.dialog.querySelector('[data-status]').textContent,/Missing cells/);
+  assert.equal(f.dialog.querySelector('[data-results]').hidden,false);assert.equal(f.dialog.querySelector('[data-result=cut]').textContent,'12,345.679 m³');assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,true);assert.match(f.dialog.querySelector('[data-preview-empty]').textContent,/Recalculate to rebuild the preview/);
+  assert.equal(f.dialog.querySelector('[name=reference]').value,'custom');assert.equal(f.dialog.querySelector('[name=elevation]').value,'100');assert.equal(f.dialog.querySelector('[name=offset]').value,'0.5');assert.equal(f.dialog.querySelector('[name=source]').value,'dtm');assert.equal(f.dialog.querySelector('[name=metres]').checked,false);
+  f.handle.close();
+});
+
+test('saved incomplete or object calculations are not presented as a new complete surface calculation',()=>{
+  const partial=fixture(()=>result,{record:{name:'Incomplete',results:{cutM3:2,coverage:.5,status:'incomplete'}}});
+  assert.equal(partial.dialog.querySelector('[data-result=fill]').textContent,'Unavailable');assert.equal(partial.dialog.querySelector('[data-result=coverage]').textContent,'50.000%');assert.match(partial.dialog.querySelector('[data-status]').textContent,/Previously saved incomplete/);partial.handle.close();
+  const object=fixture(()=>result,{record:{name:'Object',results:{volumeM3:3,status:'estimate'}}});assert.match(object.dialog.querySelector('[data-status]').textContent,/Previously saved object volume.*different calculation/);object.handle.close();
 });
