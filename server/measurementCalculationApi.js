@@ -3,6 +3,7 @@ const express = require('express');
 const auth = require('./auth');
 const { MeasurementCalculationRepository } = require('./measurementCalculationRepository');
 const { reconstructionAvailable } = require('./measurementReconstructionSupport');
+const { StorageManager } = require('./storageManager');
 const fail = (code, status = 400) => { throw Object.assign(new Error(code), { code, status }); };
 function validateCalculationRequest(input, measurement, version) {
   if (!input || Array.isArray(input) || Object.keys(input).some(k => !['revision','method','sourceAssetId','reference','sourceVerticalUnit','selection','sourceCoordinateFrame','cellSizeM','classFilter','reconstruction'].includes(k)) || input.revision !== measurement.revision) fail('measurement_calculation_invalid');
@@ -33,8 +34,14 @@ function validateCalculationRequest(input, measurement, version) {
     collection: measurement.collection, vertices: measurement.vertices, coordinateReference: measurement.coordinateReference, reference: ref,
     source: { id: asset.id, kind: asset.kind, rootKey: asset.rootKey, relativePath: asset.relativePath, sha256: asset.sha256, byteSize: asset.byteSize, ...(pointSurface?{manifestSha256:asset.manifestSha256}:{}) }, sourceVerticalUnit: input.sourceVerticalUnit || null, ...meshFields, ...(pointSurface?{cellSizeM:input.cellSizeM,classFilter:input.classFilter||'all'}:{}) };
 }
-function createMeasurementCalculationApi({ repository, measurements, getPrincipal, admin, config = {} }) {
+function createMeasurementCalculationApi({ repository, measurements, getPrincipal, admin, config = {}, preflightRaster }) {
   const router = express.Router(), jobs = new MeasurementCalculationRepository(repository.database);
+  const rasterPreflight = preflightRaster || (async request => {
+    const storage = new StorageManager(config);
+    const absolutePath = storage.resolve(request.source.rootKey, request.source.relativePath, { mustExist: true });
+    const { preflightNativeRaster } = await import('./measurementRasterCalculation.mjs');
+    return preflightNativeRaster(absolutePath, request, { maxBlockBytes: Math.min(256, (config.measurementMemoryMiB || 4096) / 8) * 1024 * 1024 });
+  });
   const gate = (req) => {
     const principal = getPrincipal(req), authority = principal && admin(req, principal);
     if (!authority) fail('measurement_admin_required', 403);
@@ -42,12 +49,23 @@ function createMeasurementCalculationApi({ repository, measurements, getPrincipa
     if (!measurement) fail('measurement_not_found', 404);
     return { principal, authority, measurement };
   };
-  router.post('/:measurementId/calculations', (req, res, next) => { try {
+  router.post('/:measurementId/calculations', async (req, res, next) => { try {
     const { principal, measurement } = gate(req);
     if (config.measurementCalculationsEnabled === false) fail('measurement_calculations_disabled', 503);
     if(req.body?.method==='reconstructed-estimate'&&!reconstructionAvailable(config))fail('measurement_reconstruction_unavailable',503);
     const version = repository.getModelVersion(principal.modelId, principal.modelVersionId)?.activeVersion;
     const request = validateCalculationRequest(req.body, measurement, version);
+    if (request.method === 'surface-cut-fill') {
+      try { await rasterPreflight(request); }
+      catch (error) {
+        const allowed = /^measurement_(source_|pixel_|rotated_|raster_)/.test(error.code || '');
+        fail(allowed ? error.code : 'measurement_source_preflight_unavailable', 422);
+      }
+      // Awaited I/O may outlive access or an edit. Recheck before enqueuing,
+      // retaining worker authorization/hash validation as an independent gate.
+      const current = gate(req).measurement;
+      if (current.revision !== measurement.revision) fail('measurement_calculation_invalid', 409);
+    }
     // Keep only server-side capability hashes for worker revalidation, never raw
     // bearer values. They are omitted from every public job representation.
     request.authority = { viewerHash: auth.hashToken(String(req.get('authorization')).replace(/^Bearer\s+/i, '')), adminHash: auth.hashToken(String(req.get('X-Viewer-Admin-Authorization')).replace(/^Bearer\s+/i, '')), subject: principal.subject };

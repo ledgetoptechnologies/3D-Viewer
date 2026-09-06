@@ -35,7 +35,7 @@ async function registryCategories(database, roots, limit = 500000) {
       const rows = database.prepare(query).all(cursor);
       if (!rows.length) break;
       for (const row of rows) {
-        const selected = category !== 'retained' ? category : row.role === 'source_photo' ? 'sources' : ['mesh_glb','mesh_obj','mesh_mtl','mesh_texture','ept','point_cloud_source','orthophoto','dsm','dtm'].includes(row.role) ? 'products' : 'other';
+        const selected = category !== 'retained' ? category : row.role === 'source_photo' ? 'sources' : ['mesh_glb','mesh_obj','mesh_mtl','mesh_texture','ept','point_cloud_source','orthophoto','orthophoto_cutline','dsm','dtm'].includes(row.role) ? 'products' : 'other';
         add(row.root_key, row.asset_path ? path.posix.join(path.posix.dirname(row.asset_path), row.relative_path) : row.relative_path, selected);
         if (++count > limit) throw Object.assign(new Error('registry limit'), { code: 'registry_entry_limit' });
         cursor = row.cursor;

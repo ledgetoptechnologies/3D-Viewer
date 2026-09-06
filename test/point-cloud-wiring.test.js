@@ -49,7 +49,8 @@ test('Potree controls preserve panel state and match mesh navigation feedback', 
   assert.match(pointCloudShell, /orbitRadiansForPixels\(dx, h, gainScale\)/);
   assert.match(pointCloudShell, /viewer\.earthControls\?\.pivotIndicator/);
   assert.match(pointCloudShell, /viewer\.setPointBudget\(10_000_000\)/);
-  assert.match(pointCloudShell, /target:\s*10_000_000/);
+  assert.match(pointCloudShell, /LtdsPointCloudPerformance\.createAdaptivePointBudget\(\)/);
+  assert.equal(require('../public/pointcloud-performance.js').createAdaptivePointBudget().state.target, 10_000_000);
   assert.match(viewerShell, /id="pc2-budget"[^>]*value="10"/);
   assert.match(viewerShell, /id="pc2-budget-val">10M</);
   assert.match(pointCloudShell, /const forward = new THREE\.Vector3\(\)\s*\.subVectors\(view\.getPivot\(\), view\.position\)\s*\.normalize\(\)\s*\.applyQuaternion\(q\)/);
@@ -70,6 +71,13 @@ test('pre-metadata mesh view remains exact when the cloud finishes loading', () 
   assert.match(pointCloudShell, /if \(!window\.__pcViewReady\) \{\s*viewer\.fitToScreen\(0\.7\)/);
   assert.doesNotMatch(pointCloudShell, /syncedTargetIsRelevant|pendingSyncedTarget/);
   assert.match(pointCloudShell, /viewer\.fitToScreen\(0\.7\)/);
+});
+
+test('cloud and map modes cannot display frozen mesh performance counters as live data', () => {
+  assert.match(mainSource, /dom\.lodStatus\.hidden = !is3D/);
+  assert.match(mainSource, /dom\.trisStatus\.hidden = !is3D/);
+  assert.match(mainSource, /state\.activeMode === 'cloud' \? pcApi\(\)\?\.getStatus\?\.\(\)\.fps : null/);
+  assert.match(mainSource, /Map renders on demand; no continuous frame-rate counter/);
 });
 
 test('sparse cloud navigation keeps narrow picks and repairs stale focal depth', () => {

@@ -24,7 +24,7 @@ test('new-tab session contract is versioned, removes grants, and isolates its ex
 test('retryable renewal failure preserves the current stable capability', () => {
   const renewalHandler = source.slice(source.indexOf('async function handleSessionRenewalMessage'));
   assert.match(renewalHandler, /const retryable =/);
-  assert.match(renewalHandler, /if \(retryable\) scheduleSessionRenewalRetry\('redemption-failed'\)/);
+  assert.match(renewalHandler, /if \(retryable\) retrySessionAccess\('redemption-failed'\)/);
   assert.doesNotMatch(renewalHandler, /sessionStorage\.removeItem/);
 });
 
@@ -32,7 +32,8 @@ test('Viewer catches up after tab suspension and recovers failed authenticated t
   assert.match(source, /requestSessionRenewalIfDue\('focus'\)/);
   assert.match(source, /requestSessionRenewalIfDue\('pageshow'\)/);
   assert.match(source, /document\.visibilityState === 'visible'/);
-  assert.match(source, /scheduleSessionRenewalRetry\('response-timeout'\)/);
+  assert.match(source, /retrySessionAccess\('controller-timeout'\)/);
+  assert.match(source, /function retrySessionAccess\(reason\)[\s\S]*?scheduleSessionRenewalRetry\(reason\)/);
   // Starting a request is not proof that one remains pending: an authoritative
   // denial must retain the blocked label, covered by the executed recovery tests.
   assert.match(source, /if \(!sessionRenewalPending\) requestSessionRenewal\('tile-authorization'\)/);

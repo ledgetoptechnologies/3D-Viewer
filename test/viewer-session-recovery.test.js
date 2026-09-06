@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-workspace.mjs'), 'utf8');
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
@@ -22,7 +23,7 @@ function fixture({ controller = true } = {}) {
     sessionAllowedOrigins: [], sessionAccessState: 'active', sessionAccessReason: null,
     lastSessionAccessFailure: null, modeEpoch: 0,
     sessionRenewalBlocked: false, sessionRenewalPending: false, sessionRenewalAttempt: null,
-    sessionRenewalResponseTimer: null, sessionRenewalTimer: null, pendingReviewRenewalRequestId: null,
+    sessionRenewalResponseTimer: null, sessionRenewalTimer: null, sessionAccessExpiryTimer:null, pendingReviewRenewalRequestId: null,
     sessionRenewalBackoffIndex: 0, sessionRenewalMinimumDelayMs: 1000,
     SESSION_RENEWAL_BACKOFF_MS: [10_000, 30_000, 60_000, 120_000, 300_000],
     lodTileRecoveryPending: true, lodTileRetryAttempt: 1, lodTileRetryTimer: null,
@@ -33,7 +34,7 @@ function fixture({ controller = true } = {}) {
     setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, delay }); return id; },
     clearTimeout: id => timers.delete(id),
     setDisplayUnits() {}, applyProjectConfig() {}, stopLodAvailabilityRefresh() {},
-    measurementWorkspace:{invalidate(){measurements.invalidations++;measurements.invalidated=true;measurements.records.clear();},isInvalidated:()=>measurements.invalidated},
+    measurementWorkspace:{invalidate(_reason,{notify=true}={}){if(measurements.invalidated)return;measurements.invalidations++;measurements.invalidated=true;measurements.records.clear();if(notify)context.measurementAccessLost();},isInvalidated:()=>measurements.invalidated},
     installMeasurementWorkspace(){measurements.installs++;measurements.invalidated=false;},
     viewerProductDownloads:null,
     releaseFailedTileReservations() {},
@@ -43,6 +44,18 @@ function fixture({ controller = true } = {}) {
   vm.runInContext(source.slice(source.indexOf('function recoverFailedLodTiles()'), source.indexOf('let sessionRenewalTimer')), context);
   vm.runInContext(source.slice(source.indexOf('function sessionControlWindow()'), source.indexOf('async function bootstrapSession()')), context);
   vm.runInContext(source.slice(source.indexOf('async function handleSessionRenewalMessage'), source.indexOf('if (reviewSessionChannel) reviewSessionChannel.onmessage')), context);
+  // Execute the real workspace invalidation callback as well as the actual
+  // Viewer controller functions: the old stub hid their reentrancy bug.
+  context.measurementFixture=measurements;
+  const invalidateSource=workspaceSource.match(/  function invalidate\([\s\S]*?\n  }/)[0];
+  vm.runInContext(`measurementWorkspace.invalidate=(()=>{
+    let invalidated=false,viewGeneration=0,ready=true,adminAllowed=true,selected='private',lastSvg='';
+    const selectedExports=new Set(),svg={innerHTML:'private'},controls={hidden:false};
+    const disarm=()=>{},closeDialogs=()=>{},tell=()=>{},onAccessLost=measurementAccessLost;
+    const store={invalidate(){measurementFixture.invalidations++;measurementFixture.invalidated=true;measurementFixture.records.clear();}};
+    ${invalidateSource}
+    return invalidate;
+  })()`,context);
   return { context, timers, posts, resets, measurements };
 }
 
@@ -73,10 +86,11 @@ test('current-access denial far before expiry is visible without requesting a co
   assert.equal(f.context.tilesRenderer !== null, true);
 });
 
-test('missing controller preserves resident tiles and exposes a durable recovery instruction', () => {
+test('missing controller preserves still-valid personal access and retries transport', () => {
   const f = fixture({ controller: false });
   assert.equal(f.context.requestSessionRenewal('tile-authorization'), false);
-  assert.match(f.context.dom.lodStatus.textContent, /reopen this model/);
+  assert.match(f.context.dom.lodStatus.textContent, /retrying access/);
+  assert.equal(f.measurements.records.size,1);
   assert.equal(f.context.sessionDiagnostics().reason, 'controller-unavailable');
   assert.equal(f.context.tilesRenderer !== null, true);
   assert.equal(f.context.lodTileRecoveryPending, true);
@@ -88,7 +102,9 @@ test('controller timeout stays visible while a bounded-delay retry is scheduled'
   f.context.requestSessionRenewal();
   [...f.timers.values()].find(timer => timer.delay === 30_000).fn();
   assert.equal(f.context.sessionRenewalPending, false);
-  assert.match(f.context.sessionAccessLabel(), /access unavailable/);
+  assert.match(f.context.sessionAccessLabel(), /retrying access/);
+  assert.equal(f.measurements.records.size,1);
+  assert.equal(f.measurements.invalidations,0);
   assert.equal([...f.timers.values()].some(timer => timer.delay === 10_000), true);
   assert.equal(f.context.sessionDiagnostics().reason, 'controller-timeout');
 });
@@ -125,6 +141,34 @@ test('proactive renewal clears the cloud access label even without a denied EPT 
   await f.context.handleSessionRenewalMessage({ version: 1, type: 'ltds-viewer:renew-session',
     requestId: REQUEST, grant: '11111111-2222-4333-8444-555555555555' }, { reviewChannel: true });
   assert.equal(f.context.dom.cloudStatus.textContent, 'Cloud: access renewed');
+});
+
+test('measurement denial far before expiry cannot start an ignored early renewal',()=>{
+  const f=fixture();f.context.activeViewerSession.expiresAt=new Date(Date.now()+1800000).toISOString();
+  f.context.measurementWorkspace.invalidate('HTTP 403');
+  assert.equal(f.context.sessionRenewalBlocked,true);assert.equal(f.posts.length,0);
+  assert.equal(f.context.sessionRenewalPending,false);assert.equal(f.measurements.invalidations,1);
+});
+
+test('expired timeout invalidates once without recursive measurement-triggered renewal',()=>{
+  const f=fixture();f.context.requestSessionRenewal();
+  f.context.activeViewerSession.expiresAt=new Date(Date.now()-1).toISOString();
+  [...f.timers.values()].find(t=>t.delay===30000).fn();
+  assert.equal(f.context.sessionAccessState,'unavailable');assert.equal(f.measurements.invalidations,1);
+  assert.equal(f.context.sessionRenewalPending,false);assert.equal(f.context.sessionRenewalAttempt,null);
+  assert.equal(f.posts.filter(p=>p.type==='ltds-viewer:session-expiring').length,1);
+  assert.equal([...f.timers.values()].filter(t=>t.delay===10000).length,1);
+});
+
+test('exact expiry hides personal data but an obsolete expiry timer cannot hide renewed data',async()=>{
+  const f=fixture();f.context.scheduleSessionRenewal(f.context.activeViewerSession);
+  const expired=f.timers.get(f.context.sessionAccessExpiryTimer).fn;
+  f.context.requestSessionRenewal();
+  await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
+  expired();assert.equal(f.context.sessionAccessState,'active');assert.equal(f.measurements.records.size,1);
+  f.timers.get(f.context.sessionAccessExpiryTimer).fn();
+  assert.equal(f.context.sessionAccessState,'unavailable');assert.equal(f.measurements.records.size,0);
+  assert.equal(f.context.sessionDiagnostics().reason,'session-expired');
 });
 
 test('unavailable access immediately hides personal records and same-person renewal recreates the private workspace',async()=>{

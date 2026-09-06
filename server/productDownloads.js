@@ -3,10 +3,11 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const { safeRelativePath, publicDerivativeKind } = require('./processingSecurity');
+const { CUTLINE_PATTERN } = require('./orthophotoCutline');
 
 const PRODUCTS = {
   ortho: ['Orthophoto', ['.tif', '.tiff']],
-  orthoCutline: ['Orthophoto cutline', ['.geojson', '.json', '.gpkg', '.zip']],
+  orthoCutline: ['Orthophoto cutline', ['.geojson', '.gpkg']],
   dsm: ['Surface model (DSM)', ['.tif', '.tiff']],
   dtm: ['Terrain model (DTM)', ['.tif', '.tiff']],
   pointCloud: ['Original point cloud', ['.las', '.laz', '.ply']],
@@ -24,6 +25,7 @@ const PRODUCTS = {
 // dependencies must never be presented as complete original downloads.
 function productDescriptor(asset, { staff = false, review = false, cameras = true } = {}) {
   const spec = PRODUCTS[asset?.kind];
+  if (asset?.kind === 'orthoCutline' && !CUTLINE_PATTERN.test(asset.relativePath || '')) return null;
   if (!spec || (!staff && (!publicDerivativeKind(asset.kind) || (!review && !asset.published)))) return null;
   if (asset.kind === 'shots' && !cameras) return null;
   if (!asset.sha256 || !Number.isSafeInteger(asset.byteSize) || asset.byteSize < 0

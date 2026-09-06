@@ -7,6 +7,8 @@ import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
+import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
+import { preflightBrowserRasterHeader } from './measurement-raster-header.mjs';
 import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
 import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
@@ -1235,6 +1237,7 @@ function recoverFailedLodTiles() {
 }
 
 let sessionRenewalTimer = null;
+let sessionAccessExpiryTimer = null;
 let sessionRenewalResponseTimer = null;
 let activeViewerSession = null;
 let sessionAccessGeneration = 0;
@@ -1367,7 +1370,7 @@ function setSessionAccessState(next, reason = null) {
   const previous = sessionAccessState;
   sessionAccessState = next;
   sessionAccessReason = reason;
-  if(next==='unavailable')measurementWorkspace?.invalidate?.('Personal measurements are hidden until access is restored.');
+  if(next==='unavailable')measurementWorkspace?.invalidate?.('Personal measurements are hidden until access is restored.',{notify:false});
   else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.()))installMeasurementWorkspace();
   const label = sessionAccessLabel();
   if (label && tilesRenderer) dom.lodStatus.textContent = label;
@@ -1408,7 +1411,7 @@ function requestSessionRenewal(reason = 'timer') {
   if (VIEW_MODE !== 'session' || !activeViewerSession || sessionRenewalPending || sessionRenewalBlocked) return false;
   // The controller intentionally refuses early renewals. A denial using current,
   // non-expiring access requires reopening authorization, not a silent timeout.
-  if (reason.endsWith('-authorization') && Date.parse(activeViewerSession.expiresAt) - Date.now() > 5 * 60 * 1000) {
+  if ((reason.endsWith('-authorization') || reason === 'measurements') && Date.parse(activeViewerSession.expiresAt) - Date.now() > 5 * 60 * 1000) {
     sessionRenewalBlocked = true;
     setSessionAccessState('unavailable', 'authorization-required');
     pcApi()?.accessUnavailable?.();
@@ -1423,8 +1426,7 @@ function requestSessionRenewal(reason = 'timer') {
     expiresAt: activeViewerSession.expiresAt,
   });
   if (!sent) {
-    setSessionAccessState('unavailable', 'controller-unavailable');
-    pcApi()?.accessUnavailable?.();
+    retrySessionAccess('controller-unavailable');
     return false;
   }
   setSessionAccessState('renewing');
@@ -1439,10 +1441,22 @@ function requestSessionRenewal(reason = 'timer') {
     postSessionRenewalFailure(requestId, true);
     clearSessionRenewalPending(attempt);
     sessionRenewalResponseTimer = null;
-    setSessionAccessState('unavailable', 'controller-timeout');
-    scheduleSessionRenewalRetry('response-timeout');
+    retrySessionAccess('controller-timeout');
   }, 30_000);
   return true;
+}
+
+function retrySessionAccess(reason) {
+  // Controller transport is not an access decision. Keep a still-valid,
+  // same-scope capability usable while retrying; expiry has its own timer.
+  scheduleSessionRenewalRetry(reason);
+  const valid = Date.parse(activeViewerSession?.expiresAt || '') > Date.now();
+  setSessionAccessState(valid ? 'retrying' : 'unavailable', reason);
+  if (!valid) pcApi()?.accessUnavailable?.();
+}
+
+function measurementAccessLost() {
+  if (VIEW_MODE === 'session' && !sessionRenewalBlocked) requestSessionRenewal('measurements');
 }
 
 function clearSessionRenewalPending(attempt = sessionRenewalAttempt) {
@@ -1486,6 +1500,12 @@ function requestSessionRenewalIfDue(reason) {
 
 function scheduleSessionRenewal(session) {
   activeViewerSession = session;
+  if (sessionAccessExpiryTimer) clearTimeout(sessionAccessExpiryTimer);
+  sessionAccessExpiryTimer = setTimeout(() => {
+    if (activeViewerSession !== session) return;
+    setSessionAccessState('unavailable', 'session-expired');
+    pcApi()?.accessUnavailable?.();
+  }, Math.max(0, Date.parse(session.expiresAt) - Date.now()));
   if (sessionRenewalTimer) clearTimeout(sessionRenewalTimer);
   const delay = Math.max(sessionRenewalMinimumDelayMs, Date.parse(session.expiresAt) - Date.now() - 5 * 60 * 1000);
   sessionRenewalTimer = setTimeout(() => requestSessionRenewal('timer'), delay);
@@ -1613,10 +1633,10 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
     // The parent can issue another one-time grant and retry in place.
     postSessionRenewalFailure(requestId, retryable, String(error.message || error));
     clearSessionRenewalPending(attempt);
-    setSessionAccessState(retryable ? 'retrying' : 'unavailable', 'redemption-failed');
-    if (retryable) scheduleSessionRenewalRetry('redemption-failed');
+    if (retryable) retrySessionAccess('redemption-failed');
     else {
       sessionRenewalBlocked = true;
+      setSessionAccessState('unavailable', 'redemption-failed');
       pcApi()?.accessUnavailable?.();
     }
   }
@@ -2278,16 +2298,19 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   if(!source)throw new Error('No existing DSM/DTM is available. An administrator must prepare a measurement surface; clients cannot start processing jobs.');
   // Calculation opens metadata only. getDataset also computes display stats,
   // which could decode an entire un-overviewed TIFF before region guards.
+  await preflightBrowserRasterHeader(source.url,{signal});
   const tiff=await openGeoTiff(source.url,{allowFullFile:false,blockSize:262144,cacheSize:32},signal);
   try{
   const image=await tiff.getImage(0),[minE,minN,maxE,maxN]=image.getBoundingBox();
   const ds={W:image.getWidth(),H:image.getHeight(),minE,minN,maxE,maxN,nodata:parseFiniteGdalNoData(image.getGDALNoData())},px=(maxE-minE)/ds.W,py=(maxN-minN)/ds.H;
   const geo=image.getGeoKeys?.()||{},expectedCrs=Number(record.coordinateReference.crs.replace('EPSG:',''));
   if(!geo.ProjectedCSTypeGeoKey||geo.ProjectedCSTypeGeoKey!==expectedCrs)throw new Error('The source CRS is absent or incompatible with this measurement. An administrator must verify alignment first.');
-  const directory=image.fileDirectory||{},transform=directory.ModelTransformation,resolution=image.getResolution();
+  const directory=image.getFileDirectory?.()||image.fileDirectory||{},transform=rasterDirectoryValue(directory,'ModelTransformation'),resolution=image.getResolution();
   if(Number(geo.GTRasterTypeGeoKey||1)!==1||(transform&&[1,2,4,6,8,9,12,13,14].some(i=>transform[i]!==0))||!Number.isFinite(resolution[0])||!Number.isFinite(resolution[1])||resolution[0]<=0||resolution[1]>=0)throw new Error('This raster uses an unsupported rotated or point-sample grid. No approximate transform will be substituted.');
-  const decodedBlock=(directory.TileWidth||ds.W)*Math.min(directory.TileLength||directory.RowsPerStrip||ds.H,ds.H)*(directory.SamplesPerPixel||1)*Math.max(...(directory.BitsPerSample||[64]))/8;
+  const decodedBlock=rasterDecodedBlockBytes(image);
   if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask an administrator for a calculation.');
+  try{await validateRasterEncodedBlocks(image,{maxBlockBytes:64*1024*1024});}
+  catch{throw new Error('The source raster has unsupported or oversized encoded blocks for browser measurement. Ask an administrator to verify the source layout.');}
   const verticalFactor=geo.VerticalUnitsGeoKey===9001?1:geo.VerticalUnitsGeoKey===9002?0.3048:geo.VerticalUnitsGeoKey===9003?1200/3937:!geo.VerticalUnitsGeoKey&&confirmMeters?1:null;
   if(verticalFactor===null)throw new Error('Confirm source elevations are meters when metadata is absent. Unsupported vertical units must be corrected before calculation.');
   const x0=Math.max(0,Math.floor((Math.min(...record.vertices.map(p=>p[0]))-ds.minE)/px));
@@ -2318,12 +2341,13 @@ function installMeasurementWorkspace() {
   measurementWorkspace=createMeasurementWorkspace({
     panel:document.getElementById('panel-measure'),context:measurementViewContext,
     token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
+    accessGeneration:()=>sessionAccessGeneration,
     permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
     toLonLat:p=>{if(!measurementCoordinateReference().crs.startsWith('EPSG:'))throw new Error('GeoJSON needs verified geographic alignment. Use JSON or DXF with the local coordinate warning.');const [lat,lon]=utmToLatLon(p[0],p[1]);return [lon,lat];},
     toolChanged:tool=>{state.activeTool=tool;document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));},
     calculateSurface:calculateSavedMeasurementSurface,
     adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
-    onAccessLost:()=>{if(VIEW_MODE==='session'&&!sessionRenewalBlocked)requestSessionRenewal('measurements');},
+    onAccessLost:measurementAccessLost,
   });
   viewerProductDownloads?.destroy();
   let productHost=document.getElementById('panel-products');if(!productHost){productHost=document.createElement('div');productHost.id='panel-products';productHost.className='panel';document.getElementById('sidebar-custom').append(productHost);}
@@ -4281,6 +4305,9 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   dom.threeContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.labelsContainer.style.display = (is3D || isDirectCloud) ? 'block' : 'none';
   dom.cloudContainer.style.display = isPotreeCloud ? 'block' : 'none';
+  // Mesh-only counters must not masquerade as live map/cloud performance.
+  dom.lodStatus.hidden = !is3D;
+  dom.trisStatus.hidden = !is3D;
   dom.leafletMap.style.display = (!is3D && !isPC) ? 'block' : 'none';
   dom.demLegend.style.display = 'none';
   dom.demHover.style.display = 'none';
@@ -4864,10 +4891,17 @@ function startLoop() {
       const now = performance.now();
       if (now - lastFps >= 1000) {
         dom.fps.textContent = frames;
+        dom.fps.title = 'Rendered 3D frames per second';
         frames = 0; lastFps = now;
         statTimer++;
         updateStats();
       }
+    } else if (performance.now() - lastFps >= 1000) {
+      const cloudFps = state.activeMode === 'cloud' ? pcApi()?.getStatus?.().fps : null;
+      dom.fps.textContent = Number.isFinite(cloudFps) ? Math.round(cloudFps) : '—';
+      dom.fps.title = state.activeMode === 'cloud' ? 'Point-cloud frames per second' : 'Map renders on demand; no continuous frame-rate counter';
+      dom.memDisplay.textContent = formatJsHeap(performance.memory?.usedJSHeapSize);
+      frames = 0; lastFps = performance.now();
     }
   }
   requestAnimationFrame(loop);

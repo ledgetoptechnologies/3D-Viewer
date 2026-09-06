@@ -18,7 +18,7 @@ process.once('message', async ({ absolutePath, request, maxCells, memoryMiB, sou
       result = await calculatePointSurface(absolutePath, request, { maxCells, sourceFiles, signal: controller.signal });
     } else if (request.method === 'surface-cut-fill') {
       const { calculateNativeRaster } = await import('./measurementRasterCalculation.mjs');
-      result = await calculateNativeRaster(absolutePath, request, { maxCells, signal: controller.signal });
+      result = await calculateNativeRaster(absolutePath, request, { maxCells, maxBlockBytes: Math.min(256, (memoryMiB || 4096) / 8) * 1024 * 1024, signal: controller.signal });
     } else throw Object.assign(new Error('unsupported measurement method'), { code: 'measurement_method_unavailable' });
     process.send?.({ type: 'result', result });
   } catch (error) { process.send?.({ type: 'error', code: /^[a-z][a-z0-9_]{0,79}$/.test(error.code || '') ? error.code : 'measurement_calculation_failed' }); }

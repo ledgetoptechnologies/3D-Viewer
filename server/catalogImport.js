@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { hashFile, hashFileChunks, hashTree } = require('./storageManager');
 const { lodDerivativeSpecs } = require('./lodDerivativePolicy');
+const { CUTLINE_PATTERN, validateCutlineFile } = require('./orthophotoCutline');
 
 const ASSET_RULES = [
   ['tiles', /(^|\/)tileset\.json$/i, '3dtiles'],
@@ -12,6 +13,7 @@ const ASSET_RULES = [
   ['glb', /(^|\/)(textured_model|model|odm_textured_model_geo)\.glb$/i, 'glb'],
   ['obj', /(^|\/)(odm_textured_model_geo|textured_model|model)\.obj$/i, 'obj'],
   ['ortho', /(^|\/)(odm_)?orthophoto[^/]*\.tiff?$/i, 'tif'],
+  ['orthoCutline', CUTLINE_PATTERN, null],
   ['dsm', /(^|\/)dsm[^/]*\.tiff?$/i, 'tif'],
   ['dtm', /(^|\/)dtm[^/]*\.tiff?$/i, 'tif'],
   ['report', /(^|\/)odm_report\/(?:report|odm_report)\.pdf$/i, 'pdf', 'application/pdf'],
@@ -47,7 +49,7 @@ async function discoverAssets(root) {
   for(const file of files){const integrity=await hashFileChunks(file.absolutePath);fileHashes.set(file.relativePath,integrity);file.sha256=integrity.sha256;file.chunks=integrity.chunks;}
   const assets = [];
   for (const [kind, pattern, format, contentType] of ASSET_RULES) {
-    const file = files.find((candidate) => pattern.test(candidate.relativePath));
+    const file = files.find((candidate) => pattern.test(candidate.relativePath) && (kind !== 'orthoCutline' || validateCutlineFile(candidate)));
     if (!file) continue;
     const integrity=fileHashes.get(file.relativePath);assets.push({ kind, relativePath: file.relativePath, format: format || path.extname(file.relativePath).slice(1).toLowerCase(), ...(contentType?{contentType}:{}), byteSize: file.byteSize, sha256: integrity.sha256, chunks:integrity.chunks });
   }

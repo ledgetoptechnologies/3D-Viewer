@@ -96,3 +96,8 @@ test('hit grid includes boundary/edge-overlapping pins without inventing a sourc
   const frame = cameraFrame([{ source: 4, world: { x: -5, y: 10 }, bearing: 0 }], { scale: 1, origin: { x: 0, y: 0 }, offset: { x: 0, y: 0 }, width: 100, height: 100, size: 24 });
   assert.equal(frame.points.length, 1); assert.equal(hitCamera(frame, 0, 2), 4); assert.equal(hitCamera(frame, 90, 90), null);
 });
+
+test('camera hover uses the bounded hit grid and restores navigation cursor',()=>{
+  const f=fixture();f.container.style.cursor='grab';f.layer.setData([{source:1,latlng:[50,60],bearing:0}],24);f.layer.onAdd(f.map);f.tick();const hover=f.container.listeners.get('pointermove:false');
+  hover({clientX:50,clientY:50});assert.equal(f.container.style.cursor,'pointer');hover({clientX:450,clientY:450});assert.equal(f.container.style.cursor,'grab');hover({clientX:50,clientY:50});f.setInteractive(false);hover({clientX:50,clientY:50});assert.equal(f.container.style.cursor,'grab');f.setInteractive(true);hover({clientX:50,clientY:50});f.layer.onRemove();assert.equal(f.container.style.cursor,'grab');assert.equal(f.container.listeners.size,0);
+});

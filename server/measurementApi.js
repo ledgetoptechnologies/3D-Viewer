@@ -34,7 +34,7 @@ function measurementAdmin(req, principal, database) {
   return processing.adminSessionLive(session) && session.subject === principal.subject && session.permissions?.includes('viewer.processing.write') ? session : null;
 }
 
-function createMeasurementApi(repository) {
+function createMeasurementApi(repository, { preflightRaster } = {}) {
   const router = express.Router();
   const measurements = new MeasurementRepository(repository.database);
   const principalFor = (req) => getMeasurementPrincipal(req, repository);
@@ -83,7 +83,7 @@ function createMeasurementApi(repository) {
     measurements.delete(req.measurementPrincipal, req.params.id, req.body.revision);
     res.status(204).end();
   }));
-  router.use(createMeasurementCalculationApi({ repository, measurements, getPrincipal: principalFor, admin: adminFor, config }));
+  router.use(createMeasurementCalculationApi({ repository, measurements, getPrincipal: principalFor, admin: adminFor, config, preflightRaster }));
   router.use((error, _req, res, next) => {
     if (!error.status) return next(error);
     res.status(error.status).json({ error: error.code, code: error.code });

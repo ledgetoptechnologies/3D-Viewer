@@ -83,6 +83,8 @@
     .tool-btn:hover, .layer-btn:hover { border-color: var(--brand-orange); color: var(--brand-orange); background: var(--panel-hover); }
     .tool-btn.active, .layer-btn.active { background: rgba(238,80,7,0.18); border-color: var(--brand-orange); color: #fff; }
     .tool-btn svg { width: 14px; height: 14px; }
+    [hidden] { display: none !important; }
+    body:has(#sidebar.collapsed) #sidebar-toggle { display: flex; }
     .tool-btn.full, .layer-btn.full { grid-column: 1 / -1; }
     .hint { font-size: 11px; color: var(--brand-muted); line-height: 1.45; }
     .slider-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; color: #c8c8c8; }

@@ -53,13 +53,21 @@ test('worker rechecks both authorities and source identity, records only current
   await processOneMeasurementCalculation(deps, 'worker'); assert.equal(calls, 1); assert.equal(f.jobs.get(f.measurement.id, next.id).errorCode, 'measurement_authorization_lost');
 });
 test('API rejects ordinary access, clients, wrong admin and client paths; owner lists results', async t => {
-  const f = fixture(t), app = express(); app.use(express.json()); app.use('/measurements', createMeasurementApi(f.repository));
+  const f = fixture(t), app = express(); let preflightCalls = 0, preflightError;
+  app.use(express.json()); app.use('/measurements', createMeasurementApi(f.repository, { preflightRaster: async () => { preflightCalls++; if (preflightError) throw Object.assign(new Error(preflightError), { code: preflightError }); } }));
   const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); }); t.after(() => new Promise(resolve => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`;
   const call = (extra = {}, body = f.body, method = 'POST') => fetch(url, { method, headers: { Authorization: `Bearer ${f.viewerToken}`, 'Content-Type': 'application/json', ...extra }, ...(method === 'GET' ? {} : { body: JSON.stringify(body) }) });
   assert.equal((await call()).status, 403);
+  assert.equal(preflightCalls, 0, 'ordinary viewer access cannot inspect native headers');
   const headers = { 'X-Viewer-Admin-Authorization': `Bearer ${f.adminToken}` };
   assert.equal((await call(headers, { ...f.body, absolutePath: '/etc/passwd' })).status, 400);
+  preflightError = 'measurement_source_vertical_units_required';
+  const missingUnits = await call(headers); assert.equal(missingUnits.status, 422);
+  assert.equal((await missingUnits.json()).code, preflightError); assert.equal(f.jobs.list(f.measurement.id).length, 0);
+  preflightError = 'measurement_raster_block_too_large';
+  assert.equal((await call(headers)).status, 422); assert.equal(f.jobs.list(f.measurement.id).length, 0);
+  preflightError = null;
   const response = await call(headers); assert.equal(response.status, 202); assert.equal((await response.json()).calculation.status, 'queued');
   const list = await (await call(headers, undefined, 'GET')).json(); assert.equal(list.calculations.length, 1); assert.ok(!JSON.stringify(list).includes('viewerHash'));
   f.database.prepare("UPDATE admin_sessions SET subject='another-person'").run(); assert.equal((await call(headers, undefined, 'GET')).status, 403);
@@ -70,6 +78,17 @@ test('revocation during calculation discards results',async t=>{
  const f=fixture(t),queued=f.jobs.enqueue(f.measurement,f.request);
  await processOneMeasurementCalculation({...f,config:{},storage:{resolve:()=>'/trusted/a.tif'},runCalculation:async(_p,_r,controls)=>{f.database.prepare('UPDATE admin_sessions SET revoked_at=?').run(new Date().toISOString());assert.equal(controls.isLive(),false);return{volumeM3:99};}},'worker');
  const job=f.jobs.get(f.measurement.id,queued.id);assert.equal(job.status,'failed');assert.equal(job.result,null);assert.equal(job.errorCode,'measurement_authorization_lost');
+});
+
+test('authority is rechecked after native source preflight before creating any job', async t => {
+  const f=fixture(t),app=express();app.use(express.json());
+  app.use('/measurements',createMeasurementApi(f.repository,{preflightRaster:async()=>{
+    f.database.prepare('UPDATE admin_sessions SET revoked_at=?').run(new Date().toISOString());
+  }}));
+  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
+  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const response=await fetch(`http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`,{method:'POST',headers:{Authorization:`Bearer ${f.viewerToken}`,'X-Viewer-Admin-Authorization':`Bearer ${f.adminToken}`,'Content-Type':'application/json'},body:JSON.stringify(f.body)});
+  assert.equal(response.status,403);assert.equal(f.jobs.list(f.measurement.id).length,0);
 });
 
 test('reconstruction requires explicit inferred geometry acknowledgement and immutable native source',t=>{

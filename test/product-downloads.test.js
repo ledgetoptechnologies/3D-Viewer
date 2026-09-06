@@ -78,6 +78,20 @@ test('Viewer product routes stream ranges, enforce scope and honor revoked downl
   c.session.permissions.download=false;assert.equal((await fetch(c.base+grant.url,{headers:{Range:'bytes=6-9'}})).status,403);assert.equal((await fetch(base)).status,403);
 });
 
+test('registered orthophoto cutline download streams unchanged geometry and revokes with model download access',async t=>{
+  const c=await fixture(t),relative='odm_orthophoto/cutline.geojson';
+  const body=JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:[[[0,0],[2,0],[2,2],[0,0]]]}}]});
+  fs.mkdirSync(path.join(c.root,'odm_orthophoto'));fs.writeFileSync(path.join(c.root,relative),body);
+  const {discoverAssets}=require('../server/catalogImport'),found=(await discoverAssets(c.root)).assets.find(a=>a.kind==='orthoCutline');
+  c.version.assets.push({...found,id:'cutline',rootKey:'fixture',published:true});
+  const base=`${c.base}/session-products/${c.viewerToken}/model`,list=await(await fetch(base)).json(),product=list.products.find(p=>p.kind==='orthoCutline');
+  assert.ok(product);assert.equal(product.format,'GEOJSON');
+  const grant=await(await fetch(c.base+product.grantUrl,{method:'POST'})).json();
+  const downloaded=await fetch(c.base+grant.url);assert.equal(downloaded.status,200);assert.equal(await downloaded.text(),body);
+  assert.match(downloaded.headers.get('content-disposition'),/attachment; filename="orthoCutline.geojson"/);
+  c.session.permissions.download=false;assert.equal((await fetch(c.base+grant.url)).status,403);
+});
+
 test('staff capability binds output state and exact registered asset without revealing admin bearer',async(t)=>{
   const c=await fixture(t),endpoint=`${c.base}/api/v1/processing/outputs/version/products/ortho/download-grants`,headers={authorization:`Bearer ${c.adminToken}`,'content-type':'application/json'};
   assert.equal((await fetch(endpoint,{method:'POST',headers:{authorization:`Bearer ${c.viewerToken}`,'content-type':'application/json'},body:'{}'})).status,401);

@@ -29,7 +29,7 @@ function publicDerivativeKind(kind) {
   // reviewed derivatives may become client/public assets.
   // Camera positions are a reviewed display companion. Their linked photos
   // remain separately authorized by exact filename and integrity record.
-  return new Set(['glb','tiles','ept','ortho','dsm','dtm','shots']).has(kind);
+  return new Set(['glb','tiles','ept','ortho','orthoCutline','dsm','dtm','shots']).has(kind);
 }
 
 function adminOutputAssetKind(kind) {

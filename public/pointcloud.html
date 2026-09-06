@@ -118,6 +118,7 @@
   <script src="/pointcloud-display.js"></script>
   <script src="/pointcloud-cameras.js"></script>
   <script src="/pointcloud-measurements.js"></script>
+  <script src="/pointcloud-performance.js"></script>
   <script>
     if (!window.LtdsPointCloudHealth?.createPointCloudHealth
       || !window.LtdsPointCloudHealth?.hasVisiblePointCloudNodes) {
@@ -194,6 +195,7 @@
     const { installPotreeMeasurementPrecision } = window.LtdsPointCloudMeasurements;
     installPotreeMeasurementPrecision(Potree, { displayUnits: DISPLAY_UNITS });
     const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
+    window.LtdsPointCloudPerformance.guardRendererResize(viewer.renderer);
     window.viewer = viewer;
     // Potree's EDL renderer composites the point cloud after scene.scene and
     // does not share that pass's depth. Draw cameras in the supported overlay
@@ -228,31 +230,22 @@
     // Budget + device-adaptive LOD
     // --------------------------------------------------------------------
     let cloudMeta = { total: 0, name: 'EPT' };
-    const budgetState = {
-      target: 10_000_000,      // user-set target (via __pcApi.setBudget only)
-      live: 10_000_000,        // what the viewer actually gets; dropped by auto-LOD
-      auto: false
-    };
-    let fpsEMA = 60, lastFrameT = 0;
+    const adaptiveBudget = window.LtdsPointCloudPerformance.createAdaptivePointBudget();
+    const budgetState = adaptiveBudget.state;
+    let fpsEMA = 60;
     (function fpsTrack(t){
       requestAnimationFrame(fpsTrack);
-      if (lastFrameT && t > lastFrameT) {
-        const inst = 1000 / (t - lastFrameT);
-        fpsEMA += (inst - fpsEMA) * 0.1;
-      }
-      lastFrameT = t;
+      const pc = viewer.scene.pointclouds[0];
+      const prior = budgetState.live;
+      const rootPoints = Number(pc?.pcoGeometry?.root?.numPoints) || 0;
+      adaptiveBudget.sample(t, {
+        active: !document.hidden && viewer.renderArea.clientWidth > 0 && !!pc,
+        minimum: Math.max(250_000, rootPoints),
+        visiblePoints: Number(pc?.numVisiblePoints) || 0,
+      });
+      fpsEMA = adaptiveBudget.fps();
+      if (prior !== budgetState.live) viewer.setPointBudget(budgetState.live);
     })(0);
-    setInterval(() => {
-      if (fpsEMA < 24 && budgetState.live > 1_500_000) {
-        budgetState.live = Math.max(1_500_000, Math.floor(budgetState.live * 0.75));
-        viewer.setPointBudget(budgetState.live);
-        budgetState.auto = budgetState.live < budgetState.target;
-      } else if (fpsEMA > 50 && budgetState.live < budgetState.target) {
-        budgetState.live = Math.min(budgetState.target, Math.floor(budgetState.live * 1.25));
-        viewer.setPointBudget(budgetState.live);
-        budgetState.auto = budgetState.live < budgetState.target;
-      }
-    }, 2000);
 
     // --------------------------------------------------------------------
     // Insertion lifecycle tracking shared by the control API and the
@@ -286,16 +279,15 @@
     viewer.volumeTool.addEventListener('end_inserting_volume', stripEarthControls);
     viewer.addEventListener('cancel_insertions', stripEarthControls);
 
-    // Live visible-point sample: Potree.numNodesLoading is a non-updating
-    // static export and pc.numVisiblePoints only refreshes during node loads,
-    // so poll it — same cadence as the status line.
+    // Read Potree's per-frame visibility counters at the bounded HUD cadence.
+    // Potree.numNodesLoading is a non-updating static export; do not use it.
     budgetState.points = 0;
     setInterval(() => {
       const pc = viewer.scene.pointclouds[0];
       if (hasVisiblePointCloudNodes(pc)) {
-        if (pc.numVisiblePoints) budgetState.points = pc.numVisiblePoints;
+        budgetState.points = Number(pc.numVisiblePoints) || 0;
         pointCloudHealth.pointsVisible();
-      }
+      } else budgetState.points = 0;
     }, 500);
 
     // --------------------------------------------------------------------
@@ -311,11 +303,9 @@
       renewAccess(eptUrl) { pointCloudAccess?.renewed(eptUrl); },
       accessUnavailable() { pointCloudAccess?.unavailable(); },
       setBudget(m) {
+        if (!Number.isFinite(Number(m))) return;
         const v = Math.max(1, Math.min(20, Number(m))) * 1e6;
-        budgetState.target = v;
-        budgetState.live = v;
-        viewer.setPointBudget(v);
-        budgetState.auto = false;
+        viewer.setPointBudget(adaptiveBudget.setTarget(v));
       },
       setSize(v) { eachMat(mat => { mat.size = parseFloat(v); }); },
       setSizing() {
@@ -390,8 +380,10 @@
       const budg = (budgetState.live / 1e6).toFixed(1).replace(/\.0$/, '');
       const ptsPrefix = cloudMeta.total ? cloudMeta.total.toLocaleString('en-US') + ' pts · ' : '';
       statusEl.textContent =
-        ptsPrefix + vis + ' visible · budget ' + budg + 'M' +
-        (budgetState.auto ? ' auto' : '') + ' · ' + Math.round(fpsEMA) + ' fps';
+        ptsPrefix + vis + ' visible · active budget ' + budg + 'M / ' +
+        (budgetState.target / 1e6).toFixed(1).replace(/\.0$/, '') + 'M requested' +
+        (budgetState.auto ? ' (adaptive)' : '') + ' · ' + Math.round(fpsEMA) + ' fps' +
+        ' · ' + (viewer.scene.pointclouds[0]?.visibleNodes?.length || 0) + ' nodes';
     }
     setInterval(renderStatus, 500);
 

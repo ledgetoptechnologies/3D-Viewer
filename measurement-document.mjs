@@ -42,15 +42,18 @@ export function validateMeasurementGeometry(record) {
   }
   return metrics;
 }
+const measurementDecimal = new Intl.NumberFormat('en-US',{minimumFractionDigits:3,maximumFractionDigits:3});
+const measurementInteger = new Intl.NumberFormat('en-US',{maximumFractionDigits:0});
 export function measurementValue(value, power = 1, units = 'imperial') {
   if (!Number.isFinite(value)) return 'Unavailable';
+  const decimal = n => measurementDecimal.format(n);
   const choices = { imperial: [1 / 0.3048, 'ft'], feet: [1 / 0.3048, 'ft'], yards: [1 / 0.9144, 'yd'], metric: [1, 'm'], centimeters: [100, 'cm'] };
   if (power === 1 && units === 'imperial') {
     const total = Math.round(Math.abs(value) / 0.0254 * 1000) / 1000;
-    return `${value < 0 ? '−' : ''}${Math.floor(total / 12)}′ ${(total % 12).toFixed(3)}″`;
+    return `${value < 0 ? '−' : ''}${measurementInteger.format(Math.floor(total / 12))}′ ${decimal(total % 12)}″`;
   }
   const [factor, suffix] = choices[units] || choices.imperial;
-  return `${(value * factor ** power).toFixed(3)} ${suffix}${power === 2 ? '²' : power === 3 ? '³' : ''}`;
+  return `${decimal(value * factor ** power)} ${suffix}${power === 2 ? '²' : power === 3 ? '³' : ''}`;
 }
 const csvCell = value => { let s = String(value ?? ''); if (/^[=+@\-\t\r]/.test(s)) s = `'${s}`; return `"${s.replaceAll('"', '""')}"`; };
 export function exportMeasurements(records, format, { toLonLat, units = 'imperial' } = {}) {

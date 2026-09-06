@@ -14,7 +14,7 @@ const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 // Execute shipped interaction code with DOM/rendering seams. This validates
 // event routing and state, not pixels or browser-specific pointer compatibility.
 class Element {
-  constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.handlers=new Map();this.queries=new Map();this.dataset={};this.style={};this.classList={add(){}};this.innerHTML='';this.textContent='';this.value='';this.attributes={};}
+  constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.handlers=new Map();this.queries=new Map();this.dataset={};this.style={};const classes=new Set();this.classList={add(...names){names.forEach(n=>classes.add(n));},remove(...names){names.forEach(n=>classes.delete(n));},toggle(n,on){on?classes.add(n):classes.delete(n);},contains:n=>classes.has(n)};this.innerHTML='';this.textContent='';this.value='';this.attributes={};}
   append(...nodes){this.children.push(...nodes);for(const node of nodes)node.parentElement=this;}
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(n=>n!==this);}
   setAttribute(k,v){this.attributes[k]=v;}
@@ -34,7 +34,7 @@ function fixture(){
   let mode='model',permitted=true,picks=0;
   const context=()=>({mode,element:canvas,host,pick:e=>{picks++;return[e.clientX,e.clientY,0];},project:p=>p.slice(0,2)});
   const scope=vm.createContext({...geometry,createMeasurementStore,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,console,
-    setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,window:windowRef});
+    setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000},window:windowRef});
   vm.runInContext(uiSource.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
   const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{}});
   const controls=panel.children[0],svg=()=>host.children.find(node=>node.tagName==='SVG');
@@ -55,6 +55,38 @@ test('Shift navigation does not consume pointer gestures or add measurement vert
   const f=fixture();f.workspace.setTool('area');f.click(10,10);const before=f.workspace.getDraft().vertices.length;
   const down=event(40,40,{shiftKey:true});f.canvas.fire('pointerdown',down);f.canvas.fire('pointermove',event(90,90,{shiftKey:true,buttons:1}));f.canvas.fire('pointerup',event(90,90,{shiftKey:true}));
   assert.equal(down.stopped,undefined);assert.equal(f.workspace.getDraft().vertices.length,before);f.workspace.dispose();
+});
+
+test('populated overlay clears when the destination collection is empty in either direction',async()=>{
+  for(const [from,to,collection] of [['model','ortho','spatial3d'],['ortho','model','map']]){
+    const f=fixture();f.setMode(from);f.workspace.tick();await f.workspace.store.save({id:crypto.randomUUID(),name:'Only original view',kind:'distance',collection,vertices:[[10,10,0],[100,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});f.workspace.tick();assert.match(f.svg().innerHTML,/Only original view/);
+    f.workspace.modeChanged();f.setMode(to);f.workspace.tick();assert.equal(f.svg().innerHTML,'');assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/No measurements/);f.workspace.dispose();
+  }
+});
+
+test('preview bursts perform one bounded pick and exact clicks remain independent',()=>{
+  const f=fixture();f.workspace.setTool('area');const start=f.picks();
+  for(let i=0;i<100;i++)f.canvas.fire('pointermove',event(i,100));assert.equal(f.picks(),start);
+  f.workspace.tick();assert.equal(f.picks(),start+1);f.workspace.tick();assert.equal(f.picks(),start+1);
+  f.click(50,60);assert.deepEqual(Array.from(f.workspace.getDraft().vertices[0]),[50,60,0]);f.workspace.dispose();
+});
+
+test('measurement cursor communicates placement, Shift navigation and vertex editing then restores',()=>{
+  const f=fixture();f.canvas.style.cursor='grab';f.workspace.setTool('area');assert.equal(f.canvas.style.cursor,'crosshair');
+  f.windowRef.fire('keydown',event(0,0,{key:'Shift'}));assert.equal(f.canvas.style.cursor,'grab');f.windowRef.fire('keyup',event(0,0,{key:'Shift'}));
+  f.windowRef.fire('keydown',event(0,0,{code:'Space'}));assert.equal(f.canvas.style.cursor,'move');f.workspace.setTool('none');assert.equal(f.canvas.style.cursor,'grab');f.workspace.dispose();
+});
+
+test('newest records precede older rows and export selection is explicitly labeled',async()=>{
+  const f=fixture(),r={kind:'distance',collection:'spatial3d',vertices:[[10,10,0],[100,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
+  await f.workspace.store.save({...r,id:crypto.randomUUID(),name:'Earlier'});await f.workspace.store.save({...r,id:crypto.randomUUID(),name:'Latest'});
+  const html=f.controls.querySelector('[data-m-list]').innerHTML;assert.ok(html.indexOf('Latest')<html.indexOf('Earlier'));assert.match(html,/> Export<\/label>/);f.workspace.dispose();
+});
+
+test('crowded overview labels are bounded and selected measurement is prioritized without losing records',async()=>{
+  const f=fixture(),ids=[];for(let i=0;i<12;i++){const id=crypto.randomUUID();ids.push(id);await f.workspace.store.save({id,name:`Overlay ${i}`,kind:'distance',collection:'spatial3d',vertices:[[30,30,0],[70,70,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});}
+  f.workspace.tick();assert.ok((f.svg().innerHTML.match(/<text /g)||[]).length<12);
+  f.controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:'select'}}:selector==='[data-record]'?{dataset:{record:ids[0]}}:null}});f.workspace.tick();assert.match(f.svg().innerHTML,/Overlay 0/);assert.equal(f.workspace.store.records.size,12);f.workspace.dispose();
 });
 
 test('Backspace undoes committed points, ignores typed fields, and Space drag edits a vertex',()=>{

@@ -9,12 +9,13 @@ const interactive = event => event.target?.closest?.('input,textarea,select,butt
 const savedUnits = {imperial:'imperial',feet:'ft',yards:'yd',metric:'m',centimeters:'cm'};
 const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yards',metric:'metric',m:'metric',cm:'centimeters'};
 
-export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, adminRequest, onAccessLost=()=>{} }) {
+export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, adminRequest, onAccessLost=()=>{}, accessGeneration=()=>0 }) {
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
   const selectedExports=new Set(),reportDialogs=new Set();
   const metricCache=new WeakMap();
   let adminAllowed=false,activeDialog=null,invalidated=false,viewGeneration=0,dialogGeneration=0;
-  const store=createMeasurementStore({token,changed:renderPanel});
+  const store=createMeasurementStore({token,accessGeneration,changed:renderPanel});
+  let pendingPick=null,lastPickAt=0,cursorOwner=null,previousCursor='';
   const allowed=()=>permitted()&&!invalidated&&!store.isInvalidated?.();
   const message=document.createElement('p');message.className='measurement-message';message.setAttribute('role','status');
   const controls=document.createElement('div');controls.className='measurement-workspace';
@@ -22,7 +23,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     <div class="measurement-actions"><button data-m="finish">Finish</button><button data-m="undo">Undo point</button><button data-m="edit">Edit selected</button><button data-m="focus">Focus selected</button></div>
     <p class="hint">Shift: navigate · Backspace: undo · Space-drag: move vertex · Enter / Esc / right-click: finish</p>
     <p class="hint">Measurements are private to you. Public-link changes reset on refresh. Display precision is not survey accuracy.</p>
-    <div data-m-list></div><button data-m="reload">Reload saved measurements</button>
+    <p class="hint measurement-list-caption">Saved measurements · newest first. Check Export to include a record; Hide only changes visibility.</p>
+    <div data-m-list role="region" aria-label="Saved measurements" tabindex="0"></div><button data-m="reload">Reload saved measurements</button>
     <div class="measurement-actions"><select data-m="format" aria-label="Export format"><option value="csv">CSV summary</option><option value="json">JSON data</option><option value="dxf">DXF (meters)</option><option value="geojson">GeoJSON</option></select><button data-m="export">Export selected / visible</button></div>
     <div class="measurement-actions"><button data-m="screenshot">Save view PNG</button><button data-m="report">Print / PDF report</button></div>`;
   panel.append(controls,message);
@@ -30,7 +32,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const densityNotice=document.createElement('p');densityNotice.className='hint';controls.append(densityNotice);
   function metrics(record){if(record===draft)return measurementMetrics(record);let value=metricCache.get(record);if(!value){value=measurementMetrics(record);metricCache.set(record,value);}return value;}
   function tell(text){message.textContent=text;}
-  function records(){if(!allowed())return [];const family=measurementCollection(context()?.mode);return [...store.records.values()].filter(r=>r.collection===family);}
+  function records(){if(!allowed())return [];const family=measurementCollection(context()?.mode);return [...store.records.values()].filter(r=>r.collection===family).reverse().sort((a,b)=>(Date.parse(b.createdAt)||0)-(Date.parse(a.createdAt)||0));}
   function summary(record){const m=metrics(record);return record.kind==='distance'?measurementValue(m.lengthM,1,units):`${measurementValue(m.horizontalAreaM2,2,units)} horizontal · ${measurementValue(m.lengthM,1,units)} perimeter${m.planarAreaM2!==null&&record.collection!=='map'?` · ${measurementValue(m.planarAreaM2,2,units)} planar`:''}`;}
   function calculationSummary(record){
     const r=record.results;if(!r||r.status==='geometry-only')return 'Vertex geometry only; no surface or object volume calculated.';
@@ -41,15 +43,22 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(disposed)return;
     if(store.isInvalidated?.()&&!invalidated){invalidate('Personal measurements unavailable. Restore access and reload your measurements.');return;}
     const list=controls.querySelector('[data-m-list]');
-    list.innerHTML=records().map(r=>`<article class="measurement-row ${selected===r.id?'selected':''}" data-record="${escape(r.id)}"><div><input type="checkbox" data-m="export-check" aria-label="Select ${escape(r.name)} for export" ${selectedExports.has(r.id)?'checked':''}><button data-m="select">${escape(r.name)}</button></div><small>${escape(summary(r))}</small><small>${escape(store.statuses.get(r.id)||'')}</small><div class="measurement-actions"><button data-m="visibility">${r.visible===false?'Show':'Hide'}</button><button data-m="rename">Rename</button><button data-m="delete">Delete</button>${r.kind==='polygon'?'<button data-m="volume">Surface cut/fill</button>':''}${r.kind==='polygon'&&adminAllowed?'<button data-m="admin-volume">Admin calculation</button>':''}</div>${Number.isFinite(r.results?.cutM3)?`<small>${escape(r.results.status||'Calculated')}: cut ${escape(measurementValue(r.results.cutM3,3,units))} · fill ${escape(measurementValue(r.results.fillM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small>${escape(r.results.status||'Calculated')}: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint">No measurements in this view group.</p>';
+    list.dataset.empty=String(records().length===0);
+    const scrollTop=list.scrollTop;
+    list.innerHTML=records().map(r=>`<article class="measurement-row ${selected===r.id?'selected':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="select" aria-pressed="${selected===r.id}">${escape(r.name)}</button><label class="measurement-export-check"><input type="checkbox" data-m="export-check" aria-label="Select ${escape(r.name)} for export" ${selectedExports.has(r.id)?'checked':''}> Export</label></div><small>${escape(summary(r))}</small><small role="status">${escape(store.statuses.get(r.id)||'')}</small><div class="measurement-actions"><button data-m="visibility">${r.visible===false?'Show':'Hide'}</button><button data-m="rename">Rename</button><button data-m="delete">Delete</button>${r.kind==='polygon'?'<button data-m="volume">Surface cut/fill</button>':''}${r.kind==='polygon'&&adminAllowed?'<button data-m="admin-volume">Admin calculation</button>':''}</div>${Number.isFinite(r.results?.cutM3)?`<small>${escape(r.results.status||'Calculated')}: cut ${escape(measurementValue(r.results.cutM3,3,units))} · fill ${escape(measurementValue(r.results.fillM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small>${escape(r.results.status||'Calculated')}: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint">No measurements in this view group.</p>';
+    list.scrollTop=scrollTop;
+    for(const action of ['finish','undo'])controls.querySelector(`[data-m="${action}"]`).disabled=!draft;
+    for(const action of ['edit','focus'])controls.querySelector(`[data-m="${action}"]`).disabled=!store.records.has(selected);
     controls.querySelector('[data-m="reload"]').hidden=!token();
   }
   function draftRecord(){return {...draft,vertices:draft.vertices.map(p=>p.slice())};}
-  function disarm(){draft=null;editing=false;cursor=null;gesture=null;space=false;toolChanged('none');}
+  function releaseCursor(){if(cursorOwner){cursorOwner.style.cursor=previousCursor;cursorOwner=null;}}
+  function updateCursor(){if(!bound?.element)return;const element=bound.element;element.classList.toggle('measurement-placing',!!draft&&!shift);element.classList.toggle('measurement-navigating',!!draft&&shift);element.classList.toggle('measurement-editing',!!draft&&!shift&&(editing||space));if(draft){if(cursorOwner!==element){releaseCursor();cursorOwner=element;previousCursor=element.style.cursor||'';}element.style.cursor=shift?'grab':editing||space?'move':'crosshair';}else releaseCursor();}
+  function disarm(){draft=null;editing=false;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
   function closeReports(){for(const dialog of [...reportDialogs])dialog.retire();}
   function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;closeReports();}
-  function invalidate(reason='Personal measurements unavailable.'){
-    if(invalidated)return;invalidated=true;viewGeneration++;ready=false;adminAllowed=false;selected=null;selectedExports.clear();disarm();closeDialogs();store.invalidate?.();svg.innerHTML='';lastSvg='';controls.hidden=true;tell(reason);onAccessLost();
+  function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
+    if(invalidated)return;invalidated=true;viewGeneration++;ready=false;adminAllowed=false;selected=null;selectedExports.clear();disarm();closeDialogs();store.invalidate?.();svg.innerHTML='';lastSvg='';controls.hidden=true;tell(reason);if(notify)onAccessLost();
   }
   async function finish(){
     if(!draft)return;
@@ -67,9 +76,9 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const family=measurementCollection(context()?.mode),kind=tool==='distance'?'distance':'polygon';
     const sourceMode=context()?.mode;
     draft={id:crypto.randomUUID(),name:`${kind==='distance'?'Distance':'Polygon'} ${records().length+1}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
-    editing=false;toolChanged(tool==='volume'?'area':tool);tell('Click to place points. Hold Shift to navigate.');
+    editing=false;updateCursor();renderPanel();toolChanged(tool==='volume'?'area':tool);tell('Click to place points. Hold Shift to navigate.');
   }
-  function editRecord(record){if(!record)return;draft=structuredClone(record);editing=true;selected=record.id;cursor=null;toolChanged('edit');tell('Drag a vertex to adjust it. Shift navigates; Finish saves.');}
+  function editRecord(record){if(!record)return;draft=structuredClone(record);editing=true;selected=record.id;cursor=null;updateCursor();renderPanel();toolChanged('edit');tell('Drag a vertex to adjust it. Shift navigates; Finish saves.');}
   function nearest(event){if(!draft)return -1;const rect=bound.element.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;let best=-1,d=18;draft.vertices.forEach((p,i)=>{const q=bound.project(p);if(q){const n=Math.hypot(q[0]-x,q[1]-y);if(n<d){best=i;d=n;}}});return best;}
   function stop(event){event.preventDefault();event.stopImmediatePropagation();}
   function pointerDown(event){
@@ -82,14 +91,15 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function pointerMove(event){
     if(!allowed()||!draft||event.shiftKey||shift||interactive(event))return;
     if(event.buttons && !gesture)return;
-    const point=bound.pick(event);
-    if(point){if(gesture?.index>=0)draft.vertices[gesture.index]=point;else if(!editing)cursor=point;}
+    pendingPick={clientX:event.clientX,clientY:event.clientY};
     if(gesture)stop(event);
   }
   function pointerUp(event){
     if(!allowed()){disarm();return;}
     if(!gesture)return;
     const g=gesture;gesture=null;stop(event);
+    pendingPick=null;
+    if(g.index>=0){const point=bound.pick(event);if(point)draft.vertices[g.index]=point;}
     try{bound.element.releasePointerCapture?.(event.pointerId);}catch{}
     if(event.shiftKey||Math.hypot(event.clientX-g.x,event.clientY-g.y)>6||g.index>=0)return;
     if(g.button===2){void finish();return;}
@@ -101,21 +111,23 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   }
   function keyDown(event){
     if(field(event))return;
-    if(event.key==='Shift')shift=true;
+    if(event.key==='Shift'){shift=true;pendingPick=null;updateCursor();}
     if(!draft)return;
-    if(event.code==='Space'){space=true;stop(event);}
+    if(event.code==='Space'){space=true;updateCursor();stop(event);}
     else if(event.key==='Backspace'){draft.vertices.pop();cursor=null;stop(event);}
     else if(event.key==='Escape'||event.key==='Enter'){stop(event);void finish();}
   }
-  function keyUp(event){if(event.code==='Space')space=false;if(event.key==='Shift')shift=false;}
-  function blur(){gesture=null;space=false;shift=false;cursor=null;}
+  function keyUp(event){if(event.code==='Space')space=false;if(event.key==='Shift')shift=false;updateCursor();}
+  function blur(){gesture=null;space=false;shift=false;cursor=null;pendingPick=null;updateCursor();}
   const contextMenu=e=>{if(draft&&!e.shiftKey)stop(e);};
   function bind(next){
     if(bound?.element===next?.element){bound=next;return;}
     if(bound){for(const [event,fn]of handlers)bound.element.removeEventListener(event,fn,true);bound.element.ownerDocument.defaultView.removeEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.removeEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.removeEventListener('blur',blur);}
-    svg.remove();bound=next;lastSvg='';
+    bound?.element.classList.remove('measurement-placing','measurement-navigating','measurement-editing');
+    releaseCursor();svg.remove();svg.innerHTML='';bound=next;lastSvg=null;pendingPick=null;
     if(!bound)return;
     bound.host.append(svg);
+    updateCursor();
     for(const [event,fn]of handlers)bound.element.addEventListener(event,fn,true);
     bound.element.ownerDocument.defaultView.addEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.addEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.addEventListener('blur',blur);
   }
@@ -127,9 +139,10 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(collection!==lastCollection){lastCollection=collection;selected=null;selectedExports.clear();renderPanel();}
     if(!permitted()){invalidate('Personal measurements are hidden until access is restored.');return;}
     if(!bound||!allowed()){if(!allowed()&&draft)disarm();svg.innerHTML='';lastSvg='';return;}
+    if(pendingPick&&draft&&!shift&&performance.now()-lastPickAt>=66){const event=pendingPick;pendingPick=null;lastPickAt=performance.now();const point=bound.pick(event);if(point){if(gesture?.index>=0)draft.vertices[gesture.index]=point;else if(!editing)cursor=point;}}
     const rect=bound.element.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${rect.width} ${rect.height}`);
     const all=records().filter(r=>r.visible!==false&&r.id!==draft?.id).sort((a,b)=>Number(b.id===selected)-Number(a.id===selected));if(draft)all.unshift(draft);
-    let markup='',displayVertices=0,labelCount=0,decluttered=false;
+    let markup='',displayVertices=0,labelCount=0,decluttered=false;const labelBoxes=[];
     for(const r of all){
       if(displayVertices+r.vertices.length>5000){decluttered=true;continue;}
       displayVertices+=r.vertices.length;
@@ -139,8 +152,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       const points=positions.map(p=>`${p[0]},${p[1]}`).join(' '),closed=r.kind==='polygon'&&positions.length>=3;
       markup+=`<${closed?'polygon':'polyline'} points="${points}" fill="${closed?'#ee5007':'none'}" fill-opacity="0.12" stroke="${r.id===selected?'#fff':'#f8cb2e'}" stroke-width="2"/>`;
       for(let i=0;i<r.vertices.length;i++){const p=positions[i];markup+=`<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="#ee5007" stroke="#fff" stroke-width="1"/>`;}
-      const text=(x,y,value)=>{if(++labelCount>1000){decluttered=true;return '';}return `<text x="${x}" y="${y}" text-anchor="middle" fill="white" stroke="#121212" stroke-width="4" paint-order="stroke" font-size="12" font-family="sans-serif">${escape(value)}</text>`;};
-      if(vertices.length>=2){const lengths=(r===draft?measurementMetrics({...r,vertices}):metrics(r)).edgeLengthsM;for(let i=0;i<lengths.length;i++){const a=positions[i],b=positions[(i+1)%positions.length];markup+=text((a[0]+b[0])/2,(a[1]+b[1])/2-7,measurementValue(lengths[i],1,units));}}
+      const text=(x,y,value)=>{const half=String(value).length*3.5+5,box=[x-half,y-13,x+half,y+4];if(++labelCount>200||labelBoxes.some(b=>box[0]<b[2]&&box[2]>b[0]&&box[1]<b[3]&&box[3]>b[1])){decluttered=true;return '';}labelBoxes.push(box);return `<text x="${x}" y="${y}" text-anchor="middle" fill="white" stroke="#121212" stroke-width="4" paint-order="stroke" font-size="12" font-family="sans-serif">${escape(value)}</text>`;};
+      if(vertices.length>=2){const lengths=(r===draft?measurementMetrics({...r,vertices}):metrics(r)).edgeLengthsM;for(let i=0;i<lengths.length;i++){const a=positions[i],b=positions[(i+1)%positions.length];if(Math.hypot(a[0]-b[0],a[1]-b[1])<90&&r!==draft&&r.id!==selected){decluttered=true;continue;}markup+=text((a[0]+b[0])/2,(a[1]+b[1])/2-7,measurementValue(lengths[i],1,units));}}
       if(r!==draft){const center=positions.reduce((s,p)=>[s[0]+p[0]/positions.length,s[1]+p[1]/positions.length],[0,0]);markup+=text(center[0],center[1]+15,r.name);if(closed)markup+=text(center[0],center[1]+30,measurementValue(measurementMetrics(r).horizontalAreaM2,2,units)+' horizontal');}
       if(r!==draft&&(Number.isFinite(r.results?.volumeM3)||Number.isFinite(r.results?.cutM3))){
         const center=positions.reduce((s,p)=>[s[0]+p[0]/positions.length,s[1]+p[1]/positions.length],[0,0]);
@@ -172,7 +185,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     dialog.retire=()=>{if(!reportDialogs.delete(dialog))return;dialog.querySelector('img').removeAttribute('src');dialog.innerHTML='';dialog.remove();};
     reportDialogs.add(dialog);dialog.querySelector('img').src=canvas.toDataURL('image/png');document.body.append(dialog);dialog.showModal();dialog.querySelector('[data-close]').onclick=()=>dialog.retire();dialog.onclose=()=>dialog.retire();dialog.querySelector('[data-print]').onclick=()=>{if(disposed||!allowed()||generation!==viewGeneration){dialog.retire();return;}window.print();};
   }
-  controls.addEventListener('change',event=>{if(event.target.dataset.m==='units'){units=event.target.value;const record=store.records.get(selected);if(record&&!draft)void store.save({...record,displayPreferences:{...record.displayPreferences,units:savedUnits[units]}}).catch(error=>tell(error.message));renderPanel();}if(event.target.dataset.m==='export-check'){const id=event.target.closest('[data-record]').dataset.record;event.target.checked?selectedExports.add(id):selectedExports.delete(id);}});
+  controls.addEventListener('change',event=>{if(event.target.dataset.m==='units'){units=event.target.value;const record=store.records.get(selected);if(record&&!draft)void store.patch(record,{displayPreferences:{...record.displayPreferences,units:savedUnits[units]}}).catch(error=>tell(error.message));renderPanel();}if(event.target.dataset.m==='export-check'){const id=event.target.closest('[data-record]').dataset.record;event.target.checked?selectedExports.add(id):selectedExports.delete(id);}});
   controls.addEventListener('click',async event=>{
     if(!allowed()){tell('Access to these personal measurements is unavailable.');return;}
     const action=event.target.closest('[data-m]')?.dataset.m,id=event.target.closest('[data-record]')?.dataset.record,record=store.records.get(id);
@@ -183,11 +196,13 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='focus'){const chosen=store.records.get(selected);if(chosen)context()?.focus?.(chosen.vertices);else tell('Select a measurement name first.');}
       if(action==='select'){selected=id;if(restoredUnits[record.displayPreferences?.units]){units=restoredUnits[record.displayPreferences.units];controls.querySelector('[data-m="units"]').value=units;}renderPanel();}
       if(action==='reload'){const notice=await store.load();ready=true;tell(notice||'Saved measurements reloaded.');}
-      if(action==='visibility')await store.save({...record,visible:record.visible===false});
+      if(action==='visibility')await store.patch(record,{visible:record.visible===false});
       if(action==='delete'){await store.remove(id);selectedExports.delete(id);if(draft?.id===id)disarm();}
       if(action==='rename'){
-        const row=event.target.closest('[data-record]'),input=document.createElement('input');input.value=record.name;input.maxLength=160;input.setAttribute('aria-label','Measurement name');event.target.replaceWith(input);input.focus();input.select();
-        input.addEventListener('keydown',async e=>{if(e.key==='Escape')renderPanel();if(e.key==='Enter'&&input.value.trim()){try{await store.save({...record,name:input.value.trim()});}catch(error){tell(error.message);}}});
+        const row=event.target.closest('[data-record]'),editor=document.createElement('form');editor.className='measurement-rename';editor.innerHTML='<label>Measurement name <input name="name" maxlength="160" required></label><div class="measurement-actions"><button type="submit">Save name</button><button type="button" data-cancel>Cancel</button></div>';
+        const input=editor.querySelector('input');input.value=record.name;row.append(editor);input.focus();input.select();
+        editor.querySelector('[data-cancel]').onclick=()=>renderPanel();editor.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();renderPanel();}};
+        editor.onsubmit=async e=>{e.preventDefault();const name=input.value.trim();if(!name)return;editor.querySelector('[type=submit]').disabled=true;try{await store.patch(record,{name});tell('Measurement name saved.');}catch(error){tell(error.message);editor.querySelector('[type=submit]').disabled=false;}};
       }
       if(action==='export'){const format=controls.querySelector('[data-m="format"]').value;download(exportMeasurements(exportRecords(),format,{toLonLat,units}),`measurements.${format}`,format==='json'||format==='geojson'?'application/json':'text/plain');}
       if(action==='screenshot'){const generation=viewGeneration,displayUnits=units;const canvas=await screenshot();const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(disposed||!allowed()||generation!==viewGeneration||displayUnits!==units)throw new Error('The view changed during capture. Capture the current view again.');if(!blob)throw new Error('View capture unavailable.');download(blob,'measured-view.png');}

@@ -86,9 +86,19 @@ export function createMapCameraOverlay(L, {
       // Preserve the original target for measurement paths and map controls.
       // Capture only real pin clicks; ordinary map clicks continue untouched.
       map.getContainer().addEventListener('click', this.click, true);
+      this.hover = event => {
+        const container=map.getContainer();
+        if(!isInteractive()||event.buttons||event.target?.closest?.('.leaflet-control')){this.clearHover();return;}
+        const rect=this.canvas.getBoundingClientRect(),hit=hitCamera(this.frame,event.clientX-rect.left,event.clientY-rect.top)!==null;
+        if(hit){if(!this.hovering)this.previousCursor=container.style.cursor;this.hovering=true;container.style.cursor='pointer';}else this.clearHover();
+      };
+      this.clearHover=()=>{if(this.hovering){map.getContainer().style.cursor=this.previousCursor||'';this.hovering=false;}};
+      map.getContainer().addEventListener('pointermove',this.hover);
+      map.getContainer().addEventListener('pointerleave',this.clearHover);
+      map.getContainer().addEventListener('pointerdown',this.clearHover);
       // A bounded DOM control exposes ALL captures, including overlapping and
       // offscreen pins, without thousands of tab stops or hidden buttons.
-      this.control = L.control({ position: 'topright' });
+      this.control = L.control({ position: 'bottomleft' });
       this.control.onAdd = () => {
         const container = documentRef.createElement('div'); container.className = 'leaflet-bar';
         this.button = documentRef.createElement('button'); this.button.type = 'button';
@@ -179,6 +189,7 @@ export function createMapCameraOverlay(L, {
       this.pendingFrame = null;
       if (documentRef.activeElement === this.button) this._map?.getContainer().focus?.();
       this._map?.getContainer().removeEventListener('click', this.click, true); this.canvas?.remove(); this.control?.remove();
+      this.clearHover?.();this._map?.getContainer().removeEventListener('pointermove',this.hover);this._map?.getContainer().removeEventListener('pointerleave',this.clearHover);this._map?.getContainer().removeEventListener('pointerdown',this.clearHover);
       if (this.canvas) { this.canvas.width = 0; this.canvas.height = 0; }
       if (this.sprite) { this.sprite.width = 0; this.sprite.height = 0; }
       this.canvas = this.context = this.sprite = this.control = this.button = this._map = null;

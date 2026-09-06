@@ -2,13 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
+import {rasterDirectoryValue,rasterDecodedBlockBytes,validateRasterEncodedBlocks} from '../raster-source-metadata.mjs';
 const main=readFileSync(new URL('../main.js',import.meta.url),'utf8');
 const start=main.indexOf('async function calculateSavedMeasurementSurface('),end=main.indexOf('function installMeasurementWorkspace()',start);
 const record={collection:'spatial3d',kind:'polygon',vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
 function fixture(overrides={}){
   const state={reads:[],closed:0,calculated:null};
   const image={getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616,VerticalUnitsGeoKey:9001}),fileDirectory:{BitsPerSample:[32],RowsPerStrip:2},getBoundingBox:()=>[0,0,2,2],getWidth:()=>2,getHeight:()=>2,getResolution:()=>[1,-1],getGDALNoData:()=>'-9999',readRasters:async options=>{state.reads.push(options);return [new Float32Array([0,2,4,6])];},...overrides};
-  const scope=vm.createContext({DSM_URL:'/native-dsm',DTM_URL:null,requestedVolumeSurface:()=>({type:'dsm',url:'/native-dsm'}),openGeoTiff:async(_url,options)=>{assert.equal(options.allowFullFile,false);return{getImage:async i=>{assert.equal(i,0);return image;},close:async()=>{state.closed++;}};},parseFiniteGdalNoData:Number,geoPool:null,PROJECT:{activeVersion:{id:'version'}},calculateBrowserSurface:async options=>{state.calculated=options;return{cutM3:12,warnings:[]};},DOMException});
+  const scope=vm.createContext({rasterDirectoryValue,rasterDecodedBlockBytes,validateRasterEncodedBlocks,DSM_URL:'/native-dsm',DTM_URL:null,requestedVolumeSurface:()=>({type:'dsm',url:'/native-dsm'}),openGeoTiff:async(_url,options)=>{assert.equal(options.allowFullFile,false);return{getImage:async i=>{assert.equal(i,0);return image;},close:async()=>{state.closed++;}};},parseFiniteGdalNoData:Number,geoPool:null,PROJECT:{activeVersion:{id:'version'}},calculateBrowserSurface:async options=>{state.calculated=options;return{cutM3:12,warnings:[]};},DOMException});
+  scope.preflightBrowserRasterHeader=async()=>{};
   vm.runInContext(main.slice(start,end),scope);return{state,calculate:(r=record,options)=>scope.calculateSavedMeasurementSurface(r,options)};
 }
 test('browser source validation rejects bad metadata before decoding pixels or statistics',async()=>{

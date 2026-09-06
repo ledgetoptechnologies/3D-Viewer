@@ -1,4 +1,4 @@
-export function createMeasurementStore({ token, fetcher = fetch, changed = () => {} }) {
+export function createMeasurementStore({ token, accessGeneration = () => 0, fetcher = fetch, changed = () => {} }) {
   const records = new Map(), statuses = new Map(), tombstones = new Set();
   let queue = Promise.resolve(), enabled = false, persistenceAllowed = null, generation = 0, invalidated = false, authenticated = !!token();
   const pending = new Set();
@@ -20,13 +20,19 @@ export function createMeasurementStore({ token, fetcher = fetch, changed = () =>
   async function request(path, method = 'GET', body, expected=generation) {
     check(expected,{allowReload:true});
     const credential = token();
+    const requestedAccessGeneration = accessGeneration();
     if (!credential) throw new Error('Personal saving requires an authenticated Viewer session.');
     authenticated=true;
     const controller=new AbortController();pending.add(controller);
     try {
       const response = await fetcher(`/api/v1/measurements${path}`, {method,cache:'no-store',credentials:'same-origin',signal:controller.signal,headers:{Authorization:`Bearer ${credential}`,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
       check(expected,{allowReload:true});
-      if(response.status===401||response.status===403){invalidate();throw unavailable();}
+      if(response.status===401||response.status===403){
+        // A successful same-person renewal may retain the bearer string. An
+        // earlier request's denial must not revoke that newly verified access.
+        if(requestedAccessGeneration!==accessGeneration())throw Object.assign(new Error('Access was renewed while this request was pending. Retry this measurement action.'),{status:response.status,code:'measurement_obsolete_access'});
+        invalidate();throw unavailable();
+      }
       const result = response.status === 204 ? {} : await response.json();
       check(expected,{allowReload:true});
       if(!response.ok) { const error=new Error(response.status===409?'This measurement changed in another tab. Reload saved measurements before editing again.':result.error||'Measurement request failed.');error.status=response.status;throw error; }
@@ -80,6 +86,21 @@ export function createMeasurementStore({ token, fetcher = fetch, changed = () =>
     save(record) {
       const snapshot=structuredClone(record);
       return schedule(record.id,expected=>persist(snapshot,expected));
+    },
+    patch(record, fields) {
+      // UI field edits are serialized, not full stale snapshots. Validate the
+      // caller now; merge only these explicit fields at execution time against
+      // the last acknowledged revision. Server 409 remains authoritative for
+      // edits made in another tab. Geometry/results keep strict save semantics.
+      const current=records.get(record.id);
+      if(!current||tombstones.has(record.id)||current.revision!==record.revision)return Promise.reject(conflict());
+      const changes=structuredClone(fields);
+      if(Object.keys(changes).some(key=>!['name','visible','displayPreferences'].includes(key)))return Promise.reject(new Error('Unsupported measurement field patch.'));
+      return schedule(record.id,expected=>{
+        const latest=records.get(record.id);
+        if(!latest||tombstones.has(record.id))throw conflict();
+        return persist({...latest,...changes},expected);
+      });
     },
     attachResults(record, results) {
       const snapshot=structuredClone(record),calculated=structuredClone(results);
