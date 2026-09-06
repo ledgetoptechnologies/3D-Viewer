@@ -3741,7 +3741,7 @@ test('browser camera photo fills the window and preserves source pixels through 
         window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:frame.contentWindow,
           data:{source:'ltds-pointcloud',type:'camera-open',correlationId:frame.dataset.correlationId,index:${index}}}));
       })()`);
-      await waitFor(client, `document.querySelector('#photo-img').naturalWidth === ${item.photoWidth} && getComputedStyle(document.querySelector('#photo-img')).opacity === '1'`, `${item.name} original photo did not decode`);
+      await waitFor(client, `document.querySelector('#photo-img').naturalWidth === ${item.photoWidth} && document.querySelector('#photo-img').style.opacity === '1' && getComputedStyle(document.querySelector('#photo-img')).opacity === '1'`, `${item.name} original photo did not decode`);
       const docked = await readPhoto();
       assert.equal(docked.naturalHeight, item.photoHeight);
       assert.equal(docked.source, docked.download, 'preview and download must identify the same original image');
@@ -3815,13 +3815,24 @@ test('browser camera photo fills the window and preserves source pixels through 
       await waitFor(client, `location.pathname === '/view/${grant}' && Boolean(window.__ltds?.tiles()?.root)`, 'permission fixture did not initialize');
       await client.evaluate(`document.querySelector('#layer-cameras').click()`);
       await waitFor(client, 'window.__ltdsCams === 3', 'permission fixture cameras did not load');
+      // A decoded image can expose naturalWidth while its queued load callback
+      // has not installed the download state. Hold the old painted opacity to
+      // exercise that ordering deterministically, rather than relying on CI load.
+      await client.evaluate(`(() => {
+        const img=document.querySelector('#photo-img');
+        img.style.transitionDelay='1s';
+        img.addEventListener('load', event => {
+          const complete=img.onload; event.stopImmediatePropagation();
+          setTimeout(() => complete?.call(img,event),250);
+        },{capture:true,once:true});
+      })()`);
       await client.evaluate(`(() => {
         const frame=document.createElement('iframe');frame.id='pc-iframe';frame.dataset.correlationId='download-permission';frame.style.display='none';
         document.querySelector('#cloud-container').appendChild(frame);
         window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:frame.contentWindow,
           data:{source:'ltds-pointcloud',type:'camera-open',correlationId:frame.dataset.correlationId,index:0}}));
       })()`);
-      await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1536 && getComputedStyle(document.querySelector('#photo-img')).opacity === '1'`, 'permission fixture photo did not decode');
+      await waitFor(client, `document.querySelector('#photo-img').naturalWidth === 1536 && document.querySelector('#photo-img').style.opacity === '1' && getComputedStyle(document.querySelector('#photo-img')).opacity === '1'`, 'permission fixture photo did not decode');
       const photo = await readPhoto();
       assert.equal(photo.downloadVisible, allowed, `${grant} photo-download permission was ignored`);
       assert.equal(photo.source, photo.download); assert.equal(photo.downloadFilename, 'photo-0.jpg');

@@ -73,8 +73,12 @@ unchanged; memory safety limits remain in force.
   lifecycle and photo rendering. This is not a live point-cloud FPS benchmark.
 - Diagnostics hooks were checked against the installed Potree method signatures,
   geometry counts and buffer-upload implementation. Synthetic tests cover
-  aggregation, opt-in activation and restoration when disabled. An actual
-  WebGL-instance diagnostics smoke remains unverified.
+  aggregation, opt-in activation and restoration when disabled. A subsequent
+  actual-Potree smoke in the in-app browser used 64 synthetic points: one node
+  and 64 submitted points, 7.0 ms frame cadence, 0.2 ms update, 0.3 ms render,
+  and zero settled buffer uploads at 620 by 500 pixels. Disabling removed the
+  timing readout while rendering continued. This verifies the hooks, not dense
+  cloud performance. The temporary loopback container and tab were cleaned up.
 - Ignored QA logs: `data/qa/unit-diagnostics-lod-browser.log`,
   `data/qa/unit-diagnostics-build-final.log` and
   `data/qa/unit-diagnostics-tests-final.log`.
@@ -96,6 +100,23 @@ is never silently enabled. Reopening does not calculate or save anything.
 This follow-up passed 34 targeted dialog, automatic-calculation, lifecycle and
 preview tests plus a Vite build; its saved-result state was verified in the
 in-app browser against the synthetic fixture. Production records were untouched.
+
+## Release gate readiness race
+
+The `fc56ddf` release stopped on the existing photo-download permission browser
+test. The fixture could observe decoded image dimensions and computed opacity
+of one before the queued load callback installed the permitted download state.
+The image's opacity transition allowed that computed value even while its
+inline loading opacity was zero. The staff permission reached the callback
+intact; independent review found no production permission override.
+
+A controlled fixture-only delay reproduced the identical assertion failure with
+the old readiness predicate. Waiting for both inline and computed opacity one
+passed the same delayed-load case, retaining the staff-allowed and public-denied
+assertions. Only the test's completion gate and deterministic race fixture changed;
+production authorization was not relaxed. Logs are in
+`data/qa/photo-readiness-race-before.log` and
+`data/qa/photo-readiness-race-after.log`.
 
 ## Remaining acceptance
 
