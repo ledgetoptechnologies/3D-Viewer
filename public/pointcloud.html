@@ -196,6 +196,9 @@
     installPotreeMeasurementPrecision(Potree, { displayUnits: DISPLAY_UNITS });
     const viewer = new Potree.Viewer(document.getElementById('potree_render_area'));
     window.LtdsPointCloudPerformance.guardRendererResize(viewer.renderer);
+    window.LtdsPointCloudPerformance.installViewerActivityGate(viewer, {
+      isActive: () => !document.hidden && viewer.renderArea.clientWidth > 0 && viewer.renderArea.clientHeight > 0,
+    });
     window.viewer = viewer;
     // Potree's EDL renderer composites the point cloud after scene.scene and
     // does not share that pass's depth. Draw cameras in the supported overlay
@@ -209,7 +212,9 @@
     });
     viewer.addEventListener('update', () => pointCloudCameraLayer.updateView());
     viewer.addEventListener('render.pass.perspective_overlay', () => {
-      viewer.renderer.render(cameraOverlayScene, viewer.scene.getActiveCamera());
+      if (pointCloudCameraLayer.group.visible && pointCloudCameraLayer.drawnCount > 0) {
+        viewer.renderer.render(cameraOverlayScene, viewer.scene.getActiveCamera());
+      }
     });
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
@@ -557,11 +562,11 @@
         for (const pointcloud of pcs) {
           if (pointcloud.visible === false) continue;
           try {
-            const point = pointcloud.pick(this.viewer, camera, ray, {
+            const point = window.LtdsPointCloudPerformance.withPointPickCleanup(pointcloud, this.viewer, { performance, measureTimings: Potree.measureTimings }, () => pointcloud.pick(this.viewer, camera, ray, {
               x: mouse.x,
               y: this.dom.clientHeight - mouse.y,
               pickWindowSize: POINT_PICK_WINDOW,
-            });
+            }));
             if (!point?.position || ![point.position.x, point.position.y, point.position.z].every(Number.isFinite)) continue;
             if (point.position.clone().sub(camera.position).dot(ray.direction) <= 0) continue;
             const distance = camera.position.distanceTo(point.position);

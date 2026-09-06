@@ -6,6 +6,7 @@ import {readFileSync} from 'node:fs';
 import * as THREE from 'three';
 import * as geometry from '../measurement-document.mjs';
 import {createMeasurementStore} from '../measurement-store.mjs';
+import {createMeasurementListLayout} from '../measurement-list-layout.mjs';
 
 const uiSource=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 const main=readFileSync(new URL('../main.js',import.meta.url),'utf8');
@@ -33,7 +34,7 @@ function fixture(){
   const panel=documentRef.createElement('section'),canvas=documentRef.createElement('canvas'),host=documentRef.createElement('div'),tools=[];
   let mode='model',permitted=true,picks=0;
   const context=()=>({mode,element:canvas,host,pick:e=>{picks++;return[e.clientX,e.clientY,0];},project:p=>p.slice(0,2)});
-  const scope=vm.createContext({...geometry,createMeasurementStore,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,console,
+  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,console,
     setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000},window:windowRef});
   vm.runInContext(uiSource.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
   const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{}});

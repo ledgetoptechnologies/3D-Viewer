@@ -1,6 +1,8 @@
 # Elevation profile / cross-section interaction
 
-Status: researched design, not an implemented profile feature in this release.
+Status: the volume inspector now implements a **reduced-sample corridor preview**
+with linked plan/chart inspection. The native-resolution line-profile feature
+described below remains a proposed follow-up, not a completed feature.
 The user's September 6 example clarifies that “cut line” means a sampled height
 profile across a pile, not the orthophoto footprint download or volume base plane.
 
@@ -12,6 +14,26 @@ profile across a pile, not the orthophoto footprint download or volume base plan
 - [ArcGIS elevation-profile interaction](https://doc.arcgis.com/en/arcgis-online/get-started/scene-elevation-profile.htm): editable multi-segment lines and separately identified elevation sources. This is an interaction reference, not a dependency or a claim about Site Scan's exact current implementation.
 
 ## Proposed Viewer behavior
+
+### Implemented volume-inspector subset (September 6 follow-up)
+
+Finishing a polygon first saves its geometry, then opens the surface inspector
+and requests the existing authorized browser/native-raster calculation. It does
+not grant processing permission or start a server processing job. Missing source
+or unverified vertical units remain explicit errors; unit confirmation is never
+automatically checked.
+
+The inspector filters the calculation's retained preview samples into an explicit
+direction/position/width corridor. The initial position uses an observed sample
+row; subsequent empty corridors remain empty. Hover and keyboard inspection show
+station, top elevation, reference elevation, difference, and source coordinates,
+linked to a plan-view marker. Samples are drawn as discrete points: no invented
+curve through unsampled cells or NoData. Full native-cell integration remains the
+volume result; the preview is neither its numerical input nor a continuous
+terrain profile. A true native-resolution transect/cloud section and its profile
+CSV export are still separate work.
+
+### Remaining full-profile design
 
 1. Add **Elevation profile** alongside Distance and Polygon. Click successive
    points across the pile, with the same live preview, Shift-to-navigate,

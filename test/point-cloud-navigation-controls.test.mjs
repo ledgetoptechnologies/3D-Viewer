@@ -7,13 +7,15 @@ import * as THREE from 'three';
 
 const require = createRequire(import.meta.url);
 const navigation = require('../public/pointcloud-navigation.js');
+const pointCloudPerformance = require('../public/pointcloud-performance.js');
 const shell = fs.readFileSync(new URL('../public/pointcloud.html', import.meta.url), 'utf8');
 const start = shell.indexOf('class PCPointerControls {');
 const end = shell.indexOf('// Replace Potree\'s EarthControls', start);
 assert.ok(start >= 0 && end > start);
 // Exercise the shipped controller methods, rather than a second implementation.
 const Controls = vm.runInNewContext(`${shell.slice(start, end)}\nPCPointerControls`, {
-  THREE, ...navigation, performance, window: {},
+  THREE, ...navigation, performance, Potree: { measureTimings: false },
+  window: { LtdsPointCloudPerformance: pointCloudPerformance },
 });
 
 function fixture(position = new THREE.Vector3(0, -200, 150), origin = new THREE.Vector3()) {
@@ -217,8 +219,11 @@ test('decoded picker ignores hidden clouds, invalid points and behind-camera res
   const forward = view.getPivot().sub(view.position).normalize();
   const point = (depth) => view.position.clone().addScaledVector(forward, depth);
   const calls = [];
-  controls.viewer = { scene: { pointclouds: [
+  const originalMaterial = {}, failedCloud = { material: originalMaterial, pick() { this.material = {}; throw new Error('node disposed during pick'); } };
+  let rendererResets = 0;
+  controls.viewer = { renderer: { setRenderTarget() { rendererResets++; }, state: { reset() { rendererResets++; } }, setScissorTest() { rendererResets++; } }, scene: { pointclouds: [
     { visible: false, pick() { throw new Error('hidden cloud must not be picked'); } },
+    failedCloud,
     { pick() { return { position: point(-1) }; } },
     { pick() { return { position: new THREE.Vector3(NaN, 0, 0) }; } },
     { pick(viewer, camera, ray, options) { calls.push(options); return { position: point(40) }; } },
@@ -227,4 +232,6 @@ test('decoded picker ignores hidden clouds, invalid points and behind-camera res
   const hit = Controls.prototype._pointPick.call(controls, { x: 500, y: 500 });
   assert.ok(hit.distanceTo(point(30)) < 1e-10, 'nearest valid point wins across visible clouds');
   assert.equal(calls[0].pickWindowSize, 11, 'fix does not widen the pick window to grab background surfaces');
+  assert.equal(failedCloud.material, originalMaterial, 'disposed-node failure restores its material and does not prevent later picks');
+  assert.equal(rendererResets, 3, 'error cleanup runs once; successful picks do not add redundant renderer resets');
 });

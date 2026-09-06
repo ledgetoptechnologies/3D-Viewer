@@ -2229,6 +2229,7 @@ function measurementViewContext() {
     if (!map) return null;
     return {
       mode: state.activeMode, element: dom.leafletMap, host: dom.leafletMap,
+      viewSignature() { const center=map.getCenter(),size=map.getSize();return [center.lat,center.lng,map.getZoom(),size.x,size.y].join(':'); },
       pick(event) { const p=map.mouseEventToLatLng(event),xy=latLonToUtm(p.lat,p.lng);return [xy[0],xy[1],0]; },
       project(p) { const ll=utmToLatLon(p[0],p[1]),screen=map.latLngToContainerPoint(ll);return [screen.x,screen.y]; },
       focus(vertices) { map.fitBounds(vertices.map(p=>utmToLatLon(p[0],p[1])),{padding:[45,45],maxZoom:22}); },
@@ -2257,8 +2258,11 @@ function measurementViewContext() {
   const activeRenderer=cloud?viewer?.renderer:renderer;
   if (!activeCamera||!activeRenderer) return null;
   const element=activeRenderer.domElement,host=cloud?dom.cloudContainer:dom.threeContainer;
+  // Creating an adapter must not force iframe layout when there is no visible
+  // measurement. The overlay supplies one viewport snapshot per actual draw.
   return {
     mode:state.activeMode,element,host,
+    viewSignature(){return [...activeCamera.matrixWorldInverse.elements,...activeCamera.projectionMatrix.elements,element.width,element.height].join(':');},
     pick(event) {
       if(!cloud){const p=pickSurface(eventNdc(event));if(!p)return null;const u=worldToUtm(p);return [u.e,u.n,u.alt];}
       const rect=element.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;
@@ -2269,14 +2273,15 @@ function measurementViewContext() {
         const original=points.material;
         try{const hit=points.pick(viewer,activeCamera,rc.ray,{x,y:rect.height-y,pickWindowSize:5,pickClipped:true});if(hit?.position){const d=hit.position.distanceTo(activeCamera.position);if(d<distance){closest=hit.position;distance=d;}}}
         catch { /* A tile can unload between the input event and point pick. */ }
-        finally{points.material=original;viewer.renderer.setRenderTarget(null);viewer.renderer.state.reset();viewer.renderer.setScissorTest(false);}
+        finally{points.material=original;viewer.renderer.setRenderTarget(null);viewer.renderer.state.reset();viewer.renderer.setScissorTest(false);if(!win.Potree?.measureTimings){win.performance?.clearMarks?.('pick-start');win.performance?.clearMarks?.('pick-end');win.performance?.clearMeasures?.('pick');}}
       }
       return closest?[closest.x,closest.y,closest.z]:null;
     },
-    project(p){
+    project(p,viewport){
       const position=cloud?new THREE.Vector3(...p):utmToWorld(...p);
       const projected=position.clone().applyMatrix4(activeCamera.matrixWorldInverse);if(projected.z>=0)return null;
-      position.project(activeCamera);return [(position.x+1)*element.clientWidth/2,(1-position.y)*element.clientHeight/2];
+      const width=viewport?.width??element.clientWidth,height=viewport?.height??element.clientHeight;
+      position.project(activeCamera);return [(position.x+1)*width/2,(1-position.y)*height/2];
     },
     focus(vertices){
       const points=vertices.map(p=>cloud?new THREE.Vector3(...p):utmToWorld(...p));
