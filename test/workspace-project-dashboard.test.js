@@ -53,7 +53,12 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
   assert.match(source,/confirmationToken:preview\.confirmationToken/);
   assert.doesNotMatch(source,/NAD83 \/ Wisconsin Central|value="NAVD88"/);
   assert.doesNotMatch(source,/card\('Project datasets'/);
-  assert.match(source,/project-columns single-column/);
+  const projectRows=source.slice(source.indexOf('function projectRows()'),source.indexOf('function selectedProject()'));
+  const projectDetail=source.slice(source.indexOf('function selectedProject()'),source.indexOf('\nfunction ',source.indexOf('function selectedProject()')+1));
+  assert.match(projectRows,/\$\{selected\?selectedProject\(\):''\}<\/article>/);
+  assert.match(projectDetail,/class="project-detail"/);
+  assert.match(projectDetail,/class="task-list"/);
+  assert.doesNotMatch(projectDetail,/All projects|project-columns|<h1|project\.description/);
 });
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{

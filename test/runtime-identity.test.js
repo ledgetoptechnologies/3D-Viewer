@@ -22,8 +22,8 @@ test('runtime identity accepts only an exact regular-file source revision and cu
     database.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  assert.equal(readSchemaVersion(database), 31);
-  assert.deepEqual(runtimeIdentity(database), { revision: 'unavailable', schemaVersion: 31 });
+  assert.equal(readSchemaVersion(database), 32);
+  assert.deepEqual(runtimeIdentity(database), { revision: 'unavailable', schemaVersion: 32 });
 });
 
 test('runtime identity rejects a symlinked source stamp', (t) => {

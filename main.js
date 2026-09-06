@@ -3,6 +3,11 @@ import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { load as loadersGlLoad } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
+import { createMapCameraOverlay } from './map-camera-overlay.mjs';
+import { createMeasurementWorkspace } from './measurement-workspace.mjs';
+import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
+import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
+import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
 import { fromUrl as openGeoTiff, Pool as GeoTiffPool } from 'geotiff';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
@@ -157,6 +162,8 @@ let sessionStorageKey = ACTIVE_SESSION_ID ? `${SESSION_STORAGE_PREFIX}${ACTIVE_S
 let PROJECT_SHARE_CATALOG = null;
 // What the active share link allows; stays fully-open in admin mode.
 let SHARE_PERMISSIONS = { measure: true, cameras: true };
+let measurementWorkspace = null;
+let viewerProductDownloads = null;
 
 const state = {
   activeMode: null,
@@ -293,6 +300,9 @@ let modeAbortController = null;
 let mapToolEpoch = 0;
 let directPointCloudLoad = null;
 let pendingPointCloudView = null;
+// Page-local only: map views must not replace the last shared 3D viewpoint.
+// Reloading or opening another model starts with its normal home view.
+let lastShared3DView = null;
 let preserveIncomingModelView = false;
 let pcCameraSyncedWindow = null;
 
@@ -707,6 +717,7 @@ function applyProjectConfig(p) {
 function init() {
   initThree();
   bindUI();
+  installMeasurementWorkspace();
   const available = applyAvailability();
   const requested = viewerModeFromUrl(location.href);
   const initialMode = chooseViewerMode(requested, available);
@@ -1242,6 +1253,13 @@ const REVIEW_CONTROLLER_ID = window.parent === window && /^[0-9a-f]{8}-[0-9a-f]{
   ? reviewControllerCandidate : null;
 const reviewSessionChannel = REVIEW_CONTROLLER_ID && typeof BroadcastChannel === 'function'
   ? new BroadcastChannel(`ltds-viewer-review:${REVIEW_CONTROLLER_ID}`) : null;
+const measurementAdminClient = createMeasurementAdminClient({
+  context: () => ({ modelId: PROJECT?.id, modelVersionId: PROJECT?.activeVersion?.id }),
+  token: () => VIEW_MODE === 'session' && sessionStorageKey ? sessionStorage.getItem(sessionStorageKey) : null,
+  // Administrative requests use only the registered workspace channel, never
+  // an arbitrary embedding parent. The privileged bearer stays in workspace.
+  send: message => { if (!reviewSessionChannel) return false; reviewSessionChannel.postMessage(message); return true; },
+});
 let pendingReviewRenewalRequestId = null;
 const LOD_AVAILABILITY_REFRESH_MS = 5000;
 let lodAvailabilityTimer = null;
@@ -1349,6 +1367,8 @@ function setSessionAccessState(next, reason = null) {
   const previous = sessionAccessState;
   sessionAccessState = next;
   sessionAccessReason = reason;
+  if(next==='unavailable')measurementWorkspace?.invalidate?.('Personal measurements are hidden until access is restored.');
+  else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.()))installMeasurementWorkspace();
   const label = sessionAccessLabel();
   if (label && tilesRenderer) dom.lodStatus.textContent = label;
   if (label && state.activeMode === 'cloud') dom.cloudStatus.textContent = sessionAccessLabel('Cloud');
@@ -1508,6 +1528,7 @@ function applyViewerSession(session, { initialize = false } = {}) {
   setSessionAccessState('active');
   recoverFailedLodTiles();
   pcApi()?.renewAccess?.(EPT_URL);
+  viewerProductDownloads?.refresh();
 }
 
 async function bootstrapSession() {
@@ -1565,6 +1586,7 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
     const session = await redeemViewerGrant(grant, { signal: abortController.signal });
     if (sessionRenewalAttempt !== attempt) return;
     if (!PROJECT || session.model.id !== PROJECT.id) throw new Error('renewal grant is scoped to a different model');
+    if(activeViewerSession&&(session.subject!==activeViewerSession.subject||session.audience!==activeViewerSession.audience||session.model.activeVersion?.id!==activeViewerSession.model.activeVersion?.id))throw Object.assign(new Error('renewal identity or model version changed'),{status:403});
     const advanced = Date.parse(session.expiresAt) > Date.parse(activeViewerSession?.expiresAt || '');
     sessionAccessGeneration += 1;
     clearSessionRenewalPending(attempt);
@@ -1600,10 +1622,13 @@ async function handleSessionRenewalMessage(data, { reviewChannel = false } = {})
   }
 }
 
-if (reviewSessionChannel) reviewSessionChannel.onmessage = event => { void handleSessionRenewalMessage(event.data, { reviewChannel: true }); };
+if (reviewSessionChannel) reviewSessionChannel.onmessage = event => {
+  if (measurementAdminClient.handleMessage(event.data)) return;
+  void handleSessionRenewalMessage(event.data, { reviewChannel: true });
+};
 window.addEventListener('pagehide', event => {
   // A persisted page resumes with its existing controller channel.
-  if (!event.persisted) reviewSessionChannel?.close();
+  if (!event.persisted) { measurementAdminClient.dispose(); reviewSessionChannel?.close(); }
 });
 window.addEventListener('focus', () => requestSessionRenewalIfDue('focus'));
 window.addEventListener('pageshow', () => requestSessionRenewalIfDue('pageshow'));
@@ -1745,18 +1770,7 @@ async function loadCameras() {
 function mapCameraGlyph(feature) {
   const scale = cameraMarkerScaleForView({ baseScale: cameraMarkerUserScale });
   const size = Math.round(Math.max(20, Math.min(38, 24 * scale / DEFAULT_CAMERA_MARKER_SCALE)));
-  const bearing = cameraFeatureImageUpBearing(feature).toFixed(2);
-  return L.divIcon({
-    className: 'map-camera-marker',
-    iconSize: [size, size * 4 / 3],
-    iconAnchor: [size / 2, size * 4 / 3],
-    html: `<svg viewBox="0 0 24 32" width="${size}" height="${size * 4 / 3}" aria-hidden="true">
-      <path d="M12 31C9 26 1 17 1 12a11 11 0 0 1 22 0c0 5-8 14-11 19Z" fill="#ee5007" stroke="#c73a0a"/>
-      <path d="M5 9h3l1.5-2h5L16 9h3v10H5Z" fill="#fff"/>
-      <circle cx="12" cy="14" r="3" fill="#ee5007"/>
-      <path d="M12 1.5 10 4.5h4Z" fill="#f8cb2e" transform="rotate(${bearing} 12 12)"/>
-    </svg>`,
-  });
+  return { size, bearing: cameraFeatureImageUpBearing(feature) };
 }
 
 function refreshMapCameraLayer() {
@@ -1769,42 +1783,33 @@ function refreshMapCameraLayer() {
     window.__ltdsMapCamDrawToSource = [];
     return false;
   }
-  if (!mapCameraLayer) mapCameraLayer = L.layerGroup();
-  // Leaflet owns zoom/pan transforms. Reuse source-anchored markers instead of
-  // choosing a different photo per screen cell every time the map moves.
+  if (!mapCameraLayer) mapCameraLayer = createMapCameraOverlay(L, {
+    onSelect: source => openPhoto(source),
+    isInteractive: () => state.activeTool === 'none',
+    onFrame: points => {
+      window.__ltdsMapCamDrawn = points.length;
+      window.__ltdsMapCamDrawToSource = points.map(point => point.source);
+      window.__ltdsMapCamPoints = points;
+    },
+  });
+  // One map-only canvas, stable source records, no photo prefetch or per-pin DOM.
   if (mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale) {
     mapCameraLayer.addTo(map);
-    window.__ltdsMapCamDrawn = mapCameraSources.length;
-    window.__ltdsMapCamDrawToSource = mapCameraSources.slice();
     return true;
   }
-  mapCameraLayer.clearLayers();
-  const positions = new Map();
+  const records = [];
   for (let index = 0; index < camFeatures.length; index += 1) {
     const position = cameraFeatureMapPosition(camFeatures[index], { projectedToLatLon: utmToLatLon });
     if (!position) continue;
-    const latlng = L.latLng(position[0], position[1]);
-    positions.set(index, latlng);
+    records.push({ source: index, latlng: L.latLng(position[0], position[1]),
+      bearing: mapCameraGlyph(camFeatures[index]).bearing,
+      label: camFeatures[index].properties?.photoKey?.split('/').at(-1) || `Photo ${index + 1}` });
   }
-  const representatives = [...positions.keys()];
-  for (const source of representatives) {
-    const marker = L.marker(positions.get(source), {
-      icon: mapCameraGlyph(camFeatures[source]),
-      keyboard: true,
-      riseOnHover: true,
-    });
-    marker.on('click', (event) => {
-      if (event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
-      openPhoto(source);
-    });
-    marker.addTo(mapCameraLayer);
-  }
+  mapCameraLayer.setData(records, mapCameraGlyph(camFeatures[0]).size);
   mapCameraLayer.addTo(map);
   mapCameraFeatures = camFeatures;
   mapCameraScale = cameraMarkerUserScale;
-  mapCameraSources = representatives;
-  window.__ltdsMapCamDrawn = representatives.length;
-  window.__ltdsMapCamDrawToSource = representatives.slice();
+  mapCameraSources = records.map(record => record.source);
   return true;
 }
 
@@ -2190,7 +2195,143 @@ function lineMaterial() {
   return new THREE.LineBasicMaterial({ color: 0xF8CB2E, depthTest: false, transparent: true, opacity: 0.95 });
 }
 
+function measurementCoordinateReference() {
+  const georef=PROJECT?.georef;
+  if(!Number.isFinite(georef?.utmZoneLon0Deg)||!['N','S'].includes(georef?.hemisphere))return {crs:'LOCAL:unverified',verticalUnit:'m'};
+  const zone = (georef.utmZoneLon0Deg + 183) / 6;
+  if(!Number.isInteger(zone)||zone<1||zone>60||UTM_PROJECTION.zoneLon0Deg!==georef.utmZoneLon0Deg||UTM_PROJECTION.hemisphere!==georef.hemisphere)return {crs:'LOCAL:unverified',verticalUnit:'m'};
+  return { crs: `EPSG:${(UTM_PROJECTION.hemisphere === 'S' ? 32700 : 32600) + zone}`, verticalUnit: 'm' };
+}
+
+function measurementViewContext() {
+  if (!state.activeMode) return null;
+  if (isMapMode()) {
+    if (!map) return null;
+    return {
+      mode: state.activeMode, element: dom.leafletMap, host: dom.leafletMap,
+      pick(event) { const p=map.mouseEventToLatLng(event),xy=latLonToUtm(p.lat,p.lng);return [xy[0],xy[1],0]; },
+      project(p) { const ll=utmToLatLon(p[0],p[1]),screen=map.latLngToContainerPoint(ll);return [screen.x,screen.y]; },
+      focus(vertices) { map.fitBounds(vertices.map(p=>utmToLatLon(p[0],p[1])),{padding:[45,45],maxZoom:22}); },
+      async capture() {
+        const rect=dom.leafletMap.getBoundingClientRect(),canvas=document.createElement('canvas');canvas.width=rect.width;canvas.height=rect.height;const ctx=canvas.getContext('2d');ctx.fillStyle='#101010';ctx.fillRect(0,0,canvas.width,canvas.height);
+        // The same stacked map tiles the user sees; cross-origin restrictions
+        // fail visibly instead of silently omitting a basemap from the export.
+        const panes=[...dom.leafletMap.querySelectorAll('.leaflet-pane')].filter(p=>!p.querySelector('.leaflet-pane')).sort((a,b)=>(Number(getComputedStyle(a).zIndex)||0)-(Number(getComputedStyle(b).zIndex)||0));
+        for(const pane of panes) for(const tile of pane.querySelectorAll('img,canvas')) {
+          const r=tile.getBoundingClientRect();if(!r.width||!r.height||r.right<rect.left||r.left>rect.right||r.bottom<rect.top||r.top>rect.bottom)continue;
+          let alpha=1,visible=true;
+          for(let parent=tile;parent&&parent!==dom.leafletMap;parent=parent.parentElement){const style=getComputedStyle(parent);if(style.display==='none'||style.visibility==='hidden'){visible=false;break;}const opacity=Number(style.opacity);if(Number.isFinite(opacity))alpha*=opacity;}
+          if(!visible||alpha===0)continue;
+          ctx.globalAlpha=alpha;ctx.drawImage(tile,r.left-rect.left,r.top-rect.top,r.width,r.height);
+        }
+        ctx.globalAlpha=1;
+        try{canvas.toDataURL();}catch{throw new Error('The basemap prevents browser image export. Use a browser screenshot including your measurements instead.');}
+        return canvas;
+      },
+    };
+  }
+  const iframe=document.getElementById('pc-iframe');
+  const cloud=state.activeMode==='cloud'&&state.cloudMode==='potree';
+  const win=cloud?iframe?.contentWindow:null, viewer=win?.viewer;
+  const activeCamera=cloud?viewer?.scene?.getActiveCamera():camera;
+  const activeRenderer=cloud?viewer?.renderer:renderer;
+  if (!activeCamera||!activeRenderer) return null;
+  const element=activeRenderer.domElement,host=cloud?dom.cloudContainer:dom.threeContainer;
+  return {
+    mode:state.activeMode,element,host,
+    pick(event) {
+      if(!cloud){const p=pickSurface(eventNdc(event));if(!p)return null;const u=worldToUtm(p);return [u.e,u.n,u.alt];}
+      const rect=element.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;
+      const rc=new win.THREE.Raycaster();rc.setFromCamera(new win.THREE.Vector2(x/rect.width*2-1,1-y/rect.height*2),activeCamera);
+      let closest=null,distance=Infinity;
+      for(const points of viewer.scene.pointclouds){
+        if(points.visible===false||!points.visibleNodes?.length)continue;
+        const original=points.material;
+        try{const hit=points.pick(viewer,activeCamera,rc.ray,{x,y:rect.height-y,pickWindowSize:5,pickClipped:true});if(hit?.position){const d=hit.position.distanceTo(activeCamera.position);if(d<distance){closest=hit.position;distance=d;}}}
+        catch { /* A tile can unload between the input event and point pick. */ }
+        finally{points.material=original;viewer.renderer.setRenderTarget(null);viewer.renderer.state.reset();viewer.renderer.setScissorTest(false);}
+      }
+      return closest?[closest.x,closest.y,closest.z]:null;
+    },
+    project(p){
+      const position=cloud?new THREE.Vector3(...p):utmToWorld(...p);
+      const projected=position.clone().applyMatrix4(activeCamera.matrixWorldInverse);if(projected.z>=0)return null;
+      position.project(activeCamera);return [(position.x+1)*element.clientWidth/2,(1-position.y)*element.clientHeight/2];
+    },
+    focus(vertices){
+      const points=vertices.map(p=>cloud?new THREE.Vector3(...p):utmToWorld(...p));
+      const box=new THREE.Box3().setFromPoints(points),center=box.getCenter(new THREE.Vector3()),radius=Math.max(box.getSize(new THREE.Vector3()).length()/2,.25);
+      const direction=activeCamera.position.clone().sub(center);if(direction.lengthSq()<1e-8)direction.set(1,1,1);direction.normalize();
+      const position=center.clone().addScaledVector(direction,radius/Math.sin((activeCamera.fov||60)*Math.PI/360)*1.3);
+      if(cloud)win.__setViewUTM(position.x,position.y,position.z,center.x,center.y,center.z);
+      else controls.setView(position,center);
+    },
+    async capture(){
+      if(cloud)viewer.render();else renderer.render(scene,camera);
+      const canvas=document.createElement('canvas');canvas.width=element.width;canvas.height=element.height;canvas.getContext('2d').drawImage(element,0,0);return canvas;
+    },
+  };
+}
+
+async function calculateSavedMeasurementSurface(record,{signal,reference={type:'boundary-triangulated'},sourceKind='auto',confirmMeters=false}={}) {
+  const source=sourceKind==='dsm'?(DSM_URL?{type:'dsm',url:DSM_URL}:null):sourceKind==='dtm'?(DTM_URL?{type:'dtm',url:DTM_URL}:null):requestedVolumeSurface();
+  if(!source)throw new Error('No existing DSM/DTM is available. An administrator must prepare a measurement surface; clients cannot start processing jobs.');
+  // Calculation opens metadata only. getDataset also computes display stats,
+  // which could decode an entire un-overviewed TIFF before region guards.
+  const tiff=await openGeoTiff(source.url,{allowFullFile:false,blockSize:262144,cacheSize:32},signal);
+  try{
+  const image=await tiff.getImage(0),[minE,minN,maxE,maxN]=image.getBoundingBox();
+  const ds={W:image.getWidth(),H:image.getHeight(),minE,minN,maxE,maxN,nodata:parseFiniteGdalNoData(image.getGDALNoData())},px=(maxE-minE)/ds.W,py=(maxN-minN)/ds.H;
+  const geo=image.getGeoKeys?.()||{},expectedCrs=Number(record.coordinateReference.crs.replace('EPSG:',''));
+  if(!geo.ProjectedCSTypeGeoKey||geo.ProjectedCSTypeGeoKey!==expectedCrs)throw new Error('The source CRS is absent or incompatible with this measurement. An administrator must verify alignment first.');
+  const directory=image.fileDirectory||{},transform=directory.ModelTransformation,resolution=image.getResolution();
+  if(Number(geo.GTRasterTypeGeoKey||1)!==1||(transform&&[1,2,4,6,8,9,12,13,14].some(i=>transform[i]!==0))||!Number.isFinite(resolution[0])||!Number.isFinite(resolution[1])||resolution[0]<=0||resolution[1]>=0)throw new Error('This raster uses an unsupported rotated or point-sample grid. No approximate transform will be substituted.');
+  const decodedBlock=(directory.TileWidth||ds.W)*Math.min(directory.TileLength||directory.RowsPerStrip||ds.H,ds.H)*(directory.SamplesPerPixel||1)*Math.max(...(directory.BitsPerSample||[64]))/8;
+  if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask an administrator for a calculation.');
+  const verticalFactor=geo.VerticalUnitsGeoKey===9001?1:geo.VerticalUnitsGeoKey===9002?0.3048:geo.VerticalUnitsGeoKey===9003?1200/3937:!geo.VerticalUnitsGeoKey&&confirmMeters?1:null;
+  if(verticalFactor===null)throw new Error('Confirm source elevations are meters when metadata is absent. Unsupported vertical units must be corrected before calculation.');
+  const x0=Math.max(0,Math.floor((Math.min(...record.vertices.map(p=>p[0]))-ds.minE)/px));
+  const x1=Math.min(ds.W,Math.ceil((Math.max(...record.vertices.map(p=>p[0]))-ds.minE)/px));
+  const y0=Math.max(0,Math.floor((ds.maxN-Math.max(...record.vertices.map(p=>p[1])))/py));
+  const y1=Math.min(ds.H,Math.ceil((ds.maxN-Math.min(...record.vertices.map(p=>p[1])))/py));
+  const width=x1-x0,height=y1-y0;
+  if(width<=0||height<=0)throw new Error('The polygon is outside this elevation surface.');
+  if(width*height>1_500_000)throw new Error('This region exceeds the safe browser calculation limit at native resolution. Reduce the selection or ask an administrator to calculate it.');
+  const rasters=await image.readRasters({window:[x0,y0,x1,y1],samples:[0],pool:geoPool,signal});
+  if(signal?.aborted)throw new DOMException('Calculation cancelled','AbortError');
+  const vertices=record.vertices.map(p=>{
+    if(record.collection==='spatial3d')return p.slice();
+    const x=Math.max(0,Math.min(width-1,Math.floor((p[0]-ds.minE)/px)-x0)),y=Math.max(0,Math.min(height-1,Math.floor((ds.maxN-p[1])/py)-y0));
+    const elevation=Number(rasters[0][y*width+x]);
+    if(p[0]<ds.minE||p[0]>ds.maxE||p[1]<ds.minN||p[1]>ds.maxN||!Number.isFinite(elevation)||elevation===ds.nodata)throw new Error('Boundary elevation is missing. Move the boundary onto valid elevation coverage.');
+    return [p[0],p[1],elevation*verticalFactor];
+  });
+  const values=verticalFactor===1?rasters[0]:Float64Array.from(rasters[0],v=>v*verticalFactor),nodata=Number.isFinite(ds.nodata)?ds.nodata*verticalFactor:NaN;
+  const bounds={minE:ds.minE+x0*px,maxE:ds.minE+x1*px,maxN:ds.maxN-y0*py,minN:ds.maxN-y1*py};
+  const result=await calculateBrowserSurface({vertices,reference,values,width,height,bounds,nodata,maxCells:1_500_000},{signal});
+  return {...result,method:'surface-cut-fill',sourceKind:source.type,sourceResolutionM:[px,py],modelVersionId:PROJECT?.activeVersion?.id,boundaryVertices:vertices,calculationOrigin:'browser',warnings:[...(result.warnings||[]),...(!geo.VerticalUnitsGeoKey?['Source elevations were explicitly confirmed as meters; vertical units are not encoded in the raster.']:[])]};
+  }finally{await tiff.close();}
+}
+
+function installMeasurementWorkspace() {
+  measurementWorkspace?.dispose();
+  measurementWorkspace=createMeasurementWorkspace({
+    panel:document.getElementById('panel-measure'),context:measurementViewContext,
+    token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
+    permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
+    toLonLat:p=>{if(!measurementCoordinateReference().crs.startsWith('EPSG:'))throw new Error('GeoJSON needs verified geographic alignment. Use JSON or DXF with the local coordinate warning.');const [lat,lon]=utmToLatLon(p[0],p[1]);return [lon,lat];},
+    toolChanged:tool=>{state.activeTool=tool;document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));},
+    calculateSurface:calculateSavedMeasurementSurface,
+    adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
+    onAccessLost:()=>{if(VIEW_MODE==='session'&&!sessionRenewalBlocked)requestSessionRenewal('measurements');},
+  });
+  viewerProductDownloads?.destroy();
+  let productHost=document.getElementById('panel-products');if(!productHost){productHost=document.createElement('div');productHost.id='panel-products';productHost.className='panel';document.getElementById('sidebar-custom').append(productHost);}
+  viewerProductDownloads=mountViewerProductDownloads({host:productHost,getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true});
+}
+
 function setTool(tool) {
+  if (measurementWorkspace) return measurementWorkspace.setTool(tool);
   if (state.activeMode === 'ortho' || state.activeMode === 'dsm' || state.activeMode === 'dtm') {
     return setMapTool(tool);
   }
@@ -2703,6 +2844,7 @@ function localCameraRendererActive() {
 }
 
 function onPointerUp(e) {
+  if (measurementWorkspace?.isDrawing()) return;
   if (!localCameraRendererActive()) return;
   if (!controls.wasClick()) return;
 
@@ -2770,6 +2912,7 @@ function onDoubleClick() {
 }
 
 function onKeyDown(e) {
+  if (measurementWorkspace?.isDrawing() || e.target?.closest?.('input,textarea,select,[contenteditable=true]')) return;
   if (e.key === 'Escape') {
     if (dom.photoModal.style.display === 'flex') { closePhoto(); return; }
     if (state.activeMode === 'cloud') {
@@ -2927,19 +3070,21 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     const winWf = winWm / mPerPxX, winHf = (wMaxN - wMinN) / mPerPxY;
     let level = Math.max(0, Math.min(ds.images.length - 1, Math.floor(Math.log2(winWf / size.x))));
     let img = ds.images[level], s = img.getWidth() / ds.W;
-    const hsPadM = () => (ds.isDem ? mPerPxX / s : 0);
+    const hsPadM = () => (ds.isDem
+      ? Math.max((ds.maxE - ds.minE) / img.getWidth(), (ds.maxN - ds.minN) / img.getHeight()) : 0);
     while (level < ds.images.length - 1) {
       const wpx = (winWm + 2 * hsPadM()) / (mPerPxX / s);
-      const hpx = ((wMaxN - wMinN) + 2 * hsPadM()) / (mPerPxY / s);
+      const hpx = ((wMaxN - wMinN) + 2 * hsPadM()) / ((ds.maxN - ds.minN) / img.getHeight());
       if (Math.max(wpx, hpx) <= 640) break;
       level++; img = ds.images[level]; s = img.getWidth() / ds.W;
     }
     const pad = hsPadM();
     const iw = img.getWidth(), ih = img.getHeight();
+    const sy = ih / ds.H;
     const wsx = Math.max(0, Math.floor((wMinE - pad - ds.minE) / mPerPxX * s));
-    const wsy = Math.max(0, Math.floor((ds.maxN - (wMaxN + pad)) / mPerPxY * s));
+    const wsy = Math.max(0, Math.floor((ds.maxN - (wMaxN + pad)) / mPerPxY * sy));
     const wex = Math.min(iw, Math.ceil((wMaxE + pad - ds.minE) / mPerPxX * s));
-    const wey = Math.min(ih, Math.ceil((ds.maxN - (wMinN - pad)) / mPerPxY * s));
+    const wey = Math.min(ih, Math.ceil((ds.maxN - (wMinN - pad)) / mPerPxY * sy));
     if (wex - wsx < 1 || wey - wsy < 1) { setTimeout(() => done(null, tile), 0); return tile; }
 
     img.readRasters({
@@ -2953,7 +3098,7 @@ const GeoTiffGridLayer = L.GridLayer.extend({
       if (signal?.aborted) { done(null, tile); return; }
       const rw = raster.width, rh = raster.height;
       // exact UTM span of the read window (pixel corners in level-m space)
-      const mpx = mPerPxX / s, mpy = mPerPxY / s;
+      const mpx = mPerPxX / s, mpy = mPerPxY / sy;
       const winMinE = ds.minE + wsx * mpx;
       const winMaxE = ds.minE + wex * mpx;
       const winMaxN = ds.maxN - wsy * mpy;
@@ -3049,7 +3194,7 @@ function warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, la
         if (steps > 0) t = (Math.floor(t * steps) + 0.5) / steps;   // discrete elevation bands
         const rgb = sampleCmap(cmap, t);
         const z = (!shade || px === 0 || py === 0 || px === rw-1 || py === rh-1)
-          ? 1 : hillshadeFactor(band, rw, rh, px, py);              // hillshade on source grid
+          ? 1 : hillshadeFactor(band, rw, rh, px, py, 1 / invW, 1 / invH, nodata);
         data[o]   = Math.min(255, rgb[0] * z);
         data[o+1] = Math.min(255, rgb[1] * z);
         data[o+2] = Math.min(255, rgb[2] * z);
@@ -3102,7 +3247,8 @@ function renderDemTile(raster, w, h, ds, warp) {
       if (steps > 0) t = (Math.floor(t * steps) + 0.5) / steps;
       const rgb = sampleCmap(cmap, t);
       const z = (demSettings.shade <= 0 || x === 0 || y === 0 || x === w-1 || y === h-1)
-        ? 1 : hillshadeFactor(band, w, h, x, y);
+        ? 1 : hillshadeFactor(band, w, h, x, y,
+          (ds.maxE - ds.minE) / w, (ds.maxN - ds.minN) / h, nodata);
       img.data[i*4] = Math.min(255, rgb[0] * z);
       img.data[i*4+1] = Math.min(255, rgb[1] * z);
       img.data[i*4+2] = Math.min(255, rgb[2] * z);
@@ -3414,17 +3560,29 @@ function sampleCmap(stops, t) {
 
 function viridis(t) { return sampleCmap(COLORMAPS.viridis, t); }
 
-function hillshadeFactor(values, w, h, x, y) {
-  const z = (a, b) => values[b * w + a];
+function hillshadeFactor(values, w, h, x, y, cellX = 1, cellY = 1, nodata = NaN) {
+  if (x <= 0 || y <= 0 || x >= w - 1 || y >= h - 1) return 1;
+  // Elevations and this viewer's UTM raster extents are both metres. Horn's
+  // gradient must divide by the ACTUAL source-level cell spacing, not assume
+  // metre-wide pixels: that flattens centimetre DSM relief and varies by zoom.
+  if (!(cellX > 0) || !Number.isFinite(cellX) || !(cellY > 0) || !Number.isFinite(cellY)) return 1;
+  const center = values[y * w + x];
+  if (!Number.isFinite(center) || center === nodata || center < -1000) return 1;
+  const z = (a, b) => {
+    const v = values[b * w + a];
+    // Do not turn masked holes into cliffs or poison valid pixels with NaN.
+    return Number.isFinite(v) && v !== nodata && v >= -1000 ? v : center;
+  };
   const A = z(x-1,y-1), B = z(x,y-1), Cc = z(x+1,y-1);
   const D = z(x-1,y), F = z(x+1,y);
   const G = z(x-1,y+1), Hh = z(x,y+1), J = z(x+1,y+1);
-  const dzdx = ((Cc + 2*F + J) - (A + 2*D + G)) / 8;
-  const dzdy = ((G + 2*Hh + J) - (A + 2*B + Cc)) / 8;
-  const slope = Math.atan(Math.sqrt(dzdx*dzdx + dzdy*dzdy));
-  const aspect = Math.atan2(dzdy, -dzdx);
+  const dzdx = ((Cc + 2*F + J) - (A + 2*D + G)) / (8 * cellX);
+  const dzdy = ((G + 2*Hh + J) - (A + 2*B + Cc)) / (8 * cellY);
   const az = 315 * Math.PI / 180, alt = 45 * Math.PI / 180;
-  const hs = Math.sin(alt) * Math.cos(slope) + Math.cos(alt) * Math.sin(slope) * Math.cos(az - aspect);
+  // Raster rows increase SOUTH; azimuth is clockwise from NORTH. Dot the
+  // north-up surface normal with a north-west light, avoiding a mirrored aspect.
+  const hs = (Math.sin(alt) + Math.cos(alt) * (-dzdx * Math.sin(az) + dzdy * Math.cos(az)))
+    / Math.sqrt(1 + dzdx * dzdx + dzdy * dzdy);
   const k = Math.min(2, Math.max(0, demSettings.shade));
   // k=0 flat color, k=1 default relief, k=2 strong relief
   const base = 1 - 0.45 * k;
@@ -3496,7 +3654,7 @@ function loadPointCloudDirect() {
       // and make a successfully decoded cloud appear as a black canvas.
       pointCloudParent.updateMatrixWorld(true);
       if (state.activeMode === 'cloud' && state.cloudMode === 'direct') {
-        frameObjectHome(pointCloudObject);
+        frameObjectHome(pointCloudObject, { apply: !lastShared3DView });
       }
       state.pointCloudLoaded = true;
       state.pointCloudLoading = false;
@@ -3618,6 +3776,7 @@ window.addEventListener('message', (event) => {
       || (POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready');
     viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
     applyPcPanelState();
+    if (pendingPointCloudView) pushViewToPointCloud(pendingPointCloudView);
     syncCameraLayer();
   } else if (message.type === 'camera-open') {
     if (!state.camerasVisible || !SHARE_PERMISSIONS.cameras
@@ -3765,9 +3924,7 @@ function bindPcPanel() {
     document.getElementById('pc2-size-val').textContent = parseFloat(e.target.value).toFixed(1);
     const api = pcApi(); if (api) api.setSize(parseFloat(e.target.value));
   });
-  document.getElementById('pc2-sizing').addEventListener('change', (e) => {
-    const api = pcApi(); if (api) api.setSizing(e.target.value);
-  });
+  // Fixed sizing is deliberately not a user-selectable mode.
   document.getElementById('pc2-color').addEventListener('change', (e) => {
     const api = pcApi(); if (api) api.setColor(e.target.value);
     syncPcElevationControls();
@@ -3785,6 +3942,18 @@ function bindPcPanel() {
   });
   document.getElementById('pc2-edl').addEventListener('change', (e) => {
     const api = pcApi(); if (api) api.setEDL(e.target.checked);
+  });
+  document.getElementById('pc2-reset').addEventListener('click', () => {
+    document.getElementById('pc2-budget').value = '10';
+    document.getElementById('pc2-budget-val').textContent = '10M';
+    document.getElementById('pc2-size').value = '1';
+    document.getElementById('pc2-size-val').textContent = '1.0';
+    document.getElementById('pc2-color').value = 'rgba';
+    document.getElementById('pc2-edl').checked = true;
+    pcElevationRange = null;
+    pcElevationDomain = null;
+    pcApi()?.resetElevationRange?.();
+    applyPcPanelState();
   });
   document.getElementById('pc2-fit').addEventListener('click', () => {
     const api = pcApi(); if (api) api.fit();
@@ -3815,15 +3984,17 @@ function captureMeshView() {
   };
 }
 
-function pushViewToPointCloud(snapshot = pendingPointCloudView, retries = 40) {
-  if (state.activeMode !== 'cloud' || state.cloudMode !== 'potree') return;
+function pushViewToPointCloud(snapshot = pendingPointCloudView, retries = 40, epoch = modeEpoch) {
+  if (epoch !== modeEpoch || state.activeMode !== 'cloud' || state.cloudMode !== 'potree') return;
+  // A newer transfer (or a completed one) makes old retry callbacks obsolete.
+  if (!snapshot || snapshot !== pendingPointCloudView) return;
   const f = document.getElementById('pc-iframe');
   const w = f && f.contentWindow;
   if (!w || typeof w.__setViewUTM !== 'function') {
-    if (retries > 0) setTimeout(() => pushViewToPointCloud(snapshot, retries - 1), 250);
+    if (retries > 0) setTimeout(() => pushViewToPointCloud(snapshot, retries - 1, epoch), 250);
     return;
   }
-  const exact = snapshot || captureMeshView();
+  const exact = snapshot;
   const camU = worldToUtm(exact.position);
   const tgtU = worldToUtm(exact.target);
   try {
@@ -3848,7 +4019,25 @@ function pullViewFromPointCloud() {
     if (camW.distanceTo(tgtW) < 0.01) return;
     preserveIncomingModelView = !tilesRenderer?.root;
     controls.setView(camW, tgtW);
+    lastShared3DView = { position: camW.clone(), target: tgtW.clone(), quaternion: camera.quaternion.clone() };
   } catch (err) { /* keep current view */ }
+}
+
+function rememberShared3DView(mode) {
+  if (mode === 'cloud' && state.cloudMode === 'potree') {
+    pullViewFromPointCloud();
+  } else if (mode === 'model' || (mode === 'cloud' && state.cloudMode === 'direct')) {
+    const initialized = mode === 'model' ? Boolean(tilesRenderer?.root) : state.pointCloudLoaded;
+    if (!initialized && !lastShared3DView) return;
+    lastShared3DView = captureMeshView();
+  }
+}
+
+function restoreShared3DView() {
+  if (!lastShared3DView) return false;
+  preserveIncomingModelView = !tilesRenderer?.root;
+  controls.setView(lastShared3DView.position, lastShared3DView.target);
+  return true;
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -4032,6 +4221,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
 
   rememberMapView(state.activeMode);   // keep the view of the tab we're leaving
   const prevMode = state.activeMode;
+  measurementWorkspace?.modeChanged();
   // disarm any active measure tool in the tab we're leaving (measurements persist)
   if (state.activeTool !== 'none') {
     if (prevMode === 'model') { cancelActiveMeasure(); }
@@ -4057,17 +4247,16 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   if (prevMode && prevMode !== mode) {
     viewerDiagnostic('mode_cancel', { mode: prevMode, reason: 'superseded' });
   }
-  if (prevMode === 'model' && mode === 'cloud' && state.cloudMode === 'potree') {
-    // Capture while the textured mesh is still present so the center-ray
-    // target is exact; tile disposal immediately below must not change it.
-    pendingPointCloudView = captureMeshView();
-  }
+  // Capture every departure from 3D before disposing either renderer, including
+  // detours through ortho/DSM/DTM. Map movement never overwrites this snapshot.
+  // Startup's nominal mode has not displayed data yet and is not a viewpoint.
+  if (reason !== 'startup') rememberShared3DView(prevMode);
+  pendingPointCloudView = null;
   if (prevMode === 'model' && prevMode !== mode) {
     tilesParent.visible = false;
     disposeTiles();
   }
   if (prevMode === 'cloud' && prevMode !== mode) {
-    if (mode === 'model' && state.cloudMode === 'potree') pullViewFromPointCloud();
     if (state.cloudMode === 'potree') stopPointCloudIframe('superseded');
     else stopDirectPointCloud('superseded');
   }
@@ -4112,16 +4301,19 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   if (is3D) {
     updateStatus('Mode: 3D Model');
     if (pointCloudParent) pointCloudParent.visible = false;
+    restoreShared3DView();
     applyMeshLayer();
     onResize();
   } else if (isPotreeCloud) {
     updateStatus('Mode: Point Cloud');
     showPointCloud();
-    if (prevMode === 'model') pushViewToPointCloud(pendingPointCloudView);
+    pendingPointCloudView = lastShared3DView;
+    if (pendingPointCloudView) pushViewToPointCloud(pendingPointCloudView);
   } else if (isDirectCloud) {
     updateStatus('Mode: Point Cloud');
     tilesParent.visible = false;
     glbParent.visible = false;
+    restoreShared3DView();
     loadPointCloudDirect();
     pointCloudParent.visible = true;
     onResize();
@@ -4141,7 +4333,7 @@ function applyPcPanelState() {
   if (!api) return false;
   api.setBudget(parseFloat(document.getElementById('pc2-budget').value));
   api.setSize(parseFloat(document.getElementById('pc2-size').value));
-  api.setSizing(document.getElementById('pc2-sizing').value);
+  api.setSizing('fixed');
   api.setColor(document.getElementById('pc2-color').value);
   if (pcElevationModelId !== PROJECT?.id) {
     pcElevationModelId = PROJECT?.id;
@@ -4661,7 +4853,7 @@ function startLoop() {
       measureRoot.traverse((o) => {
         if (o.userData.isMarker) {
           const d = o.position.distanceTo(camera.position);
-          o.scale.setScalar(Math.min(4, Math.max(0.06, d / 90)));
+          o.scale.setScalar(Math.max(1e-7, d * Math.tan(camera.fov * Math.PI / 360) * 8 / renderer.domElement.clientHeight));
         }
       });
 

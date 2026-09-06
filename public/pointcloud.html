@@ -19,6 +19,12 @@
       color: #999; font-size: 11px; background: rgba(10,10,12,0.85);
       border-radius: 6px; padding: 4px 10px;
     }
+    #pc-classification {
+      position: absolute; bottom: 10px; right: 12px; z-index: 50;
+      max-width: min(360px, 60%); padding: 6px 10px; border-radius: 6px;
+      color: #eee; background: rgba(10,10,12,0.88); font-size: 12px;
+      pointer-events: none;
+    }
     #pc-loading {
       position: absolute; inset: 0; z-index: 100; display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 14px;
@@ -49,6 +55,7 @@
   <div id="potree_sidebar_container"></div>
 
   <div id="pc-status">Loading…</div>
+  <div id="pc-classification" hidden>Classification: —</div>
   <div id="pc-loading" role="status" aria-live="polite">
     <div class="spinner"></div>
     <div id="pc-loading-text">Streaming point cloud…</div>
@@ -108,6 +115,7 @@
   <script src="/pointcloud-access.js"></script>
   <script src="/pointcloud-navigation.js"></script>
   <script src="/pointcloud-elevation.js"></script>
+  <script src="/pointcloud-display.js"></script>
   <script src="/pointcloud-cameras.js"></script>
   <script src="/pointcloud-measurements.js"></script>
   <script>
@@ -294,6 +302,7 @@
     // Control API consumed by the parent app's sidebar.
     // --------------------------------------------------------------------
     function eachMat(fn) { for (const pc of viewer.scene.pointclouds) fn(pc.material); }
+    let classificationHover = null;
     const pointCloudElevation = window.LtdsPointCloudElevation.createElevationRangeController({
       getBounds: () => viewer.scene.pointclouds.length ? viewer.scene.getBoundingBox(viewer.scene.pointclouds) : null,
       getMaterials: () => viewer.scene.pointclouds.map(pc => pc.material),
@@ -309,21 +318,19 @@
         budgetState.auto = false;
       },
       setSize(v) { eachMat(mat => { mat.size = parseFloat(v); }); },
-      setSizing(k) {
+      setSizing() {
+        // Other sizing modes are intentionally disabled, including stale calls.
         eachMat(mat => {
-          if (k === 'adaptive') {
-            mat.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-            mat.minSize = 1; mat.maxSize = 6;
-          } else if (k === 'attenuated') {
-            mat.pointSizeType = Potree.PointSizeType.ATTENUATED;
-            mat.minSize = 1; mat.maxSize = 12;
-          } else {
-            mat.pointSizeType = Potree.PointSizeType.FIXED;
-            mat.minSize = 0.5; mat.maxSize = 50;
-          }
+          mat.pointSizeType = Potree.PointSizeType.FIXED;
+          mat.minSize = 0.5; mat.maxSize = 50;
         });
       },
-      setColor(a) { eachMat(mat => { mat.activeAttributeName = a; }); },
+      setColor(a) {
+        const attribute = ['rgba', 'elevation', 'classification'].includes(a) ? a : 'rgba';
+        eachMat(mat => { mat.activeAttributeName = attribute; });
+        document.getElementById('pc-classification').hidden = attribute !== 'classification';
+        classificationHover?.clear();
+      },
       getElevationState() { return pointCloudElevation.state(); },
       setElevationRange(min, max) { return pointCloudElevation.setRange(min, max); },
       resetElevationRange() { return pointCloudElevation.reset(); },
@@ -332,9 +339,11 @@
       setCameraVisibility(visible) { pointCloudCameraLayer.setVisible(visible); },
       setCameraScale(value) { pointCloudCameraLayer.setScale(value); },
       fit() {
+        classificationHover?.clear();
         if (viewer.scene.pointclouds.length) viewer.fitToScreen(0.7);
       },
       setTool(t) {
+        classificationHover?.clear();
         // finish/cancel whatever is inserting first, then start the new one
         viewer.dispatchEvent({ type: 'cancel_insertions' });
         if (t === 'distance') {
@@ -971,6 +980,69 @@
       pointCloudCameraLayer.setHovered(-1);
     });
 
+    // Read the actual decoded point under a settled cursor, independently of
+    // navigation picking. No photo requests, classification inference or scan
+    // through unloaded nodes is needed for this readout.
+    const classificationReadout = document.getElementById('pc-classification');
+    const classificationCanvas = viewer.renderer.domElement;
+    classificationHover = window.LtdsPointCloudDisplay.createHoverReader({
+      canPick: () => !document.hidden && !classificationReadout.hidden
+        && pcControls._mode === 'none' && !pcControls._inertia.active
+        && !insertionActive.m && !insertionActive.v,
+      show: text => { if (classificationReadout.textContent !== text) classificationReadout.textContent = text; },
+      pick: position => {
+        const rect = classificationCanvas.getBoundingClientRect();
+        const x = position.x - rect.left, y = position.y - rect.top;
+        if (x < 2 || y < 2 || x > rect.width - 3 || y > rect.height - 3) return null;
+        const camera = viewer.scene.getActiveCamera();
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(x / rect.width * 2 - 1, 1 - y / rect.height * 2), camera);
+        let closest = null, distance = Infinity;
+        for (const cloud of viewer.scene.pointclouds) {
+          if (cloud.visible === false || !cloud.visibleNodes?.length) continue;
+          const originalMaterial = cloud.material;
+          let point;
+          try {
+            point = cloud.pick(viewer, camera, raycaster.ray, {
+              x, y: classificationCanvas.clientHeight - y, pickWindowSize: 5, pickClipped: true,
+            });
+          } catch {
+            // A failed optional readout must not leave Potree in its pick pass.
+            viewer.renderer.setRenderTarget(null);
+            viewer.renderer.state.reset();
+            viewer.renderer.setScissorTest(false);
+            continue;
+          } finally {
+            cloud.material = originalMaterial;
+            // Potree 1.8.2 appends these User Timing entries on every pick,
+            // even on a miss. Do not retain an unbounded hover timing history.
+            if (!Potree.measureTimings) {
+              performance.clearMarks('pick-start'); performance.clearMarks('pick-end');
+              performance.clearMeasures('pick');
+            }
+          }
+          if (!point?.position) continue;
+          const depth = point.position.clone().sub(camera.position).dot(raycaster.ray.direction);
+          const nextDistance = camera.position.distanceTo(point.position);
+          if (!(depth > 0) || !Number.isFinite(nextDistance) || nextDistance >= distance) continue;
+          distance = nextDistance;
+          // The EPT adapter declares a classification buffer even when the
+          // source schema lacks it. Do not mistake its default zeros for data.
+          const schema = cloud.pcoGeometry?.ept?.schema;
+          closest = Array.isArray(schema) && !schema.some(field => field.name?.toLowerCase() === 'classification')
+            ? { position: point.position } : point;
+        }
+        return closest;
+      },
+    });
+    classificationCanvas.addEventListener('pointermove', event => classificationHover.move(event), { passive: true });
+    for (const event of ['pointerdown', 'pointerleave', 'pointercancel', 'wheel']) {
+      classificationCanvas.addEventListener(event, () => classificationHover.clear(), { passive: true });
+    }
+    window.addEventListener('blur', () => classificationHover.clear());
+    window.addEventListener('pagehide', () => classificationHover.clear());
+    document.addEventListener('visibilitychange', () => classificationHover.clear());
+
     if (!EPT_URL) {
       pointCloudHealth.fail('not_configured', { retryable: false });
     } else {
@@ -984,7 +1056,7 @@
       const mat = pc.material;
       mat.size = 1;
       // Default FIXED sizing — no giant blobs at sparse octree edges.
-      // Adaptive/attenuated stay available through __pcApi.setSizing().
+      // The display API also enforces fixed sizing.
       mat.pointSizeType = Potree.PointSizeType.FIXED;
       mat.minSize = 0.5;
       mat.maxSize = 50;
@@ -996,6 +1068,9 @@
       if (!window.__pcViewReady) {
         viewer.fitToScreen(0.7);
       }
+      // Native cloud-first framing is just as transferable as a parent-supplied
+      // view. Otherwise later user navigation is discarded on leaving this tab.
+      window.__pcViewReady = true;
       pcControls.pivot.copy(view.getPivot());
 
       const cam = viewer.scene.getActiveCamera();

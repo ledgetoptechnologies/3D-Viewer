@@ -37,7 +37,7 @@ ${fn(main,'sampleCmap')}
 ${fn(main,'hillshadeFactor')}
 ${fn(main,'renderDemTile')}
 const demSettings={cmap:'viridis',shade:1,minFt:null,maxFt:null,steps:0};const state={activeMode:'dsm',activeTool:'none'},modeAbortController={signal:new AbortController().signal},SHOTS_URL='/synthetic-shots',SHARE_PERMISSIONS={cameras:true},DSM_URL='/synthetic-dsm',DTM_URL='/synthetic-dtm';
-const raster=[Float32Array.from({length:128*128},(_,i)=>(i%128)/127*100+Math.sin(Math.floor(i/128)/10)*2)];const ds={min:0,max:102,nodata:-9999};const canvas=document.querySelector('#raster');let paints=0;
+const raster=[Float32Array.from({length:128*128},(_,i)=>(i%128)/127*100+Math.sin(Math.floor(i/128)/10)*2)];const ds={min:0,max:102,nodata:-9999,minE:0,maxE:128,minN:0,maxN:128};const canvas=document.querySelector('#raster');let paints=0;
 const overviewCanvas=async(_ds,render)=>{await new Promise(resolve=>setTimeout(resolve,140));return{canvas:render(raster,128,128,ds)}};
 const setUrl=url=>{const image=new Image();image.onload=()=>{canvas.getContext('2d').drawImage(image,0,0);const pixels=canvas.getContext('2d').getImageData(0,0,128,128).data;let transparent=0;for(let i=3;i<pixels.length;i+=4)if(pixels[i]<255)transparent++;document.querySelector('#render-status').textContent='Paint '+(++paints)+' · '+state.activeMode.toUpperCase()+' · '+demSettings.cmap+' · range '+demSettings.minFt+' to '+demSettings.maxFt+' · nonopaque valid pixels '+transparent;};image.src=url;};
 const layer={ds,overlay:{setUrl,setOpacity:value=>canvas.style.opacity=String(value)},grid:{redraw(){},setOpacity(){}}};const demLayers={dsm:layer,dtm:null};

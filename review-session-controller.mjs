@@ -41,6 +41,7 @@ export class ReviewSessionController {
   constructor({
     origin,
     issueGrant,
+    measurementRequest = null,
     createChannel = name => new BroadcastChannel(name),
     now = () => Date.now(),
     retryDelays = [2_000, 5_000, 15_000],
@@ -52,6 +53,7 @@ export class ReviewSessionController {
     if (typeof issueGrant !== 'function' || typeof createChannel !== 'function') throw new Error('review channel dependencies are required');
     this.origin = origin;
     this.issueGrant = issueGrant;
+    this.measurementRequest = measurementRequest;
     this.createChannel = createChannel;
     this.now = now;
     this.retryDelays = [...retryDelays].filter(delay => Number.isFinite(delay) && delay >= 0).slice(0, 3);
@@ -148,6 +150,8 @@ export class ReviewSessionController {
       retryIndex: 0,
       retryTimer: null,
       renewedTimer: null,
+      measurementPending: false,
+      measurementRequestIds: new Set(),
       restored: restoring,
       updatedAt: this.now(),
     };
@@ -199,6 +203,7 @@ export class ReviewSessionController {
     const record = this.records.get(channelId);
     if (!record) return false;
     const now = this.now();
+    if (data?.type === 'ltds-viewer:measurement-request') return this.handleMeasurementRequest(record, data);
     if (exactKeys(data, ['version', 'type', 'modelId', 'expiresAt'])
       && data.version === 1 && data.type === 'ltds-viewer:ready' && data.modelId === record.context.modelId
       && validSessionExpiry(data.expiresAt, record, now)) {
@@ -270,6 +275,34 @@ export class ReviewSessionController {
     record.usedRequestIds.add(data.requestId);
     record.activeRequestId = data.requestId;
     return this.renew(record);
+  }
+
+  async handleMeasurementRequest(record, data) {
+    if (!this.subject || typeof this.measurementRequest !== 'function'
+      || !exactKeys(data, ['version','type','requestId','modelId','modelVersionId','viewerToken','operation','payload'])
+      || data.version !== 1 || !CHANNEL_ID_PATTERN.test(data.requestId || '')
+      || data.modelId !== record.context.modelId || data.modelVersionId !== record.context.modelVersionId
+      || record.measurementPending || record.measurementRequestIds.has(data.requestId)
+      || !['capabilities','create','list','status','cancel'].includes(data.operation)
+      || typeof data.viewerToken !== 'string' || data.viewerToken.length > 128) return false;
+    if (record.measurementRequestIds.size >= 128) record.measurementRequestIds.delete(record.measurementRequestIds.values().next().value);
+    record.measurementRequestIds.add(data.requestId);
+    record.measurementPending = true;
+    const subject = this.subject;
+    const response = { version: 1, type: 'ltds-viewer:measurement-response', requestId: data.requestId,
+      modelId: record.context.modelId, modelVersionId: record.context.modelVersionId };
+    try {
+      const result = await this.measurementRequest(record.context, data);
+      if (this.subject !== subject || this.records.get(record.channelId) !== record) return false;
+      record.channel.postMessage({ ...response, ok: true, result });
+      return true;
+    } catch (error) {
+      if (this.subject !== subject || this.records.get(record.channelId) !== record) return false;
+      try { record.channel.postMessage({ ...response, ok: false,
+        code: ['measurement_admin_required','measurement_scope_changed','measurement_request_invalid'].includes(error?.code) ? error.code : 'measurement_request_failed',
+        status: Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 503 }); } catch {}
+      return false;
+    } finally { record.measurementPending = false; }
   }
 
   async renew(record) {

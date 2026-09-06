@@ -1928,6 +1928,43 @@ const MIGRATIONS = [
         ON processing_jobs(attempt_id,job_type) WHERE status IN ('pending','leased');
     `,
   },
+  {
+    version: 32,
+    name: 'private_measurements_and_calculation_jobs',
+    sql: `
+      CREATE TABLE private_measurements (
+        id TEXT PRIMARY KEY,
+        model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+        model_version_id TEXT NOT NULL REFERENCES model_versions(id) ON DELETE CASCADE,
+        owner_audience TEXT NOT NULL CHECK(owner_audience IN ('ops','client')),
+        owner_subject TEXT NOT NULL,
+        collection TEXT NOT NULL CHECK(collection IN ('spatial3d','map')),
+        document_json TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision>0),
+        creation_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+      );
+      CREATE INDEX private_measurements_owner_version_idx
+        ON private_measurements(model_version_id,owner_audience,owner_subject,collection,deleted_at);
+      CREATE TABLE measurement_calculation_jobs (
+        id TEXT PRIMARY KEY,
+        measurement_id TEXT NOT NULL REFERENCES private_measurements(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        request_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued','running','complete','failed','cancelled')),
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at TEXT,
+        result_json TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX measurement_calculation_jobs_status_idx ON measurement_calculation_jobs(status,created_at);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

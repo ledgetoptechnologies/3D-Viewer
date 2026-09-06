@@ -47,7 +47,7 @@ test('published image executes a real Obj2Tiles conversion and provenance audit'
   assert.match(smoke, /KHR_texture_basisu/);
   assert.match(smoke, /compressedTextures/);
   assert.match(workflow, /docker run --rm "\$VERIFY_IMAGE" node scripts\/verify-obj2tiles-runtime\.mjs/);
-  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "31"/, 'published-image verification must match the current database schema');
+  assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "32"/, 'published-image verification must match the current database schema');
 });
 
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
@@ -323,7 +323,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   const ready = await waitFor(`${baseUrl}/api/v1/ready`, child, { headers: proxyHeaders });
   assert.deepEqual(await ready.json(), { ok: true, missing: [] });
   assert.equal(ready.headers.get('x-ltds-viewer-revision'), 'unavailable');
-  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '31');
+  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '32');
   assert.equal(ready.headers.get('cache-control'), 'no-store');
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`)).status, 421);
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`, { Host: 'viewer.example.test' })).status, 403);
@@ -333,7 +333,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   const health = await httpRequest(`${baseUrl}/api/v1/health`, proxyHeaders);
   assert.deepEqual(await health.json(), { ok: true });
   assert.equal(health.headers.get('x-ltds-viewer-revision'), 'unavailable');
-  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '31');
+  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '32');
   assert.equal(health.headers.get('cache-control'), 'no-store');
   const contentSecurityPolicy = health.headers.get('content-security-policy') || '';
   assert.match(

@@ -8,12 +8,12 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
-  const timers = new Map(), posts = [], resets = [];
+  const timers = new Map(), posts = [], resets = [], measurements = {invalidations:0,installs:0,invalidated:false,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
   window.parent = window;
-  const session = { sessionId: 'session-id', sessionMode: 'published', accessToken: 'private-token',
-    model: { id: 'model-one' }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const session = { sessionId: 'session-id', sessionMode: 'published', accessToken: 'private-token',subject:'person-one',audience:'ops',permissions:{view:true,measure:true},
+    model: { id: 'model-one',activeVersion:{id:'version-one'} }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
   const context = vm.createContext({
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
@@ -33,6 +33,9 @@ function fixture({ controller = true } = {}) {
     setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, delay }); return id; },
     clearTimeout: id => timers.delete(id),
     setDisplayUnits() {}, applyProjectConfig() {}, stopLodAvailabilityRefresh() {},
+    measurementWorkspace:{invalidate(){measurements.invalidations++;measurements.invalidated=true;measurements.records.clear();},isInvalidated:()=>measurements.invalidated},
+    installMeasurementWorkspace(){measurements.installs++;measurements.invalidated=false;},
+    viewerProductDownloads:null,
     releaseFailedTileReservations() {},
     pcApi: () => ({ renewAccess: () => resets.push('cloud'), accessUnavailable: () => resets.push('unavailable') }),
     redeemViewerGrant: async () => ({ ...session, expiresAt: new Date(Date.now() + 1_800_000).toISOString() }),
@@ -40,7 +43,7 @@ function fixture({ controller = true } = {}) {
   vm.runInContext(source.slice(source.indexOf('function recoverFailedLodTiles()'), source.indexOf('let sessionRenewalTimer')), context);
   vm.runInContext(source.slice(source.indexOf('function sessionControlWindow()'), source.indexOf('async function bootstrapSession()')), context);
   vm.runInContext(source.slice(source.indexOf('async function handleSessionRenewalMessage'), source.indexOf('if (reviewSessionChannel) reviewSessionChannel.onmessage')), context);
-  return { context, timers, posts, resets };
+  return { context, timers, posts, resets, measurements };
 }
 
 test('parallel tile/cloud authorization failures coalesce and successful renewal resumes both runtimes', async () => {
@@ -122,6 +125,33 @@ test('proactive renewal clears the cloud access label even without a denied EPT 
   await f.context.handleSessionRenewalMessage({ version: 1, type: 'ltds-viewer:renew-session',
     requestId: REQUEST, grant: '11111111-2222-4333-8444-555555555555' }, { reviewChannel: true });
   assert.equal(f.context.dom.cloudStatus.textContent, 'Cloud: access renewed');
+});
+
+test('unavailable access immediately hides personal records and same-person renewal recreates the private workspace',async()=>{
+  const f=fixture();f.context.requestSessionRenewal();
+  f.context.setSessionAccessState('unavailable','temporary-denial');
+  assert.equal(f.measurements.invalidations,1);assert.equal(f.measurements.records.size,0);assert.equal(f.measurements.installs,0);
+  await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
+  assert.equal(f.context.sessionAccessState,'active');assert.equal(f.measurements.installs,1);assert.equal(f.measurements.invalidated,false);
+  assert.equal(f.measurements.records.size,0,'a fresh private store reloads rather than restoring stale records');
+});
+
+test('same-person proactive renewal preserves the existing personal workspace',async()=>{
+  const f=fixture();f.context.requestSessionRenewal();
+  await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
+  assert.equal(f.measurements.installs,0);assert.equal(f.measurements.invalidations,0);assert.equal(f.measurements.records.get('private'),'geometry');
+});
+
+test('renewal changing person, audience or immutable version fails closed before resource recovery',async()=>{
+  for(const scope of ['subject','audience','version']){
+    const f=fixture(),current=f.context.activeViewerSession;
+    f.context.redeemViewerGrant=async()=>({...current,expiresAt:new Date(Date.now()+1_800_000).toISOString(),...(scope==='subject'?{subject:'person-two'}:scope==='audience'?{audience:'client'}:{model:{...current.model,activeVersion:{id:'version-two'}}})});
+    f.context.requestSessionRenewal();
+    await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
+    assert.equal(f.context.sessionAccessState,'unavailable',scope);assert.equal(f.context.sessionRenewalBlocked,true,scope);
+    assert.equal(f.measurements.records.size,0,scope);assert.equal(f.measurements.installs,0,scope);assert.deepEqual(f.resets,['unavailable'],scope);
+    assert.equal(f.context.activeViewerSession,current,scope);assert.equal(f.context.sessionAccessGeneration,0,scope);
+  }
 });
 
 test('returning controller advisory accelerates only a due exact-channel model request and coalesces duplicates',async()=>{

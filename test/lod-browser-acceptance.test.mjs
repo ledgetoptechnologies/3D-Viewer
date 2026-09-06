@@ -84,31 +84,27 @@ async function assertExpandedPhotoWheelAndPan(client) {
 }
 
 async function assertStableMapCameraAnchors(client) {
-  // This fixture exercises the real Leaflet marker layer without a GeoTIFF
+  // This fixture exercises the real Leaflet canvas layer without a GeoTIFF
   // response. These assertions prove camera anchoring, not raster rendering.
   await waitFor(client, `!document.querySelector('#leaflet-map .leaflet-zoom-anim')`, 'initial map zoom did not settle');
   await client.evaluate(`(() => {
-    window.__mapPinNodes=Array.from(document.querySelectorAll('.map-camera-marker'));
+    window.__mapPinCanvas=document.querySelector('.map-camera-canvas');
     window.__mapPinSources=window.__ltdsMapCamDrawToSource.slice();
   })()`);
   const read = () => client.evaluate(`(() => {
-    const nodes=Array.from(document.querySelectorAll('.map-camera-marker'));
-    return {sources:window.__ltdsMapCamDrawToSource.slice(),same:nodes.every((node,index)=>node===window.__mapPinNodes[index]),
-      points:nodes.map(node=>{const r=node.getBoundingClientRect();const style=getComputedStyle(node);return {
-        x:r.left+r.width/2,y:r.bottom,width:r.width,height:r.height,left:parseFloat(style.marginLeft),top:parseFloat(style.marginTop),
-        viewBox:node.querySelector('svg')?.getAttribute('viewBox'),transform:node.querySelector('svg')?.style.transform||''};})};
+    return {sources:window.__ltdsMapCamDrawToSource.slice().sort((a,b)=>a-b),same:document.querySelector('.map-camera-canvas')===window.__mapPinCanvas,
+      points:window.__ltdsMapCamPoints.slice().sort((a,b)=>a.source-b.source).map(point=>({...point,width:point.size}))};
   })()`);
   const before = await read(); assert.deepEqual(before.sources, [0, 1, 2]);
   for (const point of before.points) {
-    assert.equal(point.viewBox, '0 0 24 32'); assert.equal(point.transform, '', 'map pin body must remain upright');
-    assert.ok(Math.abs(point.left + point.width / 2) < 1 && Math.abs(point.top + point.height) < 1,
-      'map pin tip must stay attached to its source coordinate');
+    assert.equal(point.height, point.width * 4 / 3);
+    assert.ok(Number.isFinite(point.bearing), 'each pin retains its image-up bearing');
   }
   const separation = value => Math.hypot(value.points[2].x-value.points[0].x,value.points[2].y-value.points[0].y);
   await client.evaluate(`document.querySelector('.leaflet-control-zoom-in').click()`);
-  try { await waitFor(client, `(() => {const nodes=Array.from(document.querySelectorAll('.map-camera-marker'));if(nodes.length!==3)return false;
-    const a=nodes[0].getBoundingClientRect(),b=nodes[2].getBoundingClientRect();
-    return !document.querySelector('#leaflet-map .leaflet-zoom-anim') && Math.hypot(b.left-a.left,b.top-a.top)>${separation(before) + 0.25};})()`, 'map camera anchors did not follow map zoom', 4_000); }
+  try { await waitFor(client, `(() => {const points=window.__ltdsMapCamPoints.slice().sort((a,b)=>a.source-b.source);if(points.length!==3)return false;
+    const a=points[0],b=points[2];
+    return !document.querySelector('#leaflet-map .leaflet-zoom-anim') && Math.hypot(b.x-a.x,b.y-a.y)>${separation(before) + 0.25};})()`, 'map camera anchors did not follow map zoom', 4_000); }
   catch(error) { throw new Error(`${error.message}; before=${JSON.stringify(before)}; after=${JSON.stringify(await read())}; controls=${JSON.stringify(await client.evaluate(`({zoom:document.querySelector('.leaflet-control-zoom-in')?.outerHTML,map:document.querySelector('#leaflet-map')?.className})`))}`); }
   const zoomed = await read(); assert.equal(zoomed.same, true, 'map zoom recreated the source markers');
   assert.deepEqual(zoomed.sources, before.sources, 'map zoom changed source photo identities');
@@ -121,7 +117,7 @@ async function assertStableMapCameraAnchors(client) {
   await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:area.x,y:area.y,button:'left',buttons:1,clickCount:1});
   await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:area.x+70,y:area.y+45,button:'left',buttons:1});
   await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:area.x+70,y:area.y+45,button:'left',buttons:0,clickCount:1});
-  await waitFor(client, `(() => {const r=document.querySelector('.map-camera-marker').getBoundingClientRect();return Math.hypot(r.left+r.width/2-${zoomed.points[0].x},r.bottom-${zoomed.points[0].y})>20;})()`, 'map drag did not move its source anchors');
+  await waitFor(client, `(() => {const point=window.__ltdsMapCamPoints.find(point=>point.source===0);return point&&Math.hypot(point.x-${zoomed.points[0].x},point.y-${zoomed.points[0].y})>20;})()`, 'map drag did not move its source anchors');
   const panned = await read(); assert.equal(panned.same, true, 'map drag recreated source markers');
   assert.deepEqual(panned.sources, before.sources);
   for (let index=1;index<3;index++) {
@@ -1444,11 +1440,11 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await client.evaluate(`(() => { document.querySelector('#photo-close').click(); window.__ltds.state.activeMode='model'; window.__ltds.state.cloudMode='none'; return true; })()`);
     await client.evaluate(`document.querySelector('#tab-ortho').click()`);
     await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
-    const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
+    const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice().sort((a,b)=>a-b),icons:document.querySelectorAll('.map-camera-canvas').length}))()`);
     assert.equal(mapCamera.drawn, 3, 'map must preserve every source photo marker');
-    assert.equal(mapCamera.icons, mapCamera.drawn);
+    assert.equal(mapCamera.icons, 1, 'all map pins share one canvas');
     await assertStableMapCameraAnchors(client);
-    await client.evaluate(`document.querySelector('.map-camera-marker').click()`);
+    await client.evaluate(`document.querySelector('.map-camera-selector').dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true})); document.querySelector('.map-camera-selector').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'orthophoto camera did not open the shared photo preview');
     const mapPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
     assert.match(mapPhotoUrl, new RegExp(`/camera-photos/photo-${mapCamera.sources[0]}\\.jpg$`));
@@ -1999,11 +1995,11 @@ test('browser camera layer preserves all in-view source markers and map anchors 
     await assertExpandedPhotoWheelAndPan(client);
     await client.evaluate(`document.querySelector('#photo-close').click(); document.querySelector('#tab-ortho').click()`);
     await waitFor(client, `document.querySelector('#panel-camera-positions').style.display === 'block' && window.__ltdsMapCamDrawn > 0`, 'orthophoto did not expose bounded camera positions', 30_000);
-    const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice(),icons:document.querySelectorAll('.map-camera-marker').length}))()`);
+    const mapCamera = await client.evaluate(`(() => ({drawn:window.__ltdsMapCamDrawn,sources:window.__ltdsMapCamDrawToSource.slice().sort((a,b)=>a-b),icons:document.querySelectorAll('.map-camera-canvas').length}))()`);
     assert.equal(mapCamera.drawn, 3, 'map must preserve every source photo marker');
-    assert.equal(mapCamera.icons, mapCamera.drawn);
+    assert.equal(mapCamera.icons, 1, 'all map pins share one canvas');
     await assertStableMapCameraAnchors(client);
-    await client.evaluate(`document.querySelector('.map-camera-marker').click()`);
+    await client.evaluate(`document.querySelector('.map-camera-selector').dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true})); document.querySelector('.map-camera-selector').click()`);
     await waitFor(client, `document.querySelector('#photo-modal').dataset.presentation === 'docked'`, 'orthophoto camera did not open the shared photo preview');
     const mapPhotoUrl = await client.evaluate(`document.querySelector('#photo-img').src`);
     assert.match(mapPhotoUrl, new RegExp(`/camera-photos/photo-${mapCamera.sources[0]}\\.jpg$`));

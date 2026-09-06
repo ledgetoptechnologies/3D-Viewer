@@ -51,13 +51,18 @@ function panelFixture(units = 'imperial') {
   let current = controller;
   const ids = ['pc2-elevation-controls', 'pc2-color', 'pc2-elevation-min-label', 'pc2-elevation-max-label',
     'pc2-elevation-min', 'pc2-elevation-max', 'pc2-elevation-low', 'pc2-elevation-high', 'pc2-elevation-reset',
-    'pc2-elevation-status', 'pc2-budget', 'pc2-size', 'pc2-sizing', 'pc2-edl', 'pc2-budget-val', 'pc2-size-val', 'pc2-fit'];
+    'pc2-elevation-status', 'pc2-budget', 'pc2-size', 'pc2-edl', 'pc2-budget-val', 'pc2-size-val', 'pc2-fit', 'pc2-reset'];
   const elements = Object.fromEntries(ids.map(id => [id, { value: '', disabled: false, hidden: false, listeners: {},
     get valueAsNumber() { return this.value === '' ? NaN : Number(this.value); },
     setAttribute(name, value) { this[name] = value; }, addEventListener(name, fn) { this.listeners[name] = fn; } }]));
   elements['pc2-color'].value = 'elevation';
+  const display = {};
   const api = { getElevationState: () => current.state(), setElevationRange: (min, max) => current.setRange(min, max),
-    resetElevationRange: () => current.reset(), setBudget() {}, setSize() {}, setSizing() {}, setColor() {}, setEDL() {} };
+    resetElevationRange: () => current.reset(), setBudget(value) { display.budget = value; },
+    setSize(value) { display.size = value; }, setSizing(value) { display.sizing = value; },
+    setColor(value) { display.color = value; }, setEDL(value) { display.edl = value; },
+    fit() { throw new Error('Display reset must not move the view'); },
+    clearMeasurements() { throw new Error('Display reset must not clear measurements'); } };
   const source = fs.readFileSync(require.resolve('../main.js'), 'utf8');
   const section = source.slice(source.indexOf('let pcElevationModelId ='), source.indexOf('// View sync between', source.indexOf('let pcElevationModelId =')));
   const applyStart = source.indexOf('function applyPcPanelState()');
@@ -68,7 +73,7 @@ function panelFixture(units = 'imperial') {
   vm.createContext(context);
   vm.runInContext(`${section}\n${apply}\nthis.panel={syncPcElevationControls,applyPcElevationInputs,bindPcPanel,applyPcPanelState}`, context);
   context.panel.bindPcPanel(); context.panel.syncPcElevationControls();
-  return { elements, context, panel: context.panel, materials, controller, replaceRuntime(next) { current = next; } };
+  return { elements, context, panel: context.panel, materials, controller, display, replaceRuntime(next) { current = next; } };
 }
 
 test('parent elevation fields use displayed feet or metres and update the shader live', () => {
@@ -103,4 +108,20 @@ test('range handles cannot cross, custom range survives runtime replacement, new
   assert.equal(another.controller.state().automatic, true);
   elements['pc2-elevation-reset'].listeners.click();
   assert.deepEqual(another.materials[0].elevationRange, [200, 250]);
+});
+
+test('display reset restores defaults and auto elevation without altering viewpoint or measurements', () => {
+  const { elements, controller, display } = panelFixture('metric');
+  elements['pc2-budget'].value = '2';
+  elements['pc2-size'].value = '2.5';
+  elements['pc2-edl'].checked = false;
+  elements['pc2-elevation-min'].value = '220';
+  elements['pc2-elevation-min'].listeners.input();
+  assert.equal(controller.state().automatic, false);
+  elements['pc2-reset'].listeners.click();
+  assert.deepEqual(display, { budget: 10, size: 1, sizing: 'fixed', color: 'rgba', edl: true });
+  assert.equal(controller.state().automatic, true);
+  assert.equal(elements['pc2-elevation-controls'].hidden, true);
+  assert.equal(elements['pc2-budget-val'].textContent, '10M');
+  assert.equal(elements['pc2-size-val'].textContent, '1.0');
 });

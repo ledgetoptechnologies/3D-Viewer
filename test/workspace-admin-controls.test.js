@@ -7,11 +7,14 @@ const test=require('node:test');
 const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
 const launcher=fs.readFileSync(path.join(__dirname,'..','isolated-viewer-launch.mjs'),'utf8');
 
-test('staff output actions keep the admin bearer on downloads and mint published sessions',()=>{
+test('staff output actions exchange the admin bearer for streamed narrow downloads and mint published sessions',()=>{
   assert.match(source,/async function authenticatedDownload/);
   assert.match(source,/Authorization:`Bearer \$\{state\.token\}`/);
-  assert.match(source,/URL\.createObjectURL\(blob\)/);
-  assert.match(source,/URL\.revokeObjectURL\(url\)/);
+  const download=source.split(/\r?\n/).find(line=>line.startsWith('async function authenticatedDownload('));
+  assert.match(download,/download-grants/);
+  assert.match(download,/product-downloads/);
+  assert.doesNotMatch(download,/\.blob\(|createObjectURL/);
+  assert.match(download,/link\.referrerPolicy='no-referrer'/);
   assert.match(source,/async function viewPublishedOutput/);
   assert.match(source,/\/processing\/outputs\/\$\{encodeURIComponent\(id\)\}\/view-sessions/);
   assert.match(source,/import \{ beginIsolatedViewerLaunch \} from '\.\/isolated-viewer-launch\.mjs'/);

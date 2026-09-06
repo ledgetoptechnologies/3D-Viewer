@@ -8,6 +8,7 @@ const { requireService } = require('./serviceAuth');
 const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
 const { receiptVerifiedLodProvenance, verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
+const { createMeasurementApi } = require('./measurementApi');
 
 const VIEWER_COOKIE = 'ltds_viewer';
 
@@ -121,6 +122,9 @@ function permissions(value) {
     measure: input.measure !== false,
     cameras: input.cameras !== false,
     download: input.download === true,
+    // Service grant issuer attests that subject identifies one person, not an
+    // account/company. Legacy client grants intentionally do not persist notes.
+    ...(input.personalMeasurements === true ? { personalMeasurements: true } : {}),
   };
 }
 
@@ -147,6 +151,7 @@ function createApiV1(repository) {
   const router = express.Router();
   const serviceOnly = requireService(repository);
   const idempotentService = idempotent(repository);
+  router.use('/api/v1/measurements', createMeasurementApi(repository));
   if (config.publishedSessionSourceRevocationEnabled) repository.failClosedUnboundPublishedSessions({
     actorType: 'system',
     action: 'published_session.unbound_revoked',

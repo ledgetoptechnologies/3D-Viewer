@@ -13,6 +13,17 @@ units (feet converted to meters internally, metric input unchanged). Both DEM
 pixel-rendering paths use alpha 255 for valid pixels, so 100% opacity is genuinely
 opaque; invalid/no-data pixels remain transparent.
 
+Relief shading uses the physical east/north cell spacing of the sampled GeoTIFF
+level (including overview and cropped detail windows). Previously it implicitly
+treated every cell as one metre wide, suppressing relief in centimetre-resolution
+DSMs and changing apparent slope shading between overview levels. The renderer
+now uses metre-per-metre Horn gradients and a north-west light in the raster's
+north-up coordinate system; masked neighbors cannot create artificial cliffs.
+This is a display-only correction: source heights, min/max settings, palettes,
+shading intensity controls and measurement integration are unchanged. Exact
+WebODM visual parity is not claimed: compare the same source, zoom, elevation
+range and shading settings in a real-data browser retest.
+
 DSM and DTM use the same source-anchored camera-position map overlay as orthophoto,
 including camera permissions, original-photo preview behavior and marker size.
 
@@ -21,7 +32,7 @@ settings. They are hidden during normal DSM/DTM browsing and shown when Volume i
 selected. Their original surface/reference selection and numerical integration
 remain intact. They remain available on orthophoto as before.
 
-Local checks: `node --test test/dem-settings-ui.test.mjs test/map-volume.test.mjs`
+Local checks: `node --test test/dem-hillshade.test.mjs test/dem-settings-ui.test.mjs test/map-volume.test.mjs`
 and `npm run build`. Real-data browser retest should change palette/steps during
 loading, drag shading rapidly, reset, verify 100% opacity, toggle camera positions
 on each map, and confirm Volume reveals its reference settings.

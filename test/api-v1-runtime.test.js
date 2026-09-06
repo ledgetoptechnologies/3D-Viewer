@@ -214,6 +214,70 @@ test('v1 service API redeems a stable cookie-independent scoped browser capabili
   assert.equal(current.status, 200);
   assert.equal((await current.json()).model.assets.tiles, null);
 
+  await t.test('signed service issuance and redemption preserve individual measurement attestation across renewal', async () => {
+    const subject = 'client:stable-portal-person-identity';
+    async function issueAndRedeem(person, attestation, priorToken) {
+      const body = JSON.stringify({
+        subject: person, audience: 'client', modelVersionId: model.activeVersion.id,
+        authorizationExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+        permissions: { view: true, measure: true, ...(attestation === undefined ? {} : { personalMeasurements: attestation }) },
+      });
+      const issued = await signedFetch(baseUrl, sessionPath, {
+        method: 'POST', body, headers: { 'Idempotency-Key': `personal-measurement-${crypto.randomUUID()}` },
+      });
+      assert.equal(issued.status, 201);
+      const issuedBody = await issued.json();
+      const redeemed = await fetch(`${baseUrl}/api/v1/sessions/redeem`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(priorToken ? { Authorization: `Bearer ${priorToken}` } : {}) },
+        body: JSON.stringify({ grant: issuedBody.grant }),
+      });
+      assert.equal(redeemed.status, 200);
+      const session = await redeemed.json();
+      assert.equal(session.subject, person); assert.equal(session.audience, 'client');
+      assert.equal(session.model.id, model.id);
+      assert.equal(session.permissions.personalMeasurements === true, attestation === true);
+      return session;
+    }
+    const measurementRequest = (session, suffix = '', method = 'GET', body) => fetch(`${baseUrl}/api/v1/measurements${suffix}`, {
+      method, headers: { Authorization: `Bearer ${session.accessToken}`, 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const doc = {
+      id: crypto.randomUUID(), name: 'Individual service-grant measurement', collection: 'spatial3d', kind: 'distance',
+      vertices: [[400000.123456789, 4500000, 200], [400010, 4500000, 201]],
+      coordinateReference: { crs: 'EPSG:32616', verticalUnit: 'm' }, visible: true,
+    };
+    const trusted = await issueAndRedeem(subject, true);
+    assert.equal((await measurementRequest(trusted, '', 'POST', doc)).status, 201);
+    const initial = await (await measurementRequest(trusted)).json();
+    assert.equal(initial.capabilities.personalPersistence, true);
+    assert.equal(initial.capabilities.serverCalculations, false, 'personal annotations never grant processing authority');
+    assert.equal(initial.measurements[0].vertices[0][0], doc.vertices[0][0]);
+    const renewed = await issueAndRedeem(subject, true, trusted.accessToken);
+    assert.equal(renewed.accessToken, trusted.accessToken, 'same-person grant renews the existing capability');
+    assert.equal((await (await measurementRequest(renewed)).json()).measurements[0].id, doc.id);
+    const fresh = await issueAndRedeem(subject, true);
+    assert.notEqual(fresh.accessToken, renewed.accessToken);
+    assert.equal((await (await measurementRequest(fresh)).json()).measurements[0].id, doc.id);
+    const other = await issueAndRedeem('client:other-portal-person', true);
+    assert.deepEqual((await (await measurementRequest(other)).json()).measurements, []);
+    assert.equal((await measurementRequest(other, `/${doc.id}`)).status, 404);
+    // Omitted or false attestation must not expose records previously saved for
+    // the same subject. A later service rollout/rollback cannot broaden access.
+    for (const flag of [undefined, false]) {
+      const temporary = await issueAndRedeem(subject, flag, renewed.accessToken);
+      const listed = await (await measurementRequest(temporary)).json();
+      assert.deepEqual(listed.measurements, []);
+      assert.equal(listed.capabilities.personalPersistence, false);
+      assert.equal(listed.capabilities.serverCalculations, false);
+      const denied = await measurementRequest(temporary, '', 'POST', { ...doc, id: crypto.randomUUID() });
+      assert.equal(denied.status, 403);
+      assert.equal((await denied.json()).code, 'personal_measurement_identity_required');
+    }
+    const restored = await issueAndRedeem(subject, true, renewed.accessToken);
+    assert.equal((await (await measurementRequest(restored)).json()).measurements[0].id, doc.id);
+  });
+
   // An optional LOD backfill may complete after the browser capability was
   // redeemed. The same live, version-scoped session must immediately expose
   // and authorize that registered derivative; no reimport or new grant is

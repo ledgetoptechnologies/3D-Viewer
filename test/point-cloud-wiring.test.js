@@ -17,7 +17,7 @@ test('LAZ wiring retains Float64 until RTC localization and point-cloud-only ini
   assert.match(mainSource, /if \(is3D\) \{[\s\S]*?applyMeshLayer\(\);/);
   assert.match(
     mainSource,
-    /pointCloudOffset\.add\(pointCloudObject\)[\s\S]*pointCloudParent\.updateMatrixWorld\(true\)[\s\S]*frameObjectHome\(pointCloudObject\)/,
+    /pointCloudOffset\.add\(pointCloudObject\)[\s\S]*pointCloudParent\.updateMatrixWorld\(true\)[\s\S]*frameObjectHome\(pointCloudObject, \{ apply: !lastShared3DView \}\)/,
   );
   assert.match(mainSource, /new THREE\.PointsMaterial\(\{[\s\S]*size:\s*2,[\s\S]*sizeAttenuation:\s*false/);
 });
@@ -41,8 +41,8 @@ test('Potree controls preserve panel state and match mesh navigation feedback', 
     assert.match(mainSource, new RegExp(`api\\.${call}\\(`));
   }
   assert.match(pointCloudShell, /activeAttributeName = a/);
-  assert.match(pointCloudShell, /PointSizeType\.ADAPTIVE/);
-  assert.match(pointCloudShell, /PointSizeType\.ATTENUATED/);
+  assert.doesNotMatch(pointCloudShell, /PointSizeType\.ADAPTIVE/);
+  assert.doesNotMatch(pointCloudShell, /PointSizeType\.ATTENUATED/);
   assert.match(pointCloudShell, /PointSizeType\.FIXED/);
   assert.match(pointCloudShell, /ctx\.strokeStyle = '#EE5007'/);
   assert.match(pointCloudShell, /ctx\.fillStyle = '#ffffff'/);
@@ -149,9 +149,9 @@ test('camera positions persist across model and point-cloud modes and remain cli
   assert.match(mainSource, /getElementById\('panel-camera-positions'\)\.style\.display = \(is3D \|\| isPC \|\| isMapMode\(mode\)\)/);
   assert.match(mainSource, /async function loadCameras\(\) \{\s*if \(state\.camerasLoaded \|\| state\.camerasLoading \|\| !SHOTS_URL \|\| !SHARE_PERMISSIONS\.cameras\) return;/);
   assert.match(mainSource, /const visible = isMapMode\(\) && state\.camerasVisible\s*&& state\.camerasLoaded && SHARE_PERMISSIONS\.cameras/);
-  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*isMapMode\(\)[\s\S]*mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale[\s\S]*cameraFeatureMapPosition[\s\S]*const representatives = \[\.\.\.positions\.keys\(\)\][\s\S]*openPhoto\(source\)/);
+  assert.match(mainSource, /function refreshMapCameraLayer\(\)[\s\S]*isMapMode\(\)[\s\S]*createMapCameraOverlay\(L,[\s\S]*onSelect: source => openPhoto\(source\)[\s\S]*mapCameraFeatures === camFeatures && mapCameraScale === cameraMarkerUserScale[\s\S]*cameraFeatureMapPosition[\s\S]*mapCameraLayer\.setData\(records/);
   assert.match(mainSource, /function localCameraRendererActive\(\)[\s\S]*state\.activeMode === 'model'[\s\S]*state\.activeMode === 'cloud' && state\.cloudMode === 'direct'/);
-  assert.match(mainSource, /function onPointerUp\(e\) \{\s*if \(!localCameraRendererActive\(\)\) return;/);
+  assert.match(mainSource, /function onPointerUp\(e\) \{\s*if \(measurementWorkspace\?\.isDrawing\(\)\) return;\s*if \(!localCameraRendererActive\(\)\) return;/);
   assert.match(mainSource, /if \(state\.activeTool !== 'none'\) \{\s*if \(state\.activeMode !== 'model'\) return;/);
 });
 

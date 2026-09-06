@@ -95,7 +95,7 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "31"
+          EXPECTED_SCHEMA_VERSION: "32"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
           EXPECTED_OBJ2TILES_PATCH_SHA256: "6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b"
@@ -117,8 +117,31 @@ jobs:
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VERIFY_IMAGE")" = "$EXPECTED_REVISION"
           docker run --rm --entrypoint sh -e EXPECTED_REVISION="$EXPECTED_REVISION" "$VERIFY_IMAGE" -c \
             'test "$(cat /app/source-commit.txt)" = "$EXPECTED_REVISION" && test "$(stat -c %a /app/source-commit.txt)" = 444'
-          docker run --rm --entrypoint sh -e EXPECTED_OBJ2TILES_VERSION="$EXPECTED_OBJ2TILES_VERSION" "$VERIFY_IMAGE" -c \
-            '/opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "$EXPECTED_OBJ2TILES_VERSION" >/dev/null'
+            docker run --rm --entrypoint sh -e EXPECTED_OBJ2TILES_VERSION="$EXPECTED_OBJ2TILES_VERSION" "$VERIFY_IMAGE" -c \
+              '/opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "$EXPECTED_OBJ2TILES_VERSION" >/dev/null'
+            docker run --rm --network none --entrypoint node "$VERIFY_IMAGE" -e '
+              const assert=require("node:assert/strict"),fs=require("node:fs"),child=require("node:child_process");
+              const receipt=JSON.parse(fs.readFileSync("/opt/poisson/build-info.json","utf8"));
+              assert.equal(receipt.sourceCommit,"262b0f539d404057d1f36e1adc07fc9388678899");
+              assert.equal(receipt.sourceSha256,"4a07ad091a63cc8403c57a8906b97b41d07c2fd87aa8aad0e7680dac20c4dcd5");
+              assert.equal(receipt.patchSha256,"9ecff362ba0dba772d1969b415768ecc5503aba3f2dc5e18d2d101834ba9272c");
+              assert.equal(receipt.precision,"double");assert.equal(receipt.threads,2);
+              assert.equal(require("./server/measurementReconstructionSupport").reconstructionAvailable(),true);
+              assert.equal(require("./server/measurementReconstructionSupport").reconstructionAvailable({measurementPoissonBin:"/unavailable"}),false);
+              const smoke=child.spawnSync("/opt/poisson/PoissonRecon",[],{encoding:"utf8",timeout:10000});
+              assert.ok(!smoke.error);assert.match(smoke.stdout+smoke.stderr,/Usage:/);
+            '
+            # Only tests are mounted; all numerical engines, private APIs and
+            # native libraries are exercised from the exact built runtime.
+            docker run --rm --network none --entrypoint node \
+              -v "$PWD/test:/app/test:ro" "$VERIFY_IMAGE" --test \
+              test/measurement-volume.test.mjs \
+              test/measurement-native-raster.test.mjs \
+              test/measurement-point-surface.test.mjs \
+              test/measurement-closed-mesh.test.mjs \
+              test/measurement-reconstruction.test.mjs \
+              test/measurement-calculation-jobs.test.js \
+              test/measurement-private-api.test.js
           docker run --rm --entrypoint node \
             -e EXPECTED_OBJ2TILES_SOURCE_SHA256="$EXPECTED_OBJ2TILES_SOURCE_SHA256" \
             -e EXPECTED_OBJ2TILES_PATCH_SHA256="$EXPECTED_OBJ2TILES_PATCH_SHA256" \
@@ -189,7 +212,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "31"
+          EXPECTED_SCHEMA_VERSION: "32"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_POTREE_VERSION: "1.8.2"
           VIEWER_SCHEMA_VERSION: ${{ steps.verify.outputs.schema-version }}

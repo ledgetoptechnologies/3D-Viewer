@@ -17,9 +17,11 @@ const { config } = require('./config');
 const { publicDerivativeKind } = require('./processingSecurity');
 const { scopedStorageRootKey } = require('./storageManager');
 const { validCameraFilename } = require('./cameraPhotos');
+const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const router = express.Router();
+const productTickets = createDownloadCapabilities();
 let canonicalRepository = null;
 let processingRepository = null;
 
@@ -175,7 +177,7 @@ async function pathTokenAuthorization(req, projectId) {
       && (review
         ? model?.activeVersion?.id === viewer.modelVersionId && model.activeVersion.status === 'ready'
         : model?.status === 'ready' && model.activeVersionId === viewer.modelVersionId);
-    return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false } : false;
+    return allowed ? { model, review, cameras: viewer.permissions?.cameras !== false, download: viewer.permissions?.download === true } : false;
   }
   const payload = auth.verify(req.params.token);
   if (!payload) return false;
@@ -189,7 +191,7 @@ async function pathTokenAuthorization(req, projectId) {
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
-      return allowed ? { model, review: false, cameras: share.permissions?.cameras !== false } : false;
+      return allowed ? { model, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
     }
     const share = shareStore.getById(payload.shareId);
     return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false, cameras: share.permissions?.cameras !== false } : false;
@@ -204,7 +206,7 @@ async function pathTokenAuthorization(req, projectId) {
       && selected?.modelId === requestedModelId
       && selected.modelVersionId === payload.modelVersionId
       && model?.activeVersion?.id === payload.modelVersionId;
-    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false } : false;
+    return allowed ? { model, review: false, publicOnly: true, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
   }
   return false;
 }
@@ -308,6 +310,56 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (accelerated) { res.setHeader('X-Accel-Redirect', accelerated); return res.end(); }
     return res.sendFile(absolute, (error) => { if (error && !res.headersSent) res.status(error.status || 404).json({ error: 'photo not found' }); });
   } catch (error) { return next(error); }
+});
+
+router.get('/session-products/:token/:id', async (req,res,next) => {
+  try {
+    const access=await pathTokenAuthorization(req,req.params.id);
+    if(!access?.download)return res.status(403).json({error:'Downloads are not permitted for this model'});
+    res.setHeader('Cache-Control','private, no-store');
+    const base=`/session-products/${encodeURIComponent(req.params.token)}/${encodeURIComponent(req.params.id)}`;
+    res.json({products:registeredProducts(access.model?.activeVersion?.assets,{review:access.review,cameras:access.cameras})
+      .map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
+  }catch(error){next(error);}
+});
+
+router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,next)=>{
+  try {
+    const origin=req.get('origin');
+    if(origin&&origin!==new URL(config.publicBaseUrl||`${req.protocol}://${req.get('host')}`).origin)return res.sendStatus(403);
+    if(canonicalRepository?.rateLimited(`product-grant:${auth.hashToken(req.params.token)}:${req.ip}`,120,5*60_000))return res.sendStatus(429);
+    const access=await pathTokenAuthorization(req,req.params.id);
+    if(!access?.download)return res.sendStatus(403);
+    const asset=access.model?.activeVersion?.assets.find(candidate=>candidate.kind===req.params.kind);
+    const product=productDescriptor(asset,{review:access.review,cameras:access.cameras});
+    if(!product)return res.sendStatus(404);
+    // Retain only a minimal authorization request; never retain Express req
+    // objects, bodies or sockets for the duration of a capability.
+    const original={params:{token:req.params.token}},id=req.params.id,versionId=access.model.activeVersion.id;
+    const ticket=productTickets.issue(async()=>{
+      const current=await pathTokenAuthorization(original,id);
+      if(!current?.download||current.model?.activeVersion?.id!==versionId)return null;
+      const registered=current.model.activeVersion.assets.find(candidate=>candidate.id===asset.id&&candidate.sha256===asset.sha256);
+      const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras});
+      return descriptor?{model:current.model,asset:registered,product:descriptor}:null;
+    });
+    res.setHeader('Cache-Control','private, no-store');
+    res.status(201).json({url:`/session-product-downloads/${ticket.token}`,expiresAt:ticket.expiresAt,fileName:product.fileName});
+  }catch(error){next(error);}
+});
+
+router.get('/session-product-downloads/:token',async(req,res,next)=>{
+  try {
+    const admitted=await productTickets.acquire(req.params.token),selected=admitted?.value;
+    if(!selected)return res.status(403).json({error:'Download expired or access revoked. Open Downloads to try again.'});
+    const {model,asset,product}=selected,root=canonicalAssetRoot(model,asset.rootKey),absolute=root&&safeExistingFile(root,asset.relativePath);
+    if(!absolute)return res.sendStatus(404);
+    if(!await publishedAssetIntegrityAllows(canonicalRepository,model,asset,asset.relativePath,absolute,req.get('range')))return res.sendStatus(409);
+    if(!await admitted.revalidate())return res.sendStatus(403);
+    res.setHeader('Cache-Control','private, no-store');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');
+    res.setHeader('Content-Type','application/octet-stream');res.setHeader('Content-Disposition',`attachment; filename="${product.fileName}"`);
+    return res.sendFile(absolute,{acceptRanges:true},error=>{if(error&&!res.headersSent)next(error);});
+  }catch(error){next(error);}
 });
 
 module.exports = router;

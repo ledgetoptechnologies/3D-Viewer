@@ -163,10 +163,11 @@ test('viewer mode lifecycle cancels stale initializers and persists history', ()
 test('mesh and Potree modes exchange one immutable camera snapshot before teardown', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.match(main, /function captureMeshView\(\) \{[\s\S]*position: camera\.position\.clone\(\),[\s\S]*quaternion: camera\.quaternion\.clone\(\),[\s\S]*target: getViewTargetWorld\(\)/);
-  const capture = main.indexOf('pendingPointCloudView = captureMeshView()');
+  const capture = main.indexOf("if (reason !== 'startup') rememberShared3DView(prevMode)");
   const dispose = main.indexOf('disposeTiles()', capture);
   assert.ok(capture >= 0 && dispose > capture, 'mesh view is captured before streamed tiles are disposed');
-  assert.match(main, /setTimeout\(\(\) => pushViewToPointCloud\(snapshot, retries - 1\), 250\)/);
+  assert.match(main, /setTimeout\(\(\) => pushViewToPointCloud\(snapshot, retries - 1, epoch\), 250\)/);
+  assert.match(main, /epoch !== modeEpoch/);
   assert.match(main, /w\.__setViewUTM\(camU\.e, camU\.n, camU\.alt, tgtU\.e, tgtU\.n, tgtU\.alt\)/);
   assert.match(main, /typeof w\.__getViewUTM === 'function' \? w\.__getViewUTM\(\) : null/);
   assert.match(main, /controls\.setView\(camW, tgtW\)/);
@@ -190,7 +191,7 @@ test('LOD starts close-responsive, stages explicit high-detail requests, and cap
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="20"/);
-  assert.match(html, /Starts with balanced view-local refinement\. Raise Detail only when you need finer coverage\./);
+  assert.match(html, /id="lod-evaluation-note" hidden[\s\S]*Nearby surfaces retain requested detail; Detail 24 restores raw quality everywhere/);
   assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
   assert.match(main, /lodRuntimeProfileState\.requestedDetail = next\.requestedDetail/);
@@ -212,8 +213,7 @@ test('viewer memory modes persist only a stable key and apply bounded runtime po
   const policy = fs.readFileSync(path.join(__dirname, '..', 'lod-policy.mjs'), 'utf8');
 
   assert.match(html, /id="lod-memory-mode"[\s\S]*?<option value="auto">Auto<\/option>[\s\S]*?<option value="balanced">Balanced<\/option>[\s\S]*?<option value="high">High<\/option>/);
-  assert.match(html, /Controls decoded model data kept by this viewer/);
-  assert.match(html, /does not measure system RAM/);
+  assert.match(main, /deviceMemory is a coarse browser capability hint, not system or GPU RAM/);
   assert.match(main, /LOD_MEMORY_MODE_STORAGE_KEY = 'ltds-viewer:lod-memory-mode'/);
   assert.match(main, /localStorage\?\.setItem\(LOD_MEMORY_MODE_STORAGE_KEY, stableMode\)/);
   assert.doesNotMatch(main, /localStorage\?\.setItem\([^\n]*JSON\.stringify/,

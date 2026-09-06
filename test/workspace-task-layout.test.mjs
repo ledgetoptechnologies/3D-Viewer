@@ -74,6 +74,19 @@ test('project summary counts ready tasks once and distinguishes source collectio
   const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>source sets/);assert.doesNotMatch(html,/<small>published/);
 });
 
+test('expanded project is one unified card, without repeated name, description or all-projects control',()=>{
+  const f=fixture();f.state.projectQuery='';f.state.projects[0].description='Keep this once';
+  vm.runInContext(declaration('projectRows'),f.context);
+  vm.runInContext(source.slice(source.indexOf('function selectedProject('),source.indexOf('function datasetActions(')),f.context);
+  const html=f.context.projectRows();
+  assert.equal((html.match(/Keep this once/g)||[]).length,1);
+  assert.equal((html.match(/<strong>Site<\/strong>/g)||[]).length,1);
+  assert.doesNotMatch(html,/All projects|<h2>Site|No project description|project-columns/);
+  assert.ok(html.indexOf('class="project-detail"')<html.lastIndexOf('</article>'));
+  assert.match(html,/aria-expanded="true" aria-controls="project-detail-project"/);
+  f.state.selectedProjectId=null;assert.doesNotMatch(f.context.projectRows(),/class="project-detail"/);
+});
+
 test('GCP action renders dedicated page, releases prior images and pushes shareable route',()=>{
   const f=fixture();f.context.taskAction('task-gcp','task');
   assert.equal(f.state.taskPage,'gcp');assert.match(f.location.href,/panel=gcp/);

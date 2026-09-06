@@ -22,6 +22,7 @@ const { viewerEligibleAssets } = require('./lodDerivativePolicy');
 const { inspectLodRecoverySource } = require('./lodRecovery');
 const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
+const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
 function validUnits(value) { return value === 'imperial' || value === 'metric'; }
@@ -40,11 +41,12 @@ function validateProviderOptions(options,byName){if(!options||Array.isArray(opti
 
 function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch }) {
   const router=express.Router();
+  const productTickets=createDownloadCapabilities();
   const storageUsage=createStorageUsageMonitor({storage,database:processing.database});
   const isActivePublishedOutput=(output)=>output?.status==='published'&&repository.getModel(output.modelId)?.activeVersion?.id===output.id;
   const derivativeConfiguration=(worker)=>{const workerEnabled=typeof worker?.meshDerivatives==='boolean'?worker.meshDerivatives:null,mismatch=Boolean(worker?.live&&workerEnabled!==config.meshDerivativesEnabled);return{meshDerivativesEnabled:config.meshDerivativesEnabled,workerMeshDerivativesEnabled:workerEnabled,mismatch};};
   const publishedViewerAssets=(model)=>{const version=model?.activeVersion;if(!version)return[];const verificationAssets=version.lodVerificationAssets||version.assets,verifiedIds=new Set(viewerEligibleAssets(version.metadata,verificationAssets).map((asset)=>asset.id));return version.assets.filter((asset)=>verifiedIds.has(asset.id)&&asset.published&&publicDerivativeKind(asset.kind));};
-  const workspaceOutput=(output)=>{const version=output?.modelId&&output?.id?repository.getModelVersion(output.modelId,output.id)?.activeVersion:null,assets=(version?.assets||[]).filter((asset)=>adminOutputAssetKind(asset.kind)),accessible=['ready','published'].includes(output.status),activePublished=isActivePublishedOutput(output),base=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}`,download=accessible&&(['glb','ortho','dsm','dtm'].map((kind)=>assets.find((asset)=>asset.kind===kind)).find(Boolean)),report=accessible&&assets.find((asset)=>asset.kind==='report'),lod=output?.id?processing.lodDerivativeState(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}):{status:'unavailable',canGenerate:false};return{...output,activePublished,lod,companionRepairAction:processing.companionRepairAction(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}),assetKinds:[...new Set(assets.map((asset)=>asset.kind))].sort(),assets:assets.map((asset)=>({kind:asset.kind,byteSize:asset.byteSize??null,contentType:asset.contentType||null,url:accessible?`${base}/assets/${encodeURIComponent(asset.kind)}`:null})),downloadUrl:download?`${base}/assets/${encodeURIComponent(download.kind)}`:null,reportUrl:report?`${base}/assets/report`:null,viewSessionUrl:activePublished?`${base}/view-sessions`:null};};
+  const workspaceOutput=(output)=>{const version=output?.modelId&&output?.id?repository.getModelVersion(output.modelId,output.id)?.activeVersion:null,assets=(version?.assets||[]).filter((asset)=>adminOutputAssetKind(asset.kind)),accessible=['ready','published'].includes(output.status),activePublished=isActivePublishedOutput(output),base=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}`,download=accessible&&(['glb','ortho','dsm','dtm'].map((kind)=>assets.find((asset)=>asset.kind===kind)).find(Boolean)),report=accessible&&assets.find((asset)=>asset.kind==='report'),lod=output?.id?processing.lodDerivativeState(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}):{status:'unavailable',canGenerate:false};return{...output,activePublished,lod,companionRepairAction:processing.companionRepairAction(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}),downloadProducts:accessible?registeredProducts(version?.assets,{staff:true}).map(product=>({...product,grantUrl:`${base}/products/${encodeURIComponent(product.kind)}/download-grants`})):[],assetKinds:[...new Set(assets.map((asset)=>asset.kind))].sort(),assets:assets.map((asset)=>({kind:asset.kind,byteSize:asset.byteSize??null,contentType:asset.contentType||null,url:accessible?`${base}/assets/${encodeURIComponent(asset.kind)}`:null})),downloadUrl:download?`${base}/assets/${encodeURIComponent(download.kind)}`:null,reportUrl:report?`${base}/assets/report`:null,viewSessionUrl:activePublished?`${base}/view-sessions`:null};};
   const workspaceTask=(task)=>{const activeAttempt=task.activeAttemptId?processing.getAttempt(task.activeAttemptId):null,attempt=activeAttempt?.taskId===task.id?activeAttempt:processing.latestAttempt(task.id),storageSummary=processing.taskStorage(task.id,{limit:1}),outputPage=processing.listModelOutputsPage({taskId:task.id,limit:100}),version=attempt?.resultModelId&&attempt?.resultModelVersionId?repository.getModelVersion(attempt.resultModelId,attempt.resultModelVersionId)?.activeVersion:null,imageInventory=taskImageInventory(processing.database,task.id,version?.id),start=Date.parse(attempt?.startedAt||''),end=Date.parse(attempt?.completedAt||attempt?.updatedAt||''),georef=version?.georef||{},storedMetrics=version?.metadata?.processingMetrics||{},georeferencingCrs=typeof georef.crs==='string'?georef.crs:typeof georef.epsg==='string'||typeof georef.epsg==='number'?`EPSG:${georef.epsg}`:null;return{...task,latestAttempt:attempt,metrics:{averageGsdM:Number.isFinite(storedMetrics.averageGsdM)?storedMetrics.averageGsdM:null,surveyedAreaM2:Number.isFinite(storedMetrics.surveyedAreaM2)?storedMetrics.surveyedAreaM2:null,...imageInventory,reconstructedPointCount:version?.pointCount??storedMetrics.reconstructedPointCount??null,georeferencingCrs,processingDurationMs:Number.isFinite(start)&&Number.isFinite(end)&&end>=start?end-start:null,processingStatus:attempt?.status||task.status,outputCount:outputPage.totalCount,outputAvailable:outputPage.totalCount>0,taskDiskUsageBytes:storageSummary?.task?.totalBytes??null},outputs:outputPage.items.map(workspaceOutput)};};
   const serviceIdempotency=idempotent(repository);
   router.use((req,res,next)=>{res.setHeader('Cache-Control','no-store');if(req.path===CLIENT_GRANTS_PATH&&req.method==='OPTIONS')return res.sendStatus(403);const origin=req.get('origin');if(req.path!==CLIENT_GRANTS_PATH&&origin&&origin===config.opsBaseUrl){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Access-Control-Expose-Headers','Location, Retry-After');res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Headers','Authorization,Content-Type,Idempotency-Key,X-Upload-Token,X-Chunk-SHA256');res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,PUT,DELETE,OPTIONS');}if(req.method==='OPTIONS')return origin===config.opsBaseUrl?res.sendStatus(204):res.sendStatus(403);next();});
@@ -270,6 +272,45 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/processing/outputs/:id/view-sessions',authorize('viewer.processing.read'),mutate,(req,res)=>{if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');const output=processing.getModelOutput(req.params.id),model=output&&repository.getModel(output.modelId);if(!output||output.status!=='published'||!model?.activeVersion||model.activeVersion.id!==output.id)return error(res,404,'published_output_not_found');const publishedAssets=publishedViewerAssets(model),integrityReady=publishedAssets.length>0&&publishedAssets.every((asset)=>asset.sha256&&(!['ept','tiles'].includes(asset.kind)||(asset.manifestSha256&&repository.getModelAssetFile(asset.id,path.posix.basename(asset.relativePath)))));if(!integrityReady)return error(res,409,'asset_integrity_not_ready');const authorizedUntil=new Date(Math.min(Date.parse(req.adminPrincipal.expiresAt),Date.now()+config.viewerSessionTtlSeconds*1000)).toISOString();if(Date.parse(authorizedUntil)<=Date.now())return error(res,410,'authorization_expired');const grantExpiresAt=new Date(Math.min(Date.parse(authorizedUntil),Date.now()+config.sessionGrantTtlSeconds*1000)).toISOString(),grant=repository.createSessionGrantAudited({modelId:output.modelId,modelVersionId:output.id,sessionMode:'published',subject:req.actorId,audience:'ops',permissions:{view:true,measure:true,cameras:true,download:false,cameraPhotoDownload:true,__authorizedUntil:authorizedUntil,__versionId:output.id},displayUnits:req.adminPrincipal.displayUnits||config.defaultUnits,expiresAt:grantExpiresAt},{actorType:'admin',actorId:req.actorId,action:'processing_published_session.created',entityType:'model_output',entityId:output.id,details:{modelId:output.modelId,modelVersionId:output.id}}),base=config.publicBaseUrl||`${req.protocol}://${req.get('host')}`;return res.status(201).json({grant:grant.id,grantExpiresAt,sessionTtlSeconds:config.viewerSessionTtlSeconds,sessionMode:'published',modelId:output.modelId,modelVersionId:output.id,assetKinds:[...new Set(publishedAssets.map((asset)=>asset.kind))].sort(),redeemUrl:`${base}/api/v1/sessions/redeem`,embedUrl:`${base}/session/${encodeURIComponent(grant.id)}`});});
   router.post('/api/v1/processing/outputs/:id/archive',authorize('viewer.processing.publish'),mutate,(req,res)=>{if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');const output=processing.archiveModelOutput(req.params.id,req.actorId);if(!output)return error(res,409,'output_not_archivable');res.json({output});});
   router.delete('/api/v1/processing/outputs/:id',authorize('viewer.processing.publish'),mutate,(req,res)=>{const current=processing.getModelOutput(req.params.id);if(!current)return error(res,404,'output_not_found');const trash=trashOutput(processing,storage,current.id,req.actorId);if(!trash)return error(res,409,'output_not_trashable');const output=processing.getModelOutput(current.id);res.json({output,trash});});
+  function registeredOutputProduct(id,kind) {
+    const output=processing.getModelOutput(id);
+    if(!output||!['ready','published'].includes(output.status))return null;
+    const model=repository.getModelVersion(output.modelId,output.id);
+    const asset=model?.activeVersion?.assets.find(candidate=>candidate.kind===kind);
+    const product=productDescriptor(asset,{staff:true});
+    return product?{model,asset,product}:null;
+  }
+  router.post('/api/v1/processing/outputs/:id/products/:kind/download-grants',authorize('viewer.processing.read'),(req,res,next)=>{
+    try {
+      if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
+      const id=req.params.id,kind=req.params.kind,selected=registeredOutputProduct(id,kind);
+      if(!selected)return error(res,404,'download_product_not_found');
+      const sessionHash=auth.hashToken(presentedAdmin(req).token),assetId=selected.asset.id,sha256=selected.asset.sha256;
+      const ticket=productTickets.issue(()=>{
+        const session=processing.getAdminSessionByHash(sessionHash);
+        if(!processing.adminSessionLive(session)||!session.permissions.includes('viewer.processing.read'))return null;
+        const current=registeredOutputProduct(id,kind);
+        return current?.asset.id===assetId&&current.asset.sha256===sha256?current:null;
+      },Date.parse(req.adminPrincipal.expiresAt));
+      res.status(201).json({url:`/api/v1/processing/product-downloads/${ticket.token}`,expiresAt:ticket.expiresAt,fileName:selected.product.fileName});
+    }catch(e){next(e);}
+  });
+  router.get('/api/v1/processing/product-downloads/:token',async(req,res,next)=>{
+    try {
+      const admitted=await productTickets.acquire(req.params.token),selected=admitted?.value;
+      if(!selected)return error(res,403,'download_authorization_expired');
+      const {asset,model,product}=selected;
+      let absolute;try{absolute=storage.resolve(asset.rootKey,asset.relativePath,{mustExist:true});}catch{return error(res,404,'download_product_not_found');}
+      const stat=fs.statSync(absolute);
+      if(!stat.isFile()||stat.size!==asset.byteSize||!await publishedAssetIntegrityAllows(repository,model,asset,asset.relativePath,absolute,req.get('range')))return error(res,409,'output_asset_changed');
+      // Integrity verification may be slow: honor revocation that happened
+      // while it ran, before sending any source bytes.
+      if(!await admitted.revalidate())return error(res,403,'download_authorization_expired');
+      res.setHeader('Cache-Control','private, no-store');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');
+      res.setHeader('Content-Type','application/octet-stream');res.setHeader('Content-Disposition',`attachment; filename="${product.fileName}"`);
+      res.sendFile(absolute,{acceptRanges:true},sendError=>{if(sendError&&!res.headersSent)next(sendError);});
+    }catch(e){next(e);}
+  });
   // Read-only eligibility is shared by the modal and the mutation. Re-evaluate
   // inside the write transaction after password hashing; ready is not public.
   function outputShareState(output) {

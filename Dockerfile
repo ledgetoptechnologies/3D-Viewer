@@ -71,6 +71,28 @@ RUN curl -fsSL -o /tmp/obj2tiles.tar.gz \
       > /opt/obj2tiles/build-info.json \
     && test "$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)" = "$binary_sha256"
 
+# The same small, pinned screened-Poisson executable is source-built on amd64
+# and arm64. It is a worker-only computation tool, not another service. Keep
+# IEEE arithmetic (no -ffast-math), double precision, and a fixed thread budget.
+FROM debian:bookworm-slim AS poisson
+ARG POISSON_SOURCE_COMMIT=262b0f539d404057d1f36e1adc07fc9388678899
+ARG POISSON_SOURCE_SHA256=4a07ad091a63cc8403c57a8906b97b41d07c2fd87aa8aad0e7680dac20c4dcd5
+ARG POISSON_PATCH_SHA256=9ecff362ba0dba772d1969b415768ecc5503aba3f2dc5e18d2d101834ba9272c
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl g++ patch libpng-dev libjpeg62-turbo-dev libturbojpeg0-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY third_party/poissonrecon/262b0f5-two-threads.patch /tmp/poisson.patch
+RUN curl -fsSL "https://codeload.github.com/mkazhdan/PoissonRecon/tar.gz/${POISSON_SOURCE_COMMIT}" -o /tmp/source.tar.gz \
+    && echo "${POISSON_SOURCE_SHA256}  /tmp/source.tar.gz" | sha256sum -c - \
+    && echo "${POISSON_PATCH_SHA256}  /tmp/poisson.patch" | sha256sum -c - \
+    && mkdir -p /src/poisson /opt/poisson \
+    && tar -xzf /tmp/source.tar.gz --strip-components=1 -C /src/poisson \
+    && cd /src/poisson && patch --batch -p1 < /tmp/poisson.patch \
+    && g++ -O2 -DNDEBUG -DFAST_COMPILE -DUSE_DOUBLE -std=c++17 -fopenmp -pthread -I. Src/PoissonRecon.cpp -o /opt/poisson/PoissonRecon -lpng -ljpeg -lturbojpeg -lz \
+    && strip /opt/poisson/PoissonRecon \
+    && /opt/poisson/PoissonRecon 2>&1 | grep -F 'Usage:' \
+    && cp LICENSE /opt/poisson/LICENSE \
+    && printf '{"sourceCommit":"%s","sourceSha256":"%s","patchSha256":"%s","threads":2,"precision":"double"}\n' "$POISSON_SOURCE_COMMIT" "$POISSON_SOURCE_SHA256" "$POISSON_PATCH_SHA256" > /opt/poisson/build-info.json
+
 # ---------------------------------------------------------------------------
 # Stage 2: build the Vite frontend (bundles main.js, copies public/ incl.
 # the fetched Potree build into dist/).
@@ -95,10 +117,13 @@ FROM node:24-bookworm-slim AS runtime
 ARG VIEWER_SOURCE_COMMIT=unknown
 ENV NODE_ENV=production
 ENV OBJ2TILES_BIN=/opt/obj2tiles/Obj2Tiles
+ENV MEASUREMENT_POISSON_BIN=/opt/poisson/PoissonRecon
 LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
     && usermod --uid 568 --gid 568 node
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./scripts/
 COPY scripts/lib ./scripts/lib
@@ -106,8 +131,10 @@ RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
 COPY lod-policy.mjs lod-memory-profile.mjs ./
+COPY measurement-volume.mjs ./
 COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
+COPY --from=poisson /opt/poisson /opt/poisson
 COPY --from=build /app/dist ./dist
 RUN printf '%s\n' "${VIEWER_SOURCE_COMMIT}" > /app/source-commit.txt \
     && chmod 0444 /app/source-commit.txt \

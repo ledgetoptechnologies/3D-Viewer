@@ -32,10 +32,11 @@ test('DEM opacity starts/reset at 100 and all color inputs apply without an Appl
 
 test('DSM and DTM reuse the same stable camera layer as orthophoto with permission checks',()=>{
   const fn=source.slice(source.indexOf('function refreshMapCameraLayer()'),source.indexOf('\nlet cameraMarkerUserScale',source.indexOf('function refreshMapCameraLayer()')));
-  const layer={addTo(){return this;}};
+  let added=0;const layer={addTo(){added++;return this;}};
   const context={state:{activeMode:'dsm',camerasVisible:true,camerasLoaded:true},SHARE_PERMISSIONS:{cameras:true},SHOTS_URL:'/shots',map:{hasLayer:()=>true,removeLayer(){}},mapCameraLayer:layer,mapCameraFeatures:[],camFeatures:[],mapCameraScale:0.5,cameraMarkerUserScale:0.5,mapCameraSources:[1,2],window:{},isMapMode(){return ['ortho','dsm','dtm'].includes(context.state.activeMode);}};
   context.camFeatures=context.mapCameraFeatures;vm.createContext(context);vm.runInContext(fn,context);
-  for(const mode of ['ortho','dsm','dtm']){context.state.activeMode=mode;assert.equal(context.refreshMapCameraLayer(),true);assert.equal(context.window.__ltdsMapCamDrawn,2);}
+  for(const mode of ['ortho','dsm','dtm']){context.state.activeMode=mode;assert.equal(context.refreshMapCameraLayer(),true);assert.equal(context.mapCameraLayer,layer);}
+  assert.equal(added,3,'same canvas layer is reused; its onFrame callback owns painted diagnostics');
   context.SHARE_PERMISSIONS.cameras=false;assert.equal(context.refreshMapCameraLayer(),false);
 });
 

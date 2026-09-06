@@ -1,5 +1,7 @@
 # Operations / Viewer integration implementation handoff
 
+> Updated read-only Operations assessment and measurement integration assignment: [September 5 handoff](OPERATIONS_MEASUREMENTS_RELEASE_HANDOFF_2026-09-05.md). Use its newer pinned Operations findings where this historical snapshot differs.
+
 ## Status, ownership, and revision boundaries
 
 Prepared for the user's separate, long-running **Operations implementation agent**. The user wants that agent to implement the Operations integration while the Viewer agent releases the current Viewer work. This document does not authorize changing live credentials, broadening client access, or bypassing authentication.
