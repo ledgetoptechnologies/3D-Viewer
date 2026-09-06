@@ -65,6 +65,11 @@ const fixtures = {
   outputs: [{
     id: 'output-johnson', taskId: 'task-johnson', modelId: 'model-johnson', displayName: 'Johnson output',
     status: 'published', activePublished: true, byteSize: 4096, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
+    downloadProducts: [
+      { kind: 'glb', label: 'Textured model (glTF)', format: 'GLB', byteSize: 2048, fileName: 'johnson-model.glb', grantUrl: '/api/v1/processing/outputs/output-johnson/products/glb/download-grants' },
+      { kind: 'ortho', label: 'Orthophoto', format: 'GeoTIFF', byteSize: 1024, fileName: 'johnson-orthophoto.tif', grantUrl: '/api/v1/processing/outputs/output-johnson/products/ortho/download-grants' },
+      { kind: 'report', label: 'Quality report', format: 'PDF', byteSize: 1024, fileName: 'johnson-report.pdf', grantUrl: '/api/v1/processing/outputs/output-johnson/products/report/download-grants' },
+    ],
     lod: { status: 'fallback', canGenerate: false, canRetry: true, jobId: 'derivative-stale-fallback', reason: 'Imported tiles did not verify.', recoveryAction: { kind: 'new_version', eligible: true, sourceVersionId: 'output-johnson', endpoint: '/api/v1/processing/outputs/output-johnson/lod-recovery-attempts', reason: 'Create a new immutable recovery version.' } },
     downloadUrl: '/api/v1/processing/outputs/output-johnson/assets/glb',
     reportUrl: '/api/v1/processing/outputs/output-johnson/assets/report',
@@ -188,6 +193,12 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   }
   if (pathname === '/api/v1/processing/outputs/output-johnson/view-sessions' && method === 'POST') return json({ grant: '99999999-8888-4777-8666-555555555555', sessionMode: 'published', sessionTtlSeconds: 1800, modelId: 'model-johnson', modelVersionId: 'output-johnson', embedUrl: '/session/99999999-8888-4777-8666-555555555555' }, 201);
   if (pathname === '/api/v1/attempts/attempt-quarry/review-sessions' && method === 'POST') return json({ grant: '11111111-2222-4333-8444-555555555555', sessionMode: 'review', sessionTtlSeconds: 1800, attemptId: 'attempt-quarry', modelId: 'model-quarry', modelVersionId: 'output-quarry-ready', embedUrl: '/session/11111111-2222-4333-8444-555555555555', assetKinds: ['glb', 'ortho', 'report'] }, 201);
+  const productGrant = pathname.match(/^\/api\/v1\/processing\/outputs\/([^/]+)\/products\/([^/]+)\/download-grants$/);
+  if (productGrant && method === 'POST') {
+    const product = runtime.outputs.find(output => output.id === productGrant[1])?.downloadProducts?.find(item => item.kind === productGrant[2]);
+    if (!product) return json({ error: 'product_not_found' }, 404);
+    return json({ url: `/api/v1/processing/product-downloads/synthetic-${product.kind}`, fileName: product.fileName }, 201);
+  }
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/glb') return { status: 200, body: Buffer.from('browser-glb'), type: 'model/gltf-binary' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho') return { status: 200, body: orthophotoFixture, type: 'image/tiff' };
   if (pathname === '/api/v1/processing/outputs/output-johnson/assets/report') return { status: 200, body: Buffer.from('%PDF-browser'), type: 'application/pdf' };
@@ -562,7 +573,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
         };
         window.open=(url,name,features)=>{window.__viewerActions.push({type:'launcher',url,name,features});if(window.__blockNextLauncher){window.__blockNextLauncher=false;return null}const channelId=decodeURIComponent(new URL(url,location.origin).hash.slice(1).split('=')[1]),launcher=new BroadcastChannel('ltds-viewer-review:'+channelId);launcher.onmessage=event=>{if(event.data?.type==='ltds-viewer:navigate'){window.__viewerActions.push({type:'open',url:event.data.url});launcher.close()}};setTimeout(()=>launcher.postMessage({version:1,type:'ltds-viewer:launcher-ready',channelId}),25);return null};
         const originalAnchorClick=HTMLAnchorElement.prototype.click;
-        HTMLAnchorElement.prototype.click=function(){window.__viewerActions.push({type:'download',name:this.download});};
+        HTMLAnchorElement.prototype.click=function(){window.__viewerActions.push({type:'download',name:this.download,url:this.href});};
       `,
     });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
@@ -596,7 +607,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     ], `${viewport.name}: project search result visibility`);
 
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
-    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey project'", `${viewport.name}: project selection failed`);
+    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey tasks and actions'", `${viewport.name}: project selection failed`);
+    assert.equal(await client.evaluate(`(() => { const card=document.querySelector('.project-row.selected'),toggle=card?.querySelector('[data-action="open-project"]'),detail=card?.querySelector(':scope > .project-detail'); return Boolean(detail && toggle?.getAttribute('aria-expanded')==='true' && toggle.getAttribute('aria-controls')===detail.id && !detail.querySelector('.project-title')); })()`), true, `${viewport.name}: selected project tasks must expand inside their own card`);
     assert.equal(await client.evaluate(`new URL(location.href).searchParams.get('project')`), 'project-johnson', `${viewport.name}: selected project was not encoded in the URL`);
     assert.equal(await client.evaluate(`document.body.textContent.includes('Project datasets')`), false, `${viewport.name}: redundant project datasets card remained visible`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: selected project overflows horizontally`);
@@ -673,7 +685,15 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
     await waitFor(client, "!new URL(location.href).searchParams.has('panel') && document.querySelector('.task-quick-actions') !== null", `${viewport.name}: GCP Back to task did not restore shortcuts`);
+    await client.evaluate(`document.querySelector('.task-quick-actions [data-action="download-output"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelectorAll('.product-download-item').length === 3", `${viewport.name}: registered product chooser did not open`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.product-download-item strong')].map(item=>item.textContent)`), ['Textured model (glTF)', 'Orthophoto', 'Quality report']);
+    await client.evaluate(`document.querySelector('[data-product-index="1"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/products/ortho/download-grants');
+    await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name==='johnson-orthophoto.tif'&&new URL(item.url).pathname==='/api/v1/processing/product-downloads/synthetic-ortho')", `${viewport.name}: selected orthophoto did not use its secure download ticket`);
+    await client.evaluate(`document.querySelector('.modal-close').click()`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="download-report"]').click()`);
+    await waitForRequest(runtime, requestStart, 'POST', '/api/v1/processing/outputs/output-johnson/products/report/download-grants');
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='download'&&item.name.includes('report.pdf'))", `${viewport.name}: authenticated report download did not complete`);
     await client.evaluate(`document.querySelector('.task-quick-actions [data-action="view-output"]').click()`);
     await waitFor(client, "window.__viewerActions.some(item=>item.type==='open'&&item.url.includes('/session/99999999-8888-4777-8666-555555555555#reviewController='))", `${viewport.name}: renewable published output session did not open`);
@@ -700,7 +720,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
-    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry project'", `${viewport.name}: terminal project selection failed`);
+    await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry tasks and actions'", `${viewport.name}: terminal project selection failed`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
       ['View', 'Download', 'Report', 'Share'], `${viewport.name}: ready output did not expose focused View, download, report, and Share shortcuts`);
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
