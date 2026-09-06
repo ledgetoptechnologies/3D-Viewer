@@ -9,7 +9,7 @@ const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
-  const timers = new Map(), posts = [], resets = [], measurements = {invalidations:0,installs:0,invalidated:false,records:new Map([['private','geometry']])};
+  const timers = new Map(), posts = [], resets = [], measurements = {invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
   window.parent = window;
@@ -48,11 +48,15 @@ function fixture({ controller = true } = {}) {
   // Viewer controller functions: the old stub hid their reentrancy bug.
   context.measurementFixture=measurements;
   const invalidateSource=workspaceSource.match(/  function invalidate\([\s\S]*?\n  }/)[0];
+  const clearDisplaySource=workspaceSource.match(/  function clearDisplayRequests\([\s\S]*?\n  }/)[0];
   vm.runInContext(`measurementWorkspace.invalidate=(()=>{
     let invalidated=false,viewGeneration=0,ready=true,adminAllowed=true,selected='private',lastSvg='';
+    let recordSnapshot=['private'],orderedRecords=['private'],lastOverlayFrame={};
+    const displayCache=new Map([['private',{state:'pending',controller:{abort(){measurementFixture.displayAborts++;}}}]]);
     const selectedExports=new Set(),svg={innerHTML:'private'},controls={hidden:false};
     const disarm=()=>{},closeDialogs=()=>{},tell=()=>{},onAccessLost=measurementAccessLost;
     const store={invalidate(){measurementFixture.invalidations++;measurementFixture.invalidated=true;measurementFixture.records.clear();}};
+    ${clearDisplaySource}
     ${invalidateSource}
     return invalidate;
   })()`,context);
@@ -154,7 +158,7 @@ test('expired timeout invalidates once without recursive measurement-triggered r
   const f=fixture();f.context.requestSessionRenewal();
   f.context.activeViewerSession.expiresAt=new Date(Date.now()-1).toISOString();
   [...f.timers.values()].find(t=>t.delay===30000).fn();
-  assert.equal(f.context.sessionAccessState,'unavailable');assert.equal(f.measurements.invalidations,1);
+  assert.equal(f.context.sessionAccessState,'unavailable');assert.equal(f.measurements.invalidations,1);assert.equal(f.measurements.displayAborts,1);
   assert.equal(f.context.sessionRenewalPending,false);assert.equal(f.context.sessionRenewalAttempt,null);
   assert.equal(f.posts.filter(p=>p.type==='ltds-viewer:session-expiring').length,1);
   assert.equal([...f.timers.values()].filter(t=>t.delay===10000).length,1);

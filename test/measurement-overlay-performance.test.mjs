@@ -60,7 +60,11 @@ test('rename, units, selection, visibility and view group transitions cannot lea
   f.action('select',r.id);f.workspace.tick();assert.match(f.svg().innerHTML,/stroke="#fff"/);
   await f.workspace.store.patch(f.workspace.store.records.get(r.id),{visible:false});f.workspace.tick();assert.equal(f.svg().innerHTML,'');
   await f.workspace.store.patch(f.workspace.store.records.get(r.id),{visible:true});f.workspace.tick();assert.match(f.svg().innerHTML,/Renamed/);
-  f.setMode('ortho');f.workspace.modeChanged();f.workspace.tick();assert.equal(f.svg().innerHTML,'');
+  const beforeMap={...f.counts};
+  f.setMode('ortho');f.workspace.modeChanged();f.workspace.tick();assert.match(f.svg().innerHTML,/Renamed/);
+  assert.equal(f.counts.layout,beforeMap.layout+1);assert.equal(f.counts.project,beforeMap.project+2);
+  const stationaryMap={...f.counts};for(let i=0;i<100;i++)f.workspace.tick();
+  assert.equal(f.counts.layout,stationaryMap.layout);assert.equal(f.counts.project,stationaryMap.project);
   f.setMode('model');f.workspace.modeChanged();f.workspace.tick();assert.match(f.svg().innerHTML,/Renamed/);f.workspace.dispose();
 });
 

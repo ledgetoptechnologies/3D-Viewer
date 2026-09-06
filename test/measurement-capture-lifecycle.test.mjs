@@ -6,14 +6,27 @@ const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url
 const start=source.indexOf('  async function screenshot()'),end=source.indexOf('  async function report()',start);
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return{promise,resolve};};
 function fixture(){
-  const capture=deferred(),decode=deferred(),decodeStarted=deferred(),state={draws:0,urls:[],revoked:[],serializations:0};
+  const capture=deferred(),decode=deferred(),decodeStarted=deferred(),state={draws:0,captures:0,urls:[],revoked:[],serializations:0};
   const ctx={drawImage(){state.draws++;},fillRect(){},fillText(){}},canvas={width:400,height:300,getContext:()=>ctx};
-  const scope=vm.createContext({bound:{element:{},mode:'model',capture:()=>capture.promise},viewGeneration:1,units:'imperial',disposed:false,allowed:()=>true,draw(){},coordinateReference:()=>({crs:'EPSG:32616'}),svg:{text:'original'},XMLSerializer:class{serializeToString(svg){state.serializations++;return svg.text;}},Image:class{decode(){decodeStarted.resolve();return decode.promise;}},Blob,URL:{createObjectURL(blob){state.urls.push(blob);return'blob:test';},revokeObjectURL(url){state.revoked.push(url);}}});
+  const scope=vm.createContext({bound:{element:{},mode:'model',capture:()=>{state.captures++;return capture.promise;}},viewGeneration:1,units:'imperial',disposed:false,allowed:()=>true,draw(){},records:()=>[],displayGeometry:record=>record.vertices,displayStatus:()=>'',coordinateReference:()=>({crs:'EPSG:32616'}),svg:{text:'original'},XMLSerializer:class{serializeToString(svg){state.serializations++;return svg.text;}},Image:class{decode(){decodeStarted.resolve();return decode.promise;}},Blob,URL:{createObjectURL(blob){state.urls.push(blob);return'blob:test';},revokeObjectURL(url){state.revoked.push(url);}}});
   vm.runInContext(source.slice(start,end),scope);return{scope,state,canvas,capture,decode,decodeStarted};
 }
 test('screenshot captures the overlay snapshot before asynchronous renderer capture',async()=>{
   const f=fixture(),pending=f.scope.screenshot();assert.equal(f.state.serializations,1);f.scope.svg.text='changed';f.capture.resolve(f.canvas);
   await Promise.resolve();f.decode.resolve();await pending;assert.equal(await f.state.urls[0].text(),'original');assert.equal(f.state.draws,1);assert.deepEqual(f.state.revoked,['blob:test']);
+});
+
+test('pending or unavailable visible overlays block capture before serializing or reading the renderer',async()=>{
+  for(const status of ['Placing map measurement on the elevation surface…','3D overlay unavailable: No verified elevation surface.']){
+    const f=fixture();f.scope.records=()=>[{id:'visible',visible:true}];f.scope.displayGeometry=()=>null;f.scope.displayStatus=()=>status;
+    await assert.rejects(f.scope.screenshot(),error=>error.message.includes('Cannot capture all visible measurements yet')&&error.message.includes(status));
+    assert.equal(f.state.captures,0);assert.equal(f.state.serializations,0);assert.equal(f.state.urls.length,0);assert.equal(f.state.draws,0);
+  }
+});
+
+test('unavailable hidden overlays do not prevent an otherwise complete capture',async()=>{
+  const f=fixture();f.scope.records=()=>[{id:'hidden',visible:false}];f.scope.displayGeometry=()=>null;
+  const pending=f.scope.screenshot();assert.equal(f.state.captures,1);f.capture.resolve(f.canvas);await Promise.resolve();f.decode.resolve();await pending;assert.equal(f.state.draws,1);
 });
 test('view mode, generation, unit and permission changes reject delayed screenshot before overlay export',async()=>{
   for(const change of [f=>{f.scope.viewGeneration++;},f=>{f.scope.bound={...f.scope.bound,mode:'ortho'};},f=>{f.scope.units='metric';},f=>{f.scope.allowed=()=>false;},f=>{f.scope.disposed=true;}]){

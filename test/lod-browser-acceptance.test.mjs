@@ -3918,18 +3918,33 @@ test('browser distance-demand switches at developer Detail 20 protect nearby sur
       await client.evaluate(`(() => {const tiles=window.__ltds.tiles(),cam=window.__ltds.camera(),V=cam.position.constructor;
         tiles.group.updateWorldMatrix(true,false);
         window.__evaluationPoseFrame=tiles.frameCount;
+        window.__evaluationSettled=null;
         window.__ltds.controls().setView(new V(0,0,0).applyMatrix4(tiles.group.matrixWorld),new V(0,0,-20).applyMatrix4(tiles.group.matrixWorld));
       })()`);
-      await waitFor(client, `(() => {const t=window.__ltds.tiles();return t.frameCount>window.__evaluationPoseFrame+2 && t.root.children.every(b=>b.traversal?.inFrustum)
-        && !t.downloadQueue.running && !t.parseQueue.running && !t.processNodeQueue.running;})()`, 'fixed-pose evaluation did not settle',15_000);
+      // A parse completion can empty every queue before the following traversal
+      // replaces its coarse parent. Require a stable, work-free frontier across
+      // subsequent frames; do not confuse LOADED geometry with visible geometry.
+      // This does not require the expected leaf selection: assertions below must
+      // still reject a stable but incorrect policy result.
+      await waitFor(client, `(() => {
+        const t=window.__ltds.tiles(),queues=[t.downloadQueue,t.parseQueue,t.processNodeQueue];
+        const quiet=t.frameCount>window.__evaluationPoseFrame+2 && t.root.children.every(b=>b.traversal?.inFrustum)
+          && queues.every(q=>!q.running && q.items.length===0) && !t.stats.queued && !t.stats.downloading && !t.stats.parsing;
+        if(!quiet){window.__evaluationSettled=null;return false;}
+        const signature=JSON.stringify(t.root.children.map(b=>[b.internal.loadingState,b.children[0].internal.loadingState,t.visibleTiles.has(b),t.visibleTiles.has(b.children[0])]));
+        const previous=window.__evaluationSettled;
+        if(!previous||previous.signature!==signature){window.__evaluationSettled={frame:t.frameCount,signature};return false;}
+        return t.frameCount>=previous.frame+3;
+      })()`, 'fixed-pose evaluation did not settle',15_000);
       const result=await client.evaluate(`(() => {const t=window.__ltds.tiles();return {
         options:window.__ltds.lodEvaluation(),note:!document.querySelector('#lod-evaluation-note').hidden,
         timing:window.__ltds.lodLoadingTiming(),owner:window.__ltds.lodOwnerDiagnostics(),raw:t.errorTarget,
+        readiness:{frame:t.frameCount,poseFrame:window.__evaluationPoseFrame,stats:{...t.stats},queues:[t.downloadQueue,t.parseQueue,t.processNodeQueue].map(q=>({running:q.running,queued:q.items.length}))},
         loadingSamples:window.__ltds.lodTrace().map(entry=>entry.snapshot.loadingBudget).filter(Boolean),
         limits:{downloads:t.downloadQueue.maxJobs,parses:t.parseQueue.maxJobs,
           workers:t.plugins.find(p=>p.ktxLoader)?.ktxLoader.workerPool.pool,soft:t.lruCache.minBytesSize,hard:t.lruCache.maxBytesSize},
         branches:t.root.children.map(b=>({name:b.name,target:b.__ltdsPeripheralErrorTarget,sse:b.traversal.error,
-          demand:b.__ltdsDistanceDemand,parentVisible:t.visibleTiles.has(b),leafVisible:t.visibleTiles.has(b.children[0]),refine:b.refine}))
+          demand:b.__ltdsDistanceDemand,parentVisible:t.visibleTiles.has(b),leafVisible:t.visibleTiles.has(b.children[0]),refine:b.refine,leafState:b.children[0].internal.loadingState}))
       };})()`);
       assert.deepEqual(result.options,{distanceDemand:enabled,loadingTiming:enabled});
       assert.ok(result.loadingSamples.length > 0, 'real-browser loading admission telemetry is required');
@@ -3940,7 +3955,7 @@ test('browser distance-demand switches at developer Detail 20 protect nearby sur
       if (!enabled) {
         assert.equal(result.timing,null);
         assert.ok(result.branches.every(b=>Math.abs(b.target-result.raw)<0.01),JSON.stringify(result.branches));
-        assert.ok(result.branches.every(b=>b.leafVisible), 'baseline must select all high-SSE terminal leaves');
+        assert.ok(result.branches.every(b=>b.leafVisible), `baseline must select all high-SSE terminal leaves: ${JSON.stringify({readiness:result.readiness,branches:result.branches})}`);
       } else {
         assert.ok(result.branches.filter(b=>b.name.startsWith('background')&&b.target>100).length>=6,JSON.stringify(result.branches));
         assert.ok(result.branches.filter(b=>b.name.startsWith('background')&&b.parentVisible&&!b.leafVisible).length>=6,

@@ -10,7 +10,7 @@ import {createMeasurementListLayout} from '../measurement-list-layout.mjs';
 
 const uiSource=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 const main=readFileSync(new URL('../main.js',import.meta.url),'utf8');
-const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
+const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
 
 // Execute shipped interaction code with DOM/rendering seams. This validates
 // event routing and state, not pixels or browser-specific pointer compatibility.
@@ -28,28 +28,28 @@ class Element {
   fire(name,event){for(const fn of this.handlers.get(name)||[])fn(event);}
 }
 function event(x=0,y=0,extra={}){return{clientX:x,clientY:y,button:0,buttons:0,pointerId:1,target:new Element(),preventDefault(){this.prevented=true;},stopImmediatePropagation(){this.stopped=true;},...extra};}
-function fixture(){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM display placement'})}={}){
   const windowRef=new Element(),documentRef={defaultView:windowRef,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   documentRef.body=documentRef.createElement('body');documentRef.head=documentRef.createElement('head');
   const panel=documentRef.createElement('section'),canvas=documentRef.createElement('canvas'),host=documentRef.createElement('div'),tools=[];
   let mode='model',permitted=true,picks=0;
   const context=()=>({mode,element:canvas,host,pick:e=>{picks++;return[e.clientX,e.clientY,0];},project:p=>p.slice(0,2)});
-  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,console,
+  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,AbortController,DOMException,console,
     setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000},window:windowRef});
   vm.runInContext(uiSource.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{},resolveDisplayVertices});
   const controls=panel.children[0],svg=()=>host.children.find(node=>node.tagName==='SVG');
   workspace.tick();
   return{workspace,canvas,windowRef,controls,svg,tools,panel,setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
     click(x,y,extra={}){canvas.fire('pointerdown',event(x,y,extra));canvas.fire('pointerup',event(x,y,extra));}};
 }
 
-test('shared collections redraw both overlay and list after map detours without changing stored vertices',async()=>{
+test('both source collections stay in the shared list and overlay across map detours without changing stored vertices',async()=>{
   const f=fixture(),r={id:crypto.randomUUID(),name:'Mesh distance',kind:'distance',collection:'spatial3d',vertices:[[10,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
-  await f.workspace.store.save(r);await f.workspace.store.save({...r,id:crypto.randomUUID(),name:'Map distance',collection:'map'});
-  f.workspace.tick();assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/Mesh distance/);assert.doesNotMatch(f.controls.querySelector('[data-m-list]').innerHTML,/Map distance/);
-  for(const mode of ['ortho','dsm','dtm','cloud','model']){f.workspace.modeChanged();f.setMode(mode);f.workspace.tick();const map=geometry.measurementCollection(mode)==='map';assert.match(f.controls.querySelector('[data-m-list]').innerHTML,map?/Map distance/:/Mesh distance/);assert.match(f.svg().innerHTML,map?/Map distance/:/Mesh distance/);}
-  assert.deepEqual(f.workspace.store.records.get(r.id).vertices,r.vertices);f.workspace.dispose();
+  const map={...r,id:crypto.randomUUID(),name:'Map distance',collection:'map',vertices:[[150,150,0],[250,150,0]]};await f.workspace.store.save(r);await f.workspace.store.save(map);
+  f.workspace.tick();assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/Mesh distance/);assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/Map distance/);
+  for(const mode of ['ortho','dsm','dtm','cloud','model']){f.workspace.modeChanged();f.setMode(mode);f.workspace.tick();await flush();f.workspace.tick();for(const name of [/Map distance/,/Mesh distance/]){assert.match(f.controls.querySelector('[data-m-list]').innerHTML,name);assert.match(f.svg().innerHTML,name);}}
+  assert.deepEqual(f.workspace.store.records.get(r.id).vertices,r.vertices);assert.deepEqual(f.workspace.store.records.get(map.id).vertices,map.vertices);f.workspace.dispose();
 });
 
 test('Shift navigation does not consume pointer gestures or add measurement vertices',async()=>{
@@ -58,11 +58,17 @@ test('Shift navigation does not consume pointer gestures or add measurement vert
   assert.equal(down.stopped,undefined);assert.equal(f.workspace.getDraft().vertices.length,before);f.workspace.dispose();
 });
 
-test('populated overlay clears when the destination collection is empty in either direction',async()=>{
+test('a record remains visible after a map/model switch even without destination-origin records',async()=>{
   for(const [from,to,collection] of [['model','ortho','spatial3d'],['ortho','model','map']]){
     const f=fixture();f.setMode(from);f.workspace.tick();await f.workspace.store.save({id:crypto.randomUUID(),name:'Only original view',kind:'distance',collection,vertices:[[10,10,0],[100,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});f.workspace.tick();assert.match(f.svg().innerHTML,/Only original view/);
-    f.workspace.modeChanged();f.setMode(to);f.workspace.tick();assert.equal(f.svg().innerHTML,'');assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/No measurements/);f.workspace.dispose();
+    f.workspace.modeChanged();f.setMode(to);f.workspace.tick();await flush();f.workspace.tick();assert.match(f.svg().innerHTML,/Only original view/);assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/Only original view/);assert.equal(f.workspace.store.records.size,1);f.workspace.dispose();
   }
+});
+
+test('failed map-to-3D placement remains listed honestly and still draws in the map without changing source coordinates',async()=>{
+  const f=fixture({resolveDisplayVertices:async()=>{throw new Error('No verified elevation surface');}}),record={id:crypto.randomUUID(),name:'Map-only boundary',kind:'distance',collection:'map',vertices:[[20,20,0],[120,120,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
+  await f.workspace.store.save(record);f.workspace.tick();await flush();f.workspace.tick();assert.equal(f.svg().innerHTML,'');assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/Map-only boundary/);assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/3D overlay unavailable/);
+  f.workspace.modeChanged();f.setMode('ortho');f.workspace.tick();assert.match(f.svg().innerHTML,/Map-only boundary/);assert.deepEqual(f.workspace.store.records.get(record.id).vertices,record.vertices);f.workspace.dispose();
 });
 
 test('preview bursts perform one bounded pick and exact clicks remain independent',()=>{

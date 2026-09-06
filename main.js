@@ -9,6 +9,7 @@ import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
 import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-vertical-units.mjs';
+import { resolveMeasurementDisplayElevations } from './measurement-display-elevations.mjs';
 import { preflightBrowserRasterHeader } from './measurement-raster-header.mjs';
 import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
@@ -297,6 +298,12 @@ const demSettings = {
 };
 let geoDatasets = {};        // url -> { tiff, images[], ... }
 let geoPool = null;
+// Share one page-lifetime decoder pool across map tiles and display elevations,
+// including sessions opened directly into a 3D view before any map was loaded.
+function ensureGeoTiffPool() {
+  if (!geoPool) geoPool = new GeoTiffPool(Math.min(4, navigator.hardwareConcurrency || 2));
+  return geoPool;
+}
 let lastFps = performance.now(), frames = 0;
 let lodResources = null;
 let homeView = null;
@@ -2343,6 +2350,12 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   }finally{await tiff.close();}
 }
 
+async function resolveMeasurementDisplayVertices(record,{signal}={}){
+  const preferred=record.source?.kind;
+  const source=preferred==='dtm'&&DTM_URL?{type:'dtm',url:DTM_URL}:DSM_URL?{type:'dsm',url:DSM_URL}:DTM_URL?{type:'dtm',url:DTM_URL}:null;
+  return resolveMeasurementDisplayElevations(record,{modelVersionId:PROJECT?.activeVersion?.id,expectedCrs:measurementCoordinateReference().crs,source,signal,openTiff:openGeoTiff,preflight:preflightBrowserRasterHeader,pool:ensureGeoTiffPool()});
+}
+
 function installMeasurementWorkspace() {
   measurementWorkspace?.dispose();
   measurementWorkspace=createMeasurementWorkspace({
@@ -2353,6 +2366,7 @@ function installMeasurementWorkspace() {
     toLonLat:p=>{if(!measurementCoordinateReference().crs.startsWith('EPSG:'))throw new Error('GeoJSON needs verified geographic alignment. Use JSON or DXF with the local coordinate warning.');const [lat,lon]=utmToLatLon(p[0],p[1]);return [lon,lat];},
     toolChanged:tool=>{state.activeTool=tool;document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));},
     calculateSurface:calculateSavedMeasurementSurface,
+    resolveDisplayVertices:resolveMeasurementDisplayVertices,
     adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
     onAccessLost:measurementAccessLost,
   });
@@ -3005,7 +3019,7 @@ function throwIfAborted(signal) {
 async function getDataset(url, isDem, { signal = null } = {}) {
   throwIfAborted(signal);
   if (geoDatasets[url]) return geoDatasets[url];
-  if (!geoPool) geoPool = new GeoTiffPool(Math.min(4, navigator.hardwareConcurrency || 2));
+  ensureGeoTiffPool();
   const tiff = await openGeoTiff(url, { allowFullFile: false, blockSize: 262144, cacheSize: 128 }, signal);
   throwIfAborted(signal);
   const count = await tiff.getImageCount();
