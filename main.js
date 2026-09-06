@@ -8,6 +8,7 @@ import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
+import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-vertical-units.mjs';
 import { preflightBrowserRasterHeader } from './measurement-raster-header.mjs';
 import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
@@ -26,7 +27,7 @@ import {
   advanceLodMemoryPressure,
   configureLodRenderer,
   classifyLodQuality,
-  DEFAULT_LOD_DETAIL,
+  MAX_LOD_DETAIL,
   decideLodStartup,
   inspectLodProvenance,
   inspectLodTileset,
@@ -244,7 +245,9 @@ function persistLodMemoryMode(mode) {
   return stableMode;
 }
 
-let lodMemoryMode = readLodMemoryMode();
+// Advanced controls are retained for future developer use, but hidden from the
+// current Viewer. Do not silently reuse an old manual memory selection.
+let lodMemoryMode = 'auto';
 let lodTileRecoveryPending = false;
 let lodTileRetryAttempt = 0;
 let lodTileRetryTimer = null;
@@ -971,7 +974,7 @@ function loadTiles() {
   if (detailSlider && (!Number.isFinite(currentDetail)
     || currentDetail < Number(detailSlider.min)
     || currentDetail > Number(detailSlider.max))) {
-    detailSlider.value = String(DEFAULT_LOD_DETAIL);
+    detailSlider.value = String(MAX_LOD_DETAIL);
   }
   // deviceMemory is a coarse browser capability hint, not system or GPU RAM.
   // Leave it unknown when the browser does not provide it; Auto then uses the
@@ -984,7 +987,7 @@ function loadTiles() {
   lodRuntimeProfileState = configureLodRenderer(rendererInstance, {
     camera,
     renderer,
-    detail: detailSlider?.value,
+    detail: detailSlider?.value ?? MAX_LOD_DETAIL,
     deviceMemoryGiB,
     memoryProfile,
     interactionStateProvider: () => controls?.getInteractionState?.() || null,
@@ -2316,8 +2319,7 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask an administrator for a calculation.');
   try{await validateRasterEncodedBlocks(image,{maxBlockBytes:64*1024*1024});}
   catch{throw new Error('The source raster has unsupported or oversized encoded blocks for browser measurement. Ask an administrator to verify the source layout.');}
-  const verticalFactor=geo.VerticalUnitsGeoKey===9001?1:geo.VerticalUnitsGeoKey===9002?0.3048:geo.VerticalUnitsGeoKey===9003?1200/3937:!geo.VerticalUnitsGeoKey&&confirmMeters?1:null;
-  if(verticalFactor===null)throw new Error('Confirm source elevations are meters when metadata is absent. Unsupported vertical units must be corrected before calculation.');
+  const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata:await readRasterBandMetadata(image),confirmMeters});
   const x0=Math.max(0,Math.floor((Math.min(...record.vertices.map(p=>p[0]))-ds.minE)/px));
   const x1=Math.min(ds.W,Math.ceil((Math.max(...record.vertices.map(p=>p[0]))-ds.minE)/px));
   const y0=Math.max(0,Math.floor((ds.maxN-Math.max(...record.vertices.map(p=>p[1])))/py));
@@ -2337,7 +2339,7 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   const values=verticalFactor===1?rasters[0]:Float64Array.from(rasters[0],v=>v*verticalFactor),nodata=Number.isFinite(ds.nodata)?ds.nodata*verticalFactor:NaN;
   const bounds={minE:ds.minE+x0*px,maxE:ds.minE+x1*px,maxN:ds.maxN-y0*py,minN:ds.maxN-y1*py};
   const result=await calculateBrowserSurface({vertices,reference,values,width,height,bounds,nodata,maxCells:1_500_000},{signal});
-  return {...result,method:'surface-cut-fill',sourceKind:source.type,sourceResolutionM:[px,py],modelVersionId:PROJECT?.activeVersion?.id,boundaryVertices:vertices,calculationOrigin:'browser',warnings:[...(result.warnings||[]),...(!geo.VerticalUnitsGeoKey?['Source elevations were explicitly confirmed as meters; vertical units are not encoded in the raster.']:[])]};
+  return {...result,method:'surface-cut-fill',sourceKind:source.type,sourceResolutionM:[px,py],sourceVerticalUnitBasis:verticalUnitBasis==='administrator-declared'?'user-declared':verticalUnitBasis,modelVersionId:PROJECT?.activeVersion?.id,boundaryVertices:vertices,calculationOrigin:'browser',warnings:[...(result.warnings||[]),...(verticalUnitBasis==='administrator-declared'?['Source elevations were explicitly confirmed as meters; vertical units are not encoded in the raster.']:[])]};
   }finally{await tiff.close();}
 }
 
@@ -3842,7 +3844,9 @@ function syncCameraLayer() {
   const button = document.getElementById('layer-cameras');
   if (button) {
     button.classList.toggle('active', state.camerasVisible);
-    button.textContent = state.camerasVisible ? 'Hide Camera Positions' : 'Show Camera Positions';
+    button.textContent = state.camerasVisible ? 'Hide' : 'Show';
+    button.setAttribute('aria-label', state.camerasVisible ? 'Hide camera positions' : 'Show camera positions');
+    button.setAttribute('aria-pressed', String(state.camerasVisible));
   }
   const sizeRow = document.getElementById('cam-size-row');
   if (sizeRow) sizeRow.style.display = state.camerasVisible ? 'flex' : 'none';
@@ -4320,7 +4324,10 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
 
   // sidebar panel visibility per tab
   const isDem = mode === 'dsm' || mode === 'dtm';
-  document.getElementById('panel-3d-layers').style.display = is3D ? 'block' : 'none';
+  // Keep the advanced mesh controls dormant across every viewer transition.
+  // Their DOM/listeners remain available if this product choice is revisited.
+  document.getElementById('panel-3d-layers').hidden = true;
+  document.getElementById('panel-3d-layers').style.display = 'none';
   document.getElementById('panel-camera-positions').style.display = (is3D || isPC || isMapMode(mode)) && SHOTS_URL && SHARE_PERMISSIONS.cameras ? 'block' : 'none';
   document.getElementById('panel-nav').style.display = (is3D || isPC) ? 'block' : 'none';
   document.getElementById('panel-measure').style.display = SHARE_PERMISSIONS.measure ? 'block' : 'none';

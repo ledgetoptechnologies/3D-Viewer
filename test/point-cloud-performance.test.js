@@ -1,6 +1,79 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createAdaptivePointBudget } = require('../public/pointcloud-performance.js');
+const { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createFrameDiagnostics, createAdaptivePointBudget } = require('../public/pointcloud-performance.js');
+
+test('opt-in CPU diagnostics have no off-path work and restore inherited and own methods', () => {
+  let time = 0, reads = 0;
+  const viewer = Object.create({ update(value) { assert.equal(this, viewer); time += value; return 'update'; } });
+  viewer.renderer = { domElement: { width: 1200, height: 800 } };
+  viewer.render = function () { assert.equal(this, viewer); time += 5; return 'render'; };
+  const originalUpdate = viewer.update, originalRender = viewer.render;
+  const diagnostics = createFrameDiagnostics(viewer, { now() { reads++; return time; } });
+  assert.equal(diagnostics.enabled(), false);
+  assert.equal(viewer.update, originalUpdate); assert.equal(viewer.render, originalRender);
+  assert.equal(viewer.update(2), 'update'); assert.equal(viewer.render(), 'render');
+  assert.equal(reads, 0);
+  diagnostics.setEnabled(true); diagnostics.setEnabled(true);
+  assert.equal(viewer.update(2), 'update'); assert.equal(viewer.render(), 'render');
+  diagnostics.setEnabled(false);
+  assert.equal(viewer.update, originalUpdate); assert.equal(viewer.render, originalRender);
+  assert.equal(Object.hasOwn(viewer, 'update'), false);
+  assert.equal(diagnostics.snapshot(), null);
+  const readCount = reads; viewer.update(2); viewer.render(); assert.equal(reads, readCount);
+});
+
+test('CPU diagnostics publish bounded aggregates with submitted geometry and upload bytes', () => {
+  let time = 0;
+  const samples = [], geometry = { attributes: { position: { count: 3, array: new Float32Array(9) }, color: { array: new Uint8Array(12) } } };
+  const node = { geometryNode: { geometry } };
+  const pRenderer = {
+    createBuffer(g) { assert.equal(g, geometry); assert.equal(this, pRenderer); time += 1; return 'buffer'; },
+    updateBuffer(g) { assert.equal(g, geometry); time += 1; },
+    renderNodes(cloud, nodes) { assert.equal(this, pRenderer); assert.equal(nodes[0], node); time += 3; },
+  };
+  const viewer = { pRenderer, renderer: { domElement: { width: 1200, height: 800 } },
+    update() { time += 2; },
+    render() { pRenderer.renderNodes({}, [node]); time += 2; },
+  };
+  const originalNodes = pRenderer.renderNodes, originalCreate = pRenderer.createBuffer;
+  const d = createFrameDiagnostics(viewer, { now: () => time, onSample: sample => samples.push(sample) });
+  d.setEnabled(true);
+  assert.equal(pRenderer.createBuffer(geometry), 'buffer'); pRenderer.updateBuffer(geometry);
+  for (let i = 0; i < 25; i++) { time = i * 50; viewer.update(); viewer.render(); }
+  assert.equal(samples.length, 1);
+  const sample = samples[0];
+  assert.equal(sample.frameMs, 50); assert.equal(sample.maxFrameMs, 50);
+  assert.equal(sample.updateMs, 2); assert.equal(sample.renderMs, 5); assert.equal(sample.pointRenderMs, 3);
+  assert.equal(sample.uploads, 2); assert.equal(sample.uploadBytes, 96);
+  assert.equal(sample.submittedNodes, 1); assert.equal(sample.submittedPoints, 3);
+  assert.equal(sample.width, 1200); assert.equal(sample.height, 800);
+  const copy = d.snapshot(); copy.renderMs = 999; assert.equal(d.snapshot().renderMs, 5);
+  for (let i = 25; i < 50; i++) { time = i * 50; viewer.update(); viewer.render(); }
+  assert.equal(samples.length, 2); assert.equal(samples[1].uploads, 0);
+  d.setEnabled(false);
+  assert.equal(pRenderer.renderNodes, originalNodes); assert.equal(pRenderer.createBuffer, originalCreate);
+});
+
+test('diagnostics exclude resume gaps and preserve original errors despite failed observers', () => {
+  let time = 0;
+  const viewer = { update() {}, render() {} };
+  const d = createFrameDiagnostics(viewer, { now: () => time, onSample() { throw new Error('observer'); } });
+  d.setEnabled(true); viewer.render(); time = 10_000;
+  assert.doesNotThrow(() => viewer.render()); assert.equal(d.snapshot().frameMs, 0);
+  d.setEnabled(false);
+  const failure = new Error('render failed'); viewer.render = () => { throw failure; };
+  d.setEnabled(true); time = 11_000;
+  assert.throws(() => viewer.render(), error => error === failure);
+  d.setEnabled(false);
+});
+
+test('point-cloud diagnostics are visible opt-in controls with no automatic activation', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/pointcloud.html'), 'utf8');
+  assert.match(source, /id="pc-diagnostics-toggle"[^>]*aria-pressed="false"/);
+  assert.match(source, /id="pc-diagnostics-output" hidden/);
+  assert.match(source, /diagnosticsToggle\.addEventListener\('click'/);
+  assert.doesNotMatch(source, /frameDiagnostics\.setEnabled\(true\)/);
+});
 
 test('native point picks restore materials and bound timing entries without adding success-path GPU resets', () => {
   let resets = 0; const cleared = [], material = {}, pointcloud = { material };

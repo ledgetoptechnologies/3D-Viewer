@@ -190,7 +190,7 @@ test('viewer diagnostics are bounded and never include asset URLs or exception d
 test('LOD starts close-responsive, stages explicit high-detail requests, and caps reduced-memory clients honestly', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="20"/);
+  assert.match(html, /id="lod-detail"[^>]*min="2"[^>]*max="24"[^>]*value="24"/);
   assert.match(html, /id="lod-evaluation-note" hidden[\s\S]*Nearby surfaces retain requested detail; Detail 24 restores raw quality everywhere/);
   assert.match(main, /lodRuntimeProfileState = configureLodRenderer/);
   assert.match(main, /const next = resolveLodDetailRequest\(lodRuntimeProfileState, lodWarmupComplete, e\.target\.value\)/);
@@ -223,9 +223,9 @@ test('viewer memory modes persist only a stable key and apply bounded runtime po
     'a user-agent guess must not be presented as memory capability');
   assert.match(main, /resolveLodMemoryProfile\(\{\s*mode: lodMemoryMode,\s*deviceMemoryGiB/);
   assert.match(main, /configureLodRenderer\(rendererInstance,[\s\S]*?memoryProfile,/);
-  assert.match(main, /currentDetail[\s\S]*?detailSlider\.value = String\(DEFAULT_LOD_DETAIL\)/,
+  assert.match(main, /currentDetail[\s\S]*?detailSlider\.value = String\(MAX_LOD_DETAIL\)/,
     'invalid detail values may default');
-  assert.doesNotMatch(main, /if \(detailSlider\) detailSlider\.value = String\(DEFAULT_LOD_DETAIL\)/,
+  assert.doesNotMatch(main, /if \(detailSlider\) detailSlider\.value = String\(MAX_LOD_DETAIL\)/,
     'memory-profile reload must preserve the current Detail slider value');
   assert.match(main, /preserveIncomingModelView = true;\s*disposeTiles\(\);\s*loadTiles\(\);/);
   assert.match(main, /recentFrontierBytes/);

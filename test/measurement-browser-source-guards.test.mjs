@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 import {rasterDirectoryValue,rasterDecodedBlockBytes,validateRasterEncodedBlocks} from '../raster-source-metadata.mjs';
+import {readRasterBandMetadata,resolveRasterVerticalUnits} from '../raster-vertical-units.mjs';
 const main=readFileSync(new URL('../main.js',import.meta.url),'utf8');
 const start=main.indexOf('async function calculateSavedMeasurementSurface('),end=main.indexOf('function installMeasurementWorkspace()',start);
 const record={collection:'spatial3d',kind:'polygon',vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
@@ -11,6 +12,7 @@ function fixture(overrides={}){
   const image={getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616,VerticalUnitsGeoKey:9001}),fileDirectory:{BitsPerSample:[32],RowsPerStrip:2},getBoundingBox:()=>[0,0,2,2],getWidth:()=>2,getHeight:()=>2,getResolution:()=>[1,-1],getGDALNoData:()=>'-9999',readRasters:async options=>{state.reads.push(options);return [new Float32Array([0,2,4,6])];},...overrides};
   const scope=vm.createContext({rasterDirectoryValue,rasterDecodedBlockBytes,validateRasterEncodedBlocks,DSM_URL:'/native-dsm',DTM_URL:null,requestedVolumeSurface:()=>({type:'dsm',url:'/native-dsm'}),openGeoTiff:async(_url,options)=>{assert.equal(options.allowFullFile,false);return{getImage:async i=>{assert.equal(i,0);return image;},close:async()=>{state.closed++;}};},parseFiniteGdalNoData:Number,geoPool:null,PROJECT:{activeVersion:{id:'version'}},calculateBrowserSurface:async options=>{state.calculated=options;return{cutM3:12,warnings:[]};},DOMException});
   scope.preflightBrowserRasterHeader=async()=>{};
+  Object.assign(scope,{readRasterBandMetadata,resolveRasterVerticalUnits});
   vm.runInContext(main.slice(start,end),scope);return{state,calculate:(r=record,options)=>scope.calculateSavedMeasurementSurface(r,options)};
 }
 test('browser source validation rejects bad metadata before decoding pixels or statistics',async()=>{
@@ -38,7 +40,14 @@ test('map boundary elevations are sampled from native source, not stored Z place
 });
 test('explicit missing-unit assertion adds provenance warning and cancelled decode never calculates',async()=>{
   const f=fixture({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616})});
-  assert.match((await f.calculate(record,{confirmMeters:true})).warnings.join(' '),/explicitly confirmed/);
+  const confirmed=await f.calculate(record,{confirmMeters:true});assert.match(confirmed.warnings.join(' '),/explicitly confirmed/);assert.equal(confirmed.sourceVerticalUnitBasis,'user-declared');
   const controller=new AbortController(),cancelled=fixture({readRasters:async()=>{controller.abort();return[new Float32Array(4)];}});
   await assert.rejects(cancelled.calculate(record,{signal:controller.signal}),{name:'AbortError'});assert.equal(cancelled.state.calculated,null);assert.equal(cancelled.state.closed,1);
+});
+
+test('browser uses explicit GDAL band units and rejects conflicts before pixel decode',async()=>{
+  const f=fixture({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616}),getGDALMetadata:async sample=>{assert.equal(sample,0);return{UNITTYPE:'ft'};}});
+  const result=await f.calculate();assert.equal(f.state.calculated.values[1],2*.3048);assert.equal(result.sourceVerticalUnitBasis,'gdal-band-unit');assert.ok(!result.warnings.some(w=>/explicitly confirmed/.test(w)));
+  const conflict=fixture({getGDALMetadata:async()=>({UNITTYPE:'ft'})});await assert.rejects(conflict.calculate(record,{confirmMeters:true}),{code:'measurement_source_vertical_units_conflict'});assert.equal(conflict.state.reads.length,0);
+  const scaled=fixture({getGDALMetadata:async()=>({UNITTYPE:'m',SCALE:'.01',OFFSET:'100'})});await assert.rejects(scaled.calculate(record,{confirmMeters:true}),{code:'measurement_source_value_transform_unsupported'});assert.equal(scaled.state.reads.length,0);
 });

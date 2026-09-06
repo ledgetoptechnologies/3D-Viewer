@@ -76,6 +76,104 @@
     }
   }
 
+  // Opt-in, application-side CPU measurements only. No GPU queries/readback,
+  // User Timing entries, history arrays, polling timers, or network telemetry.
+  // Disabling restores the exact original methods: no per-frame off-path cost.
+  function createFrameDiagnostics(viewer, { now = () => performance.now(), onSample = () => {} } = {}) {
+    let enabled = false, restorers = [], windowStart = 0, previousFrame = null;
+    let totals, latest = null;
+    function reset() {
+      totals = { frames: 0, updates: 0, updateMs: 0, renderMs: 0, pointRenderMs: 0,
+        cadenceMs: 0, cadenceSamples: 0, maxFrameMs: 0, uploads: 0, uploadBytes: 0,
+        submittedNodes: 0, submittedPoints: 0 };
+    }
+    function wrap(object, name, instrument) {
+      if (typeof object?.[name] !== 'function') return;
+      const own = Object.prototype.hasOwnProperty.call(object, name), original = object[name];
+      const wrapped = function (...args) { return instrument.call(this, original, args); };
+      object[name] = wrapped;
+      restorers.push(() => {
+        // Do not overwrite another owner's newer instrumentation.
+        if (object[name] !== wrapped) return;
+        if (own) object[name] = original;
+        else delete object[name];
+      });
+    }
+    function publish(time) {
+      if (time - windowStart < 1000) return;
+      const frames = Math.max(1, totals.frames);
+      const canvas = viewer.renderer?.domElement;
+      latest = {
+        frames: totals.frames,
+        frameMs: totals.cadenceSamples ? totals.cadenceMs / totals.cadenceSamples : 0,
+        maxFrameMs: totals.maxFrameMs,
+        updateMs: totals.updateMs / Math.max(1, totals.updates),
+        renderMs: totals.renderMs / frames,
+        pointRenderMs: totals.pointRenderMs / frames,
+        uploads: totals.uploads, uploadBytes: totals.uploadBytes,
+        submittedNodes: totals.submittedNodes / frames,
+        submittedPoints: totals.submittedPoints / frames,
+        width: Number(canvas?.width) || 0, height: Number(canvas?.height) || 0,
+      };
+      reset(); windowStart = time;
+      // A diagnostics display failure must never interrupt the render loop.
+      try { onSample({ ...latest }); } catch { /* diagnostic observer only */ }
+    }
+    return {
+      enabled: () => enabled,
+      snapshot: () => latest ? { ...latest } : null,
+      setEnabled(value) {
+        value = !!value;
+        if (value === enabled) return;
+        enabled = value;
+        if (!value) {
+          for (const restore of restorers.reverse()) restore();
+          restorers = []; latest = null; previousFrame = null;
+          return;
+        }
+        reset(); windowStart = now(); previousFrame = null;
+        wrap(viewer, 'update', function (original, args) {
+          const start = now();
+          try { return original.apply(this, args); }
+          finally { totals.updateMs += now() - start; totals.updates++; }
+        });
+        wrap(viewer, 'render', function (original, args) {
+          const start = now();
+          if (previousFrame !== null) {
+            const cadence = start - previousFrame;
+            // Hidden-tab/resume gaps are not active rendering cost.
+            if (cadence >= 0 && cadence <= 1000) {
+              totals.cadenceMs += cadence; totals.cadenceSamples++;
+              totals.maxFrameMs = Math.max(totals.maxFrameMs, cadence);
+            }
+          }
+          previousFrame = start;
+          try { return original.apply(this, args); }
+          finally { const end = now(); totals.renderMs += end - start; totals.frames++; publish(end); }
+        });
+        wrap(viewer.pRenderer, 'renderNodes', function (original, args) {
+          const nodes = args[1] || [];
+          totals.submittedNodes += nodes.length;
+          for (const node of nodes) {
+            totals.submittedPoints += Number(node.geometryNode?.geometry?.attributes?.position?.count) || 0;
+          }
+          const start = now();
+          try { return original.apply(this, args); }
+          finally { totals.pointRenderMs += now() - start; }
+        });
+        for (const name of ['createBuffer', 'updateBuffer']) {
+          wrap(viewer.pRenderer, name, function (original, args) {
+            totals.uploads++;
+            for (const attribute of Object.values(args[0]?.attributes || {})) {
+              totals.uploadBytes += Number(attribute.array?.byteLength) || 0;
+            }
+            return original.apply(this, args);
+          });
+        }
+      },
+    };
+  }
+
   function createAdaptivePointBudget(initialTarget = 10_000_000) {
     const state = { target: initialTarget, live: initialTarget, auto: false, points: 0 };
     let frameMs = 1000 / 60, lastFrame = null, samples = 0, elapsed = 0, healthyMs = 0, longFrames = 0;
@@ -143,5 +241,5 @@
       },
     };
   }
-  return { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createAdaptivePointBudget };
+  return { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createFrameDiagnostics, createAdaptivePointBudget };
 }));

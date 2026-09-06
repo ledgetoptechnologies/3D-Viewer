@@ -5,17 +5,15 @@ import { createSurfaceAccumulator } from '../measurement-volume.mjs';
 import { insideSelection } from './measurementSelection.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from '../raster-source-metadata.mjs';
 import { validateMeasurementTiffHeader } from './measurementTiffHeader.mjs';
+import { readRasterBandMetadata, resolveRasterVerticalUnits } from '../raster-vertical-units.mjs';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export const NATIVE_RASTER_BLOCK_LIMIT = 256 * 1024 * 1024;
-export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT } = {}) {
+export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, bandMetadata = null } = {}) {
   const keys = image.getGeoKeys(), directory = image.getFileDirectory?.() || image.fileDirectory, epsg = Number(String(request.coordinateReference.crs).replace(/^EPSG:/i, ''));
   const rasterCrs = Number(keys.ProjectedCSTypeGeoKey), metres = Number(keys.ProjLinearUnitsGeoKey) === 9001 || ((rasterCrs >= 32601 && rasterCrs <= 32660)||(rasterCrs>=32701&&rasterCrs<=32760));
   if (!metres || rasterCrs !== epsg) fail('measurement_source_crs_mismatch');
-  const vertical = keys.VerticalUnitsGeoKey;
   if (Number(keys.GTRasterTypeGeoKey || 1) !== 1) fail('measurement_pixel_is_point_unsupported');
-  const verticalFactor = ({ 9001: 1, 9002: 0.3048, 9003: 1200 / 3937 })[Number(vertical)];
-  if (vertical !== undefined && !verticalFactor) fail('measurement_source_vertical_units_unsupported');
-  if (vertical === undefined && request.sourceVerticalUnit !== 'm') fail('measurement_source_vertical_units_required');
+  const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:request.sourceVerticalUnit==='m'});
   const transform = rasterDirectoryValue(directory, 'ModelTransformation');
   if (transform && [1,2,4,6,8,9,12,13,14].some(i => transform[i] !== 0)) fail('measurement_rotated_raster_unsupported');
   const [ox, oy] = image.getOrigin(), [dx, dy] = image.getResolution();
@@ -31,7 +29,7 @@ export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_
   for (const count of typeof encodedCounts === 'number' ? [encodedCounts] : encodedCounts) {
     if (!Number.isFinite(Number(count)) || Number(count) <= 0 || Number(count) > limit) fail('measurement_raster_block_too_large');
   }
-  return { ox, oy, dx, dy, crs: `EPSG:${rasterCrs}`, verticalUnit: 'm', verticalFactor: verticalFactor || 1, verticalUnitBasis: vertical === undefined ? 'administrator-declared' : 'raster-metadata', blockBytes, width: image.getWidth(), height: image.getHeight() };
+  return { ox, oy, dx, dy, crs: `EPSG:${rasterCrs}`, verticalUnit: 'm', verticalFactor, verticalUnitBasis, blockBytes, width: image.getWidth(), height: image.getHeight() };
 }
 // Header-only preflight never reads/decompresses pixel blocks. Source hashes and
 // live authority are checked again by the isolated worker before integration.
@@ -40,7 +38,7 @@ export async function preflightNativeRaster(absolutePath, request, options = {})
   if (!stat.isFile() || stat.size !== Number(request.source.byteSize)) fail('measurement_source_changed');
   await validateMeasurementTiffHeader(absolutePath);
   const tiff = await fromFile(absolutePath);
-  try { const image=await tiff.getImage(0),definition=nativeRasterDefinition(image, request, options);await validateRasterEncodedBlocks(image,{maxBlockBytes:Math.min(options.maxBlockBytes || NATIVE_RASTER_BLOCK_LIMIT,NATIVE_RASTER_BLOCK_LIMIT)});return definition; }
+  try { const image=await tiff.getImage(0),definition=nativeRasterDefinition(image, request, {...options,bandMetadata:await readRasterBandMetadata(image)});await validateRasterEncodedBlocks(image,{maxBlockBytes:Math.min(options.maxBlockBytes || NATIVE_RASTER_BLOCK_LIMIT,NATIVE_RASTER_BLOCK_LIMIT)});return definition; }
   finally { await tiff.close(); }
 }
 export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 2_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 128, onProgress = () => {} } = {}) {
@@ -55,7 +53,7 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
   await validateMeasurementTiffHeader(absolutePath);
   const tiff = await fromFile(absolutePath);
   try {
-    const image = await tiff.getImage(0), definition = nativeRasterDefinition(image, request, { maxBlockBytes }), { ox, oy, dx, dy, width, height } = definition;
+    const image = await tiff.getImage(0), definition = nativeRasterDefinition(image, request, { maxBlockBytes,bandMetadata:await readRasterBandMetadata(image) }), { ox, oy, dx, dy, width, height } = definition;
     await validateRasterEncodedBlocks(image,{maxBlockBytes:Math.min(maxBlockBytes,NATIVE_RASTER_BLOCK_LIMIT)});
     const xs = request.vertices.map(p => p[0]), ys = request.vertices.map(p => p[1]);
     const left = Math.max(0, Math.floor((Math.min(...xs) - ox) / dx)), right = Math.min(width, Math.ceil((Math.max(...xs) - ox) / dx));

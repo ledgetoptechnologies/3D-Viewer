@@ -1180,8 +1180,8 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not settle');
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     await waitFor(client, `(() => { const t=window.__ltds.tiles(); return !t.downloadQueue?.running && !t.parseQueue?.running && !t.processNodeQueue?.running; })()`, 'balanced startup queues did not remain settled');
-    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20`,
-      'default view did not enter direct Detail 20 refinement', 20_000);
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 24`,
+      'default view did not reach requested maximum Detail 24 refinement', 20_000);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1193,16 +1193,16 @@ test('browser LOD stream hides the coarse root after complete top-down foregroun
       errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
       status: document.querySelector('#lod-status').textContent,
     })`);
-    assert.equal(balancedStartup.slider, '20');
-    assert.equal(balancedStartup.requested, 20);
-    assert.equal(balancedStartup.active, 20);
+    assert.equal(balancedStartup.slider, '24');
+    assert.equal(balancedStartup.requested, 24);
+    assert.equal(balancedStartup.active, 24);
     assert.equal(balancedStartup.phase, 'requested-detail');
     assert.equal(balancedStartup.bootstrapPhase, 'complete');
-    assert.ok(Math.abs(balancedStartup.errorTarget - 5.481) < 0.01,
+    assert.ok(Math.abs(balancedStartup.errorTarget - 2) < 0.01,
       JSON.stringify(balancedStartup));
     assert.ok(balancedStartup.errorTarget < balancedStartup.bootstrapCoverageTarget,
-      `steady Detail 20 must refine beyond the temporary coarse bootstrap target: ${JSON.stringify(balancedStartup)}`);
-    assert.match(balancedStartup.status, /^LOD: (?:Detail 20|full-detail) \(\d+ tiles?\)$/);
+      `steady Detail 24 must refine beyond the temporary coarse bootstrap target: ${JSON.stringify(balancedStartup)}`);
+    assert.match(balancedStartup.status, /^LOD: (?:Detail 24|full-detail) \(\d+ tiles?\)$/);
     assert.doesNotMatch(balancedStartup.status, /warming|streaming/i);
     const startupLod0Requests = client.events.filter((event) => event.method === 'Network.requestWillBeSent'
       && /\/LOD-0\/[^/?#]+\.b3dm(?:[?#]|$)/i.test(event.params.request.url));
@@ -1715,9 +1715,9 @@ test('browser close view refines at the default Detail and small motion retains 
 
     await waitFor(client, `(() => {
       const profile=window.__ltds.state.lodRuntimeProfile;
-      return profile?.activeDetail===20 && profile?.bootstrapPhase==='complete'
-        && Math.abs(window.__ltds.tiles().errorTarget-5.481)<0.01;
-    })()`, 'default Detail did not finish bounded prefetch and enter raw Detail 20 refinement', 180_000);
+      return profile?.activeDetail===24 && profile?.bootstrapPhase==='complete'
+        && Math.abs(window.__ltds.tiles().errorTarget-2)<0.01;
+    })()`, 'default Detail did not finish bounded prefetch and enter raw Detail 24 refinement', 180_000);
     const defaultState = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -1727,12 +1727,12 @@ test('browser close view refines at the default Detail and small motion retains 
       bootstrapCoverageTarget: window.__ltds.state.lodRuntimeProfile?.bootstrapCoverageTarget,
       errorScale: window.__ltds.state.lodRuntimeProfile?.errorScale,
     })`);
-    assert.equal(defaultState.slider, '20');
-    assert.equal(defaultState.requested, 20);
-    assert.equal(defaultState.active, 20);
+    assert.equal(defaultState.slider, '24');
+    assert.equal(defaultState.requested, 24);
+    assert.equal(defaultState.active, 24);
     assert.equal(defaultState.bootstrapPhase, 'complete');
-    assert.ok(Math.abs(defaultState.errorTarget - 5.481) < 0.01,
-      `the default view must leave coarse bootstrap and resume raw Detail 20: ${JSON.stringify(defaultState)}`);
+    assert.ok(Math.abs(defaultState.errorTarget - 2) < 0.01,
+      `the default view must leave coarse bootstrap and resume raw Detail 24: ${JSON.stringify(defaultState)}`);
     assert.ok(defaultState.errorTarget < defaultState.bootstrapCoverageTarget, JSON.stringify(defaultState));
 
     const basePosition = [0, 44, 52];
@@ -2403,9 +2403,9 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       };
       return true;
     })()`);
-    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 20
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail === 24
       && window.__ltds.state.lodRuntimeProfile?.bootstrapPhase === 'complete'`,
-      'refreshed session did not enter direct Detail 20 refinement', 20_000);
+      'refreshed session did not reach requested maximum Detail 24 refinement', 20_000);
     const balancedStartup = await client.evaluate(`({
       slider: document.querySelector('#lod-detail').value,
       requested: window.__ltds.state.lodRuntimeProfile?.requestedDetail,
@@ -2418,7 +2418,7 @@ test('an open authenticated workspace discovers completed LOD tiles without load
       prefetch: window.__ltds.lodDiagnostics().prefetch,
     })`);
     assert.deepEqual({ ...balancedStartup, errorTarget: undefined, errorScale: undefined, bootstrapCoverageTarget: undefined, prefetch: undefined }, {
-      slider: '20', requested: 20, active: 20, errorTarget: undefined,
+      slider: '24', requested: 24, active: 24, errorTarget: undefined,
       phase: 'requested-detail', bootstrapPhase: 'complete', errorScale: undefined,
       bootstrapCoverageTarget: undefined, prefetch: undefined,
     });
@@ -2430,8 +2430,8 @@ test('an open authenticated workspace discovers completed LOD tiles without load
     assert.equal(balancedStartup.prefetch.detailReserveMiB, 1664);
     assert.equal(balancedStartup.prefetch.overSoftBudget, true,
       'crossing the 1.25 GiB target must remain diagnostic while the safe shell promotes');
-    assert.equal(balancedStartup.errorTarget, 5.481,
-      `steady Detail 20 did not use raw SSE: ${JSON.stringify(balancedStartup)}`);
+    assert.equal(balancedStartup.errorTarget, 2,
+      `steady Detail 24 did not use raw SSE: ${JSON.stringify(balancedStartup)}`);
     assert.ok(balancedStartup.errorTarget < balancedStartup.bootstrapCoverageTarget, JSON.stringify(balancedStartup));
     const promotedShell = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();
@@ -2894,6 +2894,15 @@ test('production-weighted broad view completes focal Detail 20 without cache-adm
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.equal(bootstrapPhase, 'complete', 'production-weighted direct shell did not promote');
+
+    // This developer acceptance scenario deliberately measures the Detail 20
+    // workload after bootstrap, not the client's maximum-detail startup choice.
+    await client.evaluate(`(() => {
+      const slider = document.querySelector('#lod-detail');
+      slider.value = '20';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(client, `window.__ltds.state.lodRuntimeProfile?.activeDetail===20`, 'developer Detail 20 did not apply after bootstrap');
 
     const startup = await client.evaluate(`(() => {
       const tiles = window.__ltds.tiles();
@@ -3831,7 +3840,7 @@ test('browser camera photo fills the window and preserves source pixels through 
   }
 });
 
-test('browser default distance demand and explicit overrides protect nearby surfaces with bounded timing and unchanged queue limits', { timeout: 90_000 }, async (t) => {
+test('browser distance-demand switches at developer Detail 20 protect nearby surfaces with bounded timing and unchanged queue limits', { timeout: 90_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) { t.skip('Chrome or Edge is required for evaluation-switch integration acceptance.'); return; }
   const releaseLock = await acquireBrowserHarnessLock({ root });
@@ -3892,6 +3901,9 @@ test('browser default distance demand and explicit overrides protect nearby surf
     ]) {
       await client.command('Page.navigate',{url:`${fixture.origin}/?project=${fixtureId}${query}`});
       await waitFor(client, `window.__ltds?.state?.lodRuntimeProfile?.bootstrapPhase==='complete'`, 'evaluation fixture bootstrap did not complete',20_000);
+      // Maximum Detail 24 intentionally bypasses distance-demand coarsening.
+      // Exercise this retained developer policy at its specified Detail 20.
+      await client.evaluate(`(() => {const slider=document.querySelector('#lod-detail');slider.value='20';slider.dispatchEvent(new Event('input',{bubbles:true}));})()`);
       await client.evaluate(`(() => {const tiles=window.__ltds.tiles(),cam=window.__ltds.camera(),V=cam.position.constructor;
         tiles.group.updateWorldMatrix(true,false);
         window.__evaluationPoseFrame=tiles.frameCount;

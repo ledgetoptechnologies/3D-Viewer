@@ -25,6 +25,11 @@
       color: #eee; background: rgba(10,10,12,0.88); font-size: 12px;
       pointer-events: none;
     }
+    #pc-diagnostics { position: absolute; top: 10px; right: 12px; z-index: 50; max-width: min(470px, 80%); }
+    #pc-diagnostics button { float: right; color: #ddd; background: rgba(10,10,12,.88); border: 1px solid #555; border-radius: 6px; padding: 5px 9px; cursor: pointer; }
+    #pc-diagnostics button[aria-pressed="true"] { border-color: var(--brand-orange); }
+    #pc-diagnostics button:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
+    #pc-diagnostics-output { clear: both; margin: 4px 0 0; padding: 8px; border-radius: 6px; background: rgba(10,10,12,.9); color: #ddd; font: 11px/1.5 monospace; white-space: pre-wrap; pointer-events: none; }
     #pc-loading {
       position: absolute; inset: 0; z-index: 100; display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 14px;
@@ -56,6 +61,10 @@
 
   <div id="pc-status">Loading…</div>
   <div id="pc-classification" hidden>Classification: —</div>
+  <div id="pc-diagnostics">
+    <button id="pc-diagnostics-toggle" type="button" aria-pressed="false" aria-controls="pc-diagnostics-output">Diagnostics</button>
+    <pre id="pc-diagnostics-output" hidden></pre>
+  </div>
   <div id="pc-loading" role="status" aria-live="polite">
     <div class="spinner"></div>
     <div id="pc-loading-text">Streaming point cloud…</div>
@@ -200,6 +209,28 @@
       isActive: () => !document.hidden && viewer.renderArea.clientWidth > 0 && viewer.renderArea.clientHeight > 0,
     });
     window.viewer = viewer;
+    const diagnosticsOutput = document.getElementById('pc-diagnostics-output');
+    const diagnosticsToggle = document.getElementById('pc-diagnostics-toggle');
+    const frameDiagnostics = window.LtdsPointCloudPerformance.createFrameDiagnostics(viewer, {
+      onSample(sample) {
+        const ms = value => value.toFixed(1) + ' ms';
+        diagnosticsOutput.textContent =
+          'CPU timings — not GPU timings\n' +
+          'Frame ' + ms(sample.frameMs) + ' · max ' + ms(sample.maxFrameMs) + '\n' +
+          'Update ' + ms(sample.updateMs) + ' · render ' + ms(sample.renderMs) + '\n' +
+          'Point submission ' + ms(sample.pointRenderMs) + ' (part of render)\n' +
+          'Submitted/frame: ' + Math.round(sample.submittedNodes) + ' nodes · ' + Math.round(sample.submittedPoints).toLocaleString('en-US') + ' points\n' +
+          'Uploads/window: ' + sample.uploads + ' · ' + (sample.uploadBytes / 1048576).toFixed(2) + ' MiB\n' +
+          'Framebuffer: ' + sample.width + ' × ' + sample.height;
+      },
+    });
+    diagnosticsToggle.addEventListener('click', () => {
+      const enabled = !frameDiagnostics.enabled();
+      frameDiagnostics.setEnabled(enabled);
+      diagnosticsToggle.setAttribute('aria-pressed', String(enabled));
+      diagnosticsOutput.hidden = !enabled;
+      diagnosticsOutput.textContent = enabled ? 'Sampling CPU frame costs…' : '';
+    });
     // Potree's EDL renderer composites the point cloud after scene.scene and
     // does not share that pass's depth. Draw cameras in the supported overlay
     // pass so roof markers are not overwritten by the fullscreen EDL result.

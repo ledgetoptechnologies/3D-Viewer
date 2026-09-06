@@ -430,14 +430,16 @@
   <div id="main">
     <aside id="sidebar">
       <div id="sidebar-custom">
-        <div class="panel" id="panel-3d-layers">
+        <!-- Advanced mesh controls are retained, but hidden. Default request is
+             maximum detail with automatic bounded memory; see switchMode. -->
+        <div class="panel" id="panel-3d-layers" hidden>
           <h3><svg viewBox="0 0 24 24"><path d="M4 6h16M4 10h16M4 14h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg> Layers</h3>
           <div class="tool-grid">
             <button class="layer-btn full active" data-layer="tiles" id="layer-tiles">Streamed LOD Mesh</button>
           </div>
           <div class="slider-row">
             <span>Detail</span>
-            <input type="range" id="lod-detail" min="2" max="24" step="1" value="20">
+            <input type="range" id="lod-detail" min="2" max="24" step="1" value="24">
           </div>
           <label class="slider-row" for="lod-memory-mode">
             <span>Viewer memory</span>
@@ -453,7 +455,7 @@
         <div class="panel" id="panel-camera-positions">
           <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera Positions</h3>
           <div class="tool-grid">
-            <button class="layer-btn full" data-layer="cameras" id="layer-cameras" aria-label="Toggle camera positions">Show</button>
+            <button class="layer-btn full" data-layer="cameras" id="layer-cameras" aria-label="Show camera positions" aria-pressed="false">Show</button>
           </div>
           <div class="slider-row" id="cam-size-row" style="display:none;">
             <span>Size</span>
