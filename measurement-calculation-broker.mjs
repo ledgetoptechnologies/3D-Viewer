@@ -23,6 +23,8 @@ const CALCULATION_ERROR_CODES = new Set([
   'measurement_source_value_transform_unsupported', 'measurement_source_vertical_units_conflict',
   'measurement_source_vertical_units_unsupported', 'measurement_source_vertical_units_required',
   'measurement_boundary_elevation_unavailable', 'measurement_limit', 'measurement_cancelled',
+  'measurement_transect_invalid', 'measurement_transect_limit', 'measurement_transect_reference_invalid',
+  'measurement_transect_base_unavailable', 'measurement_transect_parent_stale', 'measurement_transect_parent_unavailable',
 ]);
 export const safeMeasurementCalculationErrorCode = code =>
   typeof code === 'string' && CALCULATION_ERROR_CODES.has(code) ? code : 'measurement_request_failed';

@@ -16,7 +16,12 @@ class MeasurementCalculationRepository {
       // Keep at most twenty terminal calculations per record. Retain the
       // numerical provenance with each remaining result, not unbounded private
       // geometry/capability snapshots from every historical button press.
-      this.database.prepare("DELETE FROM measurement_calculation_jobs WHERE measurement_id=? AND status NOT IN ('queued','running') AND id NOT IN (SELECT id FROM measurement_calculation_jobs WHERE measurement_id=? AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC LIMIT 19)").run(measurement.id, measurement.id);
+      const terminal=this.database.prepare("SELECT id FROM measurement_calculation_jobs WHERE measurement_id=? AND status NOT IN ('queued','running') ORDER BY created_at DESC,id DESC").all(measurement.id);
+      const protectedIds=new Set([measurement.results?.calculationJobId,request.parentCalculationId,...this.database.prepare("SELECT json_extract(request_json,'$.parentCalculationId') AS parent FROM measurement_calculation_jobs WHERE measurement_id=? AND status IN ('queued','running')").all(measurement.id).map(row=>row.parent)].filter(Boolean));
+      const keep=new Set(terminal.filter(row=>protectedIds.has(row.id)).map(row=>row.id));
+      if(keep.size>19)throw problem('measurement_queue_full',429);
+      for(const row of terminal){if(keep.size>=19)break;keep.add(row.id);}
+      for(const row of terminal)if(!keep.has(row.id))this.database.prepare('DELETE FROM measurement_calculation_jobs WHERE id=? AND measurement_id=?').run(row.id,measurement.id);
       this.database.prepare("INSERT INTO measurement_calculation_jobs(id,measurement_id,revision,request_json,status,created_at,updated_at) VALUES(?,?,?,?,'queued',?,?)").run(id, measurement.id, measurement.revision, JSON.stringify(request), at, at);
       return this.get(measurement.id, id);
     });
@@ -25,7 +30,7 @@ class MeasurementCalculationRepository {
     const row = this.database.prepare('SELECT j.*,m.document_json AS current_document,m.revision AS current_revision,m.model_id AS current_model_id,m.model_version_id AS current_version_id FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.id=? AND j.measurement_id=? AND m.deleted_at IS NULL').get(id, measurementId);
     if(!row)return null;
     const request=JSON.parse(row.request_json),reference=request.reference||{};
-    const parameters={revision:row.revision,method:request.method,sourceAssetId:request.source?.id,reference:{type:reference.type,...(Number.isFinite(reference.elevationM)?{elevationM:reference.elevationM}:{}),...(Number.isFinite(reference.offsetM)?{offsetM:reference.offsetM}:{})},sourceVerticalUnit:request.sourceVerticalUnit||null};
+    const parameters={revision:row.revision,method:request.method,sourceAssetId:request.source?.id,reference:{type:reference.type,...(Number.isFinite(reference.elevationM)?{elevationM:reference.elevationM}:{}),...(Number.isFinite(reference.offsetM)?{offsetM:reference.offsetM}:{})},sourceVerticalUnit:request.sourceVerticalUnit||null,...(request.method==='surface-transect'?{parentCalculationId:request.parentCalculationId,parentRevision:request.parentRevision,line:request.line,baseHash:request.baseHash}:{})};
     const result=row.result_json?JSON.parse(row.result_json):null,document=JSON.parse(row.current_document);
     // Attaching a result is itself a document revision. Reuse only the exact
     // explicitly attached job, never any arbitrary historical result. Recheck
@@ -41,6 +46,7 @@ class MeasurementCalculationRepository {
   list(measurementId) {
     return this.database.prepare('SELECT j.id FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.measurement_id=? AND m.deleted_at IS NULL ORDER BY j.created_at DESC,j.id DESC LIMIT 20').all(measurementId).map(row => this.get(measurementId, row.id));
   }
+  parent(measurementId,id){if(typeof id!=='string')return null;const job=this.get(measurementId,id);if(!job)return null;const row=this.database.prepare('SELECT request_json FROM measurement_calculation_jobs WHERE id=? AND measurement_id=?').get(id,measurementId);return{job,request:JSON.parse(row.request_json)};}
   cancel(measurementId, id) {
     return this.database.prepare("UPDATE measurement_calculation_jobs SET request_json=json_remove(request_json,'$.authority'),status='cancelled',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND measurement_id=? AND status IN ('queued','running')").run(new Date().toISOString(), id, measurementId).changes === 1;
   }

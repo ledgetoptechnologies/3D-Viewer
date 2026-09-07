@@ -29,7 +29,7 @@ export function createMeasurementSurfaceClient({token,context,fetcher=fetch}){
     if(!['capabilities','create','status','list','cancel'].includes(operation)||!payload||Array.isArray(payload)||JSON.stringify(payload).length>16384)throw fail('measurement_request_invalid',400);
     const keys=operation==='capabilities'?[]:operation==='create'?['measurementId','request']:operation==='list'?['measurementId']:['measurementId','jobId'];
     if(Object.keys(payload).some(key=>!keys.includes(key))||(operation!=='capabilities'&&!uuid.test(payload.measurementId||''))||(['status','cancel'].includes(operation)&&!uuid.test(payload.jobId||'')))throw fail('measurement_request_invalid',400);
-    if(operation==='create'&&payload.request?.method!=='surface-cut-fill')throw fail('measurement_method_unavailable',403);
+    if(operation==='create'&&!['surface-cut-fill','surface-transect'].includes(payload.request?.method))throw fail('measurement_method_unavailable',403);
     const temporary=scope.temporary===true,base='/api/v1/measurements'+(temporary?'/temporary':'');
     const path=operation==='capabilities'?`${base}/capabilities`:`${base}${temporary?'':'/'+encodeURIComponent(payload.measurementId)}/calculations${['status','cancel'].includes(operation)?'/'+encodeURIComponent(payload.jobId):''}${temporary&&operation==='list'?'?measurementId='+encodeURIComponent(payload.measurementId):''}`;
     let body=payload.request;

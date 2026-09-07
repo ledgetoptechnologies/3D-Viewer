@@ -137,10 +137,12 @@ jobs:
               -v "$PWD/test:/app/test:ro" "$VERIFY_IMAGE" --test \
               test/measurement-volume.test.mjs \
               test/measurement-native-raster.test.mjs \
+              test/measurement-raster-transect.test.mjs \
               test/measurement-point-surface.test.mjs \
               test/measurement-closed-mesh.test.mjs \
               test/measurement-reconstruction.test.mjs \
               test/measurement-calculation-jobs.test.js \
+              test/measurement-transect-jobs.test.js \
               test/measurement-private-api.test.js
           docker run --rm --entrypoint node \
             -e EXPECTED_OBJ2TILES_SOURCE_SHA256="$EXPECTED_OBJ2TILES_SOURCE_SHA256" \

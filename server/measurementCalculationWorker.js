@@ -4,12 +4,14 @@ const path = require('node:path');
 const os = require('node:os');
 const { fork } = require('node:child_process');
 const { MeasurementCalculationRepository } = require('./measurementCalculationRepository');
+const {MeasurementRepository}=require('./measurementRepository');
+const {validateTransectRequest,sameTransectEvidence}=require('./measurementTransectRequest');
 function authorizationLive(request, repository, processing) {
   const viewer = request.authority?.viewerHash ? repository.getViewerSessionByHash(request.authority.viewerHash) : null, admin = request.authority?.adminHash ? processing.getAdminSessionByHash(request.authority.adminHash) : null;
   const model = viewer && repository.getModel(viewer.modelId), version = viewer && repository.getModelVersion(viewer.modelId, viewer.modelVersionId)?.activeVersion;
   const live=repository.viewerSessionLive(viewer) && version?.status === 'ready' && (viewer.sessionMode === 'review' || (model?.status === 'ready' && model.activeVersion?.id === viewer.modelVersionId)) && viewer.permissions?.measure === true && viewer.permissions?.view === true && viewer.modelId === request.modelId && viewer.modelVersionId === request.modelVersionId && viewer.subject === request.authority?.subject;
   if(!live)return false;
-  if(request.authority?.scope==='personal-raster')return Boolean(request.method==='surface-cut-fill'&&['dsm','dtm'].includes(request.source?.kind)&&['ops','client'].includes(viewer.audience)&&viewer.audience===request.authority.audience&&(viewer.audience==='ops'||viewer.permissions.personalMeasurements===true));
+  if(request.authority?.scope==='personal-raster')return Boolean(['surface-cut-fill','surface-transect'].includes(request.method)&&['dsm','dtm'].includes(request.source?.kind)&&['ops','client'].includes(viewer.audience)&&viewer.audience===request.authority.audience&&(viewer.audience==='ops'||viewer.permissions.personalMeasurements===true));
   return Boolean(viewer.audience === 'ops' && processing.adminSessionLive(admin) && admin.subject === viewer.subject && admin.permissions?.includes('viewer.processing.write'));
 }
 async function childCalculation(absolutePath, request, { config, isLive, sourceFiles, forkProcess = fork }) {
@@ -44,6 +46,8 @@ async function processOneMeasurementCalculation({ repository, processing, storag
   try {
     const request = job.request;
     if (!authorizationLive(request, repository, processing)) throw Object.assign(new Error('authorization lost'), { code: 'measurement_authorization_lost' });
+    const parentLive=()=>{if(request.method!=='surface-transect')return true;try{const measurement=new MeasurementRepository(repository.database).get({modelId:request.modelId,modelVersionId:request.modelVersionId,subject:request.authority.subject,audience:request.authority.audience},job.measurementId),version=repository.getModelVersion(request.modelId,request.modelVersionId)?.activeVersion;if(!measurement)return false;const rebuilt=validateTransectRequest({revision:measurement.revision,method:'surface-transect',parentCalculationId:request.parentCalculationId,line:request.line},measurement,version,jobs.parent(job.measurementId,request.parentCalculationId));return sameTransectEvidence(request,rebuilt);}catch{return false;}};
+    if(!parentLive())throw Object.assign(new Error('parent changed'),{code:'measurement_transect_parent_stale'});
     const asset = repository.getModelVersion(request.modelId, request.modelVersionId)?.activeVersion?.assets.find(a => a.id === request.source.id);
     if (!asset || ['sha256','rootKey','relativePath','byteSize'].some(k => asset[k] !== request.source[k])) throw Object.assign(new Error('source changed'), { code: 'measurement_source_changed' });
     const absolutePath = storage.resolve(asset.rootKey, asset.relativePath, { mustExist: true });
@@ -53,8 +57,9 @@ async function processOneMeasurementCalculation({ repository, processing, storag
       sourceFiles=repository.database.prepare('SELECT relative_path AS relativePath,byte_size AS byteSize,sha256 FROM model_asset_files WHERE asset_id=? ORDER BY relative_path LIMIT 200001').all(asset.id);
       if(sourceFiles.length>200000)throw Object.assign(new Error('source index too large'),{code:'measurement_ept_selection_limit'});
     }
-    const result = await runCalculation(absolutePath, request, { config, sourceFiles, isLive: () => authorizationLive(request, repository, processing) && jobs.heartbeat(job, owner) });
+    const result = await runCalculation(absolutePath, request, { config, sourceFiles, isLive: () => authorizationLive(request, repository, processing) && parentLive() && jobs.heartbeat(job, owner) });
     if (!authorizationLive(request, repository, processing)) throw Object.assign(new Error('authorization lost'), { code: 'measurement_authorization_lost' });
+    if(!parentLive())throw Object.assign(new Error('parent changed'),{code:'measurement_transect_parent_stale'});
     jobs.finish(job, owner, result);
   } catch (error) { jobs.finish(job, owner, null, /^[a-z][a-z0-9_]{0,79}$/.test(error.code || '') ? error.code : 'measurement_calculation_failed'); }
   return true;

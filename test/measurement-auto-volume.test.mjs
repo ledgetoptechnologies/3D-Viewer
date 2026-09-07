@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 import {measurementMetrics,validateMeasurementGeometry} from '../measurement-document.mjs';
+import {createServerProfileCalculator} from '../measurement-server-profile.mjs';
 
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 const shipped=source.slice(source.indexOf('  function showSurface('),source.indexOf('  function setTool('));
@@ -10,7 +11,7 @@ function fixture({kind='polygon',saveWait=Promise.resolve(),attachmentWait=Promi
   const record={id:'auto-volume-fixture',name:'Test boundary',kind,collection:'spatial3d',vertices:kind==='polygon'?[[0,0,0],[10,0,0],[10,10,0],[0,10,0]]:[[0,0,0],[10,0,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
   const opened=[],messages=[],records=new Map(),attachments=[],serverCalls=[],specialistOpened=[];
   const scope=vm.createContext({draft:record,selected:null,units:'metric',savedUnits:{metric:'m'},viewGeneration:0,dialogGeneration:0,disposed:false,permitted:true,mode:'model',activeDialog:null,structuredClone,
-    measurementMetrics,validateMeasurementGeometry,
+    measurementMetrics,validateMeasurementGeometry,createServerProfileCalculator,
     adminAllowed,specialistAllowed,surfaceRequest:undefined,preferServerSurface:()=>preferServer,adminRequest:async()=>({}),createServerSurfaceCalculator:options=>async(...args)=>{serverCalls.push({options,args,snapshot:options.getRecord()});if(serverError)throw serverError;return{cutM3:20,fillM3:0,calculationJobId:'server-job'};},
     openAdminCalculationDialog:async options=>{if(!options.isCurrent())throw new Error('Measurement access changed.');specialistOpened.push(options);return{close(){}};},
     store:{records,persistent:()=>false,async save(r){await saveWait;if(saveError)throw saveError;records.set(r.id,{...structuredClone(r),revision:1});},async attachResults(r,results){attachments.push({r,results});await attachmentWait;records.set(r.id,{...structuredClone(r),results,revision:r.revision+1});}},

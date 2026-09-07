@@ -4,6 +4,7 @@ const auth = require('./auth');
 const { MeasurementCalculationRepository } = require('./measurementCalculationRepository');
 const { reconstructionAvailable } = require('./measurementReconstructionSupport');
 const { StorageManager } = require('./storageManager');
+const {validateTransectRequest,sameTransectEvidence}=require('./measurementTransectRequest');
 const fail = (code, status = 400) => { throw Object.assign(new Error(code), { code, status }); };
 function validateCalculationRequest(input, measurement, version) {
   if (!input || Array.isArray(input) || Object.keys(input).some(k => !['revision','method','sourceAssetId','reference','sourceVerticalUnit','selection','sourceCoordinateFrame','cellSizeM','classFilter','reconstruction'].includes(k)) || input.revision !== measurement.revision) fail('measurement_calculation_invalid');
@@ -51,15 +52,16 @@ function createMeasurementCalculationApi({ repository, measurements, getPrincipa
     return { principal, authority, measurement };
   };
   // Legacy/advanced jobs remain staff-only even when they share an owned polygon.
-  const mayReadJob = (job, authority) => Boolean(job && (authority || job.method === 'surface-cut-fill'));
+  const mayReadJob = (job, authority) => Boolean(job && (authority || ['surface-cut-fill','surface-transect'].includes(job.method)));
   router.post('/:measurementId/calculations', async (req, res, next) => { try {
     const { principal, authority, measurement } = gate(req);
-    if (req.body?.method !== 'surface-cut-fill' && !authority) fail('measurement_admin_required', 403);
+    if (!['surface-cut-fill','surface-transect'].includes(req.body?.method) && !authority) fail('measurement_admin_required', 403);
     if (config.measurementCalculationsEnabled === false) fail('measurement_calculations_disabled', 503);
     if(req.body?.method==='reconstructed-estimate'&&!reconstructionAvailable(config))fail('measurement_reconstruction_unavailable',503);
     const version = repository.getModelVersion(principal.modelId, principal.modelVersionId)?.activeVersion;
-    const request = validateCalculationRequest(req.body, measurement, version);
-    if (request.method === 'surface-cut-fill') {
+    const transect=req.body?.method==='surface-transect';
+    const request = transect?validateTransectRequest(req.body,measurement,version,jobs.parent(measurement.id,req.body.parentCalculationId)):validateCalculationRequest(req.body, measurement, version);
+    if (['surface-cut-fill','surface-transect'].includes(request.method)) {
       try { await rasterPreflight(request); }
       catch (error) {
         const allowed = /^measurement_(source_|pixel_|rotated_|raster_)/.test(error.code || '');
@@ -69,6 +71,7 @@ function createMeasurementCalculationApi({ repository, measurements, getPrincipa
       // retaining worker authorization/hash validation as an independent gate.
       const current = gate(req).measurement;
       if (current.revision !== measurement.revision) fail('measurement_calculation_invalid', 409);
+      if(transect){const currentVersion=repository.getModelVersion(principal.modelId,principal.modelVersionId)?.activeVersion,rebuilt=validateTransectRequest(req.body,current,currentVersion,jobs.parent(current.id,req.body.parentCalculationId));if(!sameTransectEvidence(request,rebuilt))fail('measurement_transect_parent_stale',409);}
     }
     // Keep only server-side capability hashes for worker revalidation, never raw
     // bearer values. They are omitted from every public job representation.

@@ -1,8 +1,10 @@
 # Elevation profile / cross-section interaction
 
-Status: the volume inspector now implements a **reduced-sample corridor preview**
-with linked plan/chart inspection. The native-resolution line-profile feature
-described below remains a proposed follow-up, not a completed feature.
+Status: the volume inspector implements a **reduced-sample corridor preview**
+with linked plan/chart inspection. A native-raster surface-transect implementation
+is **implemented and fixture-tested on September 7; live deployment/County Road D acceptance remain pending**. The
+broader standalone line-profile and true point-cloud section designs below are
+not completed features.
 The user's September 6 example clarifies that “cut line” means a sampled height
 profile across a pile, not the orthophoto footprint download or volume base plane.
 
@@ -33,8 +35,58 @@ station, top elevation, reference elevation, difference, and source coordinates,
 linked to a plan-view marker. Samples are drawn as discrete points: no invented
 curve through unsampled cells or NoData. Full native-cell integration remains the
 volume result; the preview is neither its numerical input nor a continuous
-terrain profile. A true native-resolution transect/cloud section and its profile
-CSV export are still separate work.
+terrain profile. The native surface-transect implementation below replaces this
+chart for scoped server results, with native profile CSV/PNG export. True cloud
+corridors and standalone multi-segment profiles remain separate work.
+
+### Native surface transect: implemented, real-data acceptance pending
+
+The implementation uses the existing scoped Viewer server calculation lane.
+See [verification and acceptance](NATIVE_ELEVATION_PROFILE_QA_2026-09-07.md).
+Local fixture verification does not imply that the user's server already runs it.
+
+- For a selected polygon, request a section through its immutable registered
+  DSM/DTM using the inspector's direction and position. Sample the native raster
+  along that section rather than extracting a curve from the reduced volume
+  preview. Report the actual sampling method, spacing and coverage; native source
+  resolution does not imply that every pixel is shown in an unlimited chart.
+- Return station, source coordinates and elevation, with reference-base height
+  and difference where the section uses the volume calculation's same base.
+  Preserve gaps for NoData and points outside the selected region. Do not join
+  disconnected valid stretches across unknown ground or invent a pile surface.
+- Keep full-polygon volume integration separate from a section's visual profile.
+  The section is an inspection aid, not a substitute volume algorithm. A DSM
+  profile is a raster surface, not the complete set of cloud points in a corridor.
+- Use existing measurement/model-version authorization, private ownership and
+  temporary public scope. A client can request an allowed calculation on a shared
+  model without obtaining import, reprocessing or general job permissions.
+- Bound sampling and server work; support cancellation and fence responses by
+  the current measurement revision, source version and section parameters so a
+  late result cannot overwrite a newer selection. Linked chart hover should use
+  returned samples, not trigger expensive model/cloud picking or another job.
+- Retain source and vertical-unit validation. Unknown elevations must produce an
+  understandable unavailable state, not a silent metre assumption or browser
+  fallback. Verified native fixtures can establish algorithm behavior while the
+  County Road D source investigation proceeds independently.
+
+Known-unit fixtures verify native ramps/piles, boundary clipping and disconnected
+spans, NoData, supported unit conversion, bounded/cancelled work, private/public
+authorization, stale-response handling and the shipped inspector's linked chart.
+Live County Road D numerical acceptance additionally needs verified units; it is
+not implied by synthetic tests.
+
+### County Road D source-unit dependency
+
+The current DSM calculation rejects absent recognized vertical-unit metadata.
+The user does not know its elevation units. No metre confirmation has been
+inferred from horizontal EPSG, display feet, provider name or ODM software tags,
+and no source-unit metadata has been changed for this investigation.
+
+The server-access agent can follow
+[the read-only County Road D checklist](COUNTY_ROAD_D_VERTICAL_UNITS_HANDOFF.md)
+to bind actual source evidence to the exact immutable DSM hash. This is a
+dataset-specific verification dependency, not a reason to stop independent
+profile implementation, UI work or known-unit fixture testing.
 
 ### Remaining full-profile design
 

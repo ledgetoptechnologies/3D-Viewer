@@ -51,3 +51,19 @@ test('real private result attachment revision can recover only its exact unchang
   const edited=await calculate(current,options);assert.notEqual(edited.calculationJobId,result.calculationJobId);assert.equal(creates,3);assert.equal(runs,3);
   f.database.prepare('UPDATE viewer_sessions SET revoked_at=?').run(new Date().toISOString());await assert.rejects(calculate(current,options),{code:'measurement_surface_access_unavailable'});assert.equal(creates,3);
 });
+
+test('shipped profile client and private store use HTTP parent linkage without attaching section arrays',async t=>{
+  const f=fixture(t),app=express();app.use(express.json());app.use('/api/v1/measurements',createMeasurementApi(f.repository,{preflightRaster:async()=>{}}));
+  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const writes=[],fetcher=(path,options)=>{if(options.method!=='GET')writes.push([path,options.method]);return fetch(`http://127.0.0.1:${server.address().port}${path}`,options);};
+  const {createMeasurementStore}=await import('../measurement-store.mjs'),{createMeasurementSurfaceClient}=await import('../measurement-surface-client.mjs'),{createServerProfileCalculator}=await import('../measurement-server-profile.mjs');
+  const store=createMeasurementStore({token:()=>f.viewerToken,fetcher});await store.load();
+  const parent=f.jobs.enqueue(f.measurement,f.request),claimed=f.jobs.claim('volume');
+  const source={assetId:f.request.source.id,kind:'dsm',sha256:f.request.source.sha256,modelVersionId:f.model.activeVersion.id,verticalUnit:'m',verticalUnitBasis:'requester-declared',crs:'EPSG:32616',resolutionM:[1,1]};
+  const volume={method:'surface-cut-fill',status:'calculated',calculationOrigin:'server-native-raster',cutM3:2,fillM3:0,netM3:2,coverage:1,reference:f.request.reference,source};
+  f.jobs.finish(claimed,'volume',{...volume,preview:{samples:[],referencePatches:[[[0,0,0],[1,0,0],[1,1,0]],[[0,0,0],[1,1,0],[0,1,0]]]}});
+  await store.attachResults(store.records.get(f.measurement.id),{...volume,calculationJobId:parent.id});const before=JSON.stringify(store.records.get(f.measurement.id));writes.length=0;let runs=0;
+  const request=createMeasurementSurfaceClient({token:()=>f.viewerToken,context:()=>f.principal,fetcher}),line={start:[0,.5],end:[1,.5]};
+  const calculate=createServerProfileCalculator({request,getRecord:()=>store.records.get(f.measurement.id),wait:async()=>processOneMeasurementCalculation({...f,config:{},storage:{resolve:()=>'/trusted/a.tif'},runCalculation:async(_path,r,controls)=>{runs++;assert.ok(controls.isLive());return{method:'surface-transect',status:'calculated',sampling:'native-cell-step',parentCalculationId:r.parentCalculationId,baseHash:r.baseHash,source,line:r.line,lengthM:1,cellCount:1,segments:[{startM:0,endM:1,start:r.line.start,end:r.line.end,status:'sample',surfaceM:2,baseStartM:0,baseEndM:0,cell:[0,0]}]};}},'profile')});
+  const result=await calculate(store.records.get(f.measurement.id),{line});assert.equal(result.segments[0].surfaceM,2);assert.equal((await calculate(store.records.get(f.measurement.id),{line})).calculationJobId,result.calculationJobId);assert.equal(runs,1);assert.equal(writes.length,1);assert.ok(writes[0][0].endsWith('/calculations'));assert.equal(writes[0][1],'POST');assert.equal(JSON.stringify(store.records.get(f.measurement.id)),before);assert.equal(f.measurements.get(f.principal,f.measurement.id).revision,2);
+});

@@ -60,16 +60,16 @@ function createMeasurementApi(repository, { preflightRaster } = {}) {
     const version = rasterAuthorized ? repository.getModelVersion(req.measurementPrincipal.modelId, req.measurementPrincipal.modelVersionId)?.activeVersion : null;
     const hasMeshCrs = Number(version?.georef?.epsg) > 0 || (Number(version?.georef?.utmZone) >= 1 && Number(version?.georef?.utmZone) <= 60);
     const calculationSources = (version?.assets || []).filter(asset => asset.sha256).flatMap(asset => {
-      const methods = ['dsm','dtm'].includes(asset.kind) && /^(tif|tiff|geotiff)$/i.test(asset.format || '') ? ['surface-cut-fill'] : authorized && asset.kind === 'obj' && asset.format === 'obj' && hasMeshCrs ? ['closed-mesh'] : authorized && asset.kind === 'ept' && asset.format === 'ept' && asset.manifestSha256 ? ['point-surface-cut-fill'] : [];
+      const methods = ['dsm','dtm'].includes(asset.kind) && /^(tif|tiff|geotiff)$/i.test(asset.format || '') ? ['surface-cut-fill','surface-transect'] : authorized && asset.kind === 'obj' && asset.format === 'obj' && hasMeshCrs ? ['closed-mesh'] : authorized && asset.kind === 'ept' && asset.format === 'ept' && asset.manifestSha256 ? ['point-surface-cut-fill'] : [];
       if(methods.length&&hasMeshCrs&&['obj','ept'].includes(asset.kind)&&reconstructionAvailable(config))methods.push('reconstructed-estimate');
       return methods.length ? [{ assetId: asset.id, kind: asset.kind, format: asset.format, byteSize: asset.byteSize ?? null, methods }] : [];
     });
-    res.json({ capabilities: { personalPersistence: true, rasterCalculations: rasterAuthorized, serverCalculations: authorized }, calculationSources, calculationMethods: [...new Set(calculationSources.flatMap(source => source.methods))] });
+    res.json({ capabilities: { personalPersistence: true, rasterCalculations: rasterAuthorized, transectCalculations:rasterAuthorized, serverCalculations: authorized }, calculationSources, calculationMethods: [...new Set(calculationSources.flatMap(source => source.methods))] });
   }));
   router.get('/', endpoint((req, res) => {
     const collection = req.query.collection;
     if (collection !== undefined && !COLLECTIONS.has(collection)) throw problem('invalid_measurement_collection');
-    res.json({ measurements: measurements.list(req.measurementPrincipal, collection), capabilities: { personalPersistence: true, rasterCalculations: config.measurementCalculationsEnabled !== false, serverCalculations: Boolean(adminFor(req, req.measurementPrincipal)) && config.measurementCalculationsEnabled !== false } });
+    res.json({ measurements: measurements.list(req.measurementPrincipal, collection), capabilities: { personalPersistence: true, rasterCalculations: config.measurementCalculationsEnabled !== false, transectCalculations:config.measurementCalculationsEnabled!==false, serverCalculations: Boolean(adminFor(req, req.measurementPrincipal)) && config.measurementCalculationsEnabled !== false } });
   }));
   router.post('/', endpoint((req, res) => {
     const result = measurements.create(req.measurementPrincipal, req.body);

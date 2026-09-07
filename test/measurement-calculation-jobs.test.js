@@ -127,7 +127,7 @@ test('client own raster jobs use scoped Viewer authority; cross-person and advan
  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
  const base=`http://127.0.0.1:${server.address().port}/measurements`,headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json'};
  const call=(path,method='GET',body)=>fetch(base+path,{method,headers,...(body?{body:JSON.stringify(body)}:{})});
- const caps=await(await call('/capabilities')).json();assert.equal(caps.capabilities.rasterCalculations,true);assert.equal(caps.capabilities.serverCalculations,false);assert.deepEqual(caps.calculationMethods,['surface-cut-fill']);
+ const caps=await(await call('/capabilities')).json();assert.equal(caps.capabilities.rasterCalculations,true);assert.equal(caps.capabilities.transectCalculations,true);assert.equal(caps.capabilities.serverCalculations,false);assert.deepEqual(caps.calculationMethods,['surface-cut-fill','surface-transect']);
  for(const method of ['closed-mesh','point-surface-cut-fill','reconstructed-estimate'])assert.equal((await call(`/${own.id}/calculations`,'POST',{...f.body,method})).status,403);
  assert.equal(preflights,0);assert.equal((await call(`/${foreign.id}/calculations`,'POST',f.body)).status,404);
  const response=await call(`/${own.id}/calculations`,'POST',f.body);assert.equal(response.status,202);const queued=(await response.json()).calculation;

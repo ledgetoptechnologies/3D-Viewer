@@ -4,6 +4,7 @@ import './measurement-workspace.css';
 import {openSurfaceDialog} from './measurement-volume-dialog.mjs';
 import {openAdminCalculationDialog,availableAdminSources} from './measurement-admin-dialog.mjs';
 import {createServerSurfaceCalculator} from './measurement-server-surface.mjs';
+import {createServerProfileCalculator} from './measurement-server-profile.mjs';
 import {createMeasurementListLayout} from './measurement-list-layout.mjs';
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const field = event => event.target?.closest?.('input,textarea,select,[contenteditable=true]');
@@ -146,6 +147,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const server=typeof surfaceRequest==='function'||preferServerSurface()||adminAllowed;
     const calculate=server?createServerSurfaceCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):calculateSurface;
     activeDialog=openSurfaceDialog({record,units,autoCalculate,execution:server?'server':'browser',getRecord:()=>snapshot,
+      calculateProfile:server?createServerProfileCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):null,
       openSpecialist:adminAllowed&&specialistAllowed?async({host,isCurrent:panelCurrent,onOpened,onClose})=>{
         const current=()=>isCurrent()&&panelCurrent()&&adminAllowed&&specialistAllowed;
         if(attachmentPending)await attachmentPending;
