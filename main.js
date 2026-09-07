@@ -5,6 +5,7 @@ import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
+import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
@@ -2290,9 +2291,15 @@ function measurementViewContext() {
     },
     project(p,viewport){
       const position=cloud?new THREE.Vector3(...p):utmToWorld(...p);
-      const projected=position.clone().applyMatrix4(activeCamera.matrixWorldInverse);if(projected.z>=0)return null;
-      const width=viewport?.width??element.clientWidth,height=viewport?.height??element.clientHeight;
-      position.project(activeCamera);return [(position.x+1)*width/2,(1-position.y)*height/2];
+      const clip=new THREE.Vector4(position.x,position.y,position.z,1).applyMatrix4(activeCamera.matrixWorldInverse).applyMatrix4(activeCamera.projectionMatrix).toArray();
+      return projectMeasurementBoundary([clip],{width:viewport?.width??element.clientWidth,height:viewport?.height??element.clientHeight}).positions[0];
+    },
+    projectBoundary(vertices,viewport,{closed=false}={}){
+      const clip=vertices.map(p=>{
+        const position=cloud?new THREE.Vector3(...p):utmToWorld(...p);
+        return new THREE.Vector4(position.x,position.y,position.z,1).applyMatrix4(activeCamera.matrixWorldInverse).applyMatrix4(activeCamera.projectionMatrix).toArray();
+      });
+      return projectMeasurementBoundary(clip,{width:viewport?.width??element.clientWidth,height:viewport?.height??element.clientHeight},{closed});
     },
     focus(vertices){
       const points=vertices.map(p=>cloud?new THREE.Vector3(...p):utmToWorld(...p));

@@ -262,15 +262,24 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       displayVertices+=r.vertices.length;
       const geometry=displayGeometry(r);if(!geometry)continue;
       const vertices=geometry.slice();if(r===draft&&cursor&&!editing)vertices.push(cursor);
-      const positions=vertices.map(p=>bound.project(p,rect));if(!positions.length||positions.some(p=>!p))continue;
-      if(positions.every(p=>p[0]<0)||positions.every(p=>p[0]>rect.width)||positions.every(p=>p[1]<0)||positions.every(p=>p[1]>rect.height))continue;
-      const points=positions.map(p=>`${p[0]},${p[1]}`).join(' '),closed=r.kind==='polygon'&&positions.length>=3;
-      markup+=`<${closed?'polygon':'polyline'} points="${points}" fill="${closed?'#ee5007':'none'}" fill-opacity="0.12" stroke="${r.id===selected?'#fff':'#f8cb2e'}" stroke-width="2"/>`;
-      for(let i=0;i<r.vertices.length;i++){const p=positions[i];markup+=`<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="#ee5007" stroke="#fff" stroke-width="1"/>`;}
+      const closed=r.kind==='polygon'&&vertices.length>=3,clipped=bound.projectBoundary?.(vertices,rect,{closed});
+      const positions=clipped?.positions||vertices.map(p=>bound.project(p,rect));
+      if(clipped){
+        if(!clipped.segments.length&&!clipped.fill.length)continue;
+        if(clipped.fill.length>=3)markup+=`<polygon points="${clipped.fill.map(p=>`${p[0]},${p[1]}`).join(' ')}" fill="#ee5007" fill-opacity="0.12" fill-rule="evenodd" stroke="none"/>`;
+        for(const edge of clipped.segments)markup+=`<line data-measurement-edge="${edge.index}" x1="${edge.start[0]}" y1="${edge.start[1]}" x2="${edge.end[0]}" y2="${edge.end[1]}" stroke="${r.id===selected?'#fff':'#f8cb2e'}" stroke-width="2"/>`;
+      }else{
+        if(!positions.length||positions.some(p=>!p))continue;
+        if(positions.every(p=>p[0]<0)||positions.every(p=>p[0]>rect.width)||positions.every(p=>p[1]<0)||positions.every(p=>p[1]>rect.height))continue;
+        const points=positions.map(p=>`${p[0]},${p[1]}`).join(' ');
+        markup+=`<${closed?'polygon':'polyline'} points="${points}" fill="${closed?'#ee5007':'none'}" fill-opacity="0.12" stroke="${r.id===selected?'#fff':'#f8cb2e'}" stroke-width="2"/>`;
+      }
+      for(let i=0;i<r.vertices.length;i++){const p=positions[i];if(p)markup+=`<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="#ee5007" stroke="#fff" stroke-width="1"/>`;}
       const text=(x,y,value)=>{const half=String(value).length*3.5+5,box=[x-half,y-13,x+half,y+4];if(++labelCount>200||labelBoxes.some(b=>box[0]<b[2]&&box[2]>b[0]&&box[1]<b[3]&&box[3]>b[1])){decluttered=true;return '';}labelBoxes.push(box);return `<text x="${x}" y="${y}" text-anchor="middle" fill="white" stroke="#121212" stroke-width="4" paint-order="stroke" font-size="12" font-family="sans-serif">${escape(value)}</text>`;};
-      if(vertices.length>=2){const lengths=(r===draft?measurementMetrics({...r,vertices}):metrics(r)).edgeLengthsM;for(let i=0;i<lengths.length;i++){const a=positions[i],b=positions[(i+1)%positions.length];if(Math.hypot(a[0]-b[0],a[1]-b[1])<90&&r!==draft&&r.id!==selected){decluttered=true;continue;}markup+=text((a[0]+b[0])/2,(a[1]+b[1])/2-7,measurementValue(lengths[i],1,units));}}
-      if(r!==draft){const center=positions.reduce((s,p)=>[s[0]+p[0]/positions.length,s[1]+p[1]/positions.length],[0,0]);markup+=text(center[0],center[1]+15,r.name);if(closed)markup+=text(center[0],center[1]+30,measurementValue(metrics(r).horizontalAreaM2,2,units)+' horizontal');}
-      if(r!==draft&&(Number.isFinite(r.results?.volumeM3)||Number.isFinite(r.results?.cutM3))){
+      if(vertices.length>=2){const lengths=(r===draft?measurementMetrics({...r,vertices}):metrics(r)).edgeLengthsM;for(let i=0;i<lengths.length;i++){const a=positions[i],b=positions[(i+1)%positions.length];if(!a||!b)continue;if(Math.hypot(a[0]-b[0],a[1]-b[1])<90&&r!==draft&&r.id!==selected){decluttered=true;continue;}markup+=text((a[0]+b[0])/2,(a[1]+b[1])/2-7,measurementValue(lengths[i],1,units));}}
+      const allVerticesVisible=positions.length&&positions.every(p=>p);
+      if(r!==draft&&allVerticesVisible){const center=positions.reduce((s,p)=>[s[0]+p[0]/positions.length,s[1]+p[1]/positions.length],[0,0]);markup+=text(center[0],center[1]+15,r.name);if(closed)markup+=text(center[0],center[1]+30,measurementValue(metrics(r).horizontalAreaM2,2,units)+' horizontal');}
+      if(r!==draft&&allVerticesVisible&&(Number.isFinite(r.results?.volumeM3)||Number.isFinite(r.results?.cutM3))){
         const center=positions.reduce((s,p)=>[s[0]+p[0]/positions.length,s[1]+p[1]/positions.length],[0,0]);
         const quantity=Number.isFinite(r.results.volumeM3)?`${r.results.estimated||r.results.status==='estimate'||r.results.method==='reconstructed-estimate'?'Estimated ':''}volume ${measurementValue(r.results.volumeM3,3,units)}`:`Cut ${measurementValue(r.results.cutM3,3,units)} · Fill ${measurementValue(r.results.fillM3,3,units)}`;
         markup+=text(center[0],center[1]+46,quantity);

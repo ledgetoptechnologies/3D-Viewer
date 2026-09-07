@@ -298,6 +298,65 @@ layers. A local pull of the CI candidate was rejected by registry credentials,
 so this local rebuild is not an attestation of the registry candidate digest.
 The release workflow must still independently verify and promote its own image.
 
+That independent release subsequently passed in run **34160705830**, source
+commit `366f88e948a4442192c99903ce9d0d64fb789922`. The promoted image was
+`ghcr.io/ledgetoptechnologies/3d-viewer:sha-366f88e`, digest
+`sha256:cb3570176f0898efaf986ccebb94379fb06faf11faf82fbee5dee395a4c8bb89`.
+Its downloaded attestation confirms source checks, pull-by-digest, source stamp,
+rootless runtime, schema 33 and native runtime verification. This release
+contains the unified Measure/recovery work, not the subsequent close-up fix.
+
+## Close-zoom polygon overlay regression: live reproduction and local check
+
+In a later live County Road D session, the root agent reproduced a display-only
+failure while all five saved measurement records remained listed. The initial
+close view had no visible boundary. Two zoom-out wheel inputs (+234, then +363)
+restored the SVG overlay: 33 children and two polygons, with a yellow boundary
+visible in the screenshot. Zooming back in (-507 at screen position 845, 530)
+left the overlay with zero children/paths while the five measurement articles
+remained. This is not evidence that measurement data was deleted. The root agent
+left the live tab at that close view and made no measurement writes.
+
+The local correction clips each original boundary segment in homogeneous camera
+space rather than discarding a whole measurement when a corner crosses behind
+the camera/near plane. Clipped fill is not stroked: a viewport or near-plane cut
+must not become a fabricated measurement edge. Only surviving original vertices
+receive point handles. This follow-up is separate from the deployed b234083
+point-cloud observations and must not be presented as already verified live.
+
+`test/measurement-closezoom-browser.test.mjs` passed **1/1, zero failures/skips**,
+exit 0, in approximately 3.66 seconds. It launches an isolated headless browser
+and loads the shipped workspace/projection helper with a real Three.js
+perspective camera and synthetic saved polygon. Its sequence verifies:
+
+- Four original edges/handles when fully visible.
+- Three original edge segments and two original handles when the other corners
+  are behind the camera or inside the near plane.
+- Finite, viewport-bounded SVG coordinates; no artificial closing edge; the
+  visible front edge matches an independent analytic pinhole projection.
+- All-behind geometry clears, then zoom-out restores the complete boundary.
+- Canonical store JSON is unchanged and all API requests are reads.
+
+Screenshot `data/qa/measurement-closezoom-boundary.png` was visually inspected.
+The initial test fixture had an invalid unparenthesized arrow-return object;
+that fixture syntax was corrected before the passing run. No source geometry,
+live browser or production data was changed by this isolated test. Final integrated
+tests and deployed close-zoom acceptance of the correction remain separate gates.
+
+### Final integrated close-up-fix checks
+
+- Isolated Linux source build and complete suite: **1,436 tests, 1,414 passed,
+  zero failed, 22 environment-dependent skips**, exit 0, approximately 56 s.
+  Network disabled; no production data mounted. Log:
+  `data/qa/measure-closezoom-source-tests-final.log`.
+- Separate real-browser/projection/store/capture/specialist lifecycle suite:
+  **44 passed, zero failed/skipped**, approximately 8.7 s. This includes the
+  new close-up browser case and existing unified-inspector checks.
+- The preceding full run caught an extracted adapter fixture missing the new
+  projection-helper dependency. It was corrected to use the actual helper, with
+  extra boundary visibility and zero-layout-read assertions; no production
+  behavior was relaxed to make the test pass.
+
 ## Not yet proven
 
 - Actual County Road D stockpile units and independently checked live volume.
@@ -312,5 +371,7 @@ The release workflow must still independently verify and promote its own image.
   stockpile inspection. The current chart is explicitly a reduced-sample preview;
   it must not be described as a complete continuous terrain profile or as proof
   of independent volume accuracy.
+- Deployed close-zoom boundary clipping and measurement-handle behavior beyond
+  the isolated perspective-camera regression above.
 
 The thread goal remains active.

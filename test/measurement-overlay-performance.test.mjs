@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import * as geometry from '../measurement-document.mjs';
 import {createMeasurementStore} from '../measurement-store.mjs';
 import {createMeasurementListLayout} from '../measurement-list-layout.mjs';
+import {projectMeasurementBoundary} from '../measurement-projection.mjs';
 
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 class Element {
@@ -86,9 +87,15 @@ test('Potree adapter creation/signature/projection do not force layout and picke
   const camera=new THREE.PerspectiveCamera(60,4/3,.1,100);camera.position.set(0,0,10);camera.lookAt(0,0,0);camera.updateMatrixWorld();
   const points={visible:true,visibleNodes:[{}],material:original,pick(){this.material={};return{position:new THREE.Vector3(0,0,0)};}},viewer={scene:{getActiveCamera:()=>camera,pointclouds:[points]},renderer:{domElement:canvas,setRenderTarget(){},setScissorTest(){},state:{reset(){}}}};
   const win={viewer,THREE,Potree:{measureTimings:false},performance:{clearMarks:n=>marks.push(n),clearMeasures:n=>marks.push(n)}};
-  const scope=vm.createContext({state:{activeMode:'cloud',cloudMode:'potree'},isMapMode:()=>false,document:{getElementById:()=>({contentWindow:win})},dom:{cloudContainer:{}},camera,renderer:viewer.renderer,THREE});
+  const scope=vm.createContext({state:{activeMode:'cloud',cloudMode:'potree'},isMapMode:()=>false,document:{getElementById:()=>({contentWindow:win})},dom:{cloudContainer:{}},camera,renderer:viewer.renderer,THREE,projectMeasurementBoundary});
   vm.runInContext(main.slice(start,end),scope);const adapter=scope.measurementViewContext();
-  const signature=adapter.viewSignature();adapter.project([0,0,0],{width:400,height:300});assert.equal(layout,0);
+  const signature=adapter.viewSignature();assert.deepEqual(adapter.project([0,0,0],{width:400,height:300}),[200,150]);assert.equal(layout,0);
+  const boundary=adapter.projectBoundary([[-.2,-.2,9],[.2,-.2,9],[.2,.2,11],[-.2,.2,11]],{width:400,height:300},{closed:true});
+  assert.equal(boundary.segments.length,3,'partly behind-camera polygon retains its original visible edges');
+  assert.equal(boundary.positions.filter(Boolean).length,2,'only original visible handles remain');
+  assert.ok(boundary.fill.length>=3);assert.equal(layout,0,'boundary clipping uses the supplied CSS viewport without layout reads');
+  assert.equal(adapter.project([0,0,9.95],{width:400,height:300}),null,'hidden near-plane handle is not selectable');
+  assert.equal(layout,0);
   canvas.width=1600;assert.notEqual(adapter.viewSignature(),signature);
   adapter.pick({clientX:200,clientY:150});assert.equal(points.material,original);assert.deepEqual(marks,['pick-start','pick-end','pick']);
   marks.length=0;win.Potree.measureTimings=true;adapter.pick({clientX:200,clientY:150});assert.deepEqual(marks,[]);
