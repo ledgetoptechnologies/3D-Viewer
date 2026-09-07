@@ -52,10 +52,12 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
     const source=sources.find(s=>s.kind===kind);
     if(!source)throw new Error(`No registered ${kind.toUpperCase()} is available for server calculation. Choose an available elevation source; a DTM may omit the pile.`);
     const body=adminCalculationRequest(record,{method:'surface-cut-fill',sourceAssetId:source.assetId,reference:reference?.type,offsetM:reference?.offsetM??0,elevationM:reference?.elevationM,displayUnits:'metric',confirmMeters},sources);
-    const matches=job=>{
+    const matchesParameters=job=>{
       const p=job.parameters;
-      return job.measurementId===record.id&&job.revision===record.revision&&(!temporary||job.geometryHash===geometryHash)&&p?.method===body.method&&p.sourceAssetId===body.sourceAssetId&&p.reference?.type===body.reference.type&&(p.reference?.offsetM??0)===body.reference.offsetM&&(body.reference.type!=='custom'||p.reference?.elevationM===body.reference.elevationM)&&(p.sourceVerticalUnit??null)===(body.sourceVerticalUnit??null);
+      return job.measurementId===record.id&&(!temporary||job.geometryHash===geometryHash)&&p?.method===body.method&&p.sourceAssetId===body.sourceAssetId&&p.reference?.type===body.reference.type&&(p.reference?.offsetM??0)===body.reference.offsetM&&(body.reference.type!=='custom'||p.reference?.elevationM===body.reference.elevationM)&&(p.sourceVerticalUnit??null)===(body.sourceVerticalUnit??null);
     };
+    const matches=job=>job.revision===record.revision&&matchesParameters(job);
+    const attachedMatch=job=>!temporary&&job?.status==='complete'&&job.id===record.results?.calculationJobId&&Number.isSafeInteger(job.revision)&&job.revision<record.revision&&job.attachmentRevision===record.revision&&matchesParameters(job);
     const exposeCancel=job=>onJob({cancel:()=>send('cancel',{measurementId:record.id,jobId:job.id})});
     const recover=async()=>{
       const response=await send('list',{measurementId:record.id});
@@ -63,7 +65,13 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       const relevant=response.calculations.filter(j=>j.measurementId===record.id&&j.revision===record.revision);
       const active=relevant.find(j=>['queued','running'].includes(j.status));
       if(active&&!matches(active)){exposeCancel(active);throw surfaceCalculationError({code:'measurement_calculation_already_active'});}
-      return active||relevant.find(j=>j.status==='complete'&&matches(j));
+      const existing=active||relevant.find(j=>j.status==='complete'&&matches(j))||response.calculations.find(attachedMatch);
+      if(existing)return existing;
+      if(!temporary&&record.results?.calculationJobId&&!response.calculations.some(j=>j.id===record.results.calculationJobId)){
+        let attached;try{attached=(await send('status',{measurementId:record.id,jobId:record.results.calculationJobId}))?.calculation;}catch(error){if(error.code!=='measurement_calculation_not_found')throw error;}
+        if(attachedMatch(attached))return attached;
+      }
+      return null;
     };
     onProgress('Checking for an existing volume calculation…');
     let job=await recover();
@@ -76,7 +84,7 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
     if(typeof jobId!=='string'||!jobId)throw new Error('The server did not return a calculation identifier. Check existing jobs before retrying.');
     for(;;){
       current();
-      if(job?.id!==jobId||job.measurementId!==record.id||job.revision!==record.revision||(temporary&&job.geometryHash!==geometryHash))throw new Error('The server calculation does not match this polygon revision. No result was attached.');
+      if(job?.id!==jobId||job.measurementId!==record.id||(job.revision!==record.revision&&!attachedMatch(job))||(temporary&&job.geometryHash!==geometryHash))throw new Error('The server calculation does not match this polygon revision. No result was attached.');
       if(job.status==='complete'){
         onJob(null);
         const result=job.result;

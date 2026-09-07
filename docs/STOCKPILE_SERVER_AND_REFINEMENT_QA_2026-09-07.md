@@ -170,14 +170,103 @@ installed-routine fixtures are not proof of live dense zoom performance.
   or label all failures environmental without evidence. The subsequent isolated
   browser run above passed the previously timed-out lifecycle and KTX2 cases.
 
+## Follow-up live QA on deployed b234083
+
+The root agent tested County Road D after opening a fresh authorized Viewer
+session. The cloud contains approximately 17.5 million source points. Only one
+3D Viewer was active for these observations: RGB, fixed size 1, EDL on, requested
+and active budgets both 10 million, framebuffer 875 × 822.
+
+| View/sample | Submitted points | Selected nodes | Reported FPS | Frame mean/max | Update/render |
+| --- | ---: | ---: | ---: | --- | --- |
+| Settled baseline | 7,456,299 | 178 | 144 | 6.9 / 7.4 ms | 0.3 / 0.7 ms |
+| First closer view | 9,999,463 | 235 | 144 | 6.9 / 7.6 ms | 0.5 / 1.0 ms |
+| Second closer view | 9,986,128 | 284 | 144 | 6.9 / 7.6 ms | Not recorded |
+| After orbit | 9,551,383 | 276 | 144 | 6.9 / 7.5 ms | Not recorded |
+
+These samples demonstrate selection changing toward finer nodes while zooming
+in this live session, with responsive reported frame timing and without reducing
+the configured budget. They are sequential UI observations, not a controlled
+GPU benchmark or proof of performance on every dataset/device. The diagnostics
+measure CPU stages and frame intervals, not GPU execution time. Comparison with
+the earlier observations is not a controlled before/after experiment.
+
+The live native-server Calculate action on an existing QA polygon returned a
+clear missing-verified-height-units error. The confirmation checkbox stayed
+unchecked; no new volume was saved. All five saved measurements remained present
+when switching DSM to orthophoto. Thus server routing and honest source-unit
+failure were exercised, but a successful County Road D stockpile volume has not
+been independently verified.
+
+The live five-record list measured approximately 409 px client height and
+1,069 px scroll height. The first two cards measured 247.156 px and 149.172 px;
+the custom scrollbar used orange `rgb(238, 80, 7)` on a transparent track. This
+checks the actual first-two-card sizing/custom scroll treatment in that session,
+not every screen size or accessibility mode.
+
+### Local follow-up: unified Measure inspector and attached-result recovery
+
+The follow-up patch is separate from the deployed b234083 observation above.
+Polygon rows have one **Measure** action opening the common inspector. Authorized
+staff can expand specialist methods inside it rather than opening a competing
+row action or a second modal; clients do not receive those specialist controls.
+Opening the inspector or expanding specialist settings must not itself submit
+work. Backend method authorization remains independent of this UI presentation.
+
+The local recovery fix permits retrieving the exact completed job already
+attached to unchanged geometry after saving that result advances the private
+document revision. Server-provided attachment-revision evidence is required;
+an arbitrary older result is not treated as current merely because its ID was
+supplied by a browser.
+
+Expanded isolated headless-browser tests passed **6/6, zero failures or skips**
+in approximately 4.9 seconds. They retain queue/error/cancel coverage and add
+client/staff single-action/common-inspector checks, authorized inline specialist
+mount/collapse, and the shipped workspace/store result-attachment sequence:
+revision 1 calculation, revision 2 attachment, reopen/retrieve, revision 3
+attachment without a second calculation POST. This uses synthetic scoped HTTP
+responses; backend authority/source validation is tested separately. No browser
+runtime exceptions remained after supplying the complete synthetic map context.
+Screenshots: `data/qa/stockpile-measure-unified-browser.png`,
+`data/qa/stockpile-measure-unified-browser-client.png` and
+`data/qa/stockpile-measure-unified-browser-staff.png`.
+
+Final integrated follow-up verification:
+
+- Source-bearing isolated Linux build succeeded, with networking disabled and
+  no production data mounted. The complete source suite exited successfully:
+  **1,420 tests, 1,399 passed, zero failed, 21 environment-dependent skips** in
+  approximately 55 seconds. The installed Potree selector tests ran without
+  skips. Log: `data/qa/measure-unified-source-tests.log`.
+- Separate final browser/lifecycle command exited successfully: **31 passed,
+  zero failed/skipped**, including six real-browser checks and 25 lifecycle
+  checks for measurement storage, capture and specialist dialogs.
+- Independent review caught a specialist-collapse/in-flight-save race. The
+  parent inspector now reconciles the successful save's revision even after
+  that section closes, and a subsequent surface calculation waits for the save.
+  Inline specialist history excludes native-raster jobs and never silently
+  attaches an unrelated historical result when the section is opened.
+- The first focused source-fixture run had six failures because its extracted
+  workspace fixture lacked the new specialist capability variable. The fixture
+  was updated, authorization/race coverage was expanded, and the complete final
+  source run above passed. These failures are not counted as passing tests.
+
+The earlier deployed b234083 observations do not prove deployment of this
+follow-up. Its image publication is verified separately by the release workflow.
+
 ## Not yet proven
 
 - Actual County Road D stockpile units and independently checked live volume.
-- Dense live local-refinement behavior and navigation timing after deployment.
+- Broader dense-cloud refinement/navigation acceptance beyond the representative
+  deployed b234083 County Road D zoom/orbit observations above.
 - Live/deployed acceptance of the normal inspector's resume/cancel flow beyond
   the isolated synthetic browser checks.
 - Live/deployed public/temporary lifecycle acceptance: refresh reset,
   exact-version and per-measurement scope, expiration/revocation and shared
   admission/resource bounds.
+- Native full-resolution cross-section/profile behavior requested for detailed
+  stockpile inspection. The current chart is explicitly a reduced-sample preview;
+  it must not be described as a complete continuous terrain profile or as proof
+  of independent volume accuracy.
 
 The thread goal remains active.

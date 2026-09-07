@@ -14,6 +14,9 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const id='11111111-1111-4111-8111-111111111111',jobId='22222222-2222-4222-8222-222222222222';
 const token='synthetic_viewer_bearer_1234567890abcdef';
 const record={id,name:'Synthetic feed pile',revision:1,modelId:'fixture-model',modelVersionId:'fixture-version',collection:'map',kind:'polygon',vertices:[[0,0,0],[10,0,0],[10,10,0],[0,10,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},source:{kind:'dsm',assetId:'fixture-dsm'}};
+// UI-response fixture only: synthetic totals do not derive from the reduced
+// display grid. Native integration/source validation has separate backend tests.
+const completedResult=()=>({method:'surface-cut-fill',status:'calculated',cutM3:12345.6789,fillM3:2,netM3:12343.6789,coverage:1,source:{assetId:'fixture-dsm',kind:'dsm',modelVersionId:'fixture-version'},reference:{type:'boundary-triangulated',offsetM:0},warnings:[],preview:{samples:Array.from({length:121},(_,index)=>{const x=index%11,y=Math.floor(index/11);return [x,y,Math.max(0,6-Math.hypot(x-5,y-5)),0];})}});
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const executable=()=>[process.env.CHROME_PATH,process.env.EDGE_PATH,'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','/usr/bin/google-chrome','/usr/bin/chromium'].filter(Boolean).find(existsSync);
 
@@ -28,6 +31,20 @@ async function waitFor(client,expression,label){const until=Date.now()+8000;whil
 const click=(client,selector)=>client.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
 const status=(state)=>`document.querySelector('[data-status]')?.dataset.state===${JSON.stringify(state)}`;
 
+function workspacePage(staff){return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><style>body{background:#10151b;color:white;font:16px system-ui}#panel{width:300px;max-width:100%;box-sizing:border-box;padding:12px}#view{position:absolute;left:320px;top:20px;width:600px;height:600px}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><aside id="panel"></aside><div id="view"></div><script type="module">
+import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
+import {createMeasurementSurfaceClient} from '/measurement-surface-client.mjs';
+const record=${JSON.stringify(record)},staff=${JSON.stringify(staff)};
+const source={assetId:'fixture-dsm',kind:'dsm',format:'tif',methods:['surface-cut-fill']};
+const request=createMeasurementSurfaceClient({token:()=>${JSON.stringify(token)},context:()=>({modelId:record.modelId,modelVersionId:record.modelVersionId,audience:staff?'ops':'client',subject:'fixture-person'})});
+// This is a synthetic already-authorized broker response, not an authentication
+// bypass in shipped code. Actual capability authorization has separate API tests.
+const adminRequest=async(operation)=>{if(operation==='capabilities'){await new Promise(resolve=>setTimeout(resolve,100));document.body.dataset.capabilityChecked='true';return {capabilities:{serverCalculations:staff},calculationSources:staff?[source,{assetId:'fixture-obj',kind:'obj',format:'obj',methods:['closed-mesh']}]:[]};}if(operation==='list')return {calculations:[]};document.body.dataset.unexpectedAdminOperation=operation;throw new Error('Synthetic specialist fixture must not submit work');};
+const view=document.querySelector('#view'),mapContext={mode:'dsm',element:view,host:view,project:p=>[p[0]*10,p[1]*10],pick:()=>null,viewSignature:()=>'synthetic-static-map'};
+createMeasurementWorkspace({panel:document.querySelector('#panel'),context:()=>mapContext,token:()=>${JSON.stringify(token)},permitted:()=>true,toolChanged:()=>{},coordinateReference:()=>record.coordinateReference,toLonLat:p=>p,calculateSurface:()=>{document.body.dataset.browserFallback='true';throw new Error('Browser volume fallback forbidden');},surfaceRequest:request,adminRequest});
+document.body.dataset.ready='true';
+</script></body></html>`;}
+
 function page(){return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="/measurement-workspace.css"><style>body{background:#10151b;color:white;font:16px system-ui}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><button id="open">Open existing pile</button><output id="saved">0</output><script type="module">
 import {openSurfaceDialog} from '/measurement-volume-dialog.mjs';
 import {createServerSurfaceCalculator} from '/measurement-server-surface.mjs';
@@ -39,7 +56,7 @@ document.body.dataset.ready='true';
 </script></body></html>`;}
 
 async function fixture(){
-  const state={requests:[],job:null,posts:0,deletes:0,mode:'hold'};
+  const state={requests:[],job:null,posts:0,deletes:0,mode:'hold',document:structuredClone(record)};
   const server=createServer(async(req,res)=>{
     try{
       const pathname=new URL(req.url,'http://fixture.invalid').pathname;
@@ -48,13 +65,20 @@ async function fixture(){
         state.requests.push({path:pathname,method:req.method,authorization:req.headers.authorization,admin:req.headers['x-viewer-admin-authorization'],cookie:req.headers.cookie,body:raw?JSON.parse(raw):null});
         res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
         if(req.headers.authorization!==`Bearer ${token}`){res.statusCode=403;return res.end(JSON.stringify({code:'personal_measurements_unavailable'}));}
+        if(pathname==='/api/v1/measurements')return res.end(JSON.stringify({measurements:new URL(req.url,'http://fixture.invalid').searchParams.get('collection')==='map'?[state.document]:[],capabilities:{personalPersistence:true}}));
+        if(pathname===`/api/v1/measurements/${id}`&&req.method==='PUT'){
+          const body=JSON.parse(raw);if(body.revision!==state.document.revision){res.statusCode=409;return res.end(JSON.stringify({error:'fixture_revision_conflict'}));}
+          state.document={...body,modelId:record.modelId,modelVersionId:record.modelVersionId,revision:body.revision+1};
+          if(state.job?.status==='complete'&&state.document.results?.calculationJobId===state.job.id)state.job.attachmentRevision=state.document.revision;
+          return res.end(JSON.stringify({measurement:state.document}));
+        }
         if(pathname==='/api/v1/measurements/capabilities')return res.end(JSON.stringify({capabilities:{personalPersistence:true,rasterCalculations:true,serverCalculations:false},calculationSources:[{assetId:'fixture-dsm',kind:'dsm',format:'tif',methods:['surface-cut-fill']}]}));
         const base=`/api/v1/measurements/${id}/calculations`;
         if(pathname===base&&req.method==='GET')return res.end(JSON.stringify({calculations:state.job?[state.job]:[]}));
         if(pathname===base&&req.method==='POST'){
           state.posts++;
           if(state.mode==='units'){res.statusCode=422;return res.end(JSON.stringify({code:'measurement_source_vertical_units_required'}));}
-          const body=JSON.parse(raw);state.job={id:jobId,measurementId:id,revision:1,method:'surface-cut-fill',status:'queued',parameters:{...body,sourceVerticalUnit:body.sourceVerticalUnit??null}};
+          const body=JSON.parse(raw);state.job={id:jobId,measurementId:id,revision:body.revision,method:'surface-cut-fill',status:state.mode==='complete'?'complete':'queued',parameters:{...body,sourceVerticalUnit:body.sourceVerticalUnit??null},...(state.mode==='complete'?{result:completedResult()}:{})};
           res.statusCode=202;return res.end(JSON.stringify({calculation:state.job}));
         }
         if(pathname===`${base}/${jobId}`&&req.method==='DELETE'){state.deletes++;state.job.status='cancelled';res.statusCode=204;return res.end();}
@@ -62,6 +86,7 @@ async function fixture(){
         res.statusCode=404;return res.end(JSON.stringify({code:'fixture_unexpected_route'}));
       }
       if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(page());}
+      if(pathname==='/workspace-fixture'){res.setHeader('Content-Type','text/html');return res.end(workspacePage(new URL(req.url,'http://fixture.invalid').searchParams.get('staff')==='1'));}
       let file;
       if(/^\/[a-z0-9-]+\.(mjs|css)$/.test(pathname))file=path.join(root,pathname.slice(1));
       if(pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(pathname)){const base=path.join(root,'node_modules','three');const candidate=path.resolve(base,pathname.slice('/vendor/'.length));if(candidate.startsWith(base+path.sep))file=candidate;}
@@ -105,10 +130,7 @@ test('normal server inspector uses real browser UI for queued completion, resume
       await click(client,'#open');await click(client,'[data-calculate]');
       await waitFor(client,"document.querySelector('[data-status]').textContent.includes('Waiting to calculate')",'resumed status');
       assert.equal(s.posts,1,'resume must not create another job');
-      // UI-response fixture only: totals are synthetic, not derived from this
-      // reduced display grid. Numerical integration is covered in native tests.
-      const samples=Array.from({length:121},(_,index)=>{const x=index%11,y=Math.floor(index/11);return [x,y,Math.max(0,6-Math.hypot(x-5,y-5)),0];});
-      s.job.status='complete';s.job.result={method:'surface-cut-fill',status:'calculated',cutM3:12345.6789,fillM3:2,netM3:12343.6789,coverage:1,source:{assetId:'fixture-dsm',kind:'dsm',modelVersionId:'fixture-version'},reference:{type:'boundary-triangulated',offsetM:0},warnings:[],preview:{samples}};
+      s.job.status='complete';s.job.result=completedResult();
       await waitFor(client,status('success'),'complete UI');
       assert.equal(await client.evaluate("document.querySelector('#saved').value"),'1');
       assert.equal(await client.evaluate("document.querySelector('[data-preview-content]').hidden"),false);
@@ -144,6 +166,49 @@ test('normal server inspector uses real browser UI for queued completion, resume
       assert.equal(await client.evaluate("document.querySelector('[data-calculate]').disabled"),false);
     });
     assert.ok(s.requests.length>5);assert.ok(s.requests.every(r=>r.path.startsWith('/api/v1/measurements/')&&!r.admin&&!r.cookie&&r.authorization===`Bearer ${token}`),'all volume traffic uses narrow personal server API, without workspace authority/cookies');
+    await t.test('client and staff polygon rows share one Measure inspector with authorized inline specialist tools',async()=>{
+      const postCount=s.posts;
+      for(const staff of [false,true]){
+        await client.command('Page.navigate',{url:`${f.origin}/workspace-fixture?staff=${staff?1:0}`});
+        await waitFor(client,"document.body.dataset.capabilityChecked==='true'&&document.querySelector('[data-record]')",'loaded personal workspace');
+        assert.equal(await client.evaluate("document.querySelectorAll('[data-record] [data-m=volume]').length"),1);
+        assert.equal(await client.evaluate("document.querySelector('[data-record] [data-m=volume]').textContent"),'Measure');
+        assert.equal(await client.evaluate("document.querySelectorAll('[data-record] [data-m=admin-volume]').length"),0,'no duplicate advanced row action');
+        await click(client,'[data-record] [data-m=volume]');
+        await waitFor(client,"document.querySelector('.surface-inspector')?.open===true",'common inspector');
+        assert.equal(await client.evaluate("document.querySelector('.surface-inspector h2').textContent"),'Measure');
+        assert.equal(await client.evaluate("document.querySelectorAll('.surface-specialist').length"),staff?1:0);
+        assert.equal(await client.evaluate("document.querySelectorAll('dialog[open]').length"),1);
+        if(staff){
+          assert.match(await client.evaluate("document.querySelector('.surface-specialist summary').textContent"),/Specialist methods.*staff only/);
+          await click(client,'.surface-specialist summary');
+          await waitFor(client,"document.querySelector('[data-specialist-host] .measurement-specialist-panel')",'inline authorized specialist panel');
+          assert.equal(await client.evaluate("document.querySelectorAll('dialog[open]').length"),1,'specialist is not a second modal');
+          assert.equal(await client.evaluate("document.querySelector('[data-surface-content]').hidden"),true);
+          await click(client,'.surface-specialist summary');
+          await waitFor(client,"document.querySelector('[data-surface-content]').hidden===false",'native surface restored');
+        }
+        assert.equal(await client.evaluate("document.body.dataset.unexpectedAdminOperation||null"),null,'opening does not start specialist work');
+        assert.equal(await client.evaluate("document.body.dataset.browserFallback||null"),null);
+        assert.equal(s.posts,postCount,'inspection alone does not submit raster work');
+        if(process.env.LTDS_MEASUREMENT_BROWSER_SCREENSHOT){const shot=await client.command('Page.captureScreenshot',{format:'png'});writeFileSync(process.env.LTDS_MEASUREMENT_BROWSER_SCREENSHOT.replace(/\.png$/i,staff?'-staff.png':'-client.png'),Buffer.from(shot.data,'base64'));}
+        await click(client,'[data-close]');await waitFor(client,"!document.querySelector('dialog')",'closed common inspector');
+      }
+    });
+    await t.test('reopening through the real workspace reuses a completed job after result attachment increments revision',async()=>{
+      s.job=null;s.mode='complete';s.document=structuredClone(record);const postCount=s.posts;
+      await client.command('Page.navigate',{url:`${f.origin}/workspace-fixture?staff=0`});
+      await waitFor(client,"document.body.dataset.capabilityChecked==='true'&&document.querySelector('[data-record]')",'loaded recovery workspace');
+      await click(client,'[data-record] [data-m=volume]');await click(client,'[data-calculate]');await waitFor(client,status('success'),'attached first result');
+      assert.equal(s.document.revision,2);assert.equal(s.document.results.calculationJobId,jobId);assert.equal(s.posts,postCount+1);
+      await click(client,'[data-close]');await waitFor(client,"!document.querySelector('dialog')",'close after attachment');
+      await click(client,'[data-record] [data-m=volume]');await waitFor(client,status('saved'),'restored saved result');
+      assert.equal(s.posts,postCount+1,'opening saved inspector never creates another job');
+      await click(client,'[data-calculate]');await waitFor(client,status('success'),'retrieved attached job at later revision');
+      assert.equal(s.document.revision,3);assert.equal(s.posts,postCount+1,'same attached geometry/result must be recovered without another POST');
+      assert.equal(await client.evaluate("document.querySelector('[data-preview-content]').hidden"),false);
+      assert.equal(await client.evaluate("document.body.dataset.browserFallback||null"),null);
+    });
     assert.deepEqual(client.errors,[],'no browser module/runtime exceptions');
   }finally{
     client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}

@@ -2,7 +2,7 @@ import { measurementCollection, measurementMetrics, measurementValue, validateMe
 import { createMeasurementStore } from './measurement-store.mjs';
 import './measurement-workspace.css';
 import {openSurfaceDialog} from './measurement-volume-dialog.mjs';
-import {openAdminCalculationDialog} from './measurement-admin-dialog.mjs';
+import {openAdminCalculationDialog,availableAdminSources} from './measurement-admin-dialog.mjs';
 import {createServerSurfaceCalculator} from './measurement-server-surface.mjs';
 import {createMeasurementListLayout} from './measurement-list-layout.mjs';
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -18,7 +18,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null;
   const displayCache=new Map();
   let displayRequests=0;
-  let adminAllowed=false,activeDialog=null,invalidated=false,viewGeneration=0,dialogGeneration=0;
+  let adminAllowed=false,specialistAllowed=false,activeDialog=null,invalidated=false,viewGeneration=0,dialogGeneration=0;
   const store=createMeasurementStore({token,accessGeneration,changed:renderPanel});
   let pendingPick=null,lastPickAt=0,cursorOwner=null,previousCursor='';
   const allowed=()=>permitted()&&!invalidated&&!store.isInvalidated?.();
@@ -107,7 +107,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const focusedRecord=focused?.closest?.('[data-record]')?.dataset.record;
     const focusedAction=focusedRecord&&focused?.dataset.m;
     const scrollTop=list.scrollTop;
-    list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="select" aria-pressed="${selected===r.id}">${escape(r.name)}</button><label class="measurement-export-check"><input type="checkbox" data-m="export-check" aria-label="Select ${escape(r.name)} for export" ${selectedExports.has(r.id)?'checked':''}> Export</label></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="rename">Rename</button><button data-m="delete">Delete</button>${r.kind==='polygon'?'<button data-m="volume">Surface cut/fill</button>':''}${r.kind==='polygon'&&adminAllowed?'<button data-m="admin-volume">Advanced calculations</button>':''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">${escape(r.results.status||'Calculated')}: cut ${escape(measurementValue(r.results.cutM3,3,units))} · fill ${escape(measurementValue(r.results.fillM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">${escape(r.results.status||'Calculated')}: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
+    list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="select" aria-pressed="${selected===r.id}">${escape(r.name)}</button><label class="measurement-export-check"><input type="checkbox" data-m="export-check" aria-label="Select ${escape(r.name)} for export" ${selectedExports.has(r.id)?'checked':''}> Export</label></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="rename">Rename</button><button data-m="delete">Delete</button>${r.kind==='polygon'?'<button data-m="volume">Measure</button>':''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">${escape(r.results.status||'Calculated')}: cut ${escape(measurementValue(r.results.cutM3,3,units))} · fill ${escape(measurementValue(r.results.fillM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">${escape(r.results.status||'Calculated')}: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
     listLayout.update(visibleRecords.length);
     list.scrollTop=scrollTop;
     if(focusedAction){const row=[...(list.querySelectorAll?.('[data-record]')||[])].find(node=>node.dataset.record===focusedRecord);[...(row?.querySelectorAll('[data-m]')||[])].find(node=>node.dataset.m===focusedAction)?.focus({preventScroll:true});}
@@ -134,13 +134,32 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     closeDialogs();
     const generation=viewGeneration,dialogId=dialogGeneration;
     const isCurrent=()=>!disposed&&allowed()&&generation===viewGeneration&&dialogId===dialogGeneration;
+    let attachmentPending=null;
+    const attach=async results=>{
+      if(!isCurrent())throw new Error('Measurement access or view changed.');
+      const pending=store.attachResults(snapshot,results);attachmentPending=pending;
+      try{await pending;if(isCurrent())snapshot=structuredClone(store.records.get(record.id));}
+      finally{if(attachmentPending===pending)attachmentPending=null;}
+    };
     // Server routing is independent of the asynchronous capability indicator.
     // Missing/expired authority must produce an error, never a browser fallback.
     const server=typeof surfaceRequest==='function'||preferServerSurface()||adminAllowed;
     const calculate=server?createServerSurfaceCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):calculateSurface;
-    activeDialog=openSurfaceDialog({record,units,autoCalculate,execution:server?'server':'browser',
-      calculate:async(...args)=>{if(!isCurrent())throw new Error('Measurement access or view changed.');const result=await calculate(...args);if(!isCurrent())throw new Error('Measurement access or view changed.');return result;},
-      save:async r=>{if(!isCurrent())throw new Error('Measurement access or view changed.');await store.attachResults(snapshot,r.results);if(isCurrent())snapshot=structuredClone(store.records.get(record.id));},
+    activeDialog=openSurfaceDialog({record,units,autoCalculate,execution:server?'server':'browser',getRecord:()=>snapshot,
+      openSpecialist:adminAllowed&&specialistAllowed?async({host,isCurrent:panelCurrent,onOpened,onClose})=>{
+        const current=()=>isCurrent()&&panelCurrent()&&adminAllowed&&specialistAllowed;
+        if(attachmentPending)await attachmentPending;
+        if(!current())throw new Error('Measurement access changed.');
+        return openAdminCalculationDialog({record:structuredClone(snapshot),units,host,request:adminRequest,isCurrent:current,onOpened,onClose,onResult:async({calculation})=>{
+          if(!current())throw new Error('Measurement access changed.');
+          const {preview,...results}=calculation.result;
+          await attach({...results,calculationJobId:calculation.id});
+          if(!current())throw new Error('Measurement access changed.');
+          return snapshot;
+        }});
+      }:null,
+      calculate:async(...args)=>{if(attachmentPending)await attachmentPending;if(!isCurrent())throw new Error('Measurement access or view changed.');const result=await calculate(...args);if(!isCurrent())throw new Error('Measurement access or view changed.');return result;},
+      save:async r=>attach(r.results),
       onClose:()=>{if(dialogId===dialogGeneration)activeDialog=null;}
     });
   }
@@ -307,16 +326,10 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='screenshot'){const generation=viewGeneration,displayUnits=units;const canvas=await screenshot();const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(disposed||!allowed()||generation!==viewGeneration||displayUnits!==units)throw new Error('The view changed during capture. Capture the current view again.');if(!blob)throw new Error('View capture unavailable.');download(blob,'measured-view.png');}
       if(action==='report')await report();
       if(action==='volume')showSurface(record);
-      if(action==='admin-volume'&&adminAllowed){
-        let snapshot=structuredClone(record);
-        closeDialogs();const generation=viewGeneration,dialogId=dialogGeneration,isCurrent=()=>!disposed&&allowed()&&generation===viewGeneration&&dialogId===dialogGeneration;
-        const opened=await openAdminCalculationDialog({record,units,request:adminRequest,isCurrent,onOpened:handle=>{if(isCurrent())activeDialog=handle;else handle.close();},onResult:async({calculation})=>{if(!isCurrent())throw new Error('Measurement access changed.');const {preview,...results}=calculation.result;await store.attachResults(snapshot,{...results,calculationJobId:calculation.id});snapshot=structuredClone(store.records.get(record.id));return snapshot;},onClose:()=>{if(dialogId===dialogGeneration)activeDialog=null;}});
-        if(isCurrent())activeDialog=opened;else opened?.close();
-      }
     }catch(error){tell(error.message);}
   });
   store.load().then(notice=>{ready=true;if(notice)tell(notice);}).catch(error=>{tell(`Personal measurements unavailable: ${error.message}. Use Reload saved measurements to retry.`);});
-  if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){adminAllowed=result.capabilities?.serverCalculations===true;renderPanel();}}).catch(()=>{adminAllowed=false;});
+  if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){adminAllowed=result.capabilities?.serverCalculations===true;specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
   renderPanel();
   return {setTool,store,tick:draw,invalidate,isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){viewGeneration++;clearDisplayRequests();void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
 }

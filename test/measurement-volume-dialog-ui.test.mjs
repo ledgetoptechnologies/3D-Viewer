@@ -8,17 +8,57 @@ import {createServerSurfaceCalculator} from '../measurement-server-surface.mjs';
 
 const source=readFileSync(new URL('../measurement-volume-dialog.mjs',import.meta.url),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
-function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser'}={}){
+function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record}={}){
   const nodes=new Map();let disposed=0,saved=0;
   const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
   const dialog={...element(),querySelector(s){if(!nodes.has(s)){const node=element();if(s==='[name=sectionWidth]')node.value='10';nodes.set(s,node);}return nodes.get(s);},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},remove(){this.removed=true;}};
-  const scope=vm.createContext({document:{createElement:()=>dialog,body:{append(){}}},AbortController,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
+  const scope=vm.createContext({document:{createElement:()=>dialog,body:{append(){}}},AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
-  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution});
+  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord});
   if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';dialog.querySelector('[name=source]').value='dsm';}
   return{dialog,handle,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
 const result={status:'calculated',cutM3:12345.678912,fillM3:0,netM3:12345.678912,coverage:1,preview:{samples:[[0,0,2,0],[1,1,2,0]]}};
+
+test('client inspector has no specialist controls and keeps one native calculation action',()=>{
+  const f=fixture(()=>result);
+  assert.match(f.dialog.innerHTML,/<h2>Measure<\/h2>/);
+  assert.doesNotMatch(f.dialog.innerHTML,/surface-specialist|data-specialist-host/);
+  f.handle.close();
+});
+
+test('opening specialist methods retires native observation without starting another calculation',async()=>{
+  const wait=deferred();let signal,calls=0,closed=0;
+  const f=fixture((_r,o)=>{calls++;signal=o.signal;return wait.promise;},{openSpecialist:async({onOpened})=>{const handle={close(){closed++;}};onOpened(handle);return handle;}});
+  const native=f.calculate(),disclosure=f.dialog.querySelector('.surface-specialist');
+  disclosure.open=true;await disclosure.ontoggle();
+  assert.equal(signal.aborted,true);assert.equal(calls,1);assert.equal(f.dialog.querySelector('[data-surface-content]').hidden,true);
+  await f.calculate();assert.equal(calls,1,'native action cannot run behind specialist settings');
+  wait.resolve(result);await native;assert.equal(f.saved(),0);
+  disclosure.open=false;await disclosure.ontoggle();assert.equal(closed,1);assert.equal(f.dialog.querySelector('[data-surface-content]').hidden,false);
+  f.handle.close();
+});
+
+test('late specialist access response after close or method collapse cannot revive its panel',async()=>{
+  for(const closing of [true,false]){
+    const wait=deferred();let closed=0,current;
+    const f=fixture(()=>result,{openSpecialist:({isCurrent})=>{current=isCurrent;return wait.promise;}});
+    const disclosure=f.dialog.querySelector('.surface-specialist');disclosure.open=true;const opening=disclosure.ontoggle();
+    if(closing)f.handle.close();else{disclosure.open=false;await disclosure.ontoggle();}
+    assert.equal(current(),false);wait.resolve({close(){closed++;}});await opening;assert.equal(closed,1);
+    if(!closing)f.handle.close();
+  }
+});
+
+test('returning from specialist uses the latest attached snapshot without fabricating surface results',async()=>{
+  let savedRecord={name:'Pile A'},closed=0;
+  const f=fixture(()=>result,{getRecord:()=>savedRecord,openSpecialist:async()=>({close(){closed++;}})});
+  const disclosure=f.dialog.querySelector('.surface-specialist');disclosure.open=true;await disclosure.ontoggle();
+  savedRecord={...savedRecord,revision:3,results:{method:'closed-mesh',status:'validated',volumeM3:4}};
+  disclosure.open=false;await disclosure.ontoggle();assert.equal(closed,1);
+  assert.match(f.dialog.querySelector('[data-status]').textContent,/Previously saved object volume: 4\.000 m³.*different calculation/);
+  assert.equal(f.saved(),0);f.handle.close();
+});
 
 test('server inspector uses one explicit action and shows guarded server progress in the same preview UI',async()=>{
   const wait=deferred();let progress,calls=0;const f=fixture((_record,options)=>{calls++;progress=options.onProgress;return wait.promise;},{execution:'server'});

@@ -17,11 +17,14 @@ profile across a pile, not the orthophoto footprint download or volume base plan
 
 ### Implemented volume-inspector subset (September 6 follow-up)
 
-Finishing a polygon first saves its geometry, then opens the surface inspector
-and requests the existing authorized browser/native-raster calculation. It does
-not grant processing permission or start a server processing job. Missing source
-or unverified vertical units remain explicit errors; unit confirmation is never
-automatically checked.
+Finishing a polygon first saves its geometry, then opens the measurement inspector
+and requests an authorized native-raster calculation on the Viewer server. Since
+the September 7 server-calculation release, this also applies to scoped client
+and temporary public measurements; it does not grant import, reprocessing, or
+general administrative processing permission. Missing source or unverified
+vertical units remain explicit errors; unit confirmation is never automatically
+checked. The normal inspector and staff-only specialist options share one
+measurement entry point, while their calculation permissions remain distinct.
 
 The inspector filters the calculation's retained preview samples into an explicit
 direction/position/width corridor. The initial position uses an observed sample

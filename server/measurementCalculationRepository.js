@@ -22,11 +22,21 @@ class MeasurementCalculationRepository {
     });
   }
   get(measurementId, id) {
-    const row = this.database.prepare('SELECT j.* FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.id=? AND j.measurement_id=? AND m.deleted_at IS NULL').get(id, measurementId);
+    const row = this.database.prepare('SELECT j.*,m.document_json AS current_document,m.revision AS current_revision,m.model_id AS current_model_id,m.model_version_id AS current_version_id FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.id=? AND j.measurement_id=? AND m.deleted_at IS NULL').get(id, measurementId);
     if(!row)return null;
     const request=JSON.parse(row.request_json),reference=request.reference||{};
     const parameters={revision:row.revision,method:request.method,sourceAssetId:request.source?.id,reference:{type:reference.type,...(Number.isFinite(reference.elevationM)?{elevationM:reference.elevationM}:{}),...(Number.isFinite(reference.offsetM)?{offsetM:reference.offsetM}:{})},sourceVerticalUnit:request.sourceVerticalUnit||null};
-    return { id: row.id, measurementId: row.measurement_id, revision: row.revision, method: request.method, parameters, status: row.status, result: row.result_json ? JSON.parse(row.result_json) : null, errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at };
+    const result=row.result_json?JSON.parse(row.result_json):null,document=JSON.parse(row.current_document);
+    // Attaching a result is itself a document revision. Reuse only the exact
+    // explicitly attached job, never any arbitrary historical result. Recheck
+    // its immutable input geometry and registered source, not browser assertions.
+    const geometry=value=>JSON.stringify([value.collection,value.vertices,[value.coordinateReference?.crs,value.coordinateReference?.verticalUnit]]);
+    let attachmentRevision=null;
+    if(row.status==='complete'&&request.method==='surface-cut-fill'&&document.kind==='polygon'&&document.results?.calculationJobId===row.id&&row.current_revision>row.revision&&request.modelId===row.current_model_id&&request.modelVersionId===row.current_version_id&&geometry(document)===geometry(request)){
+      const asset=this.database.prepare('SELECT version_id,kind,root_key,relative_path,sha256,byte_size FROM model_assets WHERE id=?').get(request.source?.id||'');
+      if(asset&&asset.version_id===request.modelVersionId&&asset.kind===request.source.kind&&asset.root_key===request.source.rootKey&&asset.relative_path===request.source.relativePath&&asset.sha256===request.source.sha256&&asset.byte_size===request.source.byteSize&&result?.source?.assetId===request.source.id&&result.source.sha256===request.source.sha256&&result.source.kind===request.source.kind&&result.source.modelVersionId===request.modelVersionId)attachmentRevision=row.current_revision;
+    }
+    return { id: row.id, measurementId: row.measurement_id, revision: row.revision, method: request.method, parameters, attachmentRevision, status: row.status, result, errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at };
   }
   list(measurementId) {
     return this.database.prepare('SELECT j.id FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.measurement_id=? AND m.deleted_at IS NULL ORDER BY j.created_at DESC,j.id DESC LIMIT 20').all(measurementId).map(row => this.get(measurementId, row.id));
