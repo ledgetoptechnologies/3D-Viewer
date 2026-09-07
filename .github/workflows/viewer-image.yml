@@ -134,7 +134,9 @@ jobs:
             # Only tests are mounted; all numerical engines, private APIs and
             # native libraries are exercised from the exact built runtime.
             docker run --rm --network none --entrypoint node \
+              -e POTREE_BUNDLE=/app/dist/potree/build/potree/potree.js \
               -v "$PWD/test:/app/test:ro" "$VERIFY_IMAGE" --test \
+              test/potree-visibility-patch.test.mjs \
               test/measurement-volume.test.mjs \
               test/measurement-native-raster.test.mjs \
               test/measurement-raster-transect.test.mjs \
@@ -154,6 +156,7 @@ jobs:
               if(info.schemaVersion!==1||info.sourceVersion!=="v1.6.2"||info.sourceSha256!==process.env.EXPECTED_OBJ2TILES_SOURCE_SHA256||info.patchSha256!==process.env.EXPECTED_OBJ2TILES_PATCH_SHA256||info.binarySha256!==binary)process.exit(1);
             '
           docker run --rm "$VERIFY_IMAGE" node scripts/verify-obj2tiles-runtime.mjs
+          docker run --rm --network none "$VERIFY_IMAGE" node scripts/verify-potree-visibility.mjs /app/dist/potree/build/potree/potree.js
           docker run --rm --entrypoint node "$VERIFY_IMAGE" -e '
             const fs=require("node:fs");
             const file="/app/dist/potree/build/potree/potree.js";

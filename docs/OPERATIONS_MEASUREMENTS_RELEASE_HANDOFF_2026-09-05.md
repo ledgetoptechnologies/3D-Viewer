@@ -7,7 +7,7 @@ Prepared September 5, 2026, America/Chicago. This file is intended to be handed 
 The user subsequently approved **server-side stockpile volume for everyone with
 measurement access**, including clients and temporary public-link users. The
 older staff-only server-calculation wording below is superseded **only for
-native DSM/DTM `surface-cut-fill`**. Do not grant clients `viewer.processing.write`,
+native DSM/DTM `surface-cut-fill` and its parent-linked `surface-transect` profile**. Do not grant clients `viewer.processing.write`,
 admin bearers, import/reprocess rights, native point/mesh reconstruction methods,
 or access to another person's measurements to enable stockpile volume.
 
@@ -16,10 +16,18 @@ page-scoped server lane (schema 33). Existing Operations individual-identity
 attestation and scope/renewal requirements remain; no new broad Operations
 processing permission is needed. Measurements now share one per-person/model
 list across all five views, with source-coordinate semantics preserved.
+The profile uses the completed volume's exact source and frozen base; it does
+not modify the saved volume or grant standalone arbitrary processing. The
+ordinary flags are `rasterCalculations` and `transectCalculations`;
+`serverCalculations` still denotes separately authorized specialist methods,
+not whether normal measurements run on the server.
 
 See [current calculation contract](MEASUREMENT_CALCULATIONS.md),
 [current measurement API](PRIVATE_MEASUREMENT_API.md), and
 [September 7 QA and source-unit handoff](STOCKPILE_SERVER_AND_REFINEMENT_QA_2026-09-07.md).
+The [native-profile acceptance record](NATIVE_ELEVATION_PROFILE_QA_2026-09-07.md)
+describes the new profile and its live acceptance boundary. No additional
+Operations processing permission is required to enable it.
 The last document includes the remaining read-only County Road D unit inspection:
 bind evidence to the exact raster/version hash, do not assume meters from a
 WebODM label, and do not alter source data or start processing to bypass it.

@@ -17,6 +17,7 @@ Jobs snapshot saved canonical `[E,N,Z]` metre vertices, collection, coordinate r
 | Method | Authoritative input | Result and limitations |
 | --- | --- | --- |
 | `surface-cut-fill` | Original registered DSM/DTM GeoTIFF, image 0 | Native-cell 2.5D surface above/below the selected base. No overview or display-tile calculation. |
+| `surface-transect` | The completed owned volume's exact native DSM/DTM and frozen effective reference triangles | Piecewise-constant native-cell elevation profile through that polygon. Explicit gaps and base heights; not a new volume, inferred smooth surface, or point-cloud corridor. |
 | `point-surface-cut-fill` | Original EPT manifest and every intersecting hierarchy node | All source points contribute to a topmost-point grid at an explicit requested cell size; optional ground class 2. This is a 2.5D surface, not the enclosed volume of a car/building. |
 | `closed-mesh` | Original OBJ, explicitly declared projected or local-ENU frame | Seed-selected connected original mesh component within the selected polygon and elevation bounds; only a validated closed manifold produces a volume. Cropping that opens the object fails. |
 | `reconstructed-estimate` | Selected original OBJ surface vertices or all selected native EPT points | Explicit opt-in screened-Poisson reconstruction, then closed-mesh validation. Every generated face is inferred. The output is an estimate, never an observed-object/exact volume. |
@@ -36,6 +37,25 @@ The ordinary surface inspector uses a direct, scoped Viewer-bearer client and th
 The inspector exposes cancellation without requiring the advanced staff dialog. Active work with different settings must finish or be cancelled before submitting changed settings. Closing or switching views stops observation, not an accepted job; reopening and calculating with the same settings resumes observation or retrieves the result. Result attachment checks the measurement revision, source asset, immutable model version and reference base. Stale observers cannot attach results to a different view or edited geometry.
 
 Errors retain exact allowlisted codes and become plain-language guidance. Missing DSM does not silently select a bare-earth DTM that may omit the pile. Server execution is not by itself a guarantee of accuracy: source units, coverage, base choice and input resolution still determine what a volume means.
+
+## Parent-linked native profiles
+
+Normal measurement access also permits `surface-transect`, advertised by
+`transectCalculations`. Its request contains only `revision`, `method`,
+`parentCalculationId`, and a `line` with projected XY `start`/`end`; the server
+resolves the source and reference from the completed authorized native volume.
+It rejects client-provided sources/base triangles, stale or foreign parents,
+changed geometry and unmatched source versions. The exact unchanged attached
+volume may be used at a later document revision only with verified attachment
+evidence. The returned profile does not change measurement or volume results.
+
+Both crossed raster cells and output intervals are capped at 20,000. NoData and
+outside-polygon/raster intervals are explicit, not interpolated. The effective
+reference includes the parent's offset exactly once. Existing worker bounds,
+source hashing, cancellation and current-access checks apply. Private retention
+protects an attached volume and parents of active profiles within the bounded
+history; temporary profiles cannot outlive their parent volume. See
+[native-profile implementation and acceptance](NATIVE_ELEVATION_PROFILE_QA_2026-09-07.md).
 
 ## Temporary/public server lifecycle
 

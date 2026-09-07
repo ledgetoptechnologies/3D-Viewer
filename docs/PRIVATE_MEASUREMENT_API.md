@@ -22,6 +22,13 @@ No Operations repository changes are included here. Its integration agent must v
 
 ### Ordinary server stockpile calculations
 
+September 7 extension: the same narrow scope now also permits
+`surface-transect`, a native DSM/DTM profile linked to a completed authorized
+surface volume. `transectCalculations` advertises it alongside
+`rasterCalculations`. The older `serverCalculations` flag below remains the
+specialist/admin flag; false does not mean that normal volume/profile work
+runs in the browser. No new Operations processing grant is needed.
+
 Normal stockpile volumes use the server, not a browser-computed fallback. A verified signed-in individual with live `view` and `measure` permissions can submit, list, inspect and cancel `surface-cut-fill` jobs for their own saved polygon and exact immutable model version using only the Viewer bearer. Eligible native DSM/DTM sources are advertised by `rasterCalculations` and `calculationSources`. A client cannot select another person's measurement, an unregistered source, another version, or an advanced method through this capability.
 
 `measurement-surface-client.mjs` sends only fixed capability/job operations to the personal API, omits ambient cookies, rejects redirects, uses finite timeouts and fences responses after identity/version changes. It does not obtain an Operations admin token. Same-person token renewal is allowed; a volume-specific denial does not itself erase the saved personal measurement collection. The worker revalidates the live Viewer authority and the narrow `personal-raster` method/source scope.
@@ -77,6 +84,28 @@ Limits: 2,000 vertices, 256 KiB document, 1,000 live documents per person/versio
 - `DELETE /api/v1/measurements/:measurementId/calculations/:jobId`: cancel owned, authorized queued/running work.
 
 Public job representations include safe `method` and `parameters` (revision, method, source asset ID, reference and source-unit assertion) for exact resume matching. They exclude source paths, raw bearers and authority hashes. Global queue/resource bounds and worker revocation checks apply to ordinary jobs as well as advanced jobs; personal measurement permission is not an unbounded compute grant.
+
+### Parent-linked native profile request
+
+For a personal profile, use the existing calculation POST route with
+`{revision,method:"surface-transect",parentCalculationId,line:{start:[E,N],end:[E,N]}}`.
+The server resolves the exact source, effective reference triangles and base
+hash from the completed owned native volume. It rejects client-supplied source
+paths/reference patches and stale or foreign parents. A verified attached
+volume on unchanged geometry can survive an intervening document revision;
+arbitrary historical volumes cannot. Safe job parameters add `line`,
+`parentCalculationId`, `parentRevision` and `baseHash` for exact recovery.
+`parentRevision` is the original parent job's revision, not a later attached
+document revision. `baseHash` identifies the server's ordered effective
+reference patches, whose elevations already include the volume's base offset.
+Profile inspection does not attach another volume or change the measurement.
+
+The temporary route accepts the same request inside `{measurement,request}`,
+requires the existing page/grant/version scope and matching geometry, and does
+not allow a profile to outlive its completed parent. Both capability endpoints
+advertise `transectCalculations` when enabled; `calculationSources` lists the
+method only on registered eligible raster sources. The method shares existing queue, worker and source-unit guards.
+See [native profile contract and limitations](MEASUREMENT_CALCULATIONS.md#parent-linked-native-profiles).
 
 ### Temporary/public calculation routes
 

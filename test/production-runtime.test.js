@@ -103,6 +103,15 @@ test('published image executes a real Obj2Tiles conversion and provenance audit'
   assert.match(workflow, /EXPECTED_SCHEMA_VERSION: "33"/, 'published-image verification must match the current database schema');
 });
 
+test('exact-image point-cloud gate verifies installed visibility and demand bytes without source repair',()=>{
+  const workflow=fs.readFileSync(path.join(repositoryRoot,'.github/workflows/viewer-image.yml'),'utf8');
+  assert.match(workflow,/-e POTREE_BUNDLE=\/app\/dist\/potree\/build\/potree\/potree\.js[\s\S]*?-v "\$PWD\/test:\/app\/test:ro" "\$VERIFY_IMAGE" --test\s*\\\r?\n\s*test\/potree-visibility-patch\.test\.mjs/);
+  assert.match(workflow,/"\$VERIFY_IMAGE" node scripts\/verify-potree-visibility\.mjs \/app\/dist\/potree\/build\/potree\/potree\.js/);
+  const verifier=fs.readFileSync(path.join(repositoryRoot,'scripts/verify-potree-visibility.mjs'),'utf8');
+  assert.match(verifier,/patchPotreeVisibilitySelection\(source\)===source/);
+  assert.doesNotMatch(verifier,/writeFile|renameSync/);
+});
+
 test('production Compose publishes only the gated Viewer API on the approved TrueNAS layout', () => {
   const compose = fs.readFileSync(path.join(repositoryRoot, 'docker-compose.yml'), 'utf8');
   const environmentTemplate = fs.readFileSync(path.join(repositoryRoot, '.env.example'), 'utf8');

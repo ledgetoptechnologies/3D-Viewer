@@ -4,6 +4,14 @@ This supplements the September 5 Operations measurement handoff. Operations
 source and deployment were not changed by the Viewer agent. Reconcile against
 your current Operations implementation; do not overwrite concurrent work.
 
+September 7 authority update: normal native DSM/DTM stockpile volume and its
+parent-linked elevation profile now use scoped Viewer measurement permission
+on the server, including authorized clients and temporary public pages. The
+historical staff-only calculation note below applies only to specialist methods.
+See [current calculation permissions](MEASUREMENT_CALCULATIONS.md) and the
+[updated Operations handoff](OPERATIONS_MEASUREMENTS_RELEASE_HANDOFF_2026-09-05.md).
+Do not grant general processing privileges to enable normal measurements.
+
 ## Viewer-side fixes in this follow-up
 
 - Valid same-scope access survives controller transport timeout while bounded
@@ -15,8 +23,9 @@ your current Operations implementation; do not overwrite concurrent work.
 - A current-access denial occurring more than five minutes before expiry does
   not enter a renewal request that the existing controller deliberately ignores.
   It is treated as an authorization problem, not as evidence to bypass access.
-- Native calculation preflight still requires independent same-person staff
-  processing authority. No job permission was added for clients.
+- Specialist point/mesh/reconstruction calculation preflight still requires
+  independent same-person staff processing authority. Normal raster volume and
+  parent-linked profiles use the narrower measurement scope described above.
 
 ## What Operations should verify live
 
