@@ -6,6 +6,7 @@ import {existsSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {runInNewContext} from 'node:vm';
 import {acquireBrowserHarnessLock} from './browser-lock.mjs';
 
 // Isolated headless fixture only. No production server, user profile, or live
@@ -27,9 +28,42 @@ class Cdp {
   async evaluate(expression){const value=await this.command('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(value.exceptionDetails)throw new Error(value.exceptionDetails.exception?.description||value.exceptionDetails.text);return value.result?.value;}
   close(){for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('Browser fixture closed'));}this.pending.clear();this.socket.close();}
 }
-async function waitFor(client,expression,label){const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(expression))return;await delay(30);}throw new Error(`${label}: ${await client.evaluate('document.body.innerText')} ${JSON.stringify(client.errors)}`);}
+async function waitFor(client,expression,label){const until=Date.now()+8000;while(Date.now()<until){if(await client.evaluate(expression))return;await delay(30);}throw new Error(`${label}: ${await client.evaluate("document.body?.innerText??'(document body unavailable)'")} ${JSON.stringify(client.errors)}`);}
 const click=(client,selector)=>client.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
 const status=(state)=>`document.querySelector('[data-status]')?.dataset.state===${JSON.stringify(state)}`;
+const readiness=Object.freeze({
+  module:"document.body?.dataset.ready==='true'",
+  workspace:"document.body?.dataset.capabilityChecked==='true'&&document.querySelector('[data-record]')",
+  queued:"document.querySelector('[data-status]')?.textContent.includes('Waiting to calculate')",
+  cancelled:"document.querySelector('[data-status]')?.textContent.includes('Cancellation requested')",
+  restored:"document.querySelector('[data-surface-content]')?.hidden===false",
+});
+// Page.navigate can acknowledge before document commit. A ready flag from the
+// previous fixture must never satisfy the next staff/client navigation.
+const readinessAt=(url,expression)=>`location.href===${JSON.stringify(new URL(url).href)}&&(${expression})`;
+
+test('browser readiness predicates tolerate a pre-DOM navigation document',()=>{
+  const context={document:{body:null,querySelector:()=>null}};
+  for(const [name,expression]of Object.entries({...readiness,success:status('success')}))assert.equal(Boolean(runInNewContext(expression,context)),false,`${name} waits for DOM without throwing`);
+  context.document.body={dataset:{ready:'true',capabilityChecked:'true'}};context.document.querySelector=()=>({dataset:{state:'success'},textContent:'Waiting to calculate; Cancellation requested',hidden:false});
+  for(const [name,expression]of Object.entries({...readiness,success:status('success')}))assert.equal(Boolean(runInNewContext(expression,context)),true,`${name} still requires its actual ready condition`);
+});
+test('browser polling propagates actual evaluation failures without retrying or hiding them',async()=>{
+  const failure=new Error('real application evaluation failure');let calls=0;
+  await assert.rejects(waitFor({evaluate:async()=>{calls++;throw failure;}},readiness.module,'readiness'),error=>error===failure);
+  assert.equal(calls,1);
+});
+test('navigation readiness rejects the previous ready document until the requested URL commits',()=>{
+  const requested='http://127.0.0.1:1234/workspace-fixture?staff=1';
+  const context={location:{href:'http://127.0.0.1:1234/workspace-fixture?staff=0'},document:{body:{dataset:{ready:'true',capabilityChecked:'true'}},querySelector:()=>({})}};
+  const expression=readinessAt(requested,readiness.workspace);
+  assert.equal(Boolean(runInNewContext(expression,context)),false,'old client page is not the new staff page');
+  context.location.href=requested;context.document.body=null;
+  assert.equal(Boolean(runInNewContext(expression,context)),false,'new URL still waits for its body');
+  context.document.body={dataset:{capabilityChecked:'true'}};
+  assert.equal(Boolean(runInNewContext(expression,context)),true);
+  assert.match(readinessAt('http://127.0.0.1:1234',readiness.module),/1234\//,'origin URL normalizes to document trailing slash');
+});
 
 function workspacePage(staff){return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><style>body{background:#10151b;color:white;font:16px system-ui}#panel{width:300px;max-width:100%;box-sizing:border-box;padding:12px}#view{position:absolute;left:320px;top:20px;width:600px;height:600px}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><aside id="panel"></aside><div id="view"></div><script type="module">
 import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
@@ -119,16 +153,16 @@ test('normal server inspector uses real browser UI for queued completion, resume
     await client.command('Runtime.enable');await client.command('Page.enable');
     await client.command('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:f.origin});
-    await waitFor(client,"document.body.dataset.ready==='true'",'module readiness');
+    await waitFor(client,readinessAt(f.origin,readiness.module),'module readiness');
 
     await t.test('queued work reopens without duplicate and produces inspectable native-result preview',async()=>{
       await click(client,'#open');assert.equal(s.posts,0,'opening does not submit');
       await click(client,'[data-calculate]');
-      await waitFor(client,"document.querySelector('[data-status]').textContent.includes('Waiting to calculate')",'queued status');
+      await waitFor(client,readiness.queued,'queued status');
       assert.equal(s.posts,1);assert.equal(await client.evaluate("document.querySelector('[data-calculate]').disabled"),true);
       await click(client,'[data-close]');await waitFor(client,"!document.querySelector('dialog')",'closed');
       await click(client,'#open');await click(client,'[data-calculate]');
-      await waitFor(client,"document.querySelector('[data-status]').textContent.includes('Waiting to calculate')",'resumed status');
+      await waitFor(client,readiness.queued,'resumed status');
       assert.equal(s.posts,1,'resume must not create another job');
       s.job.status='complete';s.job.result=completedResult();
       await waitFor(client,status('success'),'complete UI');
@@ -161,7 +195,7 @@ test('normal server inspector uses real browser UI for queued completion, resume
     await t.test('cancel action stops owned queued work without saving a result',async()=>{
       s.job=null;s.mode='hold';const saved=await client.evaluate("document.querySelector('#saved').value");
       await click(client,'#open');await click(client,'[data-calculate]');await waitFor(client,"document.querySelector('[data-cancel-job]')?.hidden===false",'cancel available');
-      await click(client,'[data-cancel-job]');await waitFor(client,"document.querySelector('[data-status]').textContent.includes('Cancellation requested')",'cancel acknowledgement');
+      await click(client,'[data-cancel-job]');await waitFor(client,readiness.cancelled,'cancel acknowledgement');
       assert.equal(s.deletes,1);assert.equal(s.job.status,'cancelled');assert.equal(await client.evaluate("document.querySelector('#saved').value"),saved);
       assert.equal(await client.evaluate("document.querySelector('[data-calculate]').disabled"),false);
     });
@@ -169,8 +203,9 @@ test('normal server inspector uses real browser UI for queued completion, resume
     await t.test('client and staff polygon rows share one Measure inspector with authorized inline specialist tools',async()=>{
       const postCount=s.posts;
       for(const staff of [false,true]){
-        await client.command('Page.navigate',{url:`${f.origin}/workspace-fixture?staff=${staff?1:0}`});
-        await waitFor(client,"document.body.dataset.capabilityChecked==='true'&&document.querySelector('[data-record]')",'loaded personal workspace');
+        const workspaceUrl=`${f.origin}/workspace-fixture?staff=${staff?1:0}`;
+        await client.command('Page.navigate',{url:workspaceUrl});
+        await waitFor(client,readinessAt(workspaceUrl,readiness.workspace),'loaded personal workspace');
         assert.equal(await client.evaluate("document.querySelectorAll('[data-record] [data-m=volume]').length"),1);
         assert.equal(await client.evaluate("document.querySelector('[data-record] [data-m=volume]').textContent"),'Measure');
         assert.equal(await client.evaluate("document.querySelectorAll('[data-record] [data-m=admin-volume]').length"),0,'no duplicate advanced row action');
@@ -186,7 +221,7 @@ test('normal server inspector uses real browser UI for queued completion, resume
           assert.equal(await client.evaluate("document.querySelectorAll('dialog[open]').length"),1,'specialist is not a second modal');
           assert.equal(await client.evaluate("document.querySelector('[data-surface-content]').hidden"),true);
           await click(client,'.surface-specialist summary');
-          await waitFor(client,"document.querySelector('[data-surface-content]').hidden===false",'native surface restored');
+          await waitFor(client,readiness.restored,'native surface restored');
         }
         assert.equal(await client.evaluate("document.body.dataset.unexpectedAdminOperation||null"),null,'opening does not start specialist work');
         assert.equal(await client.evaluate("document.body.dataset.browserFallback||null"),null);
@@ -197,8 +232,9 @@ test('normal server inspector uses real browser UI for queued completion, resume
     });
     await t.test('reopening through the real workspace reuses a completed job after result attachment increments revision',async()=>{
       s.job=null;s.mode='complete';s.document=structuredClone(record);const postCount=s.posts;
-      await client.command('Page.navigate',{url:`${f.origin}/workspace-fixture?staff=0`});
-      await waitFor(client,"document.body.dataset.capabilityChecked==='true'&&document.querySelector('[data-record]')",'loaded recovery workspace');
+      const recoveryUrl=`${f.origin}/workspace-fixture?staff=0`;
+      await client.command('Page.navigate',{url:recoveryUrl});
+      await waitFor(client,readinessAt(recoveryUrl,readiness.workspace),'loaded recovery workspace');
       await click(client,'[data-record] [data-m=volume]');await click(client,'[data-calculate]');await waitFor(client,status('success'),'attached first result');
       assert.equal(s.document.revision,2);assert.equal(s.document.results.calculationJobId,jobId);assert.equal(s.posts,postCount+1);
       await click(client,'[data-close]');await waitFor(client,"!document.querySelector('dialog')",'close after attachment');

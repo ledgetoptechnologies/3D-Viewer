@@ -254,6 +254,16 @@ Final integrated follow-up verification:
 The earlier deployed b234083 observations do not prove deployment of this
 follow-up. Its image publication is verified separately by the release workflow.
 
+The first follow-up release check (run 34159211428) stopped before image build:
+1,424 tests passed, one browser-harness test failed, and 13 were skipped. Its
+initial readiness predicate accessed `document.body.dataset` before Chromium
+created the body. The harness now waits for the exact destination URL and a
+present, ready DOM, preventing both null-body errors and premature readiness
+from the previous fixture page. Three deterministic regressions preserve real
+evaluation-error propagation. The corrected browser/lifecycle run passed
+**34/34, zero failures/skips**. No production code was changed for this harness
+correction, and the failed run did not promote any image tags.
+
 ## Not yet proven
 
 - Actual County Road D stockpile units and independently checked live volume.
