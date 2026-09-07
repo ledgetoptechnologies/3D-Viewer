@@ -29,31 +29,21 @@ function fixture(t) {
   return { database, repository, processing, measurements, jobs, model, principal, measurement, document, viewerToken, adminToken, body, request };
 }
 
-test('real private result attachment revision can recover only its exact unchanged completed calculation',async t=>{
-  const f=fixture(t),app=express();app.use(express.json());app.use('/api/v1/measurements',createMeasurementApi(f.repository,{preflightRaster:async()=>{}}));
-  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
-  let creates=0,runs=0;const fetcher=(path,options)=>{if(options.method==='POST'&&path.endsWith('/calculations'))creates++;return fetch(`http://127.0.0.1:${server.address().port}${path}`,options);};
-  const {createMeasurementStore}=await import('../measurement-store.mjs'),{createMeasurementSurfaceClient}=await import('../measurement-surface-client.mjs'),{createServerSurfaceCalculator}=await import('../measurement-server-surface.mjs');
-  const store=createMeasurementStore({token:()=>f.viewerToken,fetcher});await store.load();
-  const request=createMeasurementSurfaceClient({token:()=>f.viewerToken,context:()=>f.principal,fetcher});
-  const calculate=createServerSurfaceCalculator({request,getRecord:()=>store.records.get(f.measurement.id),wait:async()=>{await processOneMeasurementCalculation({...f,config:{},storage:{resolve:()=>'/trusted/a.tif'},runCalculation:async(_path,job,controls)=>{runs++;assert.ok(controls.isLive());return{method:'surface-cut-fill',status:'calculated',cutM3:12,fillM3:0,netM3:12,coverage:1,source:{assetId:job.source.id,kind:job.source.kind,sha256:job.source.sha256,modelVersionId:job.modelVersionId},reference:job.reference};}},'integration');}});
-  const options={reference:{type:'custom',elevationM:0},confirmMeters:true},initial=store.records.get(f.measurement.id),result=await calculate(initial,options);await store.attachResults(initial,result);
-  let current=store.records.get(initial.id);assert.equal(current.revision,2);assert.equal(f.jobs.get(initial.id,result.calculationJobId).revision,1);assert.equal(f.jobs.get(initial.id,result.calculationJobId).attachmentRevision,2);
-  const recovered=await calculate(current,options);assert.equal(recovered.calculationJobId,result.calculationJobId);assert.equal(creates,1);assert.equal(runs,1);
-  await store.attachResults(current,recovered);current=store.records.get(initial.id);assert.equal(current.revision,3);assert.equal((await calculate(current,options)).calculationJobId,result.calculationJobId);assert.equal(creates,1);
-  await store.patch(current,{name:'Renamed unchanged pile'});current=store.records.get(initial.id);assert.equal((await calculate(current,options)).calculationJobId,result.calculationJobId);assert.equal(creates,1);
-  f.database.prepare('UPDATE model_assets SET sha256=?').run('b'.repeat(64));assert.equal(f.jobs.get(initial.id,result.calculationJobId).attachmentRevision,null);f.database.prepare('UPDATE model_assets SET sha256=?').run('a'.repeat(64));
-  const different=await calculate(current,{...options,reference:{type:'custom',elevationM:1}});assert.notEqual(different.calculationJobId,result.calculationJobId);assert.equal(creates,2);assert.equal(runs,2);
-  await store.save({...current,vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]]});current=store.records.get(initial.id);assert.equal(f.jobs.get(initial.id,result.calculationJobId).attachmentRevision,null);
-  const edited=await calculate(current,options);assert.notEqual(edited.calculationJobId,result.calculationJobId);assert.equal(creates,3);assert.equal(runs,3);
-  f.database.prepare('UPDATE viewer_sessions SET revoked_at=?').run(new Date().toISOString());await assert.rejects(calculate(current,options),{code:'measurement_surface_access_unavailable'});assert.equal(creates,3);
-});
-
 test('historical result reuse requires explicit stored attachment, exact coordinate frame and source identity',t=>{
   const f=fixture(t),queued=f.jobs.enqueue(f.measurement,f.request),claimed=f.jobs.claim('worker'),result={method:'surface-cut-fill',cutM3:1,fillM3:0,netM3:1,coverage:1,source:{assetId:f.request.source.id,kind:'dsm',sha256:f.request.source.sha256,modelVersionId:f.request.modelVersionId},reference:f.request.reference};f.jobs.finish(claimed,'worker',result);
   f.measurements.update(f.principal,f.measurement.id,{...f.document,revision:1,results:{...result,calculationJobId:crypto.randomUUID()}});assert.equal(f.jobs.get(f.measurement.id,queued.id).attachmentRevision,null);
   f.measurements.update(f.principal,f.measurement.id,{...f.document,revision:2,results:{...result,calculationJobId:queued.id}});assert.equal(f.jobs.get(f.measurement.id,queued.id).attachmentRevision,3);
   const row=f.database.prepare('SELECT request_json FROM measurement_calculation_jobs WHERE id=?').get(queued.id),request=JSON.parse(row.request_json);request.coordinateReference.crs='EPSG:32617';f.database.prepare('UPDATE measurement_calculation_jobs SET request_json=? WHERE id=?').run(JSON.stringify(request),queued.id);assert.equal(f.jobs.get(f.measurement.id,queued.id).attachmentRevision,null);
+});
+
+test('runtime repository attests attached results across save revisions but rejects changed geometry or source',t=>{
+  const f=fixture(t),queued=f.jobs.enqueue(f.measurement,f.request),claimed=f.jobs.claim('worker'),result={method:'surface-cut-fill',cutM3:12,fillM3:0,netM3:12,coverage:1,source:{assetId:f.request.source.id,kind:'dsm',sha256:f.request.source.sha256,modelVersionId:f.request.modelVersionId},reference:f.request.reference};
+  assert.equal(f.jobs.finish(claimed,'worker',result),true);
+  let current=f.measurements.update(f.principal,f.measurement.id,{...f.document,revision:1,results:{...result,calculationJobId:queued.id}});assert.equal(current.revision,2);assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,2);assert.equal(f.jobs.get(current.id,queued.id).revision,1);
+  current=f.measurements.update(f.principal,current.id,{...f.document,revision:current.revision,results:current.results});assert.equal(current.revision,3);assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,3);
+  current=f.measurements.update(f.principal,current.id,{...f.document,name:'Renamed pile',revision:current.revision,results:current.results});assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,4);assert.equal(f.jobs.list(current.id).length,1);
+  f.database.prepare('UPDATE model_assets SET sha256=? WHERE id=?').run('b'.repeat(64),f.request.source.id);assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,null);f.database.prepare('UPDATE model_assets SET sha256=? WHERE id=?').run(f.request.source.sha256,f.request.source.id);
+  current=f.measurements.update(f.principal,current.id,{...f.document,revision:current.revision,results:current.results,vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]]});assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,null);
 });
 test('job queue snapshots revision, enforces singleton, cancels on edit, hides private request', t => {
   const f = fixture(t), queued = f.jobs.enqueue(f.measurement, f.request);

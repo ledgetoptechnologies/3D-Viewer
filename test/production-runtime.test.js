@@ -12,6 +12,59 @@ const test = require('node:test');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 
+// Early feedback for the tests-only runtime mount. This deliberately checks
+// literal relative imports, not arbitrary JS; the exact image run is decisive.
+function runtimeTestImportGuard({ sourceOverrides = new Map() } = {}) {
+  const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
+  const runtime = dockerfile.slice(dockerfile.lastIndexOf('\nFROM '));
+  assert.match(runtime, / AS runtime\b/);
+  const shipped = [{ target: 'test', directory: true }];
+  for (const line of runtime.split(/\r?\n/)) {
+    if (!line.startsWith('COPY ') || line.startsWith('COPY --from=')) continue;
+    const parts = line.slice(5).trim().split(/\s+/), destination = parts.pop();
+    for (const source of parts) {
+      const directory = fs.statSync(path.join(repositoryRoot, source)).isDirectory();
+      const target = path.posix.normalize(destination.endsWith('/') && !directory ? destination + path.posix.basename(source) : destination).replace(/^\.\//, '');
+      shipped.push({ target, directory });
+    }
+  }
+  const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/viewer-image.yml'), 'utf8');
+  const mounted = workflow.match(/-v "\$PWD\/test:\/app\/test:ro" "\$VERIFY_IMAGE" --test\s*\\\r?\n((?:[ \t]+test\/[^\r\n]+\r?\n)+)/);
+  assert.ok(mounted, 'exact-image tests-only verification block must remain discoverable');
+  const entries = [...mounted[1].matchAll(/test\/[\w./-]+\.test\.(?:mjs|js)/g)].map(match => match[0]);
+  assert.ok(entries.length > 0, 'the exact-image gate must include runtime test entries');
+  const visited = new Set();
+  function inspect(file) {
+    if (visited.has(file)) return;
+    visited.add(file);
+    const source = sourceOverrides.get(file) ?? fs.readFileSync(path.join(repositoryRoot, file), 'utf8');
+    for (const match of source.matchAll(/\b(?:from\s*|import\s*(?:\(\s*)?|require\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)) {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), match[1]));
+      assert.ok(shipped.some(item => target === item.target || (item.directory && target.startsWith(item.target + '/'))),
+        `${file} imports ${match[1]}, which is not copied into the final runtime or mounted test tree; move source-only integration to a separate test`);
+      if (target.startsWith('test/')) {
+        const resolved = [target, target + '.js', target + '.mjs'].find(candidate => fs.existsSync(path.join(repositoryRoot, candidate)) && /\.(?:mjs|js)$/.test(candidate));
+        assert.ok(resolved, `${file}: cannot resolve mounted test dependency ${match[1]}`);
+        inspect(resolved);
+      }
+    }
+  }
+  entries.forEach(inspect);
+}
+
+test('exact-image test entrypoints import only final-runtime modules or mounted test helpers', () => {
+  runtimeTestImportGuard();
+});
+
+test('runtime import guard rejects raw frontend integration while allowing copied numerical modules', () => {
+  const entry = 'test/measurement-calculation-jobs.test.js';
+  const source = fs.readFileSync(path.join(repositoryRoot, entry), 'utf8');
+  for (const injected of ["import('../measurement-store.mjs')", "require('../measurement-store.mjs')", "import {createMeasurementStore} from '../measurement-store.mjs'"]) {
+    assert.throws(() => runtimeTestImportGuard({ sourceOverrides: new Map([[entry, source + '\n' + injected]]) }), /measurement-store\.mjs.*not copied/);
+  }
+  assert.doesNotThrow(() => runtimeTestImportGuard({ sourceOverrides: new Map([[entry, source + "\nimport('../measurement-volume.mjs')"]]) }));
+});
+
 test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT constructor contract', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /ARG OBJ2TILES_VERSION=1\.6\.2/);

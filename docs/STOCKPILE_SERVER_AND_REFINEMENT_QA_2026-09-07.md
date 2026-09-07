@@ -35,17 +35,22 @@ This is a working QA record, not a release or completion attestation.
   expiry; refresh/close does not promise immediate server cancellation. The
   private and temporary lanes share the global twenty queued/running-job ceiling
   and existing heavy-job admission. Temporary retention additionally caps forty
-  rows per grant/version scope. Final lifecycle/full-suite acceptance is pending.
+  rows per grant/version scope. Source-suite checks have passed; deployed
+  lifecycle acceptance remains pending.
   No Operations repository changes were made.
 - New polygons save first, then open their automatic surface calculation. Opening
-  an existing polygon does not submit a new job. One request creates the job;
-  subsequent requests only poll that identifier.
-- Results must match the measurement revision, source, model version and base.
+  an existing polygon does not submit a new job. Recovery lists existing work
+  before creating a job, and an accepted job is observed through its identifier.
+- Results must match the source, model version, base and saved geometry/revision.
+  The exact completed result already attached to unchanged geometry can also be
+  recovered at a later document revision when the server provides matching
+  attachment-revision evidence; arbitrary historical results are not reused.
   Switching views, closing or losing access retires the observer; it does not
   falsely claim that an accepted server job was cancelled.
 - Normal inspector resume/cancel is implemented locally: before submission, the
-  helper checks the same revision and source/base/unit parameters for queued,
-  running or completed work. Matching work is observed/retrieved rather than
+  helper checks revision and source/base/unit parameters for queued, running or
+  completed work, including the verified attached-result exception above.
+  Matching work is observed/retrieved rather than
   deliberately duplicated; a create race triggers another check. Different
   active settings expose cancellation in the ordinary inspector. Closing stops
   observation; reopening and calculating with the same settings resumes it.
@@ -128,9 +133,9 @@ off-screen nodes do not justify growth. Requested ceilings, overload rollback
 and backoff remain in force. This addresses a selector/adaptation deadlock;
 installed-routine fixtures are not proof of live dense zoom performance.
 
-## Verification so far
+## Historical verification: pre-unified b234083 snapshot
 
-- Final source-bearing isolated Linux image: 1,407 tests, 1,386 passed, zero
+- Pre-unified source-bearing isolated Linux image: 1,407 tests, 1,386 passed, zero
   failed, 21 environment-dependent skips; process exited successfully. Log:
   `data/qa/stockpile-server-source-tests.log`. Network disabled, no production
   data mounted. Includes the actual patched Potree bundle and schema 33.
@@ -140,7 +145,7 @@ installed-routine fixtures are not proof of live dense zoom performance.
 - Actual installed-Potree selector/demand tests: 35 passed, zero failed/skipped.
   Geometry/render I/O is isolated; this does not establish real dense GPU timing.
 - Production-contract checks: 9 passed, zero failed.
-- Separate final Windows/headless browser regression run: 43 tests, 39 passed,
+- Separate pre-unified Windows/headless browser regression run: 43 tests, 39 passed,
   zero failed, 4 skipped for the unavailable real tile dataset fixture. Includes
   model detail/foreground retention, camera-photo rendering, history/refresh
   teardown, KTX2/CSP, normal server inspector, public project sharing, session
@@ -160,7 +165,10 @@ installed-routine fixtures are not proof of live dense zoom performance.
 - Private/temporary backend checks: 28 passed, including direct client/helper
   through HTTP and worker result delivery, geometry-hash agreement, exact-version
   rejection and older active-job recovery without personal-row creation.
-- Production image build succeeded locally. No new release pushed from this batch.
+- The b234083 production image was subsequently published and deployed, as
+  recorded in the live follow-up below. Later unified-inspector commits e8db2c3
+  and harness correction 1309fb6 were pushed; their source publication is not
+  proof that a candidate image passed exact-runtime verification or promotion.
 - An initial attempt to run the whole source suite in the production-only image
   lacked test source/dev dependencies. It is invalid QA, not a passing gate; its
   exact disposable container was stopped after the corrected source-image run.
@@ -263,6 +271,32 @@ from the previous fixture page. Three deterministic regressions preserve real
 evaluation-error propagation. The corrected browser/lifecycle run passed
 **34/34, zero failures/skips**. No production code was changed for this harness
 correction, and the failed run did not promote any image tags.
+
+The second follow-up release attempt (run 34159775858) passed its source checks
+and built the candidate, then stopped during exact-runtime verification:
+**44 passed, one failed, zero skipped**. A newly expanded server integration test
+imported raw frontend `measurement-store.mjs` from the production image root,
+where frontend modules are bundled rather than retained as raw source files.
+The failed test therefore crossed the source-test/runtime-test packaging boundary.
+The source-only integration is being separated from runtime-only backend coverage;
+the proposed correction does not skip the test or mount raw application source
+over the candidate. That correction and its final counts are **not yet verified**
+in this record. Source-check success and candidate construction alone do not
+establish exact-image acceptance or tag promotion.
+
+### Corrected local production-runtime verification
+
+The container-test packaging correction keeps raw frontend/store integration in
+the full source suite and retains backend attachment-revision coverage in the
+exact-runtime suite. A source contract now rejects literal imports of unshipped
+modules from exact-runtime tests. The locally rebuilt production image passed
+**45/45 runtime tests, zero failures/skips**, with networking disabled and only
+the read-only test folder mounted. Log:
+`data/qa/measure-unified-runtime-tests.log`. Building the image required normal
+dependency-download access; an earlier offline build lacked cached dependency
+layers. A local pull of the CI candidate was rejected by registry credentials,
+so this local rebuild is not an attestation of the registry candidate digest.
+The release workflow must still independently verify and promote its own image.
 
 ## Not yet proven
 
