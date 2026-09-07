@@ -25,6 +25,15 @@ test('same-version, same-XY saved boundary with explicit units can be reused wit
   const f=fixture(),result=await f.run(r);assert.deepEqual(result.vertices.map(p=>p[2]),[100,101,102,103]);assert.equal(f.counts.preflight,0);result.vertices[0][2]=900;assert.equal(r.results.boundaryVertices[0][2],100);
   assert.equal(retainedDisplayBoundary(r,'other'),null);r.results.boundaryVertices[0][0]++;assert.equal(retainedDisplayBoundary(r,'v1'),null);r.results.boundaryVertices[0][0]--;delete r.results.sourceVerticalUnitBasis;assert.equal(retainedDisplayBoundary(r,'v1'),null);
 });
+
+test('requester-declared saved boundaries retain honest provenance and legacy declarations remain readable',()=>{
+  for(const basis of ['requester-declared','administrator-declared','user-declared']){
+    const r=record();r.results={method:'surface-cut-fill',source:{modelVersionId:'v1',verticalUnitBasis:basis},boundaryVertices:r.vertices.map(p=>[p[0],p[1],100])};
+    const before=structuredClone(r),retained=retainedDisplayBoundary(r,'v1');
+    assert.deepEqual(retained.vertices,r.results.boundaryVertices);assert.ok(retained.basis.includes(basis));assert.deepEqual(r,before,'reading does not rewrite historical attribution');
+    assert.equal(retainedDisplayBoundary(r,'other'),null);
+  }
+});
 test('missing elevations or unverified units fail closed instead of fabricating zero or reusing stale preview',async()=>{
   for(const [overrides,pattern]of [
     [{getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616})},/does not encode elevation units/],

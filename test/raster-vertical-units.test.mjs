@@ -10,6 +10,14 @@ import {readRasterBandMetadata,resolveRasterVerticalUnits} from '../raster-verti
 import {calculateNativeRaster,preflightNativeRaster} from '../server/measurementRasterCalculation.mjs';
 const image=key=>({getGeoKeys:()=>key===undefined?{}:{VerticalUnitsGeoKey:key},getSamplesPerPixel:()=>1});
 
+test('explicit requester unit declarations preserve legacy basis but never override encoded units',()=>{
+  assert.equal(resolveRasterVerticalUnits(image(),{confirmMeters:true,confirmationBasis:'requester-declared'}).verticalUnitBasis,'requester-declared');
+  assert.equal(resolveRasterVerticalUnits(image(),{confirmMeters:true}).verticalUnitBasis,'administrator-declared','legacy callers and persisted basis remain compatible');
+  assert.equal(resolveRasterVerticalUnits(image(9001),{confirmMeters:true,confirmationBasis:'requester-declared'}).verticalUnitBasis,'raster-metadata');
+  assert.throws(()=>resolveRasterVerticalUnits(image(),{confirmationBasis:'requester-declared'}),{code:'measurement_source_vertical_units_required'});
+  assert.throws(()=>resolveRasterVerticalUnits(image(),{confirmMeters:true,confirmationBasis:'verified-by-server'}),{code:'measurement_source_vertical_metadata_invalid'});
+});
+
 test('explicit band units are accepted independently of horizontal EPSG, and unknown/conflicts never fall back',()=>{
   for(const [unit,factor]of [['m',1],['metres',1],['ft',.3048],['US survey foot',1200/3937],['cm',.01]]){
     assert.deepEqual(resolveRasterVerticalUnits(image(),{bandMetadata:{UNITTYPE:unit}}),{verticalFactor:factor,verticalUnitBasis:'gdal-band-unit'});

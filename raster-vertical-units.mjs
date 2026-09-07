@@ -57,7 +57,7 @@ export async function readRasterBandMetadata(image){
 
 // GDAL's band-0 UNITTYPE is explicit value-unit metadata, independent of the
 // horizontal CRS. Dataset-level metadata is deliberately never passed here.
-export function resolveRasterVerticalUnits(image,{bandMetadata=null,confirmMeters=false}={}){
+export function resolveRasterVerticalUnits(image,{bandMetadata=null,confirmMeters=false,confirmationBasis='administrator-declared'}={}){
   for(const [name,value]of Object.entries(bandMetadata||{})){const key=name.toUpperCase();if(key==='SCALE'||key==='OFFSET')identityTransform(key,value);}
   const key=image.getGeoKeys?.()?.VerticalUnitsGeoKey;
   const encoded=key!==undefined&&key!==null;
@@ -79,6 +79,13 @@ export function resolveRasterVerticalUnits(image,{bandMetadata=null,confirmMeter
   if(keyFactor!==null&&bandFactor!==null&&keyFactor!==bandFactor)fail('measurement_source_vertical_units_conflict','Vertical CRS units and elevation band units conflict. Verify the source metadata.');
   if(keyFactor!==null)return{verticalFactor:keyFactor,verticalUnitBasis:'raster-metadata'};
   if(bandFactor!==null)return{verticalFactor:bandFactor,verticalUnitBasis:'gdal-band-unit'};
-  if(confirmMeters)return{verticalFactor:1,verticalUnitBasis:'administrator-declared'};
+  if(confirmMeters){
+    // Legacy browser callers translate administrator-declared to user-declared.
+    // New server callers supply requester-declared unless separate staff
+    // authority actually established who made the declaration. Neither is
+    // equivalent to elevation units encoded or independently verified in data.
+    if(!['administrator-declared','requester-declared'].includes(confirmationBasis))metadataInvalid();
+    return{verticalFactor:1,verticalUnitBasis:confirmationBasis};
+  }
   fail('measurement_source_vertical_units_required','Confirm source elevations are meters only after verifying them; the raster does not encode elevation units.');
 }

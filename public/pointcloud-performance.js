@@ -190,7 +190,7 @@
         resetTiming();
         return state.live;
       },
-      sample(time, { active = true, minimum = 250_000, visiblePoints = state.points } = {}) {
+      sample(time, { active = true, minimum = 250_000, visiblePoints = state.points, demand = null } = {}) {
         if (!active || !Number.isFinite(time)) { longFrames = 0; resetTiming(); return state.live; }
         const floor = Math.min(state.target, Math.max(250_000, Number.isFinite(minimum) ? minimum : 250_000));
         // Hierarchy metadata may arrive after the budget has already adapted.
@@ -212,9 +212,15 @@
         // never reaching 45 FPS. Probe density after sustained <=44ms frames;
         // keep a dead band below the existing >45ms overload threshold.
         healthyMs = frameMs <= 44 ? healthyMs + dt : 0;
+        // Whole additive nodes may not fit the remaining budget even when the
+        // scene occupies less than 70% of it. Probe only confirmed eligible
+        // demand with settled drawn ancestors, never an empty/loading scene.
+        const settledDemand = demand && demand.pending === false && Number.isFinite(demand.drawnPoints) && demand.drawnPoints > 0;
+        const canGrow = demand ? settledDemand && Number.isFinite(demand.requiredPoints) && demand.requiredPoints > state.live && demand.requiredPoints <= state.target : visiblePoints >= state.live * 0.7;
+        const probeSettled = demand ? settledDemand : visiblePoints >= state.live * 0.7;
         if (probeBase !== null) {
           probeAgeMs += dt;
-          if (probeAgeMs >= 2000 && frameMs <= 45 && visiblePoints >= state.live * 0.7) {
+          if (probeAgeMs >= 2000 && frameMs <= 45 && probeSettled) {
             probeBase = null; recoveryDelayMs = 4000;
           }
         }
@@ -230,7 +236,7 @@
             state.live = Math.max(floor, Math.floor(state.live * (frameMs > 90 ? 0.5 : 0.75)));
           }
           elapsed = 0; samples = 0; healthyMs = 0;
-        } else if (probeBase === null && healthyMs >= recoveryDelayMs && visiblePoints >= state.live * 0.7 && state.live < state.target) {
+        } else if (probeBase === null && healthyMs >= recoveryDelayMs && canGrow && state.live < state.target) {
           // Do not mistake an almost-empty/loading scene for capacity to draw more.
           probeBase = state.live; probeAgeMs = 0;
           state.live = Math.min(state.target, Math.ceil(state.live * 1.15));

@@ -2,6 +2,30 @@
 
 Prepared September 5, 2026, America/Chicago. This file is intended to be handed directly to the separate Operations implementation agent.
 
+## September 7 update — revised stockpile authority
+
+The user subsequently approved **server-side stockpile volume for everyone with
+measurement access**, including clients and temporary public-link users. The
+older staff-only server-calculation wording below is superseded **only for
+native DSM/DTM `surface-cut-fill`**. Do not grant clients `viewer.processing.write`,
+admin bearers, import/reprocess rights, native point/mesh reconstruction methods,
+or access to another person's measurements to enable stockpile volume.
+
+Viewer now implements narrow personal raster jobs and a separate temporary,
+page-scoped server lane (schema 33). Existing Operations individual-identity
+attestation and scope/renewal requirements remain; no new broad Operations
+processing permission is needed. Measurements now share one per-person/model
+list across all five views, with source-coordinate semantics preserved.
+
+See [current calculation contract](MEASUREMENT_CALCULATIONS.md),
+[current measurement API](PRIVATE_MEASUREMENT_API.md), and
+[September 7 QA and source-unit handoff](STOCKPILE_SERVER_AND_REFINEMENT_QA_2026-09-07.md).
+The last document includes the remaining read-only County Road D unit inspection:
+bind evidence to the exact raster/version hash, do not assume meters from a
+WebODM label, and do not alter source data or start processing to bypass it.
+Historical commit/image and source-inspection details below are not current
+deployment attestations.
+
 ## 1. Assignment and ownership
 
 Implement the Operations-side integration described below, reconciling it against your current work first. The user explicitly asked the Viewer agent to inspect Operations **read-only**, because another agent owns its implementation. No Operations source, worktree, branch, dependencies, database, credentials or deployment was changed by this assessment. No Operations test scripts were run in an active checkout.

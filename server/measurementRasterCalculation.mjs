@@ -10,10 +10,11 @@ const fail = code => { throw Object.assign(new Error(code), { code }); };
 export const NATIVE_RASTER_BLOCK_LIMIT = 256 * 1024 * 1024;
 export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, bandMetadata = null } = {}) {
   const keys = image.getGeoKeys(), directory = image.getFileDirectory?.() || image.fileDirectory, epsg = Number(String(request.coordinateReference.crs).replace(/^EPSG:/i, ''));
-  const rasterCrs = Number(keys.ProjectedCSTypeGeoKey), metres = Number(keys.ProjLinearUnitsGeoKey) === 9001 || ((rasterCrs >= 32601 && rasterCrs <= 32660)||(rasterCrs>=32701&&rasterCrs<=32760));
+  const rasterCrs = Number(keys.ProjectedCSTypeGeoKey), metres = keys.ProjLinearUnitsGeoKey !== undefined ? Number(keys.ProjLinearUnitsGeoKey) === 9001 : ((rasterCrs >= 32601 && rasterCrs <= 32660)||(rasterCrs>=32701&&rasterCrs<=32760));
   if (!metres || rasterCrs !== epsg) fail('measurement_source_crs_mismatch');
   if (Number(keys.GTRasterTypeGeoKey || 1) !== 1) fail('measurement_pixel_is_point_unsupported');
-  const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:request.sourceVerticalUnit==='m'});
+  const staffDeclaration=request.authority?.adminHash&&!request.authority.scope;
+  const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:request.sourceVerticalUnit==='m',confirmationBasis:staffDeclaration?'administrator-declared':'requester-declared'});
   const transform = rasterDirectoryValue(directory, 'ModelTransformation');
   if (transform && [1,2,4,6,8,9,12,13,14].some(i => transform[i] !== 0)) fail('measurement_rotated_raster_unsupported');
   const [ox, oy] = image.getOrigin(), [dx, dy] = image.getResolution();
@@ -97,6 +98,7 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
     const finalStat = await fs.promises.stat(absolutePath);
     if (['size','ino','dev','mtimeMs','ctimeMs'].some(k => sourceStat[k] !== finalStat[k])) fail('measurement_source_changed');
     const result = accumulator.result();
-    return { ...result, calculationOrigin: 'server-native-raster', preview:{previewOnly:true,samples:previewSamples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))}, source: { assetId: request.source.id, kind: request.source.kind, sha256: request.source.sha256, modelVersionId: request.modelVersionId, resolutionM: [dx, -dy], crs: definition.crs, verticalUnit: definition.verticalUnit, verticalUnitBasis: definition.verticalUnitBasis }, warnings: [...result.warnings, ...(definition.verticalUnitBasis === 'administrator-declared' ? ['Raster vertical units were declared as metres by the requesting administrator; they were not encoded in the raster.'] : [])] };
+    const declaredBy=definition.verticalUnitBasis==='administrator-declared'?'requesting administrator':definition.verticalUnitBasis==='requester-declared'?'requester':null;
+    return { ...result, calculationOrigin: 'server-native-raster', preview:{previewOnly:true,samples:previewSamples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))}, source: { assetId: request.source.id, kind: request.source.kind, sha256: request.source.sha256, modelVersionId: request.modelVersionId, resolutionM: [dx, -dy], crs: definition.crs, verticalUnit: definition.verticalUnit, verticalUnitBasis: definition.verticalUnitBasis }, warnings: [...result.warnings, ...(declaredBy ? [`Raster vertical units were declared as metres by the ${declaredBy}; they were not encoded in the raster or independently verified by this calculation.`] : [])] };
   } finally { await tiff.close(); }
 }

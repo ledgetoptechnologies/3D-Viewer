@@ -5,7 +5,7 @@ const MAX_CELLS=1_500_000,MAX_BLOCK=64*1024*1024;
 const fail=message=>{throw new Error(`3D overlay unavailable: ${message}`);};
 const check=signal=>{if(signal?.aborted)throw new DOMException('Display elevation sampling cancelled','AbortError');};
 const finiteVertex=p=>Array.isArray(p)&&p.length===3&&p.every(v=>typeof v==='number'&&Number.isFinite(v)&&Math.abs(v)<=1e9);
-const knownBasis=new Set(['raster-metadata','gdal-band-unit','user-declared','administrator-declared']);
+const knownBasis=new Set(['raster-metadata','gdal-band-unit','user-declared','administrator-declared','requester-declared']);
 
 export function retainedDisplayBoundary(record,modelVersionId){
   const result=record.results,vertices=result?.boundaryVertices,basis=result?.sourceVerticalUnitBasis||result?.source?.verticalUnitBasis,version=result?.modelVersionId||result?.source?.modelVersionId;

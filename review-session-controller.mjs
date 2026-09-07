@@ -1,3 +1,5 @@
+import { safeMeasurementCalculationErrorCode } from './measurement-calculation-broker.mjs';
+
 const CHANNEL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GRANT_PATTERN = CHANNEL_ID_PATTERN;
 const RENEWAL_LEAD_MS = 5 * 60 * 1000;
@@ -299,7 +301,7 @@ export class ReviewSessionController {
     } catch (error) {
       if (this.subject !== subject || this.records.get(record.channelId) !== record) return false;
       try { record.channel.postMessage({ ...response, ok: false,
-        code: ['measurement_admin_required','measurement_scope_changed','measurement_request_invalid'].includes(error?.code) ? error.code : 'measurement_request_failed',
+        code: safeMeasurementCalculationErrorCode(error?.code),
         status: Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 503 }); } catch {}
       return false;
     } finally { record.measurementPending = false; }

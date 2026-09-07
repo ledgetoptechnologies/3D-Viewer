@@ -2,7 +2,7 @@
 
 ## Authorization boundaries
 
-Viewer access does **not** confer workspace administration. A share grants access only to the referenced task/model version, or the tasks permitted through the shared project. Private measurements are personal annotations within that existing access; they do not grant import, processing, reconstruction, project editing, or sharing authority.
+Viewer access does **not** confer workspace administration. A share grants access only to the referenced task/model version, or the tasks permitted through the shared project. Private measurements are personal annotations within that existing access. Their narrow server-side raster volume capability does not grant import, general processing, reconstruction, project editing, or sharing authority.
 
 Personal records are scoped by trusted `(audience, subject, modelId, modelVersionId)`. The server reads all four from the live, signed Viewer session. Clients cannot override them in JSON, URLs, or query parameters. The UI exposes one personal list across model, point cloud, orthophoto, DSM and DTM. The immutable `spatial3d` and `map` collection fields retain creation/calculation provenance, not separate UI workspaces. No database migration or broader access is required.
 
@@ -20,20 +20,30 @@ Legacy client grants omit the attestation and intentionally remain temporary-onl
 
 No Operations repository changes are included here. Its integration agent must verify per-person identity before enabling this flag. An end user cannot enable it from the Viewer UI or a measurement request.
 
-### Administrative calculation authority
+### Ordinary server stockpile calculations
 
-Server calculations additionally require `X-Viewer-Admin-Authorization: Bearer <workspace token>`. The workspace token must be live, have explicit `viewer.processing.write`, and match the `ops` Viewer session's person. An `ops` audience alone, a client Viewer token, or workspace read access is insufficient. The separate administrative token is never stored in a measurement document or returned with a result. Job authority is checked for submission, retrieval, cancellation, and worker execution. Administrators decide whether to grant processing authority to another staff member; general viewing access does not imply it.
+Normal stockpile volumes use the server, not a browser-computed fallback. A verified signed-in individual with live `view` and `measure` permissions can submit, list, inspect and cancel `surface-cut-fill` jobs for their own saved polygon and exact immutable model version using only the Viewer bearer. Eligible native DSM/DTM sources are advertised by `rasterCalculations` and `calculationSources`. A client cannot select another person's measurement, an unregistered source, another version, or an advanced method through this capability.
+
+`measurement-surface-client.mjs` sends only fixed capability/job operations to the personal API, omits ambient cookies, rejects redirects, uses finite timeouts and fences responses after identity/version changes. It does not obtain an Operations admin token. Same-person token renewal is allowed; a volume-specific denial does not itself erase the saved personal measurement collection. The worker revalidates the live Viewer authority and the narrow `personal-raster` method/source scope.
+
+The normal inspector checks for matching queued/running or completed work before submission and recovers a create race through a fresh list request. Reopening with the same settings resumes observation or retrieves a result; different active settings require waiting or explicit cancellation in that inspector. Closing stops polling, not the accepted job. No general processing UI or staff-only advanced dialog is needed for ordinary stockpile work.
+
+Public-link and unverified temporary-identity server calculations use the locally implemented ephemeral path below. They do not create persistent personal records or turn an anonymous visitor into a trusted individual. Private CRUD behavior is unchanged: public shares cannot use it, and legacy client identities remain temporary-only. No browser volume fallback conceals an unavailable ephemeral server path. Final full-suite/deployment acceptance is still pending.
+
+### Advanced administrative calculation authority
+
+Advanced point-surface, closed-mesh and reconstructed-estimate calculations additionally require `X-Viewer-Admin-Authorization: Bearer <workspace token>`. The workspace token must be live, have explicit `viewer.processing.write`, and match the `ops` Viewer session's person. An `ops` audience alone, a client Viewer token, or workspace read access is insufficient for these advanced methods. `serverCalculations` retains this advanced meaning; it must not be used as the sole ordinary-raster gate. The separate administrative token is never stored in a measurement document or returned with a result. Advanced job authority is checked for submission, retrieval, cancellation, and worker execution. Administrators decide whether to grant processing authority to another staff member; general viewing access does not imply it. Supplying an invalid explicit admin header fails closed rather than silently ignoring it.
 
 The isolated model tab does **not** receive this workspace token. Its already registered random review-controller BroadcastChannel carries narrowly typed measurement requests to the workspace. `measurement-calculation-broker.mjs` first verifies `/api/v1/sessions/current` using only the model's Viewer bearer, pins the same staff subject and exact model/version/mode/attempt, and only then attaches the workspace token to fixed calculation endpoints. It rejects arbitrary paths, client sessions, stale/foreign scope, missing write permission, redirects, duplicate channel request IDs, and late completion after sign-out. Fetches are bounded by 15-second timeouts. Routing descriptors persist no credentials.
 
-Broker request: `{version:1,type:'ltds-viewer:measurement-request',requestId:<uuid>,modelId,modelVersionId,viewerToken,operation,payload}`. Operations are `capabilities` with `{}`, `create` with `{measurementId,request}`, `list` with `{measurementId}`, and `status`/`cancel` with `{measurementId,jobId}`. Responses are correlated `ltds-viewer:measurement-response` messages containing the exact model/version/request ID and either `ok:true,result` or `ok:false,code,status`. A closed/unavailable workspace cannot broker calculations; ordinary personal measurement tools remain independent.
+Broker request: `{version:1,type:'ltds-viewer:measurement-request',requestId:<uuid>,modelId,modelVersionId,viewerToken,operation,payload}`. Operations are `capabilities` with `{}`, `create` with `{measurementId,request}`, `list` with `{measurementId}`, and `status`/`cancel` with `{measurementId,jobId}`. Responses are correlated `ltds-viewer:measurement-response` messages containing the exact model/version/request ID and either `ok:true,result` or `ok:false,code,status`. Error transport uses exact allowlisted codes, not arbitrary server messages. A closed/unavailable workspace cannot broker advanced calculations; ordinary personal measurement tools and the direct raster client remain independent.
 
 ## CRUD
 
 All routes use explicit `Authorization: Bearer <viewer token>` and `Cache-Control:no-store`. Ambient Viewer cookies are not accepted by these APIs. They do not enable cross-origin credential sharing.
 
-- `GET /api/v1/measurements?collection=spatial3d|map`: `{measurements, capabilities:{personalPersistence,serverCalculations}}`; omit collection for both.
-- `GET /api/v1/measurements/capabilities`: capability flags without loading documents. Administratively authorized callers additionally receive registered eligible `calculationSources` with asset ID, kind, format, byte size, and explicitly supported `methods`—not server paths or credentials. Only advertised native DSM/DTM, EPT, and OBJ workflows are shown; unavailable reconstruction methods must not be invented by the UI.
+- `GET /api/v1/measurements?collection=spatial3d|map`: `{measurements, capabilities:{personalPersistence,rasterCalculations,serverCalculations}}` for verified personal identities; omit collection for both. Missing capability flags mean unavailable, including legacy temporary responses.
+- `GET /api/v1/measurements/capabilities`: capability flags without loading documents. Verified personal callers receive eligible registered DSM/DTM `calculationSources`; administratively authorized callers can additionally receive EPT/OBJ sources and advanced methods. Source descriptors contain asset ID, kind, format, byte size and explicitly supported `methods`—not server paths or credentials. Only advertised workflows are shown; unavailable reconstruction methods must not be invented by the UI.
 - `GET /api/v1/measurements/:id`: `{measurement}`; another person's ID returns the same 404 as an absent ID.
 - `POST /api/v1/measurements`: full document below. Returns 201, or 200 for the same creation ID and original normalized request. A changed retry returns 409.
 - `PUT /api/v1/measurements/:id`: full document plus current `revision`; returns the next revision. Stale revisions return 409. ID, collection, kind, coordinate reference, and model version cannot change.
@@ -59,11 +69,33 @@ Optional `results` is a bounded JSON object. Browser-supplied results are always
 
 Limits: 2,000 vertices, 256 KiB document, 1,000 live documents per person/version, 180 mutations/minute/person. Names are bounded to 200 characters. Requests reject unknown root fields, nonfinite/out-of-range coordinates, invalid units, deep/oversized result objects, and mismatched IDs. An edit cancels queued/running results for the preceding revision.
 
+### Personal calculation routes
+
+- `POST /api/v1/measurements/:measurementId/calculations`: a bounded request with the saved `revision`, registered `sourceAssetId`, `method`, reference settings and optional explicit source-unit assertion. Ordinary callers can request only `surface-cut-fill`; advanced methods require the separate authority above. Source preflight is followed by an access/revision recheck before enqueue.
+- `GET /api/v1/measurements/:measurementId/calculations`: at most twenty retained jobs, filtered to owned raster work unless advanced authority is present.
+- `GET /api/v1/measurements/:measurementId/calculations/:jobId`: owned, authorized job status/result.
+- `DELETE /api/v1/measurements/:measurementId/calculations/:jobId`: cancel owned, authorized queued/running work.
+
+Public job representations include safe `method` and `parameters` (revision, method, source asset ID, reference and source-unit assertion) for exact resume matching. They exclude source paths, raw bearers and authority hashes. Global queue/resource bounds and worker revocation checks apply to ordinary jobs as well as advanced jobs; personal measurement permission is not an unbounded compute grant.
+
+### Temporary/public calculation routes
+
+The separate `/api/v1/measurements/temporary` router accepts an explicit live Viewer bearer or existing signed task/project-share asset bearer, never ambient cookies. Access must include `view` and `measure`; only native registered DSM/DTM surface jobs are allowed, and shared assets must be published. `X-Measurement-Model-Version` pins the exact displayed immutable version for capabilities and every job operation. The client also checks the capability response version and fences late responses after scope changes.
+
+- `GET /temporary/capabilities` beneath the measurement API: temporary raster source/capability discovery with `personalPersistence:false`, `rasterCalculations`, `temporaryCalculations:true`, `serverCalculations:false` and `modelVersionId`.
+- `POST /temporary/calculations`: `{measurement,request}`; validates bounded temporary polygon geometry, registered source and calculation settings. No private measurement row is created.
+- `GET /temporary/calculations?measurementId=<uuid>`: scoped jobs for that temporary measurement, not a cross-measurement top-twenty list.
+- `GET` or `DELETE /temporary/calculations/:jobId`: read or cancel work in the same grant/page/version scope.
+
+Every non-capability operation includes `X-Measurement-Page`, a random 256-bit base64url handle created in memory once per page. The server stores its hash. Refresh creates a new handle, so old jobs and temporary measurement geometry cannot be restored through the new page. Geometry hashes canonically order CRS/vertical-unit values; incidental JSON property order cannot cause a false mismatch. Same-page resume requires matching geometry and parameters.
+
+Job retention expires at the earlier of fifteen minutes or grant expiry. Refresh/close stops observation but does not assert instant server cancellation; expired work loses authority and rows are pruned through the worker/API lifecycle. Private and temporary lanes share the global twenty queued/running-job ceiling and heavy-job admission checks. At most forty temporary rows are retained per grant/version scope, with additional submission rate limits. Public capabilities never expose arbitrary source paths, advanced jobs or another page's results.
+
 ## Administrative model-tab interface
 
 `measurement-admin-client.mjs` serializes correlated requests over the registered model controller channel, with finite timeouts and cancellation on client disposal. `measurement-admin-dialog.mjs` opens only after administrative capability verification. It lists recent jobs, submits an explicit source/method, refreshes progress, supports cancellation, and displays actual result warnings and coverage. Closing the dialog stops polling and releases its preview; it does not silently cancel an already accepted server job.
 
-- Native raster surface calculation accepts a registered DSM/DTM source plus the selected reference definition. A source-elevation meter assertion is explicit when metadata is missing.
+- Native raster surface calculation accepts a registered DSM/DTM source plus the selected reference definition. Known encoded vertical units are converted to metres. When metadata is missing, a source-elevation metre assertion is explicit and marked `requester-declared` for normal calculations, or `administrator-declared` with separately verified administrative authority. Neither means the source units were independently verified; do not assert metres when unknown.
 - Point-surface calculation accepts the registered EPT source, an explicit grid cell size equivalent to 0.001–100 meters, all/ground classification filter, and the reference definition. No automatic coarsening is hidden in the UI.
 - Closed-mesh calculation accepts a registered OBJ source, explicit projected/local-ENU frame, a selected-object seed, and lower/upper elevations. Open or cropped geometry is not automatically sealed.
 - Reconstructed estimate is shown only when the server advertises the verified native reconstruction runtime for an eligible OBJ/EPT source. The administrator must explicitly acknowledge inferred geometry, choose depth 6–9, provide normal-neighborhood radius and observation-support distance (positive and no greater than 100 meters), and verify the seed and vertical selection. OBJ requires a coordinate-frame declaration; EPT requires a meter-elevation assertion and all/ground filter. No inferred shell is labeled an observed solid-material volume.
@@ -74,8 +106,8 @@ Base elevation, offset, grid size, seed elevation, and vertical bounds use the s
 
 ## Verification
 
-`test/measurement-private-api.test.js` covers person/audience isolation, renewal, stale versions, public/cookie-only/expired/revoked/denied sessions, default-denied legacy client identities, retry-safe create/delete, revision conflicts, full-precision values, immutable record identity, bounds, forged identity, browser result provenance, cancelled stale jobs, and server-job denial for clients even with an unrelated staff capability.
+`test/measurement-private-api.test.js` covers person/audience isolation, renewal, stale versions, public/cookie-only/expired/revoked/denied sessions, default-denied legacy client identities, retry-safe create/delete, revision conflicts, full-precision values, immutable record identity, bounds, forged identity, browser result provenance and cancelled stale jobs. Current calculation API/worker tests additionally exercise personal raster authority while retaining advanced-method denial and unrelated-staff-capability rejection. Helper/client tests cover exact resume matching, cancellation, stale scope and safe errors. These are test responsibilities, not a claim that the final current tree has passed its release gate; see the dated working QA record.
 
-Migration 32 creates private records and calculation jobs. Existing runtime/CI schema assertions are updated to 32; no existing model geometry is rewritten. Separate integration acceptance is still required for Operations' real client identity and renewal contract.
+Migration 32 introduced private records and calculation jobs; migration 33 adds the separate `ephemeral_measurement_jobs` table. Neither rewrites existing model geometry. The final current-tree full-suite gate remains pending, including schema/lifecycle acceptance. Separate integration acceptance is still required for Operations' real client identity and renewal contract.
 
 The browser store exposes `invalidate()` and `isInvalidated()`. Identity/access invalidation clears private records, statuses and drafts owned by the workspace, aborts outstanding requests, and fences late responses/queued mutations using a generation counter. The workspace must call invalidation when its trusted owner or model-version identity changes. HTTP 401/403 also fails closed. An expired signed-in session cannot silently become a temporary public workspace; explicit authenticated reload is required. Normal token renewal for the same trusted identity remains supported. Lifecycle regression tests cover late writes, late JSON, queued saves, deletion races and token loss.

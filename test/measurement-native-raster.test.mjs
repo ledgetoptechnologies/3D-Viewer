@@ -15,6 +15,8 @@ function image(overrides = {}) {
 test('native source validation rejects CRS, units, point pixels, rotation and oversized codec blocks', () => {
   const request = { coordinateReference: { crs: 'EPSG:32616' } };
   assert.equal(nativeRasterDefinition(image(), request).dx, 1);
+  for(const units of [9002,9003,9999,null,0])assert.throws(() => nativeRasterDefinition(image({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616,ProjLinearUnitsGeoKey:units,VerticalUnitsGeoKey:9001})}),request),{code:'measurement_source_crs_mismatch'},'explicit nonmetric/invalid horizontal units cannot be overridden by UTM EPSG');
+  assert.equal(nativeRasterDefinition(image({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616,VerticalUnitsGeoKey:9001})}),request).dx,1,'UTM supplies meters only when horizontal-unit metadata is absent');
   assert.throws(() => nativeRasterDefinition(image(), { coordinateReference: { crs: 'EPSG:32617' } }), { code: 'measurement_source_crs_mismatch' });
   assert.throws(() => nativeRasterDefinition(image({ getGeoKeys: () => ({ ProjectedCSTypeGeoKey: 32616, VerticalUnitsGeoKey: 9999 }) }), request), { code: 'measurement_source_vertical_units_unsupported' });
   assert.equal(nativeRasterDefinition(image({ getGeoKeys: () => ({ ProjectedCSTypeGeoKey: 32616, VerticalUnitsGeoKey: 9002 }) }), request).verticalFactor, 0.3048);
@@ -33,9 +35,13 @@ test('actual GeoTIFF native windows preserve zero and fractional pixels, source 
   const bytes = Buffer.from(writeArrayBuffer([0, 2, 4, 6], { width: 2, height: 2, ModelPixelScale: [1,1,0], ModelTiepoint: [0,0,0,0,2,0], ProjectedCSTypeGeoKey: 32616, GTModelTypeGeoKey: 1, GTRasterTypeGeoKey: 1 })); fs.writeFileSync(file, bytes);
   const request = { modelVersionId: 'v1', coordinateReference: { crs: 'EPSG:32616' }, sourceVerticalUnit: 'm', source: { id: 'a', kind: 'dsm', byteSize: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }, vertices: [[0,0,0],[2,0,0],[2,2,0],[0,2,0]], reference: { type: 'custom', elevationM: 0 } };
   const result = await calculateNativeRaster(file, request, { windowSize: 1 });
-  const definition = await preflightNativeRaster(file, request); assert.equal(definition.verticalUnitBasis, 'administrator-declared');
+  const definition = await preflightNativeRaster(file, request); assert.equal(definition.verticalUnitBasis, 'requester-declared');
   await assert.rejects(preflightNativeRaster(file, { ...request, sourceVerticalUnit: null }), { code: 'measurement_source_vertical_units_required' });
-  assert.equal(result.cutM3, 12); assert.equal(result.coverage, 1); assert.equal(result.sampleCount, 4); assert.equal(result.source.verticalUnitBasis, 'administrator-declared');
+  assert.equal(result.cutM3, 12); assert.equal(result.coverage, 1); assert.equal(result.sampleCount, 4); assert.equal(result.source.verticalUnitBasis, 'requester-declared');
+  assert.match(result.warnings.join(' '),/by the requester.*not encoded.*independently verified/);assert.doesNotMatch(result.warnings.join(' '),/administrator/);
+  const clientRequest={...request,authority:{scope:'personal-raster',audience:'client',subject:'client-one'}};
+  const clientResult=await calculateNativeRaster(file,clientRequest,{windowSize:1});assert.equal(clientResult.cutM3,12);assert.equal(clientResult.source.verticalUnitBasis,'requester-declared');
+  const adminResult=await calculateNativeRaster(file,{...request,authority:{adminHash:'separately-validated-admin'}},{windowSize:1});assert.equal(adminResult.source.verticalUnitBasis,'administrator-declared');assert.match(adminResult.warnings.join(' '),/requesting administrator/);
   await assert.rejects(calculateNativeRaster(file, request, { maxCells: 3 }), { code: 'measurement_limit' });
   await assert.rejects(calculateNativeRaster(file, { ...request, source: { ...request.source, sha256: '0'.repeat(64) } }), { code: 'measurement_source_changed' });
   const map={...request,collection:'map',vertices:[[.25,.25,0],[1.75,.25,0],[1.75,1.75,0],[.25,1.75,0]],reference:{type:'boundary-triangulated'}};

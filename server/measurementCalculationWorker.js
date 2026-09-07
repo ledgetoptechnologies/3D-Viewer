@@ -5,9 +5,12 @@ const os = require('node:os');
 const { fork } = require('node:child_process');
 const { MeasurementCalculationRepository } = require('./measurementCalculationRepository');
 function authorizationLive(request, repository, processing) {
-  const viewer = repository.getViewerSessionByHash(request.authority?.viewerHash), admin = processing.getAdminSessionByHash(request.authority?.adminHash);
+  const viewer = request.authority?.viewerHash ? repository.getViewerSessionByHash(request.authority.viewerHash) : null, admin = request.authority?.adminHash ? processing.getAdminSessionByHash(request.authority.adminHash) : null;
   const model = viewer && repository.getModel(viewer.modelId), version = viewer && repository.getModelVersion(viewer.modelId, viewer.modelVersionId)?.activeVersion;
-  return Boolean(repository.viewerSessionLive(viewer) && version?.status === 'ready' && (viewer.sessionMode === 'review' || (model?.status === 'ready' && model.activeVersion?.id === viewer.modelVersionId)) && viewer.audience === 'ops' && viewer.permissions?.measure === true && viewer.permissions?.view === true && viewer.modelId === request.modelId && viewer.modelVersionId === request.modelVersionId && viewer.subject === request.authority?.subject && processing.adminSessionLive(admin) && admin.subject === viewer.subject && admin.permissions?.includes('viewer.processing.write'));
+  const live=repository.viewerSessionLive(viewer) && version?.status === 'ready' && (viewer.sessionMode === 'review' || (model?.status === 'ready' && model.activeVersion?.id === viewer.modelVersionId)) && viewer.permissions?.measure === true && viewer.permissions?.view === true && viewer.modelId === request.modelId && viewer.modelVersionId === request.modelVersionId && viewer.subject === request.authority?.subject;
+  if(!live)return false;
+  if(request.authority?.scope==='personal-raster')return Boolean(request.method==='surface-cut-fill'&&['dsm','dtm'].includes(request.source?.kind)&&['ops','client'].includes(viewer.audience)&&viewer.audience===request.authority.audience&&(viewer.audience==='ops'||viewer.permissions.personalMeasurements===true));
+  return Boolean(viewer.audience === 'ops' && processing.adminSessionLive(admin) && admin.subject === viewer.subject && admin.permissions?.includes('viewer.processing.write'));
 }
 async function childCalculation(absolutePath, request, { config, isLive, sourceFiles, forkProcess = fork }) {
   const scratchRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'viewer-measurement-job-'));
@@ -37,7 +40,7 @@ async function childCalculation(absolutePath, request, { config, isLive, sourceF
 async function processOneMeasurementCalculation({ repository, processing, storage, config, runCalculation = childCalculation }, owner) {
   if (config.measurementCalculationsEnabled === false) return false;
   const jobs = new MeasurementCalculationRepository(repository.database), job = jobs.claim(owner);
-  if (!job) return false;
+  if (!job) return require('./ephemeralMeasurementWorker').processOneEphemeralMeasurement({repository,processing,storage,config,runCalculation},owner);
   try {
     const request = job.request;
     if (!authorizationLive(request, repository, processing)) throw Object.assign(new Error('authorization lost'), { code: 'measurement_authorization_lost' });

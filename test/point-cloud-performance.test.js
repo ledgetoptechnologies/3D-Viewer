@@ -226,3 +226,37 @@ test('empty scenes, sustained overload, and explicit lower targets still constra
   for (let i = 0; i < 3000; i++) { time += 40; c.sample(time, { visiblePoints: c.state.live }); }
   assert.equal(c.state.live, 500_000);
 });
+
+test('settled underfilled additive frontier probes enough budget for real blocked detail then stops', () => {
+  const c=createAdaptivePointBudget();frames(c,100,200);let time=20_000;
+  for(let i=0;i<36000;i++){
+    const fits=c.state.live>=275000;
+    c.sample(time+=1000/60,{visiblePoints:fits?275000:100000,demand:{requiredPoints:fits?0:275000,drawnPoints:fits?275000:100000,pending:false}});
+  }
+  assert.equal(c.state.live,287500,'one bounded 15% probe admits the next 175k node after the 100k ancestor');
+  assert.equal(c.state.target,10000000);
+});
+
+test('demand-aware probing excludes empty/loading/no-demand scenes and unreachable targets', () => {
+  for(const demand of [
+    {requiredPoints:275000,drawnPoints:0,pending:false},
+    {requiredPoints:275000,drawnPoints:100000,pending:true},
+    {requiredPoints:0,drawnPoints:250000,pending:false},
+    {requiredPoints:11000000,drawnPoints:100000,pending:false},
+  ]){
+    const c=createAdaptivePointBudget();frames(c,100,200);let time=20000;
+    for(let i=0;i<4000;i++)c.sample(time+=16.667,{visiblePoints:250000,demand});
+    assert.equal(c.state.live,250000);
+  }
+});
+
+test('underfilled demand probe retains overload rollback and bounded retry backoff', () => {
+  const c=createAdaptivePointBudget();frames(c,100,200);let time=20000,previous=c.state.live;const probes=[];
+  while(time<200000){
+    const fits=c.state.live>=275000;
+    c.sample(time+=fits?100:40,{visiblePoints:fits?275000:100000,demand:{requiredPoints:fits?0:275000,drawnPoints:fits?275000:100000,pending:false}});
+    if(c.state.live>previous)probes.push(time);previous=c.state.live;
+  }
+  assert.equal(c.state.live,250000);assert.ok(probes.length>=4&&probes.length<=7);
+  assert.ok(probes.at(-1)-probes.at(-2)>=60000);
+});

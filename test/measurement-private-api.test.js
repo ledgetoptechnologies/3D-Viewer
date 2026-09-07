@@ -96,7 +96,7 @@ test('validation rejects forged identity, oversized or nonfinite coordinates and
   assert.equal(result.results.volumeM3, 1.23456789); assert.equal(result.results.calculationOrigin, 'browser'); assert.equal(result.results.verified, false);
 });
 
-test('server-job authority needs a matching live workspace write permission, never ordinary signed-in access', async (t) => {
+test('advanced-job authority needs a matching live workspace write permission, never ordinary signed-in access', async (t) => {
   const f = await fixture(t), principal = { ...f.principal, audience: 'ops' }, adminToken = crypto.randomBytes(32).toString('base64url');
   const req = { get: (header) => header === 'X-Viewer-Admin-Authorization' ? `Bearer ${adminToken}` : undefined };
   assert.equal(measurementAdmin(req, principal, f.database), null);
@@ -120,7 +120,7 @@ test('edits cancel obsolete jobs and delete clears saved result geometry', async
   assert.equal(f.database.prepare('SELECT document_json FROM private_measurements WHERE id=?').get(doc.id).document_json, '{}');
 });
 
-test('client model access cannot launch, inspect or cancel server calculation jobs even with a staff token', async (t) => {
+test('a client cannot use a staff-token header to launch, inspect or cancel calculation jobs', async (t) => {
   const f = await fixture(t), doc = document(), bearer = f.token();
   await f.request(bearer, '', 'POST', doc);
   const adminToken = crypto.randomBytes(32).toString('base64url');

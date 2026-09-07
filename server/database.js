@@ -1965,6 +1965,21 @@ const MIGRATIONS = [
       CREATE INDEX measurement_calculation_jobs_status_idx ON measurement_calculation_jobs(status,created_at);
     `,
   },
+  {
+    version: 33,
+    name: 'ephemeral_raster_measurements',
+    sql: `
+      CREATE TABLE ephemeral_measurement_jobs (
+        id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, page_hash TEXT NOT NULL,
+        measurement_id TEXT NOT NULL, geometry_hash TEXT NOT NULL,
+        request_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','running','complete','failed','cancelled')),
+        lease_owner TEXT, lease_token TEXT, lease_expires_at TEXT,
+        result_json TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL
+      );
+      CREATE INDEX ephemeral_measurement_jobs_scope_idx ON ephemeral_measurement_jobs(scope_key,page_hash,created_at);
+      CREATE INDEX ephemeral_measurement_jobs_status_idx ON ephemeral_measurement_jobs(status,created_at);
+    `,
+  },
 ];
 
 function applyMigrations(database) {

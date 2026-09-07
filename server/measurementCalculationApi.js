@@ -44,13 +44,17 @@ function createMeasurementCalculationApi({ repository, measurements, getPrincipa
   });
   const gate = (req) => {
     const principal = getPrincipal(req), authority = principal && admin(req, principal);
-    if (!authority) fail('measurement_admin_required', 403);
+    if (!principal) fail('personal_measurements_unavailable', 403);
+    if (req.get('X-Viewer-Admin-Authorization') && !authority) fail('measurement_admin_required', 403);
     const measurement = measurements.get(principal, req.params.measurementId);
     if (!measurement) fail('measurement_not_found', 404);
     return { principal, authority, measurement };
   };
+  // Legacy/advanced jobs remain staff-only even when they share an owned polygon.
+  const mayReadJob = (job, authority) => Boolean(job && (authority || job.method === 'surface-cut-fill'));
   router.post('/:measurementId/calculations', async (req, res, next) => { try {
-    const { principal, measurement } = gate(req);
+    const { principal, authority, measurement } = gate(req);
+    if (req.body?.method !== 'surface-cut-fill' && !authority) fail('measurement_admin_required', 403);
     if (config.measurementCalculationsEnabled === false) fail('measurement_calculations_disabled', 503);
     if(req.body?.method==='reconstructed-estimate'&&!reconstructionAvailable(config))fail('measurement_reconstruction_unavailable',503);
     const version = repository.getModelVersion(principal.modelId, principal.modelVersionId)?.activeVersion;
@@ -68,21 +72,21 @@ function createMeasurementCalculationApi({ repository, measurements, getPrincipa
     }
     // Keep only server-side capability hashes for worker revalidation, never raw
     // bearer values. They are omitted from every public job representation.
-    request.authority = { viewerHash: auth.hashToken(String(req.get('authorization')).replace(/^Bearer\s+/i, '')), adminHash: auth.hashToken(String(req.get('X-Viewer-Admin-Authorization')).replace(/^Bearer\s+/i, '')), subject: principal.subject };
+    request.authority = { viewerHash: auth.hashToken(String(req.get('authorization')).replace(/^Bearer\s+/i, '')), subject: principal.subject, audience: principal.audience, ...(authority ? { adminHash: auth.hashToken(String(req.get('X-Viewer-Admin-Authorization')).replace(/^Bearer\s+/i, '')) } : { scope: 'personal-raster' }) };
     res.status(202).json({ calculation: jobs.enqueue(measurement, request) });
   } catch (e) { next(e); } });
   router.get('/:measurementId/calculations/:jobId', (req, res, next) => { try {
-    const { measurement } = gate(req), calculation = jobs.get(measurement.id, req.params.jobId);
-    if (!calculation) fail('measurement_calculation_not_found', 404);
+    const { measurement, authority } = gate(req), calculation = jobs.get(measurement.id, req.params.jobId);
+    if (!mayReadJob(calculation, authority)) fail('measurement_calculation_not_found', 404);
     res.json({ calculation });
   } catch (e) { next(e); } });
   router.get('/:measurementId/calculations', (req, res, next) => { try {
-    const { measurement } = gate(req);
-    res.json({ calculations: jobs.list(measurement.id) });
+    const { measurement, authority } = gate(req);
+    res.json({ calculations: jobs.list(measurement.id).filter(job=>mayReadJob(job,authority)) });
   } catch (e) { next(e); } });
   router.delete('/:measurementId/calculations/:jobId', (req, res, next) => { try {
-    const { measurement } = gate(req);
-    if (!jobs.get(measurement.id, req.params.jobId)) fail('measurement_calculation_not_found', 404);
+    const { measurement, authority } = gate(req);
+    if (!mayReadJob(jobs.get(measurement.id, req.params.jobId),authority)) fail('measurement_calculation_not_found', 404);
     jobs.cancel(measurement.id, req.params.jobId); res.status(204).end();
   } catch (e) { next(e); } });
   return router;

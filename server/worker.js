@@ -31,6 +31,7 @@ async function runMaintenance(){maintenanceActive=true;try{
   await maintenanceStep('processing-log-prune',()=>processing.pruneLogs(config.processingLogRetentionDays));
   await maintenanceStep('operation-receipt-prune',()=>processing.pruneSubjectOperationReceipts(7));
   await maintenanceStep('abuse-window-prune',()=>repository.pruneAbuseWindows());
+  await maintenanceStep('temporary-measurement-prune',()=>new (require('./ephemeralMeasurementRepository').EphemeralMeasurementRepository)(db).prune());
 }finally{maintenanceActive=false;}}
 const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));async function lane(name,run){while(!stopped){try{if(!await run())await delay(2000);}catch(error){console.error(`${name} lane error:`,error.code||error.name||'worker_error');await delay(2000);}}}
 const initialHeartbeat=heartbeat();console.log(`Processing worker started: heartbeat=${initialHeartbeat?'recorded':'pending'} local-derivatives=${config.localDerivativesEnabled?'enabled':'disabled'} mesh-derivatives=${config.meshDerivativesEnabled?'enabled':'disabled'} lanes=dataset-operation,processing,provider-health,derivative,event,import-cleanup`);maintenance();const heartbeatTimer=setInterval(heartbeat,10000),maintenanceTimer=setInterval(maintenance,3600000);heartbeatTimer.unref?.();maintenanceTimer.unref?.();

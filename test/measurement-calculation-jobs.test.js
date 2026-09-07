@@ -52,14 +52,14 @@ test('worker rechecks both authorities and source identity, records only current
   assert.equal(authorizationLive(f.request, f.repository, f.processing), false);
   await processOneMeasurementCalculation(deps, 'worker'); assert.equal(calls, 1); assert.equal(f.jobs.get(f.measurement.id, next.id).errorCode, 'measurement_authorization_lost');
 });
-test('API rejects ordinary access, clients, wrong admin and client paths; owner lists results', async t => {
+test('API allows owned raster measurements without general processing authority and retains advanced admin checks', async t => {
   const f = fixture(t), app = express(); let preflightCalls = 0, preflightError;
   app.use(express.json()); app.use('/measurements', createMeasurementApi(f.repository, { preflightRaster: async () => { preflightCalls++; if (preflightError) throw Object.assign(new Error(preflightError), { code: preflightError }); } }));
   const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); }); t.after(() => new Promise(resolve => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`;
   const call = (extra = {}, body = f.body, method = 'POST') => fetch(url, { method, headers: { Authorization: `Bearer ${f.viewerToken}`, 'Content-Type': 'application/json', ...extra }, ...(method === 'GET' ? {} : { body: JSON.stringify(body) }) });
-  assert.equal((await call()).status, 403);
-  assert.equal(preflightCalls, 0, 'ordinary viewer access cannot inspect native headers');
+  assert.equal((await call({}, {...f.body,method:'closed-mesh'})).status, 403);
+  assert.equal(preflightCalls, 0, 'ordinary viewer access cannot start advanced processing');
   const headers = { 'X-Viewer-Admin-Authorization': `Bearer ${f.adminToken}` };
   assert.equal((await call(headers, { ...f.body, absolutePath: '/etc/passwd' })).status, 400);
   preflightError = 'measurement_source_vertical_units_required';
@@ -98,4 +98,48 @@ test('reconstruction requires explicit inferred geometry acknowledgement and imm
  const request=validateCalculationRequest(body,f.measurement,version);assert.equal(request.collection,'map');assert.equal(request.source.sha256,asset.sha256);assert.equal(request.reconstruction.acknowledgeInferredGeometry,true);
  assert.throws(()=>validateCalculationRequest({...body,reconstruction:{...body.reconstruction,acknowledgeInferredGeometry:false}},f.measurement,version),{code:'measurement_reconstruction_settings_invalid'});
  assert.throws(()=>validateCalculationRequest({...body,reconstruction:{...body.reconstruction,depth:10}},f.measurement,version),{code:'measurement_reconstruction_settings_invalid'});
+});
+
+test('client own raster jobs use scoped Viewer authority; cross-person and advanced paths remain closed',async t=>{
+ const f=fixture(t),client={...f.principal,audience:'client',subject:'client-one'},other={...client,subject:'client-two'};
+ const own=f.measurements.create(client,{...f.document,id:crypto.randomUUID()}).measurement;
+ const foreign=f.measurements.create(other,{...f.document,id:crypto.randomUUID()}).measurement;
+ const token=crypto.randomBytes(32).toString('base64url');
+ f.repository.createViewerSession({...client,tokenHash:auth.hashToken(token),permissions:{view:true,measure:true,personalMeasurements:true},expiresAt:new Date(Date.now()+3600000).toISOString()});
+ let preflights=0;const app=express();app.use(express.json());app.use('/measurements',createMeasurementApi(f.repository,{preflightRaster:async()=>{preflights++;}}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const base=`http://127.0.0.1:${server.address().port}/measurements`,headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json'};
+ const call=(path,method='GET',body)=>fetch(base+path,{method,headers,...(body?{body:JSON.stringify(body)}:{})});
+ const caps=await(await call('/capabilities')).json();assert.equal(caps.capabilities.rasterCalculations,true);assert.equal(caps.capabilities.serverCalculations,false);assert.deepEqual(caps.calculationMethods,['surface-cut-fill']);
+ for(const method of ['closed-mesh','point-surface-cut-fill','reconstructed-estimate'])assert.equal((await call(`/${own.id}/calculations`,'POST',{...f.body,method})).status,403);
+ assert.equal(preflights,0);assert.equal((await call(`/${foreign.id}/calculations`,'POST',f.body)).status,404);
+ const response=await call(`/${own.id}/calculations`,'POST',f.body);assert.equal(response.status,202);const queued=(await response.json()).calculation;
+ assert.equal(queued.method,'surface-cut-fill');assert.equal(queued.request,undefined);assert.equal(queued.authority,undefined);
+ assert.equal((await call(`/${foreign.id}/calculations/${queued.id}`)).status,404);
+ const internal=JSON.parse(f.database.prepare('SELECT request_json FROM measurement_calculation_jobs WHERE id=?').get(queued.id).request_json);
+ assert.equal(internal.authority.scope,'personal-raster');assert.equal(internal.authority.audience,'client');assert.equal(internal.authority.adminHash,undefined);
+ assert.equal(authorizationLive(internal,f.repository,f.processing),true);
+ assert.equal(authorizationLive({...internal,method:'closed-mesh'},f.repository,f.processing),false);
+ assert.equal(authorizationLive({...internal,source:{...internal.source,kind:'obj'}},f.repository,f.processing),false);
+ assert.equal(authorizationLive({...internal,authority:{...internal.authority,subject:'client-two'}},f.repository,f.processing),false);
+ assert.equal(authorizationLive({...internal,modelVersionId:crypto.randomUUID()},f.repository,f.processing),false);
+ assert.equal((await call(`/${own.id}/calculations/${queued.id}`,'DELETE')).status,204);
+ // Method-only filtering is intentional: even a legacy advanced job on an
+ // owned measurement cannot become accessible without staff authority.
+ const advanced=f.jobs.enqueue(own,{...internal,method:'closed-mesh'});
+ assert.equal((await call(`/${own.id}/calculations/${advanced.id}`)).status,404);
+ assert.equal((await call(`/${own.id}/calculations/${advanced.id}`,'DELETE')).status,404);
+ const listed=await(await call(`/${own.id}/calculations`)).json();assert.deepEqual(listed.calculations.map(j=>j.id),[queued.id]);
+ f.jobs.cancel(own.id,advanced.id);
+ const workerJob=f.jobs.enqueue(own,internal);
+ await processOneMeasurementCalculation({...f,storage:{resolve:()=>'/trusted/a.tif'},config:{},runCalculation:async(_p,_r,controls)=>{assert.equal(controls.isLive(),true);f.database.prepare('UPDATE viewer_sessions SET revoked_at=? WHERE token_hash=?').run(new Date().toISOString(),auth.hashToken(token));assert.equal(controls.isLive(),false);return{cutM3:20};}},'client-raster');
+ assert.equal(f.jobs.get(own.id,workerJob.id).result,null);assert.equal(f.jobs.get(own.id,workerJob.id).errorCode,'measurement_authorization_lost');
+ assert.equal((await call(`/${own.id}/calculations`)).status,403);
+});
+
+test('scoped raster preflight cannot enqueue after client access revocation',async t=>{
+ const f=fixture(t),app=express();app.use(express.json());app.use('/measurements',createMeasurementApi(f.repository,{preflightRaster:async()=>{f.database.prepare('UPDATE viewer_sessions SET revoked_at=?').run(new Date().toISOString());}}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const response=await fetch(`http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`,{method:'POST',headers:{Authorization:`Bearer ${f.viewerToken}`,'Content-Type':'application/json'},body:JSON.stringify(f.body)});
+ assert.equal(response.status,403);assert.equal(f.jobs.list(f.measurement.id).length,0);
 });

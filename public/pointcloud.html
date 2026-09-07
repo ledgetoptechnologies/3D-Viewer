@@ -25,7 +25,8 @@
       color: #eee; background: rgba(10,10,12,0.88); font-size: 12px;
       pointer-events: none;
     }
-    #pc-diagnostics { position: absolute; top: 10px; right: 12px; z-index: 50; max-width: min(470px, 80%); }
+    /* Leave the parent viewer's reset/fullscreen controls unobstructed. */
+    #pc-diagnostics { position: absolute; top: 56px; right: 12px; z-index: 50; max-width: min(470px, 80%); }
     #pc-diagnostics button { float: right; color: #ddd; background: rgba(10,10,12,.88); border: 1px solid #555; border-radius: 6px; padding: 5px 9px; cursor: pointer; }
     #pc-diagnostics button[aria-pressed="true"] { border-color: var(--brand-orange); }
     #pc-diagnostics button:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
@@ -278,6 +279,7 @@
         active: !document.hidden && viewer.renderArea.clientWidth > 0 && !!pc,
         minimum: Math.max(250_000, rootPoints),
         visiblePoints: Number(pc?.numVisiblePoints) || 0,
+        demand: pc?.ltdsBudgetDemand || null,
       });
       fpsEMA = adaptiveBudget.fps();
       if (prior !== budgetState.live) viewer.setPointBudget(budgetState.live);

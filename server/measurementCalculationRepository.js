@@ -8,7 +8,7 @@ class MeasurementCalculationRepository {
     return this.transaction(() => {
       const current = this.database.prepare('SELECT revision FROM private_measurements WHERE id=? AND deleted_at IS NULL').get(measurement.id);
       if (current?.revision !== measurement.revision) throw problem('measurement_revision_conflict', 409);
-      const active = this.database.prepare("SELECT count(*) n FROM measurement_calculation_jobs WHERE status IN ('queued','running')").get().n;
+      const active = this.database.prepare("SELECT (SELECT count(*) FROM measurement_calculation_jobs WHERE status IN ('queued','running'))+(SELECT count(*) FROM ephemeral_measurement_jobs WHERE status IN ('queued','running') AND expires_at>?) n").get(new Date().toISOString()).n;
       if (active >= 20) throw problem('measurement_queue_full', 429);
       const prior = this.database.prepare("SELECT * FROM measurement_calculation_jobs WHERE measurement_id=? AND revision=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1").get(measurement.id, measurement.revision);
       if (prior) throw problem('measurement_calculation_already_active', 409);
@@ -23,7 +23,10 @@ class MeasurementCalculationRepository {
   }
   get(measurementId, id) {
     const row = this.database.prepare('SELECT j.* FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.id=? AND j.measurement_id=? AND m.deleted_at IS NULL').get(id, measurementId);
-    return row ? { id: row.id, measurementId: row.measurement_id, revision: row.revision, status: row.status, result: row.result_json ? JSON.parse(row.result_json) : null, errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at } : null;
+    if(!row)return null;
+    const request=JSON.parse(row.request_json),reference=request.reference||{};
+    const parameters={revision:row.revision,method:request.method,sourceAssetId:request.source?.id,reference:{type:reference.type,...(Number.isFinite(reference.elevationM)?{elevationM:reference.elevationM}:{}),...(Number.isFinite(reference.offsetM)?{offsetM:reference.offsetM}:{})},sourceVerticalUnit:request.sourceVerticalUnit||null};
+    return { id: row.id, measurementId: row.measurement_id, revision: row.revision, method: request.method, parameters, status: row.status, result: row.result_json ? JSON.parse(row.result_json) : null, errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at };
   }
   list(measurementId) {
     return this.database.prepare('SELECT j.id FROM measurement_calculation_jobs j JOIN private_measurements m ON m.id=j.measurement_id WHERE j.measurement_id=? AND m.deleted_at IS NULL ORDER BY j.created_at DESC,j.id DESC LIMIT 20').all(measurementId).map(row => this.get(measurementId, row.id));
@@ -34,6 +37,7 @@ class MeasurementCalculationRepository {
   claim(owner, at = Date.now()) {
     return this.transaction(() => {
       const time = new Date(at).toISOString();
+      if(this.database.prepare("SELECT 1 FROM ephemeral_measurement_jobs WHERE status='running' AND lease_expires_at>? AND expires_at>? LIMIT 1").get(time,time))return null;
       // Do not automatically replay a heavy job after process death. Its source
       // and authorization must be explicitly submitted again by the owner.
       this.database.prepare("UPDATE measurement_calculation_jobs SET request_json=json_remove(request_json,'$.authority'),status='failed',error_code='worker_interrupted',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE status='running' AND lease_expires_at<=?").run(time, time);

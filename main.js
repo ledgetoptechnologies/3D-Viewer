@@ -6,6 +6,7 @@ import L from 'leaflet';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
+import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
 import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-vertical-units.mjs';
@@ -2368,6 +2369,10 @@ function installMeasurementWorkspace() {
     calculateSurface:calculateSavedMeasurementSurface,
     resolveDisplayVertices:resolveMeasurementDisplayVertices,
     adminRequest:reviewSessionChannel ? measurementAdminClient.request : undefined,
+    surfaceRequest:createMeasurementSurfaceClient({
+      token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):measurementAssetBearer(DSM_URL||DTM_URL||TILES_URL||EPT_URL||ORTHO_URL),
+      context:()=>({modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,audience:activeViewerSession?.audience,subject:activeViewerSession?.subject,temporary:VIEW_MODE!=='session'||(activeViewerSession?.audience!=='ops'&&activeViewerSession?.permissions?.personalMeasurements!==true)}),
+    }),
     onAccessLost:measurementAccessLost,
   });
   viewerProductDownloads?.destroy();
