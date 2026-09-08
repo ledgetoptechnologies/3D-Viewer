@@ -3,10 +3,10 @@ import {profileLine, profileStation, exportNativeProfile, validateNativeProfile}
 
 export function mountNativeProfile(host, {record, getRecord = () => record, units = 'imperial', calculate}) {
   host.innerHTML = `<section class="surface-section native-profile"><div class="surface-section-header"><h3>Elevation cross-section</h3><p>Inspect the original elevation cells along a line through this polygon, using the same reference base as its saved volume.</p></div>
-  <div class="section-controls"><label>Direction <output data-direction>0° · east → west axis</output><input data-azimuth type="range" min="0" max="179" value="0" aria-label="Native section direction"></label><label>Position <output data-position>Center</output><input data-position-input type="range" min="-100" max="100" value="0" aria-label="Native section position"></label><div class="profile-actions"><button data-update>Update profile on server</button><button data-cancel hidden>Cancel</button></div></div>
+  <div class="section-controls"><label>Direction <output data-direction>0° · east → west axis</output><input data-azimuth type="range" min="0" max="179" value="0" aria-label="Native section direction"></label><label>Position <output data-position>Center</output><input data-position-input type="range" min="-100" max="100" value="0" aria-label="Native section position"></label><div class="profile-actions"><button data-update>Update profile</button><button data-cancel hidden>Cancel</button></div></div>
   <p data-profile-status role="status" class="section-provenance">Choose a section, then update it. The saved polygon and volume will not change.</p>
   <div class="section-charts"><canvas data-profile-plan width="300" height="300" aria-label="Polygon boundary and selected section line, viewed from above"></canvas><canvas data-profile-chart width="850" height="300" tabindex="0" aria-label="Native elevation section. Use left and right arrows to inspect cells; Home and End go to the endpoints."></canvas></div>
-  <div class="section-readout" data-profile-readout role="status">The profile will appear after the server has read this section.</div>
+  <div class="section-readout" data-profile-readout role="status">Update the profile to see the elevations along this section.</div>
   <p class="section-provenance" data-profile-provenance>Orange: above base · Blue: below base · Gray: reference base. Gaps are missing data, not zero elevation. Section area is not volume.</p>
   <div class="profile-export"><button data-profile-csv disabled>Export profile CSV</button><button data-profile-png disabled>Save profile PNG</button><span class="hint">Unrounded source values in CSV · vertical datum unverified</span></div></section>`;
   const find = selector => host.querySelector(selector), chart = find('[data-profile-chart]'), plan = find('[data-profile-plan]');
@@ -31,7 +31,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     if (line) { pc.beginPath(); pc.moveTo(...project(line.start)); pc.lineTo(...project(line.end)); pc.strokeStyle = '#f37523'; pc.lineWidth = 2; pc.stroke(); }
     pc.fillStyle = '#bac9d8'; pc.font = '12px system-ui'; pc.fillText('Polygon · north ↑', 14, 20);
     ctx.clearRect(0, 0, chart.width, chart.height); ctx.fillStyle = '#0d141d'; ctx.fillRect(0, 0, chart.width, chart.height); scales = null;
-    if (!result) { ctx.fillStyle = '#adbbcb'; ctx.font = '12px system-ui'; ctx.fillText('Update to read this section on the server.', 16, chart.height/2,chart.width-32); return; }
+    if (!result) { ctx.fillStyle = '#adbbcb'; ctx.font = '12px system-ui'; ctx.fillText('Update the profile to view this section.', 16, chart.height/2,chart.width-32); return; }
     let min = Infinity, max = -Infinity;
     for (const s of result.segments) if (s.status === 'sample') { min = Math.min(min, s.surfaceM, s.baseStartM, s.baseEndM); max = Math.max(max, s.surfaceM, s.baseStartM, s.baseEndM); }
     if (!Number.isFinite(min)) { ctx.fillStyle = '#adbbcb'; ctx.font = '12px system-ui'; ctx.fillText('No valid cells here. Move the section.', 16, chart.height/2,chart.width-32); return; }
@@ -63,7 +63,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   const gapNames = {nodata: 'NoData · elevation missing', 'outside-raster': 'Outside elevation raster', 'outside-selection': 'Outside selected polygon'};
   function inspect(station) {
     inspected = station === null ? null : profileStation(result, station);
-    if (!inspected) readout.textContent = result ? 'Hover the profile, or focus it and use arrow keys to inspect each native cell.' : 'The profile will appear after the server has read this section.';
+    if (!inspected) readout.textContent = result ? 'Hover the profile, or focus it and use arrow keys to inspect each native cell.' : 'Update the profile to see the elevations along this section.';
     else { const p = inspected, s = p.segment; readout.textContent = `Distance ${format(p.station)} · ${s.status === 'sample' ? `Surface ${format(s.surfaceM)} · Base ${format(p.base)} · Δ ${format(p.difference)}` : gapNames[s.status]} · X ${p.x.toFixed(3)}, Y ${p.y.toFixed(3)} (source coordinates, m)`; }
     plot();
   }
@@ -72,7 +72,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     controller?.abort(); generation++; cancelling=false;cancelJob = null; find('[data-cancel]').hidden = true; find('[data-update]').disabled = false; host.removeAttribute('aria-busy'); clearResult();
     const angle = Number(find('[data-azimuth]').value), offset = Number(find('[data-position-input]').value);
     line = profileLine(vertices, angle, offset); find('[data-direction]').textContent = `${angle}° from east`; find('[data-position]').textContent = offset === 0 ? 'Center' : `${offset > 0 ? '+' : ''}${offset}%`;
-    status.textContent = 'Section selected. Update the profile to read these cells. Previously accepted server work is not cancelled.'; inspect(null);
+    status.textContent = 'Section selected. Update the profile to read these elevations. A previous calculation may still be running.'; inspect(null);
   }
   find('[data-azimuth]').oninput = changeLine; find('[data-position-input]').oninput = changeLine;
   chart.onpointermove = event => { if (!result || !scales) return; const bounds = chart.getBoundingClientRect(), x = (event.clientX - bounds.left) / Math.max(1, bounds.width) * chart.width; inspect((x - scales.left) / (scales.right-scales.left) * result.lengthM); };
@@ -101,7 +101,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     const pending = cancelJob, key = generation;
     if (retired || !pending || cancelling) return; cancelling=true;find('[data-cancel]').disabled = true;find('[data-update]').disabled = true;
     try { await pending.cancel(); if (retired || generation !== key) return; controller?.abort(); generation++; cancelJob = null; find('[data-cancel]').hidden = true; find('[data-update]').disabled = false; host.removeAttribute('aria-busy'); status.textContent = 'Cancellation requested. The saved polygon and volume are unchanged.'; }
-    catch (error) { if (!retired && generation === key) { cancelling=false;find('[data-cancel]').disabled = false;find('[data-update]').disabled=false;host.removeAttribute('aria-busy');status.textContent = `Could not cancel the server section. ${error.message} Update the same profile to resume or retrieve its result.`; } }
+    catch (error) { if (!retired && generation === key) { cancelling=false;find('[data-cancel]').disabled = false;find('[data-update]').disabled=false;host.removeAttribute('aria-busy');status.textContent = `Could not cancel the section calculation. ${error.message} Update the same profile to resume or retrieve its result.`; } }
   };
   const links = new Set();
   function download(blob, filename) { if (retired) return; const url = URL.createObjectURL(blob); links.add(url); const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); setTimeout(() => { URL.revokeObjectURL(url); links.delete(url); }, 1000); }

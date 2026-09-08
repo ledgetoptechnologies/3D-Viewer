@@ -18,6 +18,7 @@ test('server stockpile dispatches once and polls the accepted job, preserving na
   assert.deepEqual(f.calls.map(c=>c[0]),['capabilities','list','create','status','status']);
   assert.deepEqual(f.calls[2][1],{measurementId:'polygon',request:{revision:2,method:'surface-cut-fill',sourceAssetId:'dsm-source',reference:{type:'boundary-triangulated',offsetM:0}}});
   assert.deepEqual(output,{...result,calculationJobId:'job'});assert.match(progress.join(' '),/Waiting to calculate.*Calculating your volume/);
+  assert.doesNotMatch(progress.join(' '),/\bserver\b/i);
 });
 test('server reference values are already meters and explicit vertical-unit confirmation is opt-in',async()=>{
   const reference={type:'custom',offsetM:.3048,elevationM:100},f=setup({responses:[job('complete',{result:{...result,reference,source:{...result.source,assetId:'dtm-source',kind:'dtm'}}})]});await f.calculate(record,{...options,reference,confirmMeters:true,sourceKind:'dtm'});

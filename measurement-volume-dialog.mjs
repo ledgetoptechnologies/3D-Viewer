@@ -9,7 +9,7 @@ import './measurement-volume-dialog.css';
 export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,getRecord=()=>record,calculateProfile=null}){
   const unit={imperial:['ft',0.3048],feet:['ft',0.3048],yards:['yd',0.9144],metric:['m',1],centimeters:['cm',0.01]}[units]||['ft',0.3048];
   const dialog=document.createElement('dialog');dialog.className='measurement-volume-dialog surface-inspector';
-  dialog.innerHTML=`<header class="surface-heading"><div><p class="surface-eyebrow">Measurement inspector</p><h2>Measure</h2><p data-name></p></div><button data-close aria-label="Close measurement inspector">Close</button></header><div data-surface-content>
+  dialog.innerHTML=`<header class="surface-heading"><div><p class="surface-eyebrow">Measurement inspector</p><h2>Calculate volume</h2><p data-name></p></div><button data-close aria-label="Close measurement inspector">Close</button></header><div data-surface-content>
   <p class="surface-description">Explore the selected region above and below a reference base. This measures space between surfaces—not solid material inside a car, roof, or hollow object.</p>
   <details class="surface-settings" open><summary>Surface &amp; reference base</summary><div class="surface-settings-grid">
   <label>Elevation surface<select name="source"><option value="auto">Current surface / DSM</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground</option></select></label>
@@ -17,7 +17,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   <label data-custom hidden>Custom elevation (${unit[0]})<input name="elevation" type="number" step="any" value="0"></label><label>Base offset (${unit[0]})<input name="offset" type="number" step="any" value="0"></label></div>
   <label class="surface-confirm"><input name="metres" type="checkbox"><span>If vertical-unit metadata is absent, I confirm source elevations are in meters.</span></label>
   <p class="hint">Boundary points define a sloping base. Choose a custom elevation only when that height is known. Confirm meters only if you have verified the source vertical units. A DTM may remove the pile itself.</p></details>
-  <div class="surface-action-bar"><button data-calculate>Calculate / update</button><button data-cancel-job hidden>Cancel calculation</button><span class="hint">Native surface cells · same selected boundary</span></div><p data-status role="status" data-state="idle">Choose a surface and base, then calculate. No volume has been calculated yet.</p>
+  <div class="surface-action-bar"><button data-calculate>Calculate volume</button><button data-cancel-job hidden>Cancel calculation</button><span class="hint">Original elevation data · your selected outline</span></div><p data-status role="status" data-state="idle">Your polygon area is already available. Choose a surface and base, then calculate volume. No volume has been calculated yet.</p>
   <div data-results class="surface-results" hidden><div class="surface-result"><span>Above base · cut</span><strong data-result="cut">—</strong></div><div class="surface-result"><span>Below base · fill</span><strong data-result="fill">—</strong></div><div class="surface-result"><span>Net volume</span><strong data-result="net">—</strong></div><div class="surface-result"><span>Source coverage</span><strong data-result="coverage">—</strong></div></div>
   <div data-native-profile hidden></div><p data-preview-empty>The isolated surface and reference-base preview will appear after a successful calculation.</p><div data-preview-content hidden>
   <section class="surface-section" data-sampled-section><div class="surface-section-header"><h3>Sampled cross-section preview</h3><p>A narrow corridor through the selected region. Hover or focus the chart and use arrow keys to inspect real retained samples.</p></div>
@@ -27,9 +27,9 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   <details class="region-disclosure"><summary>Explore the isolated region in 3D</summary><div data-region-preview></div></details></div></div>${typeof openSpecialist==='function'?'<details class="surface-specialist"><summary>Specialist methods · staff only</summary><p class="hint">Point-cloud surfaces and object methods use different assumptions. Opening these options does not start a calculation or cancel a running job.</p><p data-specialist-status role="status"></p><div data-specialist-host></div></details>':''}`;
   dialog.querySelector('[data-name]').textContent=record.name;
   if(execution==='server'){
-    dialog.querySelector('[data-calculate]').textContent='Calculate on server';
-    dialog.querySelector('.surface-action-bar .hint').textContent='Calculated on the server · original elevation data';
-    dialog.querySelector('[data-status]').textContent='Choose a surface and base, then calculate on the server. You can close this inspector while it works. Reopen it and calculate with the same settings to resume or retrieve your result.';
+    dialog.querySelector('[data-calculate]').textContent='Calculate volume';
+    dialog.querySelector('.surface-action-bar .hint').textContent='Original elevation data · your selected outline';
+    dialog.querySelector('[data-status]').textContent='Your polygon area is already available. Choose a surface and base, then calculate volume. You can close this inspector while it works. Reopen it and choose Calculate volume with the same settings to retrieve your result.';
   }
   let abort=null,preview=null,regionPreview=null,section=null,selected=null,chartBounds=null,retired=false,closed=false,specialist=null,specialistGeneration=0,nativeProfile=null;
   const status=dialog.querySelector('[data-status]'),canvas=dialog.querySelector('[data-section-chart]'),plan=dialog.querySelector('[data-section-plan]');

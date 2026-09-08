@@ -2,7 +2,7 @@ import {measurementGeometryHash} from './measurement-surface-client.mjs';
 import {surfaceCalculationError} from './measurement-server-surface.mjs';
 import {validateNativeProfile} from './measurement-native-profile.mjs';
 
-const stopped = () => Object.assign(new Error('Stopped watching this section. Accepted server work may still be running; reopen the same section to resume.'), {name: 'AbortError'});
+const stopped = () => Object.assign(new Error('Stopped watching this section. Its calculation may still be running; reopen the same section to resume.'), {name: 'AbortError'});
 const pause = (ms, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) return reject(stopped());
   const abort = () => { clearTimeout(timer); reject(stopped()); };
@@ -16,7 +16,7 @@ export function createServerProfileCalculator({request, getRecord, isCurrent = (
   return async function calculateProfile(record, {line, signal, onProgress = () => {}, onJob = () => {}} = {}) {
     record = structuredClone(getRecord?.() || record);
     const original = structuredClone(record), parentCalculationId = record.results?.calculationJobId;
-    if (!parentCalculationId || record.results?.method !== 'surface-cut-fill') throw new Error('Calculate and save this polygon’s surface volume before requesting a native section.');
+    if (!parentCalculationId || record.results?.method !== 'surface-cut-fill') throw new Error('Calculate and save this polygon’s surface volume before requesting a cross-section.');
     const fingerprint = r => JSON.stringify([r?.id, r?.modelVersionId, r?.revision, r?.collection, r?.vertices, r?.coordinateReference, r?.results?.calculationJobId]);
     const current = () => {
       if (signal?.aborted) throw stopped();
@@ -25,7 +25,7 @@ export function createServerProfileCalculator({request, getRecord, isCurrent = (
     const send = async (operation, payload) => { current(); let response; try { response = await request(operation, payload, record); } catch (error) { throw surfaceCalculationError(error); } current(); return response; };
     onProgress('Checking access to the saved volume and original elevation data…');
     const caps = await send('capabilities', {});
-    if (caps?.capabilities?.transectCalculations !== true) throw new Error('Native section calculations are not available on this server or for your current access.');
+    if (caps?.capabilities?.transectCalculations !== true) throw new Error('Cross-section calculations are not available for this model or your current access.');
     const temporary = caps.capabilities.temporaryCalculations === true;
     const geometryHash = temporary ? await measurementGeometryHash(record) : null; current();
     if (temporary) {
@@ -52,15 +52,15 @@ export function createServerProfileCalculator({request, getRecord, isCurrent = (
       catch (error) { if (error.code !== 'measurement_calculation_already_active') throw error; job = await recover(); if (!job) throw error; }
     }
     const jobId = job?.id;
-    if (!jobId) throw new Error('The server did not return a section calculation identifier.');
+    if (!jobId) throw new Error('The section calculation could not be identified. Update the same profile to check for an existing result.');
     for (;;) {
       current();
-      if (job?.id !== jobId || !matches(job)) throw new Error('The server section does not match the current polygon, line, or saved volume.');
-      if (job.status === 'complete') { onJob(null); if(!job.parameters.baseHash||job.result?.baseHash!==job.parameters.baseHash)throw new Error('The section reference base does not match the accepted server request.');return {...validateNativeProfile(job.result, {line, parentCalculationId, source}), calculationJobId: jobId}; }
+      if (job?.id !== jobId || !matches(job)) throw new Error('The section does not match the current polygon, line, or saved volume.');
+      if (job.status === 'complete') { onJob(null); if(!job.parameters.baseHash||job.result?.baseHash!==job.parameters.baseHash)throw new Error('The section reference base does not match the accepted calculation request.');return {...validateNativeProfile(job.result, {line, parentCalculationId, source}), calculationJobId: jobId}; }
       if (job.status === 'failed') { onJob(null); throw surfaceCalculationError(Object.assign(new Error(`The section could not finish (${String(job.errorCode || 'unavailable').replaceAll('_', ' ')}). Your saved volume is unchanged.`), {code: job.errorCode})); }
       if (job.status === 'cancelled') { onJob(null); throw new Error('Section calculation cancelled. Your saved volume is unchanged.'); }
-      if (!['queued', 'running'].includes(job.status)) throw new Error('Unknown server section state.');
-      exposeCancel(job); onProgress(job.status === 'queued' ? 'Section queued on the server. You may close this inspector while it works.' : 'Reading every crossed native elevation cell on the server…');
+      if (!['queued', 'running'].includes(job.status)) throw new Error('The section calculation status could not be understood. Update the same profile to check its status.');
+      exposeCancel(job); onProgress(job.status === 'queued' ? 'Waiting to calculate this section. You may close this inspector while it works.' : 'Reading the original elevation data along this section…');
       await wait(pollMs, signal); current(); job = (await send('status', {measurementId: record.id, jobId}))?.calculation;
     }
   };

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {createServerProfileCalculator} from '../measurement-server-profile.mjs';
 import {measurementGeometryHash} from '../measurement-surface-client.mjs';
 const source={assetId:'dsm',kind:'dsm',modelVersionId:'version',sha256:'a'.repeat(64),verticalUnit:'m',verticalUnitBasis:'raster-metadata',crs:'EPSG:32616',resolutionM:[1,1]};
@@ -13,9 +14,16 @@ function setup({caps={capabilities:{transectCalculations:true}},parentJob=parent
   const calls=[],request=async(op,payload)=>{calls.push([op,payload]);if(op==='capabilities')return caps;if(op==='status'&&payload.jobId==='parent')return{calculation:parentJob};if(op==='list')return{calculations:existing};return{calculation:responses.shift()||job()};};
   return{calls,calculate:createServerProfileCalculator({request,getRecord,isCurrent,wait})};
 }
+
+test('profile controls describe the client action without infrastructure labels',()=>{
+  const panel=readFileSync(new URL('../measurement-profile-panel.mjs',import.meta.url),'utf8');
+  assert.match(panel,/<button data-update>Update profile<\/button>/);
+  assert.doesNotMatch(panel,/\bserver\b/i);
+});
 test('native profile uses linked parent only, recovers active jobs, and never writes measurement results',async()=>{
   for(const existing of [[],[job('running')],[job()]]){
-    const f=setup({existing,responses:existing.length?[]:[job('queued'),job('running'),job()]}),before=JSON.stringify(record);const out=await f.calculate(record,{line});assert.equal(out.calculationJobId,'profile');assert.equal(JSON.stringify(record),before);
+    const f=setup({existing,responses:existing.length?[]:[job('queued'),job('running'),job()]}),before=JSON.stringify(record),progress=[];const out=await f.calculate(record,{line,onProgress:value=>progress.push(value)});assert.equal(out.calculationJobId,'profile');assert.equal(JSON.stringify(record),before);
+    assert.doesNotMatch(progress.join(' '),/\bserver\b/i);
     assert.equal(f.calls.filter(([op])=>op==='create').length,existing.length?0:1);assert.ok(f.calls.every(([op])=>['capabilities','status','list','create'].includes(op)));
     if(!existing.length)assert.deepEqual(f.calls.find(([op])=>op==='create')[1].request,{revision:3,method:'surface-transect',parentCalculationId:'parent',line});
   }

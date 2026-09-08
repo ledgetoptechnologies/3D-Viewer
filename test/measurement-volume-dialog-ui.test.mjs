@@ -22,7 +22,7 @@ const result={status:'calculated',cutM3:12345.678912,fillM3:0,netM3:12345.678912
 
 test('client inspector has no specialist controls and keeps one native calculation action',()=>{
   const f=fixture(()=>result);
-  assert.match(f.dialog.innerHTML,/<h2>Measure<\/h2>/);
+  assert.match(f.dialog.innerHTML,/<h2>Calculate volume<\/h2>/);
   assert.doesNotMatch(f.dialog.innerHTML,/surface-specialist|data-specialist-host/);
   f.handle.close();
 });
@@ -62,7 +62,7 @@ test('returning from specialist uses the latest attached snapshot without fabric
 
 test('server inspector uses one explicit action and shows guarded server progress in the same preview UI',async()=>{
   const wait=deferred();let progress,calls=0;const f=fixture((_record,options)=>{calls++;progress=options.onProgress;return wait.promise;},{execution:'server'});
-  assert.equal(calls,0);assert.equal(f.dialog.querySelector('[data-calculate]').textContent,'Calculate on server');
+  assert.equal(calls,0);assert.equal(f.dialog.querySelector('[data-calculate]').textContent,'Calculate volume');
   const pending=f.calculate();progress('Queued on your server.');assert.equal(f.dialog.querySelector('[data-status]').textContent,'Queued on your server.');
   f.handle.close();progress('Private result');assert.equal(f.dialog.querySelector('[data-status]').textContent,'Queued on your server.');wait.resolve(result);await pending;assert.equal(f.saved(),0);
 });

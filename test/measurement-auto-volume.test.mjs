@@ -19,7 +19,7 @@ function fixture({kind='polygon',saveWait=Promise.resolve(),attachmentWait=Promi
     calculateSurface:async()=>({cutM3:10,fillM3:0}),
     tell:text=>messages.push(text)});
   vm.runInContext('function allowed(){return permitted;} function context(){return {mode};} function draftRecord(){return structuredClone(draft);} function disarm(){draft=null;} function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;}'+shipped,scope);
-  return{scope,opened,messages,records,attachments,serverCalls,specialistOpened,finish:options=>scope.finish(options)};
+  return{scope,opened,messages,records,attachments,serverCalls,specialistOpened,finish:(options={openVolume:true})=>scope.finish(options)};
 }
 
 test('one inspector exposes specialist methods only with verified staff and registered-method capability',async()=>{
@@ -28,7 +28,7 @@ test('one inspector exposes specialist methods only with verified staff and regi
     assert.equal(typeof f.opened[0].openSpecialist==='function',adminAllowed&&specialistAllowed);
     assert.equal(f.specialistOpened.length,0,'auto-on-finish never opens specialist methods');
   }
-  assert.doesNotMatch(source,/data-m="admin-volume"/);assert.match(source,/data-m="volume">Measure<\/button>/);
+  assert.doesNotMatch(source,/data-m="admin-volume"/);assert.match(source,/data-m="volume">Calculate volume<\/button>/);
 });
 
 test('surface and specialist attachments share the freshest saved revision in either direction',async()=>{
@@ -63,7 +63,7 @@ test('specialist attachment finishing after collapse updates parent revision bef
 
 test('authorized staff use the server calculator in the normal polygon inspector',async()=>{
   const f=fixture({adminAllowed:true});await f.finish();const dialog=f.opened[0];
-  assert.equal(dialog.execution,'server');assert.equal(dialog.autoCalculate,true);
+  assert.equal(dialog.execution,'server');assert.equal(dialog.autoCalculate,false);
   const result=await dialog.calculate(dialog.record,{});
   assert.equal(result.calculationJobId,'server-job');assert.equal(f.serverCalls.length,1);
   assert.equal(f.serverCalls[0].snapshot.id,dialog.record.id);
@@ -87,11 +87,18 @@ test('client personal surface transport uses server without advanced staff capab
   assert.equal(f.opened[0].execution,'server');await f.opened[0].calculate(f.opened[0].record,{});
   assert.equal(f.serverCalls[0].options.request,f.scope.surfaceRequest);
 });
-test('finishing a polygon saves geometry first and opens automatic surface calculation once',async()=>{
-  const f=fixture();await f.finish();assert.equal(f.records.size,1);assert.equal(f.opened.length,1);assert.equal(f.opened[0].autoCalculate,true);
+test('explicit inspector request saves geometry first without automatically calculating',async()=>{
+  const f=fixture();await f.finish();assert.equal(f.records.size,1);assert.equal(f.opened.length,1);assert.equal(f.opened[0].autoCalculate,false);
   assert.equal(f.opened[0].record.results.status,'geometry-only');assert.equal(f.opened[0].record.results.horizontalAreaM2,100);
   await f.finish();assert.equal(f.opened.length,1);
 });
+test('default polygon finish saves area immediately without opening or starting volume',async()=>{
+  const f=fixture();await f.scope.finish();
+  assert.equal(f.records.size,1);assert.equal(f.opened.length,0);assert.equal(f.serverCalls.length,0);
+  assert.equal(f.records.values().next().value.results.horizontalAreaM2,100);
+  assert.equal(f.records.values().next().value.results.status,'geometry-only');
+});
+
 test('distance and mode-switch completion never open automatic volume',async()=>{
   for(const f of [fixture({kind:'distance'}),fixture()]){await f.finish({openVolume:false});assert.equal(f.records.size,1);assert.equal(f.opened.length,0);}
   const distance=fixture({kind:'distance'});await distance.finish();assert.equal(distance.opened.length,0);

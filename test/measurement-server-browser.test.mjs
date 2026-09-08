@@ -200,18 +200,18 @@ test('normal server inspector uses real browser UI for queued completion, resume
       assert.equal(await client.evaluate("document.querySelector('[data-calculate]').disabled"),false);
     });
     assert.ok(s.requests.length>5);assert.ok(s.requests.every(r=>r.path.startsWith('/api/v1/measurements/')&&!r.admin&&!r.cookie&&r.authorization===`Bearer ${token}`),'all volume traffic uses narrow personal server API, without workspace authority/cookies');
-    await t.test('client and staff polygon rows share one Measure inspector with authorized inline specialist tools',async()=>{
+    await t.test('client and staff polygon rows share one Calculate volume inspector with authorized inline specialist tools',async()=>{
       const postCount=s.posts;
       for(const staff of [false,true]){
         const workspaceUrl=`${f.origin}/workspace-fixture?staff=${staff?1:0}`;
         await client.command('Page.navigate',{url:workspaceUrl});
         await waitFor(client,readinessAt(workspaceUrl,readiness.workspace),'loaded personal workspace');
         assert.equal(await client.evaluate("document.querySelectorAll('[data-record] [data-m=volume]').length"),1);
-        assert.equal(await client.evaluate("document.querySelector('[data-record] [data-m=volume]').textContent"),'Measure');
+        assert.equal(await client.evaluate("document.querySelector('[data-record] [data-m=volume]').textContent"),'Calculate volume');
         assert.equal(await client.evaluate("document.querySelectorAll('[data-record] [data-m=admin-volume]').length"),0,'no duplicate advanced row action');
         await click(client,'[data-record] [data-m=volume]');
         await waitFor(client,"document.querySelector('.surface-inspector')?.open===true",'common inspector');
-        assert.equal(await client.evaluate("document.querySelector('.surface-inspector h2').textContent"),'Measure');
+        assert.equal(await client.evaluate("document.querySelector('.surface-inspector h2').textContent"),'Calculate volume');
         assert.equal(await client.evaluate("document.querySelectorAll('.surface-specialist').length"),staff?1:0);
         assert.equal(await client.evaluate("document.querySelectorAll('dialog[open]').length"),1);
         if(staff){
