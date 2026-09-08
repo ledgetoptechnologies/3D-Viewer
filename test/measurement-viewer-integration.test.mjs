@@ -142,6 +142,15 @@ test('3D adapter maps model picks to canonical E/N/Z and cloud picks remain cano
   scope.state.activeMode='cloud';assert.deepEqual(Array.from(scope.measurementViewContext().pick(event(20,20))),[500101,4800203,107]);assert.equal(points.material,material);
 });
 
+test('basemap initialization opts into anonymous CORS for measurement exports',()=>{
+  const start=main.indexOf('function ensureMap()'),end=main.indexOf('  map.setView(',start);
+  const layers=[],mapStub={createPane(){},getPane:()=>({style:{}})};
+  const scope=vm.createContext({map:null,dom:{leafletMap:{style:{}}},L:{map:()=>mapStub,tileLayer:(url,options)=>{layers.push({url,options});return{addTo(){}};}}});
+  vm.runInContext(main.slice(start,end)+'}',scope);scope.ensureMap();
+  assert.equal(layers.length,1);assert.match(layers[0].url,/server\.arcgisonline\.com/);
+  assert.equal(layers[0].options.crossOrigin,'anonymous');assert.equal(layers[0].options.attribution,'Tiles © Esri');
+});
+
 test('map screenshots preserve transparent tiles and reject cross-origin-tainted captures',async()=>{
   const draws=[],ctx={globalAlpha:1,fillRect(){},drawImage(tile,...bounds){draws.push({tile,alpha:this.globalAlpha,bounds});}};
   const canvas={getContext:()=>ctx,toDataURL:()=> 'data:image/png;base64,AA=='};

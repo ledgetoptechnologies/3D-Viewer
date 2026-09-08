@@ -3000,7 +3000,9 @@ function ensureMap() {
   map.createPane('gtiff');
   map.getPane('gtiff').style.zIndex = 450;
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    attribution: 'Tiles © Esri', maxZoom: 28, maxNativeZoom: 19
+    // Esri permits anonymous CORS. Opt in before loading so visible basemap
+    // tiles can be included in measurement PNG/report canvases without taint.
+    crossOrigin: 'anonymous', attribution: 'Tiles © Esri', maxZoom: 28, maxNativeZoom: 19
   }).addTo(map);
   map.setView([42.981, -88.628], 15);
 
