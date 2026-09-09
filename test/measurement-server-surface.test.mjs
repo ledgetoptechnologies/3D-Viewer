@@ -31,7 +31,7 @@ test('scoped raster capability supports client volumes without advanced processi
 });
 test('client capabilities and missing DSM never dispatch server processing or silently substitute DTM',async()=>{
   const denied=setup({caps:{...capabilities,capabilities:{serverCalculations:false}}});await assert.rejects(denied.calculate(record,options),/does not allow/);assert.equal(denied.calls.length,1);
-  const missing=setup({caps:{...capabilities,calculationSources:[capabilities.calculationSources[1]]}});await assert.rejects(missing.calculate(record,options),/No registered DSM/);assert.equal(missing.calls.length,1);
+  const missing=setup({caps:{...capabilities,calculationSources:[capabilities.calculationSources[1]]}});await assert.rejects(missing.calculate(record,options),error=>{assert.match(error.message,/survey surface.*unavailable.*Contact the model owner/);assert.doesNotMatch(error.message,/DSM|DTM|Choose/);return true;});assert.equal(missing.calls.length,1);
 });
 test('unknown units error from source preflight is propagated without retry or local fallback',async()=>{
   const calls=[];const calculate=createServerSurfaceCalculator({request:async op=>{calls.push(op);if(op==='capabilities')return capabilities;if(op==='list')return{calculations:[]};throw Object.assign(new Error('measurement source vertical units required'),{code:'measurement_source_vertical_units_required'});}});
@@ -44,6 +44,8 @@ test('stockpile setup and already-running errors provide plain-language next ste
   assert.match(units.message,/administrator.*original elevation data/);
   const active=surfaceCalculationError({code:'measurement_calculation_already_active'});
   assert.match(active.message,/already running.*cancel it here/);
+  const crs=surfaceCalculationError({code:'measurement_source_crs_mismatch',status:422});
+  assert.equal(crs.code,'measurement_source_crs_mismatch');assert.equal(crs.status,422);assert.match(crs.message,/model owner.*outline and area are unchanged/);assert.doesNotMatch(crs.message,/CRS|EPSG|DSM|EPT/);
 });
 test('abort and view/access invalidation suppress polling and delivery without cancelling an accepted job',async()=>{
   for(const action of ['abort','revoke']){

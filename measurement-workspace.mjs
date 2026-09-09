@@ -146,7 +146,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     // Missing/expired authority must produce an error, never a browser fallback.
     const server=typeof surfaceRequest==='function'||preferServerSurface()||adminAllowed;
     const calculate=server?createServerSurfaceCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):calculateSurface;
-    activeDialog=openSurfaceDialog({record,units,autoCalculate,execution:server?'server':'browser',getRecord:()=>snapshot,
+    activeDialog=openSurfaceDialog({record,units,autoCalculate,advancedSettings:adminAllowed,areaM2:measurementMetrics(record).horizontalAreaM2,execution:server?'server':'browser',getRecord:()=>snapshot,
       calculateProfile:server?createServerProfileCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):null,
       openSpecialist:adminAllowed&&specialistAllowed?async({host,isCurrent:panelCurrent,onOpened,onClose})=>{
         const current=()=>isCurrent()&&panelCurrent()&&adminAllowed&&specialistAllowed;

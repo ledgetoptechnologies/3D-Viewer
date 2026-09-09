@@ -6,12 +6,13 @@ import './measurement-volume-dialog.css';
 
 // Calculation is injected: scoped server work or an isolated browser fixture.
 // A sampled corridor is not a native-resolution elevation transect.
-export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,getRecord=()=>record,calculateProfile=null}){
+export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,advancedSettings=false,areaM2=null,getRecord=()=>record,calculateProfile=null}){
   const unit={imperial:['ft',0.3048],feet:['ft',0.3048],yards:['yd',0.9144],metric:['m',1],centimeters:['cm',0.01]}[units]||['ft',0.3048];
   const dialog=document.createElement('dialog');dialog.className='measurement-volume-dialog surface-inspector';
   dialog.innerHTML=`<header class="surface-heading"><div><p class="surface-eyebrow">Measurement inspector</p><h2>Calculate volume</h2><p data-name></p></div><button data-close aria-label="Close measurement inspector">Close</button></header><div data-surface-content>
-  <p class="surface-description">Explore the selected region above and below a reference base. This measures space between surfaces—not solid material inside a car, roof, or hollow object.</p>
-  <details class="surface-settings" open><summary>Surface &amp; reference base</summary><div class="surface-settings-grid">
+  <p class="surface-description">Draw around the bottom of the pile on surrounding ground, then calculate its volume above a reference ground surface. This does not measure solid material inside a car or building.</p>
+  <div class="surface-area"><span>Outline area</span><strong data-area></strong></div>
+  <details class="surface-settings" ${advancedSettings?'':'hidden'}><summary>Advanced settings · staff only</summary><div class="surface-settings-grid">
   <label>Elevation surface<select name="source"><option value="auto">Current surface / DSM</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground</option></select></label>
   <label>Reference base<select name="reference"><option value="boundary-triangulated">Ground from boundary</option><option value="fitted-plane">Fitted sloping plane</option><option value="lowest-boundary">Lowest boundary</option><option value="highest-boundary">Highest boundary</option><option value="average-boundary">Average boundary</option><option value="custom">Custom horizontal elevation</option></select></label>
   <label data-custom hidden>Custom elevation (${unit[0]})<input name="elevation" type="number" step="any" value="0"></label><label>Base offset (${unit[0]})<input name="offset" type="number" step="any" value="0"></label></div>
@@ -26,10 +27,18 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   <div class="section-readout" data-readout role="status">Hover the chart to inspect a sample.</div><p class="section-provenance" data-provenance></p></section>
   <details class="region-disclosure"><summary>Explore the isolated region in 3D</summary><div data-region-preview></div></details></div></div>${typeof openSpecialist==='function'?'<details class="surface-specialist"><summary>Specialist methods · staff only</summary><p class="hint">Point-cloud surfaces and object methods use different assumptions. Opening these options does not start a calculation or cancel a running job.</p><p data-specialist-status role="status"></p><div data-specialist-host></div></details>':''}`;
   dialog.querySelector('[data-name]').textContent=record.name;
+  dialog.querySelector('[data-area]').textContent=Number.isFinite(areaM2)&&areaM2>=0?measurementValue(areaM2,2,units):'Available in your measurement list';
+  if(!advancedSettings){
+    // New client stockpiles use the pile-containing surface in every view.
+    // restoreSavedResult below still preserves an explicitly saved source/base.
+    dialog.querySelector('[name=source]').value='dsm';
+    for(const name of ['source','reference','elevation','offset'])dialog.querySelector(`[name=${name}]`).disabled=true;
+    dialog.querySelector('[data-status]').textContent='Your outline is ready. Calculate volume when you are ready; your area is already available.';
+  }
   if(execution==='server'){
     dialog.querySelector('[data-calculate]').textContent='Calculate volume';
     dialog.querySelector('.surface-action-bar .hint').textContent='Original elevation data · your selected outline';
-    dialog.querySelector('[data-status]').textContent='Your polygon area is already available. Choose a surface and base, then calculate volume. You can close this inspector while it works. Reopen it and choose Calculate volume with the same settings to retrieve your result.';
+    dialog.querySelector('[data-status]').textContent=advancedSettings?'Your polygon area is already available. Review advanced settings only if needed, then calculate volume. You can close this inspector while it works.':'Your outline is ready. Calculate volume when you are ready. You can close this window while it works and return to your measurement later.';
   }
   let abort=null,preview=null,regionPreview=null,section=null,selected=null,chartBounds=null,retired=false,closed=false,specialist=null,specialistGeneration=0,nativeProfile=null;
   const status=dialog.querySelector('[data-status]'),canvas=dialog.querySelector('[data-section-chart]'),plan=dialog.querySelector('[data-section-plan]');
@@ -65,8 +74,8 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     const warnings=Array.isArray(saved.warnings)?saved.warnings.filter(w=>typeof w==='string').join(' '):'';
     status.dataset.state='saved';status.textContent=hasSurface?`Previously saved ${saved.status||'surface'} result. These totals have not been recalculated or revalidated against the current source. ${warnings}`:`Previously saved object volume: ${measurementValue(saved.volumeM3,3,units)}. This is a different calculation from surface cut/fill. ${warnings}`;
     dialog.querySelector('[data-preview-content]').hidden=true;dialog.querySelector('[data-preview-empty]').hidden=false;
-    dialog.querySelector('[data-preview-empty]').textContent='Recalculate to rebuild the preview from the source. Review the surface and reference settings first. Opening this inspector does not run another calculation.';
-    dialog.querySelector('.surface-settings').open=true;dialog.setAttribute('data-calculated','true');showNativeProfile();
+    dialog.querySelector('[data-preview-empty]').textContent=advancedSettings?'Recalculate to rebuild the preview from the source. Review advanced settings if needed. Opening this inspector does not run another calculation.':'Your saved result is shown above. Calculate volume again to rebuild its preview using the saved calculation settings.';
+    dialog.querySelector('.surface-settings').open=false;dialog.setAttribute('data-calculated','true');showNativeProfile();
   }
   function plot(){
     const ctx=canvas.getContext('2d'),pc=plan.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);pc.clearRect(0,0,plan.width,plan.height);if(!section)return;

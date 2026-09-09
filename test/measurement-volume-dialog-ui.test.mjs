@@ -26,6 +26,9 @@ test('client inspector has no specialist controls and keeps one native calculati
   assert.doesNotMatch(f.dialog.innerHTML,/surface-specialist|data-specialist-host/);
   assert.doesNotMatch(f.dialog.innerHTML,/name="metres"|I confirm source elevations/);
   assert.match(f.dialog.innerHTML,/value="boundary-triangulated">Ground from boundary/);
+  assert.match(f.dialog.innerHTML,/<details class="surface-settings" hidden>/);
+  assert.equal(f.dialog.querySelector('[name=source]').disabled,true);
+  assert.equal(f.dialog.querySelector('[name=reference]').disabled,true);
   f.handle.close();
 });
 
@@ -90,6 +93,17 @@ test('standard calculation cannot declare missing elevation units and surfaces r
   await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.confirmMeters,false);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'error');assert.equal(f.dialog.querySelector('.surface-settings').open,true);f.handle.close();
 });
 
+test('new client stockpile uses the pile-containing surface even when drawn on terrain',async()=>{
+  let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{record:{name:'Terrain outline',source:{kind:'dtm'}},autoCalculate:true});
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.sourceKind,'dsm');assert.equal(settings.confirmMeters,false);f.handle.close();
+});
+
+test('client recalculation preserves an explicitly saved terrain source and custom base',async()=>{
+  let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{record:{name:'Saved terrain',results:{...result,sourceKind:'dtm',reference:{type:'custom',elevationM:100,offsetM:2}}}});
+  assert.equal(f.dialog.querySelector('.surface-settings').open,false);assert.doesNotMatch(f.dialog.querySelector('[data-preview-empty]').textContent,/Review.*settings/);
+  await f.calculate();assert.equal(settings.sourceKind,'dtm');assert.equal(settings.reference.type,'custom');assert.equal(settings.reference.elevationM,100);assert.equal(settings.reference.offsetM,2);f.handle.close();
+});
+
 test('sample corridor stays explicit and keyboard inspection reports observed sample and base',async()=>{
   const f=fixture(async()=>({...result,preview:{samples:[[0,0,2,0],[1,0,3,0],[2,0,4,0]]}}));await f.calculate();
   assert.match(f.dialog.querySelector('[data-provenance]').textContent,/Points are not joined/);const chart=f.dialog.querySelector('[data-section-chart]');chart.onkeydown({key:'Home',preventDefault(){}});assert.match(f.dialog.querySelector('[data-readout]').textContent,/Surface 2\.000 m.*Base 0\.000 m/);chart.onkeydown({key:'End',preventDefault(){}});assert.match(f.dialog.querySelector('[data-readout]').textContent,/Surface 4\.000 m/);f.handle.close();
@@ -126,7 +140,7 @@ test('reopening an existing surface result shows saved totals honestly without a
   let calculated=0;const saved={...result,preview:undefined,reference:{type:'custom',elevationM:100,offsetM:.5},sourceKind:'dtm',warnings:['Missing cells remain excluded.']};
   const f=fixture(()=>{calculated++;return result;},{record:{name:'Saved pile',results:saved}});
   assert.equal(calculated,0);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'saved');assert.match(f.dialog.querySelector('[data-status]').textContent,/Previously saved.*not been recalculated/);assert.match(f.dialog.querySelector('[data-status]').textContent,/Missing cells/);
-  assert.equal(f.dialog.querySelector('[data-results]').hidden,false);assert.equal(f.dialog.querySelector('[data-result=cut]').textContent,'12,345.679 m³');assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,true);assert.match(f.dialog.querySelector('[data-preview-empty]').textContent,/Recalculate to rebuild the preview/);
+  assert.equal(f.dialog.querySelector('[data-results]').hidden,false);assert.equal(f.dialog.querySelector('[data-result=cut]').textContent,'12,345.679 m³');assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,true);assert.match(f.dialog.querySelector('[data-preview-empty]').textContent,/saved calculation settings/);
   assert.equal(f.dialog.querySelector('[name=reference]').value,'custom');assert.equal(f.dialog.querySelector('[name=elevation]').value,'100');assert.equal(f.dialog.querySelector('[name=offset]').value,'0.5');assert.equal(f.dialog.querySelector('[name=source]').value,'dtm');assert.doesNotMatch(f.dialog.innerHTML,/name="metres"/);
   f.handle.close();
 });

@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { createSurfaceAccumulator } from '../measurement-volume.mjs';
 import { insideSelection } from './measurementSelection.mjs';
+import { resolveEptUtmCrs } from './measurementEptCrs.mjs';
 const require = createRequire(import.meta.url), fail = code => { throw Object.assign(new Error(code), { code }); };
 let decoderReady;
 async function lazModule() {
@@ -51,8 +52,8 @@ export async function calculatePointSurface(absolutePath,request,{maxCells=2_000
   const root=await fs.promises.realpath(path.dirname(absolutePath)),files=new Map(sourceFiles.map(f=>[f.relativePath,f]));
   files.set('ept.json',{byteSize:request.source.byteSize,sha256:request.source.sha256});
   const ept=JSON.parse((await readVerified(root,'ept.json',files,{maxBytes:1024*1024,signal})).toString('utf8'));
-  const code=Number(ept.srs?.horizontal||ept.srs?.code),expected=Number(request.coordinateReference.crs.replace(/^EPSG:/i,''));
-  if(code!==expected||!((expected>=32601&&expected<=32660)||(expected>=32701&&expected<=32760)))fail('measurement_source_crs_mismatch');
+  const expected=Number(request.coordinateReference.crs.replace(/^EPSG:/i,''));
+  resolveEptUtmCrs(ept.srs,expected);
   if(request.sourceVerticalUnit!=='m')fail('measurement_source_vertical_units_required');
   if(!Array.isArray(ept.bounds)||ept.bounds.length!==6||!ept.bounds.every(Number.isFinite)||!['laszip','binary'].includes(ept.dataType)||!Array.isArray(ept.schema))fail('measurement_ept_schema_unsupported');
   const classify=ept.schema.find(s=>s.name==='Classification');if(request.classFilter==='ground'&&!classify)fail('measurement_point_classification_unavailable');

@@ -2,6 +2,7 @@ import {availableAdminSources,adminCalculationRequest} from './measurement-admin
 import {measurementGeometryHash} from './measurement-surface-client.mjs';
 
 const guidance=Object.freeze({
+  measurement_source_crs_mismatch:'The survey coordinates for this model need to be checked by the model owner before volume can be calculated. Your outline and area are unchanged.',
   measurement_source_vertical_units_required:'This dataset needs its height units verified before volume can be calculated. Your outline is saved. An administrator needs to check the original elevation data; do not guess meters or feet.',
   measurement_source_vertical_units_conflict:'The elevation data contains conflicting height units. Your outline is saved; an administrator needs to correct the dataset setup.',
   measurement_source_vertical_units_unsupported:'The elevation data uses height units that need administrator review. Your outline is saved.',
@@ -46,11 +47,11 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       record={...record,revision:1,modelVersionId:capabilities.modelVersionId};
     }
     const sources=availableAdminSources({...capabilities,capabilities:{...capabilities.capabilities,serverCalculations:rasterAllowed}}).filter(s=>['dsm','dtm'].includes(s.kind)&&s.methods.includes('surface-cut-fill'));
-    if(!['auto','dsm','dtm'].includes(sourceKind))throw new Error('Choose a DSM or DTM elevation source.');
+    if(!['auto','dsm','dtm'].includes(sourceKind))throw new Error('The calculation source needs review by the model owner. Your outline and area are unchanged.');
     const kind=sourceKind==='auto'?(record.source?.kind==='dtm'?'dtm':'dsm'):sourceKind;
     // Do not silently substitute bare-earth DTM for a missing stockpile DSM.
     const source=sources.find(s=>s.kind===kind);
-    if(!source)throw new Error(`No registered ${kind.toUpperCase()} is available for volume calculation. Choose an available elevation source; a DTM may omit the pile.`);
+    if(!source)throw new Error('The survey surface needed for this calculation is unavailable. Your outline and area are unchanged. Contact the model owner to check the elevation data.');
     const body=adminCalculationRequest(record,{method:'surface-cut-fill',sourceAssetId:source.assetId,reference:reference?.type,offsetM:reference?.offsetM??0,elevationM:reference?.elevationM,displayUnits:'metric',confirmMeters},sources);
     const matchesParameters=job=>{
       const p=job.parameters;

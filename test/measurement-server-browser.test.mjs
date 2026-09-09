@@ -186,6 +186,8 @@ test('normal server inspector uses real browser UI for queued completion, resume
       await click(client,'#open');await click(client,'[data-calculate]');await waitFor(client,status('error'),'unit error');
       assert.match(await client.evaluate("document.querySelector('[data-status]').textContent"),/height units verified/);
       assert.equal(await client.evaluate("document.querySelector('[name=metres]')===null"),true);
+      assert.equal(await client.evaluate("document.querySelector('.surface-settings').hidden"),true,'an error cannot expose staff settings to clients');
+      assert.doesNotMatch(await client.evaluate("document.querySelector('.surface-inspector').innerText"),/\bDSM\b|\bDTM\b|Advanced settings|Specialist/);
       assert.equal(await client.evaluate("document.querySelector('#saved').value"),saved);
       assert.equal(await client.evaluate("document.querySelector('[data-preview-content]').hidden"),true);
       assert.equal(s.requests.filter(r=>r.method==='POST').at(-1).body.sourceVerticalUnit,undefined);
@@ -213,6 +215,11 @@ test('normal server inspector uses real browser UI for queued completion, resume
         await waitFor(client,"document.querySelector('.surface-inspector')?.open===true",'common inspector');
         assert.equal(await client.evaluate("document.querySelector('.surface-inspector h2').textContent"),'Calculate volume');
         assert.equal(await client.evaluate("document.querySelectorAll('.surface-specialist').length"),staff?1:0);
+        assert.equal(await client.evaluate("document.querySelector('.surface-settings').hidden"),!staff);
+        assert.equal(await client.evaluate("document.querySelector('[name=source]').disabled"),!staff);
+        assert.equal(await client.evaluate("document.querySelector('[name=reference]').disabled"),!staff);
+        assert.match(await client.evaluate("document.querySelector('[data-area]').textContent"),/1,076\.391 ft²/);
+        if(!staff)assert.doesNotMatch(await client.evaluate("document.querySelector('.surface-inspector').innerText"),/\bDSM\b|\bDTM\b|Specialist|Advanced settings|Elevation surface/);
         assert.equal(await client.evaluate("document.querySelectorAll('dialog[open]').length"),1);
         if(staff){
           assert.match(await client.evaluate("document.querySelector('.surface-specialist summary').textContent"),/Specialist methods.*staff only/);
