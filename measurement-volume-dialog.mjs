@@ -13,10 +13,10 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   <p class="surface-description">Explore the selected region above and below a reference base. This measures space between surfaces—not solid material inside a car, roof, or hollow object.</p>
   <details class="surface-settings" open><summary>Surface &amp; reference base</summary><div class="surface-settings-grid">
   <label>Elevation surface<select name="source"><option value="auto">Current surface / DSM</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground</option></select></label>
-  <label>Reference base<select name="reference"><option value="boundary-triangulated">Triangulated boundary</option><option value="fitted-plane">Fitted sloping plane</option><option value="lowest-boundary">Lowest boundary</option><option value="highest-boundary">Highest boundary</option><option value="average-boundary">Average boundary</option><option value="custom">Custom horizontal elevation</option></select></label>
+  <label>Reference base<select name="reference"><option value="boundary-triangulated">Ground from boundary</option><option value="fitted-plane">Fitted sloping plane</option><option value="lowest-boundary">Lowest boundary</option><option value="highest-boundary">Highest boundary</option><option value="average-boundary">Average boundary</option><option value="custom">Custom horizontal elevation</option></select></label>
   <label data-custom hidden>Custom elevation (${unit[0]})<input name="elevation" type="number" step="any" value="0"></label><label>Base offset (${unit[0]})<input name="offset" type="number" step="any" value="0"></label></div>
-  <label class="surface-confirm"><input name="metres" type="checkbox"><span>If vertical-unit metadata is absent, I confirm source elevations are in meters.</span></label>
-  <p class="hint">Boundary points define a sloping base. Choose a custom elevation only when that height is known. Confirm meters only if you have verified the source vertical units. A DTM may remove the pile itself.</p></details>
+  <p class="hint">For Ground from boundary, place the outline around the pile toe on surrounding ground. This estimates a base; it is not surveyed ground. Choose a custom elevation only when that height is known. A DTM may remove the pile itself.</p>
+  <p class="hint">Volume requires established elevation units in the source data. If these are unavailable, your outline and horizontal area remain available; contact the model owner to review the source.</p></details>
   <div class="surface-action-bar"><button data-calculate>Calculate volume</button><button data-cancel-job hidden>Cancel calculation</button><span class="hint">Original elevation data · your selected outline</span></div><p data-status role="status" data-state="idle">Your polygon area is already available. Choose a surface and base, then calculate volume. No volume has been calculated yet.</p>
   <div data-results class="surface-results" hidden><div class="surface-result"><span>Above base · cut</span><strong data-result="cut">—</strong></div><div class="surface-result"><span>Below base · fill</span><strong data-result="fill">—</strong></div><div class="surface-result"><span>Net volume</span><strong data-result="net">—</strong></div><div class="surface-result"><span>Source coverage</span><strong data-result="coverage">—</strong></div></div>
   <div data-native-profile hidden></div><p data-preview-empty>The isolated surface and reference-base preview will appear after a successful calculation.</p><div data-preview-content hidden>
@@ -121,7 +121,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     };
   }
   field('reference').onchange=()=>{dialog.querySelector('[data-custom]').hidden=field('reference').value!=='custom';invalidateSettings();};
-  for(const name of ['source','metres'])field(name).onchange=invalidateSettings;
+  field('source').onchange=invalidateSettings;
   for(const name of ['offset','elevation'])field(name).oninput=invalidateSettings;
   dialog.querySelector('.region-disclosure').ontoggle=()=>{if(!retired&&dialog.querySelector('.region-disclosure').open&&preview&&!regionPreview)regionPreview=mountMeasurementRegionPreview(dialog.querySelector('[data-region-preview]'),{preview,units});};
   dialog.querySelector('[data-calculate]').onclick=async()=>{
@@ -131,7 +131,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     const reference={type:field('reference').value,offsetM:value('offset')*unit[1]};if(reference.type==='custom')reference.elevationM=value('elevation')*unit[1];
     try{
       if(!String(field('offset').value).trim()||!Number.isFinite(reference.offsetM)||(reference.type==='custom'&&(!String(field('elevation').value).trim()||!Number.isFinite(reference.elevationM))))throw new Error('Enter a finite reference elevation and base offset.');
-      const result=await calculate(record,{signal:mine.signal,reference,sourceKind:field('source').value,confirmMeters:field('metres').checked,onProgress:message=>{if(!retired&&!mine.signal.aborted)status.textContent=message;},onJob:job=>{
+      const result=await calculate(record,{signal:mine.signal,reference,sourceKind:field('source').value,confirmMeters:false,onProgress:message=>{if(!retired&&!mine.signal.aborted)status.textContent=message;},onJob:job=>{
         if(retired||mine.signal.aborted||cancelPending)return;
         const button=dialog.querySelector('[data-cancel-job]');button.hidden=!job;button.disabled=false;
         button.onclick=async()=>{

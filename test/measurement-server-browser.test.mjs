@@ -185,7 +185,7 @@ test('normal server inspector uses real browser UI for queued completion, resume
       s.job=null;s.mode='units';const saved=await client.evaluate("document.querySelector('#saved').value");
       await click(client,'#open');await click(client,'[data-calculate]');await waitFor(client,status('error'),'unit error');
       assert.match(await client.evaluate("document.querySelector('[data-status]').textContent"),/height units verified/);
-      assert.equal(await client.evaluate("document.querySelector('[name=metres]').checked"),false);
+      assert.equal(await client.evaluate("document.querySelector('[name=metres]')===null"),true);
       assert.equal(await client.evaluate("document.querySelector('#saved').value"),saved);
       assert.equal(await client.evaluate("document.querySelector('[data-preview-content]').hidden"),true);
       assert.equal(s.requests.filter(r=>r.method==='POST').at(-1).body.sourceVerticalUnit,undefined);

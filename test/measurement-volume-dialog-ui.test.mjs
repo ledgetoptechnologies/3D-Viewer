@@ -24,6 +24,8 @@ test('client inspector has no specialist controls and keeps one native calculati
   const f=fixture(()=>result);
   assert.match(f.dialog.innerHTML,/<h2>Calculate volume<\/h2>/);
   assert.doesNotMatch(f.dialog.innerHTML,/surface-specialist|data-specialist-host/);
+  assert.doesNotMatch(f.dialog.innerHTML,/name="metres"|I confirm source elevations/);
+  assert.match(f.dialog.innerHTML,/value="boundary-triangulated">Ground from boundary/);
   f.handle.close();
 });
 
@@ -68,7 +70,7 @@ test('server inspector uses one explicit action and shows guarded server progres
 });
 
 test('surface dialog explains initial empty state and centers responsively without showing a blank preview',()=>{
-  const f=fixture(()=>result);assert.match(f.dialog.innerHTML,/No volume has been calculated yet/);assert.match(f.dialog.innerHTML,/data-preview-content hidden/);assert.match(f.dialog.innerHTML,/Confirm meters only if you have verified/);
+  const f=fixture(()=>result);assert.match(f.dialog.innerHTML,/No volume has been calculated yet/);assert.match(f.dialog.innerHTML,/data-preview-content hidden/);assert.match(f.dialog.innerHTML,/your outline and horizontal area remain available/);
   const css=readFileSync(new URL('../measurement-workspace.css',import.meta.url),'utf8');assert.match(css,/position:fixed;inset:0;margin:auto/);assert.match(css,/max-height:calc\(100dvh - 24px\)/);f.handle.close();
 });
 
@@ -83,7 +85,7 @@ test('source rejection clears an earlier preview and never presents a stale resu
   assert.equal(f.saved(),1);assert.equal(f.disposed(),1);assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,true);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'error');assert.match(f.dialog.querySelector('[data-status]').textContent,/No new volume was saved.*Source vertical units required/);assert.match(f.dialog.querySelector('[data-preview-empty]').textContent,/Preview unavailable/);f.handle.close();
 });
 
-test('automatic calculation preserves unchecked unit confirmation and surfaces required metadata',async()=>{
+test('standard calculation cannot declare missing elevation units and surfaces required metadata',async()=>{
   let settings;const f=fixture(async(_record,options)=>{settings=options;throw new Error('Source vertical units required.');},{autoCalculate:true});
   await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.confirmMeters,false);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'error');assert.equal(f.dialog.querySelector('.surface-settings').open,true);f.handle.close();
 });
@@ -125,7 +127,7 @@ test('reopening an existing surface result shows saved totals honestly without a
   const f=fixture(()=>{calculated++;return result;},{record:{name:'Saved pile',results:saved}});
   assert.equal(calculated,0);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'saved');assert.match(f.dialog.querySelector('[data-status]').textContent,/Previously saved.*not been recalculated/);assert.match(f.dialog.querySelector('[data-status]').textContent,/Missing cells/);
   assert.equal(f.dialog.querySelector('[data-results]').hidden,false);assert.equal(f.dialog.querySelector('[data-result=cut]').textContent,'12,345.679 m³');assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,true);assert.match(f.dialog.querySelector('[data-preview-empty]').textContent,/Recalculate to rebuild the preview/);
-  assert.equal(f.dialog.querySelector('[name=reference]').value,'custom');assert.equal(f.dialog.querySelector('[name=elevation]').value,'100');assert.equal(f.dialog.querySelector('[name=offset]').value,'0.5');assert.equal(f.dialog.querySelector('[name=source]').value,'dtm');assert.equal(f.dialog.querySelector('[name=metres]').checked,false);
+  assert.equal(f.dialog.querySelector('[name=reference]').value,'custom');assert.equal(f.dialog.querySelector('[name=elevation]').value,'100');assert.equal(f.dialog.querySelector('[name=offset]').value,'0.5');assert.equal(f.dialog.querySelector('[name=source]').value,'dtm');assert.doesNotMatch(f.dialog.innerHTML,/name="metres"/);
   f.handle.close();
 });
 
