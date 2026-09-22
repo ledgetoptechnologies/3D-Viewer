@@ -1,6 +1,31 @@
 // Renderer-independent measurement geometry. Coordinates are E/N/Z metres,
 // never screen coordinates or a renderer's movable local origin.
 export const measurementCollection = mode => ['ortho', 'dsm', 'dtm'].includes(mode) ? 'map' : 'spatial3d';
+// Editing uses world-space vertices; screen handles never become coordinates.
+export function changeMeasurementVertex(record, {type,index,point}) {
+  const vertices=record.vertices.map(p=>p.slice());
+  if(!Number.isInteger(index)||index<0||index>=vertices.length)throw new Error('Select a vertex first.');
+  if(type==='delete'){
+    if(vertices.length<=(record.kind==='polygon'?3:2))throw new Error(record.kind==='polygon'?'A polygon needs at least three points.':'A distance needs at least two points.');
+    vertices.splice(index,1);
+  }else if(type==='insert'){
+    if(vertices.length>=2000)throw new Error('Maximum 2000 vertices.');
+    if(record.kind!=='polygon'&&index===vertices.length-1)throw new Error('Select an existing edge.');
+    const next=vertices[(index+1)%vertices.length];vertices.splice(index+1,0,vertices[index].map((v,i)=>(v+next[i])/2));
+  }else if(type==='move')vertices[index]=point?.slice();
+  else throw new Error('Unknown vertex action.');
+  const updated={...record,vertices};validateMeasurementGeometry(updated);return vertices;
+}
+export function measurementEditHandles(record,positions,selected,width,height){
+  const midpoints=[];
+  for(let i=0;i<(record.kind==='polygon'?positions.length:positions.length-1);i++){
+    const a=positions[i],b=positions[(i+1)%positions.length];
+    if(a&&b&&Math.hypot(a[0]-b[0],a[1]-b[1])>=44){const x=(a[0]+b[0])/2,y=(a[1]+b[1])/2;if(x>=0&&y>=0&&x<=width&&y<=height)midpoints.push({index:i,x,y});}
+  }
+  const p=positions[selected];
+  const deletion=p&&record.vertices.length>(record.kind==='polygon'?3:2)?{x:Math.max(6,Math.min(width-82,p[0]+20)),y:Math.max(6,Math.min(height-30,p[1]-42)),width:76,height:26}:null;
+  return {midpoints,deletion};
+}
 const length = (a, b) => Math.hypot(...a.map((v, i) => v - b[i]));
 export function measurementMetrics(record) {
   const points = record.vertices;

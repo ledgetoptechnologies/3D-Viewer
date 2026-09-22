@@ -18,8 +18,8 @@ async function sentLimit(kind, config = {}) {
   return sent.maxCells;
 }
 test('native DSM and DTM capacity does not expand point or mesh budgets', async () => {
-  assert.equal(await sentLimit('dsm'), 30_000_000);
-  assert.equal(await sentLimit('dtm'), 30_000_000);
+  assert.equal(await sentLimit('dsm'), 100_000_000);
+  assert.equal(await sentLimit('dtm'), 100_000_000);
   assert.equal(await sentLimit('ept'), 2_000_000);
   assert.equal(await sentLimit('obj'), 2_000_000);
 });

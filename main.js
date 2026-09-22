@@ -5,6 +5,7 @@ import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
+import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
@@ -4235,6 +4236,8 @@ function bindUI() {
   document.getElementById('btn-fullscreen').addEventListener('click', toggleFullscreen);
   document.getElementById('btn-reset-float').addEventListener('click', resetCamera);
   document.getElementById('btn-fullscreen-float').addEventListener('click', toggleFullscreen);
+  document.getElementById('btn-capture-float').addEventListener('click', () => measurementWorkspace?.captureView());
+  document.getElementById('btn-model-report').addEventListener('click', () => measurementWorkspace?.openReport());
   if (dom.btnMeasureFloat) {
     dom.btnMeasureFloat.addEventListener('click', () => {
       setTool(state.activeTool === 'none' ? 'distance' : 'none');
@@ -4242,6 +4245,7 @@ function bindUI() {
   }
   const sidebar = document.getElementById('sidebar');
   const sidebarToggle = document.getElementById('sidebar-toggle');
+  installSidebarResize({sidebar,handle:document.getElementById('sidebar-resize'),onResize});
   if (window.matchMedia('(max-width: 1024px)').matches) {
     sidebar.classList.add('collapsed');
     sidebarToggle.setAttribute('aria-expanded', 'false');

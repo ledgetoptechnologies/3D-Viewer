@@ -39,6 +39,14 @@ function fixture(){
 }
 const record=()=>({id:crypto.randomUUID(),name:'Distance',kind:'distance',collection:'spatial3d',vertices:[[10,10,0],[120,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
 
+test('centered polygon label and card preserve negative net volume rather than converting fill to positive',async()=>{
+  const f=fixture();f.units('metric');const r={...record(),name:'Below base',kind:'polygon',vertices:[[20,20,0],[380,20,0],[380,280,0],[20,280,0]],results:{status:'calculated',method:'surface-cut-fill',cutM3:2,fillM3:7,netM3:-5}};
+  await f.workspace.store.save(r);f.workspace.tick();
+  assert.match(f.svg().innerHTML,/text-anchor="middle"[^>]*>Below base<tspan[^>]*>Volume -5\.000 m³/);
+  assert.match(f.controls.querySelector('[data-m-list]').innerHTML,/Net volume: -5\.000 m³/);
+  assert.equal(f.workspace.store.records.get(r.id).results.netM3,-5);f.workspace.dispose();
+});
+
 test('empty and entirely hidden collections perform no viewport reads or projections over 100 ticks',async()=>{
   const f=fixture();for(let i=0;i<100;i++)f.workspace.tick();
   assert.deepEqual(f.counts,{layout:0,project:0,signature:0});
@@ -78,7 +86,7 @@ test('draft vertex changes invalidate a stationary view while access expiry clea
 test('explicit capture refresh bypasses stationary cache without altering stored geometry',async()=>{
   const f=fixture(),r=record();await f.workspace.store.save(r);f.workspace.tick();
   f.workspace.tick({force:true});assert.equal(f.counts.layout,2);assert.equal(f.counts.project,4);assert.deepEqual(f.workspace.store.records.get(r.id).vertices,r.vertices);
-  assert.match(source,/async function screenshot\(\)\s*\{\s*draw\(\{force:true\}\)/);f.workspace.dispose();
+  assert.match(source,/async function screenshot\(\{allowIncomplete=false\}=\{\}\)\s*\{\s*draw\(\{force:true\}\)/);f.workspace.dispose();
 });
 
 test('Potree adapter creation/signature/projection do not force layout and picker timing is cleaned safely',()=>{

@@ -72,15 +72,16 @@ test('all five views expose both original collections without duplicate records,
   assert.ok(f.projected.filter(p=>['model','cloud'].includes(p.mode)).every(p=>p.point[2]!==0),'map placeholder Z must not be projected as measured elevation');
 });
 
-test('selection and export checks survive map/3D detours and JSON retains original geometry and provenance',async t=>{
-  const f=fixture();t.after(()=>f.workspace.dispose());const{spatial,map}=await seed(f);await f.action('select',spatial.id);await f.exportCheck(map.id);
+test('selection survives map/3D detours and export-all retains original geometry and provenance',async t=>{
+  const f=fixture();t.after(()=>f.workspace.dispose());const{spatial,map}=await seed(f);await f.action('select',spatial.id);
   for(const mode of ['ortho','dsm','dtm','cloud','model']){
     await f.switchTo(mode);
     assert.match(f.list(),new RegExp(`measurement-row selected[^>]*data-record="${spatial.id}"`));
-    const row=f.list().split(`data-record="${map.id}"`)[1]?.split('</article>')[0];assert.match(row,/data-m="export-check"[^>]*checked/);
+    const row=f.list().split(`data-record="${map.id}"`)[1]?.split('</article>')[0];assert.match(row,/Map boundary/);
   }
-  const exported=await f.exportJson();assert.equal(exported.measurements.length,1);assert.equal(exported.measurements[0].id,map.id);
-  for(const key of ['vertices','collection','coordinateReference','source','results'])assert.deepEqual(exported.measurements[0][key],map[key]);
+  // Export all now includes all saved records, independent of prior selection.
+  const exported=await f.exportJson();assert.equal(exported.measurements.length,2);const exportedMap=exported.measurements.find(r=>r.id===map.id);
+  for(const key of ['vertices','collection','coordinateReference','source','results'])assert.deepEqual(exportedMap[key],map[key]);
 });
 
 test('cross-family editing is refused with guidance and never substitutes map pick Z for measured elevation',async t=>{

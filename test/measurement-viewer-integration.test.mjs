@@ -84,10 +84,10 @@ test('measurement cursor communicates placement, Shift navigation and vertex edi
   f.windowRef.fire('keydown',event(0,0,{code:'Space'}));assert.equal(f.canvas.style.cursor,'move');f.workspace.setTool('none');assert.equal(f.canvas.style.cursor,'grab');f.workspace.dispose();
 });
 
-test('newest records precede older rows and export selection is explicitly labeled',async()=>{
+test('newest records precede older rows and cards avoid obsolete export selection',async()=>{
   const f=fixture(),r={kind:'distance',collection:'spatial3d',vertices:[[10,10,0],[100,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
   await f.workspace.store.save({...r,id:crypto.randomUUID(),name:'Earlier'});await f.workspace.store.save({...r,id:crypto.randomUUID(),name:'Latest'});
-  const html=f.controls.querySelector('[data-m-list]').innerHTML;assert.ok(html.indexOf('Latest')<html.indexOf('Earlier'));assert.match(html,/> Export<\/label>/);f.workspace.dispose();
+  const html=f.controls.querySelector('[data-m-list]').innerHTML;assert.ok(html.indexOf('Latest')<html.indexOf('Earlier'));assert.doesNotMatch(html,/data-m="export-check"/);assert.match(html,/data-m="edit-record"/);f.workspace.dispose();
 });
 
 test('crowded overview labels are bounded and selected measurement is prioritized without losing records',async()=>{

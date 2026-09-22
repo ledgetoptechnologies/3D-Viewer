@@ -43,6 +43,10 @@ test('actual GeoTIFF native windows preserve zero and fractional pixels, source 
   const clientResult=await calculateNativeRaster(file,clientRequest,{windowSize:1});assert.equal(clientResult.cutM3,12);assert.equal(clientResult.source.verticalUnitBasis,'requester-declared');
   const adminResult=await calculateNativeRaster(file,{...request,authority:{adminHash:'separately-validated-admin'}},{windowSize:1});assert.equal(adminResult.source.verticalUnitBasis,'administrator-declared');assert.match(adminResult.warnings.join(' '),/requesting administrator/);
   await assert.rejects(calculateNativeRaster(file, request, { maxCells: 3 }), { code: 'measurement_limit' });
+  for(const windowSize of [0,513,NaN,Infinity])await assert.rejects(calculateNativeRaster(file,request,{windowSize}),{code:'measurement_limit'});
+  for(const maxCells of [0,NaN,Infinity])await assert.rejects(calculateNativeRaster(file,request,{maxCells}),{code:'measurement_limit'});
+  const largeWindow=await calculateNativeRaster(file,request,{windowSize:512});
+  assert.equal(largeWindow.cutM3,result.cutM3,'larger streamed windows preserve exact native-cell results');
   await assert.rejects(calculateNativeRaster(file, { ...request, source: { ...request.source, sha256: '0'.repeat(64) } }), { code: 'measurement_source_changed' });
   const map={...request,collection:'map',vertices:[[.25,.25,0],[1.75,.25,0],[1.75,1.75,0],[.25,1.75,0]],reference:{type:'boundary-triangulated'}};
   const sampled=await calculateNativeRaster(file,map);assert.ok(Math.abs(sampled.netM3)<1e-9);assert.ok(sampled.preview.samples.some(p=>p[3]>0));

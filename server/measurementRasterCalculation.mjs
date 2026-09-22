@@ -54,7 +54,12 @@ export async function preflightNativeRaster(absolutePath, request, options = {})
   try { const image=await tiff.getImage(0),definition=nativeRasterDefinition(image, request, {...options,bandMetadata:await readRasterBandMetadata(image)});await validateRasterEncodedBlocks(image,{maxBlockBytes:Math.min(options.maxBlockBytes || NATIVE_RASTER_BLOCK_LIMIT,NATIVE_RASTER_BLOCK_LIMIT)});return definition; }
   finally { await tiff.close(); }
 }
-export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 30_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 128, onProgress = () => {} } = {}) {
+export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 100_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 512, onProgress = () => {} } = {}) {
+  // Large outlines remain native resolution. Only a bounded window (at most
+  // 2 MiB of normalized Float64 samples) is resident during integration.
+  if(!Number.isInteger(windowSize)||windowSize<1||windowSize>512)fail('measurement_limit');
+  if(!Number.isSafeInteger(maxCells)||maxCells<1)fail('measurement_limit');
+  maxCells=Math.min(maxCells,100_000_000);
   const check = () => { if (signal?.aborted) fail('measurement_cancelled'); };
   const sourceStat = await fs.promises.stat(absolutePath);
   if (!sourceStat.isFile() || sourceStat.size !== Number(request.source.byteSize)) fail('measurement_source_changed');
@@ -87,7 +92,8 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
       }
     }
     const referenceBase=(!request.reference?.type||request.reference.type==='boundary-triangulated')?createDelaunayReference(vertices,request.reference):undefined;
-    const accumulator = createSurfaceAccumulator({ vertices, reference: request.reference, referenceBase, maxCells, maxWork: 300_000_000 });
+    const accumulator = createSurfaceAccumulator({ vertices, reference: request.reference, referenceBase, maxCells, maxWork: 1_000_000_000 });
+    if(cells*accumulator.reference.patches.length>1_000_000_000)fail('measurement_limit');
     let processed = 0;
     const previewSamples = [], previewStride = Math.max(1, Math.ceil(cells / 4096));
     for (let row = top; row < bottom; row += windowSize) for (let col = left; col < right; col += windowSize) {

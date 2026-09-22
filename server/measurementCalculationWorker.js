@@ -40,7 +40,7 @@ async function childCalculation(absolutePath, request, { config, isLive, sourceF
     // drainage, so a valid final result wins over a successful child exit.
     child.on('close', () => { if (!settled) stop('measurement_worker_interrupted'); });
     const raster = ['dsm', 'dtm'].includes(request.source?.kind);
-    child.send({ absolutePath, request, maxCells: raster ? (config.measurementRasterMaxCells || 30_000_000) : (config.measurementMaxCells || 2_000_000), memoryMiB: config.measurementMemoryMiB || 4096, sourceFiles, scratchRoot }, error => { if (error) stop('measurement_worker_unavailable'); });
+    child.send({ absolutePath, request, maxCells: raster ? (config.measurementRasterMaxCells || 100_000_000) : (config.measurementMaxCells || 2_000_000), memoryMiB: config.measurementMemoryMiB || 4096, sourceFiles, scratchRoot }, error => { if (error) stop('measurement_worker_unavailable'); });
   }); } finally { const resolved = path.resolve(scratchRoot); if (resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(resolved).startsWith('viewer-measurement-job-')) await fs.promises.rm(resolved, { recursive: true, force: true }); }
 }
 async function processOneMeasurementCalculation({ repository, processing, storage, config, runCalculation = childCalculation }, owner) {

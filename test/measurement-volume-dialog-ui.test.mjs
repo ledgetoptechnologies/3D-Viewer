@@ -9,14 +9,14 @@ import {createServerSurfaceCalculator} from '../measurement-server-surface.mjs';
 const source=readFileSync(new URL('../measurement-volume-dialog.mjs',import.meta.url),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
 function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record}={}){
-  const nodes=new Map();let disposed=0,saved=0;
-  const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
+  const nodes=new Map(),notices=[];let disposed=0,saved=0;
+  const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},append(){},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
   const dialog={...element(),querySelector(s){if(!nodes.has(s)){const node=element();if(s==='[name=sectionWidth]')node.value='10';nodes.set(s,node);}return nodes.get(s);},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},remove(){this.removed=true;}};
-  const scope=vm.createContext({document:{createElement:()=>dialog,body:{append(){}}},AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
+  const scope=vm.createContext({document:{createElement:tag=>tag==='dialog'?dialog:{...element(),remove(){this.removed=true;}},body:{append(node){if(node.className==='measurement-job-notice')notices.push(node);}}},setTimeout,clearTimeout,AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
   const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord});
   if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';if(execution!=='server')dialog.querySelector('[name=source]').value='dsm';}
-  return{dialog,handle,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
+  return{dialog,handle,notices,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
 const result={status:'calculated',cutM3:12345.678912,fillM3:0,netM3:12345.678912,coverage:1,preview:{samples:[[0,0,2,0],[1,1,2,0]]}};
 
@@ -156,6 +156,20 @@ test('saved incomplete or object calculations are not presented as a new complet
   const partial=fixture(()=>result,{record:{name:'Incomplete',results:{cutM3:2,coverage:.5,status:'incomplete'}}});
   assert.equal(partial.dialog.querySelector('[data-result=fill]').textContent,'Unavailable');assert.equal(partial.dialog.querySelector('[data-result=coverage]').textContent,'50.000%');assert.match(partial.dialog.querySelector('[data-status]').textContent,/Previously saved incomplete/);partial.handle.close();
   const object=fixture(()=>result,{record:{name:'Object',results:{volumeM3:3,status:'estimate'}}});assert.match(object.dialog.querySelector('[data-status]').textContent,/Previously saved object volume.*different calculation/);object.handle.close();
+});
+
+test('unchanged completed volume opens in view mode while invalidated geometry asks for recalculation',()=>{
+  const saved={...result,method:'surface-cut-fill',calculationJobId:'saved-job',source:{kind:'dsm',modelVersionId:'v1'}};
+  const current=fixture(()=>{throw new Error('must not calculate on open');},{record:{name:'Saved pile',modelVersionId:'v1',results:saved}});
+  assert.equal(current.dialog.querySelector('h2').textContent,'View volume');assert.equal(current.dialog.querySelector('[data-calculate]').hidden,true);assert.equal(current.saved(),0);
+  current.dialog.querySelector('[name=offset]').oninput();assert.equal(current.dialog.querySelector('[data-calculate]').hidden,false);current.handle.close();
+  const stale=fixture(()=>result,{record:{name:'Edited pile',results:{status:'geometry-only',volumeInvalidated:true}}});
+  assert.equal(stale.dialog.querySelector('h2').textContent,'Calculate volume');assert.equal(stale.dialog.querySelector('[data-calculate]').hidden,false);assert.equal(stale.dialog.querySelector('[data-status]').dataset.state,'stale');assert.match(stale.dialog.querySelector('[data-status]').textContent,/outline changed.*old volume is no longer current/);stale.handle.close();
+});
+
+test('accepted volume notice is polite, contains no private measurement data and survives ordinary close',async()=>{
+  const wait=deferred(),f=fixture((_record,{onJob})=>{onJob({cancel:async()=>{}});onJob({cancel:async()=>{}});return wait.promise;});
+  const pending=f.calculate();assert.equal(f.notices.length,1);assert.equal(f.notices[0].attributes.role,'status');assert.match(f.notices[0].textContent,/while your access remains valid/);assert.doesNotMatch(f.notices[0].textContent,/Pile A/);f.handle.close();assert.equal(f.notices[0].removed,undefined);wait.resolve(result);await pending;assert.equal(f.saved(),0);
 });
 
 const serverRecord={id:'polygon',name:'Pile A',revision:2,kind:'polygon',modelVersionId:'version',source:{kind:'ortho'}};

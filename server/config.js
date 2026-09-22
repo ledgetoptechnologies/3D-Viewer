@@ -99,7 +99,7 @@ const config = {
   measurementCalculationsEnabled: bool(process.env.MEASUREMENT_CALCULATIONS_ENABLED, true),
   measurementMaxCells: Math.min(16_000_000, positiveInteger(process.env.MEASUREMENT_MAX_CELLS, 2_000_000)),
   // Native rasters stream bounded windows; point grids retain their own limit.
-  measurementRasterMaxCells: Math.min(30_000_000, positiveInteger(process.env.MEASUREMENT_RASTER_MAX_CELLS, 30_000_000)),
+  measurementRasterMaxCells: Math.min(100_000_000, positiveInteger(process.env.MEASUREMENT_RASTER_MAX_CELLS, 100_000_000)),
   measurementMemoryMiB: Math.min(4096, positiveInteger(process.env.MEASUREMENT_MEMORY_MIB, 4096)),
   measurementTimeoutMs: Math.min(900_000, positiveInteger(process.env.MEASUREMENT_TIMEOUT_MS, 300_000)),
   measurementPoissonBin: process.env.MEASUREMENT_POISSON_BIN || '/opt/poisson/PoissonRecon',

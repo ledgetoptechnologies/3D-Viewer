@@ -10,7 +10,7 @@ const shipped=source.slice(source.indexOf('  function showSurface('),source.inde
 function fixture({kind='polygon',saveWait=Promise.resolve(),attachmentWait=Promise.resolve(),saveError=null,adminAllowed=false,specialistAllowed=false,serverError=null,preferServer=false}={}){
   const record={id:'auto-volume-fixture',name:'Test boundary',kind,collection:'spatial3d',vertices:kind==='polygon'?[[0,0,0],[10,0,0],[10,10,0],[0,10,0]]:[[0,0,0],[10,0,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
   const opened=[],messages=[],records=new Map(),attachments=[],serverCalls=[],specialistOpened=[];
-  const scope=vm.createContext({draft:record,selected:null,units:'metric',savedUnits:{metric:'m'},viewGeneration:0,dialogGeneration:0,disposed:false,permitted:true,mode:'model',activeDialog:null,structuredClone,
+  const scope=vm.createContext({draft:record,editing:false,editBaseline:null,selected:null,units:'metric',savedUnits:{metric:'m'},viewGeneration:0,dialogGeneration:0,disposed:false,permitted:true,mode:'model',activeDialog:null,structuredClone,
     measurementMetrics,validateMeasurementGeometry,createServerProfileCalculator,
     adminAllowed,specialistAllowed,surfaceRequest:undefined,preferServerSurface:()=>preferServer,adminRequest:async()=>({}),createServerSurfaceCalculator:options=>async(...args)=>{serverCalls.push({options,args,snapshot:options.getRecord()});if(serverError)throw serverError;return{cutM3:20,fillM3:0,calculationJobId:'server-job'};},
     openAdminCalculationDialog:async options=>{if(!options.isCurrent())throw new Error('Measurement access changed.');specialistOpened.push(options);return{close(){}};},
@@ -28,7 +28,7 @@ test('one inspector exposes specialist methods only with verified staff and regi
     assert.equal(typeof f.opened[0].openSpecialist==='function',adminAllowed&&specialistAllowed);
     assert.equal(f.specialistOpened.length,0,'auto-on-finish never opens specialist methods');
   }
-  assert.doesNotMatch(source,/data-m="admin-volume"/);assert.match(source,/data-m="volume">Calculate volume<\/button>/);
+  assert.doesNotMatch(source,/data-m="admin-volume"/);assert.match(source,/data-m="volume">\$\{[^\n]+\?'View volume':[^\n]+\?'Recalculate volume':'Calculate volume'\}/);
 });
 
 test('surface and specialist attachments share the freshest saved revision in either direction',async()=>{
@@ -97,6 +97,17 @@ test('default polygon finish saves area immediately without opening or starting 
   assert.equal(f.records.size,1);assert.equal(f.opened.length,0);assert.equal(f.serverCalls.length,0);
   assert.equal(f.records.values().next().value.results.horizontalAreaM2,100);
   assert.equal(f.records.values().next().value.results.status,'geometry-only');
+});
+
+test('edit finish preserves unchanged volume or invalidates changed geometry without automatically calculating',async()=>{
+  for(const changed of [false,true]){
+    const f=fixture(),saved={status:'calculated',method:'surface-cut-fill',cutM3:12,fillM3:0,netM3:12};
+    f.scope.editing=true;f.scope.editBaseline=JSON.stringify(f.scope.draft.vertices);f.scope.draft.results=structuredClone(saved);
+    if(changed)f.scope.draft.vertices[0][0]=1;
+    await f.scope.finish();const result=f.records.values().next().value.results;
+    if(changed){assert.equal(result.status,'geometry-only');assert.equal(result.volumeInvalidated,true);assert.equal(result.cutM3,undefined);}else assert.deepEqual(result,saved);
+    assert.equal(f.opened.length,0);assert.equal(f.serverCalls.length,0);
+  }
 });
 
 test('distance and mode-switch completion never open automatic volume',async()=>{

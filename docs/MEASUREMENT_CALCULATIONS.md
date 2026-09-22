@@ -103,13 +103,19 @@ The result records source identity, reconstruction settings, engine commit/preci
 ## Resource and privacy limits
 
 - Existing processing worker only; one active measurement job across private and temporary lanes, with symmetric database admission against heavy dataset/processing/derivative jobs. Maximum twenty queued/running measurement jobs globally across both lanes. Temporary rows additionally have a fifteen-minute-or-grant-expiry lifetime and a forty-row grant/version-scope cap.
-- Native DSM/DTM calculations stream up to thirty million cells by default (`MEASUREMENT_RASTER_MAX_CELLS`, maximum thirty million), with a separate three-hundred-million cell/reference-patch work limit. Point grids retain their independent two-million-cell default (`MEASUREMENT_MAX_CELLS`, configurable up to sixteen million) and thirty-million cell/reference-patch work limit. No silent coarsening. Interior raster cells use exact linear-plane integration; boundary and cut/fill sign-crossing cells retain fractional clipping.
-- Native TIFF reads in 128-cell windows. EPT uses at most 20,000 intersecting nodes/10,000 hierarchy pages, 64 MiB per node, two million decoded points per node and twenty million points read per selection.
+- Native DSM/DTM calculations stream up to one hundred million cells by default (`MEASUREMENT_RASTER_MAX_CELLS`, hard maximum one hundred million), with a separate one-billion cell/reference-patch work limit. Limits apply to the selected raster bounding rectangle, not just polygon area. Point grids retain their independent two-million-cell default (`MEASUREMENT_MAX_CELLS`, configurable up to sixteen million) and thirty-million cell/reference-patch work limit. No silent coarsening. Interior raster cells use exact linear-plane integration; boundary and cut/fill sign-crossing cells retain fractional clipping.
+- Native TIFF reads use at most 512-by-512-cell windows (2 MiB of normalized Float64 samples); codec-block allocation remains separately bounded. Smaller test windows are supported and produce the same native integration within floating-point summation tolerance. EPT uses at most 20,000 intersecting nodes/10,000 hierarchy pages, 64 MiB per node, two million decoded points per node and twenty million points read per selection.
 - Reconstruction accepts 50–100,000 selected unique sample candidates, with at most 200,000 output vertices/faces and 32 MiB generated ASCII output. Closed source selection similarly caps 200,000 vertices/faces. Intersection validation has a finite test budget.
 - V8 old-space capped at 1 GiB. Default total calculation memory 4 GiB; parent RSS checks run independently of child event-loop activity. Native subprocess RSS plus Node RSS is also checked. Two native threads; deadline default 300 seconds, configurable maximum 900 seconds; native Poisson has its own 240-second deadline.
 - Cancellation, revoked access, changed measurement revision, timeout or lost lease kills the child process group, including native descendants on Linux. Private scratch directories are removed after termination. Only bounded previews/results are persisted; source rasters, clouds and full reconstructed meshes are not copied into measurement rows.
 
 Environment controls: `MEASUREMENT_CALCULATIONS_ENABLED`, `MEASUREMENT_MAX_CELLS`, `MEASUREMENT_RASTER_MAX_CELLS`, `MEASUREMENT_MEMORY_MIB`, `MEASUREMENT_TIMEOUT_MS`, `MEASUREMENT_POISSON_BIN`.
+
+Accepted jobs are database-backed and do not require the calculation dialog or
+browser page to remain open. They still require the original Viewer authorization
+to remain valid: expiry, revocation, cancellation, changed measurement revision,
+or lost worker lease stops the job. Do not promise completion after access expires.
+Closing the dialog alone does not cancel an accepted job; use explicit cancellation.
 
 ## Verification and remaining deployment checks
 

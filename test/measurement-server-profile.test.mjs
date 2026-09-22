@@ -17,7 +17,8 @@ function setup({caps={capabilities:{transectCalculations:true}},parentJob=parent
 
 test('profile controls describe the client action without infrastructure labels',()=>{
   const panel=readFileSync(new URL('../measurement-profile-panel.mjs',import.meta.url),'utf8');
-  assert.match(panel,/<button data-update>Update profile<\/button>/);
+  assert.match(panel,/<button data-update>Retry profile<\/button>/);
+  assert.match(panel,/<button data-reset>Reset section<\/button>/);
   assert.doesNotMatch(panel,/\bserver\b/i);
 });
 test('native profile uses linked parent only, recovers active jobs, and never writes measurement results',async()=>{

@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
-const start=source.indexOf('  async function screenshot()'),end=source.indexOf('  async function report()',start);
+const start=source.indexOf('  async function screenshot('),end=source.indexOf('  async function report()',start);
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return{promise,resolve};};
 function fixture(){
-  const capture=deferred(),decode=deferred(),decodeStarted=deferred(),state={draws:0,captures:0,urls:[],revoked:[],serializations:0};
-  const ctx={drawImage(){state.draws++;},fillRect(){},fillText(){}},canvas={width:400,height:300,getContext:()=>ctx};
+  const capture=deferred(),decode=deferred(),decodeStarted=deferred(),state={draws:0,captures:0,urls:[],revoked:[],serializations:0,text:[]};
+  const ctx={drawImage(){state.draws++;},fillRect(){},fillText(text){state.text.push(text);}},canvas={width:400,height:300,getContext:()=>ctx};
   const scope=vm.createContext({bound:{element:{},mode:'model',capture:()=>{state.captures++;return capture.promise;}},viewGeneration:1,units:'imperial',disposed:false,allowed:()=>true,draw(){},records:()=>[],displayGeometry:record=>record.vertices,displayStatus:()=>'',coordinateReference:()=>({crs:'EPSG:32616'}),svg:{text:'original'},XMLSerializer:class{serializeToString(svg){state.serializations++;return svg.text;}},Image:class{decode(){decodeStarted.resolve();return decode.promise;}},Blob,URL:{createObjectURL(blob){state.urls.push(blob);return'blob:test';},revokeObjectURL(url){state.revoked.push(url);}}});
   vm.runInContext(source.slice(start,end),scope);return{scope,state,canvas,capture,decode,decodeStarted};
 }
@@ -27,6 +27,13 @@ test('pending or unavailable visible overlays block capture before serializing o
 test('unavailable hidden overlays do not prevent an otherwise complete capture',async()=>{
   const f=fixture();f.scope.records=()=>[{id:'hidden',visible:false}];f.scope.displayGeometry=()=>null;
   const pending=f.scope.screenshot();assert.equal(f.state.captures,1);f.capture.resolve(f.canvas);await Promise.resolve();f.decode.resolve();await pending;assert.equal(f.state.draws,1);
+});
+
+test('quick capture explicitly warns about unavailable overlays instead of silently omitting them',async()=>{
+  const f=fixture();f.scope.records=()=>[{id:'pending-map',visible:true}];f.scope.displayGeometry=()=>null;
+  const pending=f.scope.screenshot({allowIncomplete:true});f.capture.resolve(f.canvas);await Promise.resolve();f.decode.resolve();await pending;
+  assert.equal(f.state.captures,1);assert.equal(f.state.draws,1);assert.match(f.state.text[0],/^Current view only.*some measurement overlays unavailable/);
+  assert.match(f.state.text[0],/imperial.*EPSG:32616/);
 });
 test('view mode, generation, unit and permission changes reject delayed screenshot before overlay export',async()=>{
   for(const change of [f=>{f.scope.viewGeneration++;},f=>{f.scope.bound={...f.scope.bound,mode:'ortho'};},f=>{f.scope.units='metric';},f=>{f.scope.allowed=()=>false;},f=>{f.scope.disposed=true;}]){
@@ -64,8 +71,8 @@ test('successful PNG retry replaces an earlier capture error only after requesti
 
 function reportFixture(){
   const reports=new Set(),body={children:[],append(node){this.children.push(node);}};let printed=0;
-  const document={body,createElement(){const nodes=new Map();return{innerHTML:'',showModal(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,{removeAttribute(key){delete this[key];}});return nodes.get(selector);},remove(){body.children=body.children.filter(n=>n!==this);}};}};
-  const scope=vm.createContext({document,reportDialogs:reports,viewGeneration:1,disposed:false,allowed:()=>true,units:'imperial',structuredClone,exportRecords:()=>[],screenshot:async()=>({toDataURL:()=> 'data:image/png;private'}),coordinateReference:()=>({crs:'EPSG:32616'}),escape:String,window:{print(){printed++;}}});
+  const document={body,createElement(){const nodes=new Map();return{innerHTML:'',showModal(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,{following:[],after(node){this.following.push(node);},removeAttribute(key){delete this[key];}});return nodes.get(selector);},remove(){body.children=body.children.filter(n=>n!==this);}};}};
+  const scope=vm.createContext({document,reportDialogs:reports,viewGeneration:1,disposed:false,allowed:()=>true,units:'imperial',structuredClone,exportRecords:()=>[],screenshot:async()=>({toDataURL:()=> 'data:image/png;private'}),coordinateReference:()=>({crs:'EPSG:32616'}),summary:r=>r.name+' geometry',calculationSummary:()=> 'Volume 10',measurementMetrics:()=>({edgeLengthsM:[1,2,3]}),measurementValue:String,escape:String,window:{print(){printed++;}}});
   vm.runInContext(source.slice(source.indexOf('  async function report()'),source.indexOf("  controls.addEventListener('change'")),scope);
   vm.runInContext(source.slice(source.indexOf('  function closeReports()'),source.indexOf('  function closeDialogs()')),scope);
   return{scope,reports,body,printed:()=>printed};
@@ -82,5 +89,21 @@ test('open report cleanup clears private image and markup, and is idempotent',as
 test('report print fails closed and clears the report after access or view change',async()=>{
   for(const change of [s=>{s.allowed=()=>false;},s=>{s.disposed=true;},s=>{s.viewGeneration++;}]){
     const f=reportFixture();await f.scope.report();const print=f.body.children[0].querySelector('[data-print]').onclick;change(f.scope);print();assert.equal(f.printed(),0);assert.equal(f.body.children.length,0);
+  }
+});
+
+test('report keeps every measurement table when renderer or image encoding is unavailable',async()=>{
+  for(const encoding of [false,true]){
+    const f=reportFixture();f.scope.exportRecords=()=>[{name:'First saved measurement'},{name:'Second saved measurement',visible:false}];
+    f.scope.screenshot=async()=>{if(!encoding)throw new Error('Renderer unavailable');return{toDataURL(){throw new Error('Canvas is tainted');}};};
+    await f.scope.report();const dialog=f.body.children[0];assert.match(dialog.innerHTML,/First saved measurement/);assert.match(dialog.innerHTML,/Second saved measurement/);assert.equal(dialog.querySelector('img').hidden,true);assert.match(dialog.querySelector('h1').following[0].textContent,/View image unavailable.*saved measurement tables/);
+    dialog.querySelector('[data-print]').onclick();assert.equal(f.printed(),1);f.scope.closeReports();assert.equal(f.body.children.length,0);
+  }
+});
+
+test('report fallback cannot expose saved tables after access, lifecycle or view invalidation during capture',async()=>{
+  for(const change of [s=>{s.allowed=()=>false;},s=>{s.disposed=true;},s=>{s.viewGeneration++;}]){
+    const f=reportFixture(),wait=deferred();f.scope.exportRecords=()=>[{name:'Private saved record'}];f.scope.screenshot=async()=>{await wait.promise;throw new Error('Renderer failed');};
+    const pending=f.scope.report(),rejected=assert.rejects(pending,/Access or view changed/);change(f.scope);wait.resolve();await rejected;assert.equal(f.body.children.length,0);assert.equal(f.reports.size,0);
   }
 });

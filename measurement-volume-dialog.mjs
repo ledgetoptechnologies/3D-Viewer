@@ -27,6 +27,13 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   <div class="section-readout" data-readout role="status">Hover the chart to inspect a sample.</div><p class="section-provenance" data-provenance></p></section>
   <details class="region-disclosure"><summary>Explore the isolated region in 3D</summary><div data-region-preview></div></details></div></div>${typeof openSpecialist==='function'?'<details class="surface-specialist"><summary>Specialist methods · staff only</summary><p class="hint">Point-cloud surfaces and object methods use different assumptions. Opening these options does not start a calculation or cancel a running job.</p><p data-specialist-status role="status"></p><div data-specialist-host></div></details>':''}`;
   dialog.querySelector('[data-name]').textContent=record.name;
+  // Keep technical controls below the result/profile, next to staff-only tools.
+  dialog.querySelector('[data-surface-content]').append(dialog.querySelector('.surface-settings'));
+  const help={cut:'Material above the reference ground surface inside your outline.',fill:'Space below the reference ground surface inside your outline.',net:'Above-base volume minus below-base volume. This can be negative.',coverage:'The percentage of your outline with usable elevation data. Missing data is not treated as zero.'};
+  for(const [name,text]of Object.entries(help)){
+    const card=dialog.querySelector(`[data-result=${name}]`).parentElement;
+    if(card){const tip=document.createElement('details');tip.className='volume-help';tip.innerHTML=`<summary aria-label="Explain ${name}" title="${text}">?</summary><p>${text}</p>`;card.append(tip);}
+  }
   dialog.querySelector('[data-area]').textContent=Number.isFinite(areaM2)&&areaM2>=0?measurementValue(areaM2,2,units):'Available in your measurement list';
   if(!advancedSettings){
     // New client stockpiles use the pile-containing surface in every view.
@@ -41,8 +48,13 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     dialog.querySelector('[data-status]').textContent=advancedSettings?'Your polygon area is already available. Review advanced settings only if needed, then calculate volume. You can close this inspector while it works.':'Your outline is ready. Calculate volume when you are ready. You can close this window while it works and return to your measurement later.';
   }
   let abort=null,preview=null,regionPreview=null,section=null,selected=null,chartBounds=null,retired=false,closed=false,specialist=null,specialistGeneration=0,nativeProfile=null;
+  let jobNotice=null,jobNoticeTimer=null;
+  function clearJobNotice(){clearTimeout(jobNoticeTimer);jobNoticeTimer=null;jobNotice?.remove();jobNotice=null;}
+  function announceJob(){clearJobNotice();jobNotice=document.createElement('div');jobNotice.className='measurement-job-notice';jobNotice.setAttribute('role','status');jobNotice.setAttribute('aria-live','polite');jobNotice.textContent='Volume calculation accepted. You can close this window and return later; work continues while your access remains valid.';document.body.append(jobNotice);jobNoticeTimer=setTimeout(clearJobNotice,8000);jobNoticeTimer?.unref?.();}
   const status=dialog.querySelector('[data-status]'),canvas=dialog.querySelector('[data-section-chart]'),plan=dialog.querySelector('[data-section-plan]');
   const field=name=>dialog.querySelector(`[name=${name}]`),value=name=>Number(field(name).value),format=v=>measurementValue(v,1,units);
+  function savedSurfaceIsCurrent(current){const r=current?.results;return r?.status==='calculated'&&['surface-cut-fill','point-surface-cut-fill'].includes(r.method)&&typeof r.calculationJobId==='string'&&[r.cutM3,r.fillM3,r.netM3,r.coverage].every(Number.isFinite)&&r.coverage>=0&&r.coverage<=1&&r.source?.modelVersionId===current.modelVersionId&&!!current.modelVersionId&&!r.volumeInvalidated;}
+  function setResultMode(valid){dialog.querySelector('h2').textContent=valid?'View volume':'Calculate volume';dialog.querySelector('[data-calculate]').hidden=valid;dialog.querySelector('.surface-action-bar').hidden=valid;}
   function clearNativeProfile(){nativeProfile?.dispose();nativeProfile=null;dialog.querySelector('[data-native-profile]').hidden=true;}
   function showNativeProfile(){
     clearNativeProfile();
@@ -57,7 +69,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     clearNativeProfile();
     record=structuredClone(getRecord()||record);
     const saved=record.results;
-    if(!saved||saved.status==='geometry-only')return;
+    if(!saved||saved.status==='geometry-only'){setResultMode(false);if(saved?.volumeInvalidated){status.dataset.state='stale';status.textContent='The outline changed. Calculate volume again to update its volume and cross-section. The old volume is no longer current.';}return;}
     const hasSurface=Number.isFinite(saved.cutM3)||Number.isFinite(saved.fillM3)||Number.isFinite(saved.netM3);
     if(!hasSurface&&!Number.isFinite(saved.volumeM3))return;
     const reference=saved.reference||{},referenceTypes=['boundary-triangulated','fitted-plane','lowest-boundary','highest-boundary','average-boundary','custom'];
@@ -73,8 +85,11 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     }
     const warnings=Array.isArray(saved.warnings)?saved.warnings.filter(w=>typeof w==='string').join(' '):'';
     status.dataset.state='saved';status.textContent=hasSurface?`Previously saved ${saved.status||'surface'} result. These totals have not been recalculated or revalidated against the current source. ${warnings}`:`Previously saved object volume: ${measurementValue(saved.volumeM3,3,units)}. This is a different calculation from surface cut/fill. ${warnings}`;
+    const valid=savedSurfaceIsCurrent(record);setResultMode(valid);
+    if(!valid){dialog.querySelector('h2').textContent='View volume';dialog.querySelector('[data-calculate]').textContent='Recalculate volume';}
+    if(valid)status.textContent=`Saved volume for this outline. Explore the cross-section below without changing the volume. ${warnings}`;
     dialog.querySelector('[data-preview-content]').hidden=true;dialog.querySelector('[data-preview-empty]').hidden=false;
-    dialog.querySelector('[data-preview-empty]').textContent=advancedSettings?'Recalculate to rebuild the preview from the source. Review advanced settings if needed. Opening this inspector does not run another calculation.':'Your saved result is shown above. Calculate volume again to rebuild its preview using the saved calculation settings.';
+    dialog.querySelector('[data-preview-empty]').textContent=valid?'Your saved result is shown above.':'This historical result may need recalculation. Calculate volume to update it using the saved calculation settings.';
     dialog.querySelector('.surface-settings').open=false;dialog.setAttribute('data-calculated','true');showNativeProfile();
   }
   function plot(){
@@ -108,6 +123,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   canvas.onpointerleave=()=>inspect(null);
   canvas.onkeydown=event=>{if(!section?.points.length||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();let index=selected?section.points.indexOf(selected):-1;if(event.key==='Home')index=0;else if(event.key==='End')index=section.points.length-1;else index=Math.max(0,Math.min(section.points.length-1,index+(event.key==='ArrowRight'?1:-1)));inspect(section.points[index]);};
   function invalidateSettings(){
+    setResultMode(false);
     clearNativeProfile();
     abort?.abort();preview=null;section=null;selected=null;chartBounds=null;regionPreview?.dispose();regionPreview=null;
     dialog.querySelector('[data-cancel-job]').hidden=true;
@@ -135,28 +151,30 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   dialog.querySelector('.region-disclosure').ontoggle=()=>{if(!retired&&dialog.querySelector('.region-disclosure').open&&preview&&!regionPreview)regionPreview=mountMeasurementRegionPreview(dialog.querySelector('[data-region-preview]'),{preview,units});};
   dialog.querySelector('[data-calculate]').onclick=async()=>{
     if(retired||(typeof openSpecialist==='function'&&dialog.querySelector('.surface-specialist').open))return;
-    abort?.abort();abort=new AbortController();const mine=abort;let cancelPending=false;dialog.querySelector('[data-cancel-job]').hidden=true;status.textContent='Checking source units and calculating the surface…';status.dataset.state='loading';dialog.setAttribute('aria-busy','true');dialog.querySelector('[data-calculate]').disabled=true;
+    abort?.abort();abort=new AbortController();const mine=abort;let cancelPending=false,jobAnnounced=false;clearJobNotice();dialog.querySelector('[data-cancel-job]').hidden=true;status.textContent='Checking source units and calculating the surface…';status.dataset.state='loading';dialog.setAttribute('aria-busy','true');dialog.querySelector('[data-calculate]').disabled=true;
     clearNativeProfile();preview=null;section=null;selected=null;chartBounds=null;regionPreview?.dispose();regionPreview=null;dialog.removeAttribute('data-calculated');dialog.querySelector('[data-results]').hidden=true;dialog.querySelector('[data-preview-content]').hidden=true;dialog.querySelector('[data-preview-empty]').hidden=false;dialog.querySelector('[data-preview-empty]').textContent='Calculating. The preview will appear only when a valid result is available.';
     const reference={type:field('reference').value,offsetM:value('offset')*unit[1]};if(reference.type==='custom')reference.elevationM=value('elevation')*unit[1];
     try{
       if(!String(field('offset').value).trim()||!Number.isFinite(reference.offsetM)||(reference.type==='custom'&&(!String(field('elevation').value).trim()||!Number.isFinite(reference.elevationM))))throw new Error('Enter a finite reference elevation and base offset.');
       const result=await calculate(record,{signal:mine.signal,reference,sourceKind:field('source').value,confirmMeters:false,onProgress:message=>{if(!retired&&!mine.signal.aborted)status.textContent=message;},onJob:job=>{
         if(retired||mine.signal.aborted||cancelPending)return;
+        if(job&&!jobAnnounced){jobAnnounced=true;announceJob();}else if(!job)clearJobNotice();
         const button=dialog.querySelector('[data-cancel-job]');button.hidden=!job;button.disabled=false;
         button.onclick=async()=>{
           if(retired||mine.signal.aborted||!job||cancelPending)return;cancelPending=true;button.disabled=true;
-          try{await job.cancel();if(retired||mine.signal.aborted)return;mine.abort();button.hidden=true;dialog.removeAttribute('aria-busy');dialog.querySelector('[data-calculate]').disabled=false;status.dataset.state='idle';status.textContent='Cancellation requested. Your outline and previously saved result are unchanged. You can calculate again with new settings.';}
+          try{await job.cancel();if(retired||mine.signal.aborted)return;clearJobNotice();mine.abort();button.hidden=true;dialog.removeAttribute('aria-busy');dialog.querySelector('[data-calculate]').disabled=false;status.dataset.state='idle';status.textContent='Cancellation requested. Your outline and previously saved result are unchanged. You can calculate again with new settings.';}
           catch(error){if(!retired&&!mine.signal.aborted){cancelPending=false;status.textContent=`Could not cancel the calculation. ${error.message}`;button.disabled=false;dialog.removeAttribute('aria-busy');dialog.querySelector('[data-calculate]').disabled=false;}}
         };
       }});if(mine.signal.aborted||cancelPending)return;
       if(result.preview?.samples?.length)buildSampledCrossSection(result.preview.samples,{width:1});
       const{preview:nextPreview,...persisted}=result;await save({...record,results:persisted});if(mine.signal.aborted)return;preview=nextPreview;
+      setResultMode(savedSurfaceIsCurrent({...record,results:persisted}));
       status.dataset.state='success';status.textContent=`${result.status}: cut ${measurementValue(result.cutM3,3,units)}; fill ${measurementValue(result.fillM3,3,units)}; net ${measurementValue(result.netM3,3,units)}. Coverage ${(result.coverage*100).toFixed(3)}%. ${(result.warnings||[]).join(' ')}`;
       for(const [name,key] of [['cut','cutM3'],['fill','fillM3'],['net','netM3']])dialog.querySelector(`[data-result=${name}]`).textContent=measurementValue(result[key],3,units);dialog.querySelector('[data-result=coverage]').textContent=`${(result.coverage*100).toFixed(3)}%`;dialog.querySelector('[data-results]').hidden=false;
       dialog.querySelector('[data-preview-content]').hidden=!preview?.samples?.length;dialog.querySelector('[data-preview-empty]').hidden=!!preview?.samples?.length;dialog.querySelector('[data-preview-empty]').textContent='Calculation complete; no preview samples are available for this region.';
       if(preview?.samples?.length){rebuild({initial:true});if(dialog.querySelector('.region-disclosure').open)regionPreview=mountMeasurementRegionPreview(dialog.querySelector('[data-region-preview]'),{preview,units});}dialog.querySelector('.surface-settings').open=false;dialog.setAttribute('data-calculated','true');showNativeProfile();
     }catch(error){if(!mine.signal.aborted){status.dataset.state='error';status.textContent=`No new volume was saved. ${error.message}`;dialog.querySelector('[data-preview-empty]').textContent='Preview unavailable. Resolve the source or calculation issue above and try again.';dialog.querySelector('.surface-settings').open=true;}}
-    finally{if(!mine.signal.aborted&&!cancelPending){dialog.removeAttribute('aria-busy');dialog.querySelector('[data-calculate]').disabled=false;}}
+    finally{if(!mine.signal.aborted&&!cancelPending){clearJobNotice();dialog.removeAttribute('aria-busy');dialog.querySelector('[data-calculate]').disabled=false;}}
   };
   function retire(){if(retired)return;retired=true;specialistGeneration++;specialist?.close();specialist=null;abort?.abort();clearNativeProfile();preview=null;section=null;selected=null;chartBounds=null;regionPreview?.dispose();regionPreview=null;}
   function close(){retire();dialog.close();}

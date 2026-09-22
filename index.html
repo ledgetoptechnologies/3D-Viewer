@@ -61,7 +61,7 @@
 
     #main { flex: 1; display: flex; min-height: 0; position: relative; }
     #sidebar {
-      width: 300px; min-width: 300px;
+      width: var(--sidebar-width,300px); min-width: var(--sidebar-width,300px); position:relative;
       background: var(--brand-panel);
       border-right: 1px solid var(--panel-border);
       display: flex; flex-direction: column;
@@ -69,6 +69,10 @@
       transition: transform 0.25s ease, width 0.25s ease;
     }
     #sidebar.collapsed { transform: translateX(-100%); width: 0; min-width: 0; }
+    #sidebar.resizing { transition:none; }
+    #sidebar-resize { position:absolute;right:0;top:0;bottom:0;width:7px;cursor:col-resize;touch-action:none;z-index:100;background:transparent; }
+    #sidebar-resize:hover,#sidebar-resize:focus-visible,#sidebar.resizing #sidebar-resize { background:var(--brand-orange);outline:none; }
+    #sidebar.collapsed #sidebar-resize { display:none; }
 
     #sidebar-custom { padding: 14px; gap: 14px; display: flex; flex-direction: column; overflow-y: auto; }
     .panel { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius); padding: 14px; }
@@ -379,7 +383,7 @@
       #brand { grid-column: 1; grid-row: 1; }
       #admin-controls { grid-column: 2; grid-row: 1; }
       #view-tabs { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
-      #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: 300px; }
+      #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: var(--sidebar-width,300px); }
       #sidebar-toggle { display: flex; }
     }
     @media (max-width: 640px) {
@@ -436,6 +440,7 @@
 
   <div id="main">
     <aside id="sidebar">
+      <div id="sidebar-resize" role="separator" aria-label="Resize navigation sidebar" aria-orientation="vertical" aria-valuemin="240" aria-valuemax="720" aria-valuenow="300" tabindex="0"></div>
       <div id="sidebar-custom">
         <!-- Advanced mesh controls are retained, but hidden. Default request is
              maximum detail with automatic bounded memory; see switchMode. -->
@@ -500,6 +505,7 @@
           </div>
         </div>
 
+        <div class="panel" id="panel-model-report"><h3>Model report</h3><button class="tool-btn full" id="btn-model-report">Print / PDF report</button><p class="hint">Current view and all your saved measurements.</p></div>
         <div class="panel" id="panel-camera">
           <h3><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" fill="none"/></svg> Camera</h3>
           <div class="tool-grid">
@@ -625,6 +631,7 @@
 
       <div id="floating-controls">
         <button class="icon-btn" id="btn-measure-float" title="Toggle distance measurement" style="display:none;"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+        <button class="icon-btn" id="btn-capture-float" title="Save view image" aria-label="Save view image"><svg viewBox="0 0 24 24"><path d="M4 6h4l2-2h4l2 2h4v14H4z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-reset-float" title="Reset camera"><svg viewBox="0 0 24 24"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
         <button class="icon-btn" id="btn-fullscreen-float" title="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
       </div>

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {existsSync,mkdtempSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdtempSync,mkdirSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -42,7 +42,7 @@ async function fixture(){
   const server=createServer(async(req,res)=>{try{
     const url=new URL(req.url,'http://fixture.invalid');
     if(url.pathname.startsWith('/api/')){requests.push({method:req.method,path:url.pathname});res.setHeader('Content-Type','application/json');if(req.method!=='GET'||req.headers.authorization!==`Bearer ${token}`){res.statusCode=403;return res.end('{}');}return res.end(JSON.stringify({measurements:url.searchParams.get('collection')==='spatial3d'?[record]:[],capabilities:{personalPersistence:true}}));}
-    if(url.pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(page());}
+    if(url.pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(url.searchParams.has('sidebar')?sidebarPage():url.searchParams.has('editor')?editorPage():page());}
     let file;if(/^\/[a-z0-9-]+\.(mjs|css)$/.test(url.pathname))file=path.join(root,url.pathname.slice(1));
     if(url.pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(url.pathname)){const base=path.join(root,'node_modules','three'),candidate=path.resolve(base,url.pathname.slice(8));if(candidate.startsWith(base+path.sep))file=candidate;}
     if(!file||!existsSync(file)){res.statusCode=404;return res.end();}
@@ -84,5 +84,97 @@ test('real measurement overlay preserves original visible edges across close zoo
   }finally{
     client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-measurement-closezoom-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained an isolated temporary profile lock: ${absolute}`);}}
+  }
+});
+
+function editorPage(){return `<!doctype html><html><head><style>body{margin:0;background:#121820;color:white;font:14px system-ui}#panel{position:absolute;left:810px;top:0;width:300px}#view{position:relative;width:800px;height:600px;background:#1a2634;overflow:hidden}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><div id="view"></div><button id="fixture-capture">Capture current view</button><button id="fixture-report">Open report</button><aside id="panel"></aside><script type="module">
+import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
+const mode=new URL(location.href).searchParams.get('editor'),map=['ortho','dsm','dtm'].includes(mode),view=document.querySelector('#view');let permission=true;
+const record={id:'11111111-1111-4111-8111-111111111111',name:'Editable pile',kind:'polygon',collection:map?'map':'spatial3d',vertices:[[100,100,1],[300,100,1],[300,300,1],[100,300,1]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},results:{method:'surface-cut-fill',status:'complete',cutM3:15,fillM3:3,netM3:12},visible:true};
+if(map)record.vertices=record.vertices.map(([x,y])=>[x,y,0]);
+let captureCount=0,frameColor='rgb(20,40,60)';
+const context={mode,element:view,host:view,pick:event=>{const r=view.getBoundingClientRect();return [event.clientX-r.left,event.clientY-r.top,map?0:1];},project:p=>p.slice(0,2),viewSignature:()=>mode,capture:async()=>{captureCount++;const canvas=document.createElement('canvas');canvas.width=800;canvas.height=600;const ctx=canvas.getContext('2d');ctx.fillStyle=frameColor;ctx.fillRect(0,0,800,600);return canvas;}};
+const workspace=createMeasurementWorkspace({panel:document.querySelector('#panel'),context:()=>context,token:()=>null,permitted:()=>permission,toolChanged:()=>{},coordinateReference:()=>record.coordinateReference,toLonLat:p=>p});
+await workspace.store.save(record);workspace.tick({force:true});
+document.querySelector('#fixture-capture').onclick=()=>workspace.captureView();document.querySelector('#fixture-report').onclick=()=>workspace.openReport();
+window.editorFixture={draft:()=>workspace.getDraft(),saved:()=>[...workspace.store.records.values()][0],captures:()=>captureCount,nextFrame:()=>{frameColor='rgb(70,80,90)';},deny(){permission=false;workspace.tick();}};document.body.dataset.ready='true';
+</script></body></html>`;}
+
+function sidebarPage(){const styles=readFileSync(path.join(root,'index.html'),'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><style>${styles}</style></head><body><div id="app"><div id="main"><aside id="sidebar"><div id="sidebar-resize" role="separator" tabindex="0" aria-label="Resize navigation sidebar" aria-orientation="vertical" aria-valuemin="240"></div><div id="sidebar-custom">Synthetic sidebar</div></aside><div id="test-view" style="flex:1;min-width:0"></div></div></div><script type="module">
+import {installSidebarResize} from '/viewer-sidebar-resize.mjs';
+const sidebar=document.querySelector('#sidebar'),handle=document.querySelector('#sidebar-resize');let calls=0;
+const dispose=installSidebarResize({sidebar,handle,onResize:()=>calls++});
+window.sidebarFixture={dispose,collapse:()=>sidebar.classList.toggle('collapsed'),state:()=>({width:sidebar.getBoundingClientRect().width,view:document.querySelector('#test-view').getBoundingClientRect().width,scroll:document.documentElement.scrollWidth,handle:getComputedStyle(handle).display,calls,resizing:sidebar.classList.contains('resizing')})};document.body.dataset.ready='true';
+</script></body></html>`;}
+
+test('real sidebar CSS supports desktop drag, keyboard and mobile collapsed layout',{timeout:60000},async t=>{
+  const binary=browserPath();if(!binary){t.skip('Chromium-family browser required');return;}
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
+  try{
+    const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-sidebar-layout-browser-'));
+    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(30);assert.ok(existsSync(active));
+    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`${f.origin}?sidebar=1`});await waitFor(client,"document.body?.dataset.ready==='true'");
+    assert.equal((await client.evaluate('sidebarFixture.state()')).width,300);
+    await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:297,y:100,button:'left',clickCount:1});await client.command('Input.dispatchMouseEvent',{type:'mouseMoved',x:497,y:100,button:'left',buttons:1});await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:497,y:100,button:'left',clickCount:1});await waitFor(client,'sidebarFixture.state().width===500');
+    let state=await client.evaluate('sidebarFixture.state()');assert.equal(state.view,700);assert.equal(state.resizing,false);assert.ok(state.calls>0);
+    await client.evaluate("document.querySelector('#sidebar-resize').focus()");await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'End'});await waitFor(client,'sidebarFixture.state().width===720');
+    await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home'});await waitFor(client,'sidebarFixture.state().width===240');
+    await client.evaluate('sidebarFixture.collapse()');await waitFor(client,"sidebarFixture.state().width<=1&&sidebarFixture.state().handle==='none'");assert.ok((await client.evaluate('sidebarFixture.state()')).view>=1199);
+    await client.command('Emulation.setDeviceMetricsOverride',{width:390,height:800,deviceScaleFactor:1,mobile:true});await client.evaluate('sidebarFixture.collapse()');await waitFor(client,'sidebarFixture.state().width===240');state=await client.evaluate('sidebarFixture.state()');assert.equal(state.view,390);assert.ok(state.scroll<=390);
+    await client.evaluate('sidebarFixture.collapse()');await waitFor(client,'sidebarFixture.state().width<=1');assert.equal((await client.evaluate('sidebarFixture.state()')).view,390);
+    await client.evaluate('sidebarFixture.dispose()');assert.deepEqual(client.errors,[]);
+  }finally{
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-sidebar-layout-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated sidebar profile retained: ${absolute}`);}}
+  }
+});
+
+test('real editor inserts midpoint, moves/deletes selected vertices and retains lifecycle across all view adapters',{timeout:60000},async t=>{
+  const binary=browserPath();if(!binary){t.skip('Chromium-family browser required');return;}
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
+  try{
+    const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-measurement-editor-browser-'));const downloads=path.join(profile,'downloads');mkdirSync(downloads);
+    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(30);assert.ok(existsSync(active));
+    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:850,deviceScaleFactor:1,mobile:false});
+    const mouse=async(type,x,y,extra={})=>client.command('Input.dispatchMouseEvent',{type,x,y,button:'left',clickCount:1,...extra});
+    const click=async(x,y)=>{await mouse('mousePressed',x,y);await mouse('mouseReleased',x,y);};
+    const button=async selector=>{const p=await client.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2];})()`);await click(...p);};
+    for(const mode of ['model','cloud','ortho','dsm','dtm']){
+      await client.command('Page.navigate',{url:`${f.origin}?editor=${mode}`});await waitFor(client,"document.body?.dataset.ready==='true'&&document.querySelector('[data-m=edit-record]')");
+      assert.match(await client.evaluate("document.querySelector('.measurement-overlay').textContent"),/Editable pile.*Volume/s);
+      if(mode==='model'){
+        const original=await client.evaluate('JSON.stringify(editorFixture.saved())');
+        await button('#fixture-capture');const imageFile=path.join(downloads,'measured-view.png'),deadline=Date.now()+8000;while(!existsSync(imageFile)&&Date.now()<deadline)await delay(30);assert.ok(existsSync(imageFile),await client.evaluate('document.body.innerText'));
+        const bytes=readFileSync(imageFile);assert.deepEqual([...bytes.subarray(0,8)],[137,80,78,71,13,10,26,10]);assert.ok(bytes.length>5000);assert.equal(bytes.readUInt32BE(16),800);assert.equal(bytes.readUInt32BE(20),600);
+        const pixel=await client.evaluate(`(async()=>{const image=new Image();image.src=${JSON.stringify('data:image/png;base64,')}+${JSON.stringify(bytes.toString('base64'))};await image.decode();const canvas=document.createElement('canvas');canvas.width=800;canvas.height=600;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);return [...ctx.getImageData(500,500,1,1).data];})()`);assert.deepEqual(pixel,[20,40,60,255]);assert.equal(await client.evaluate('editorFixture.captures()'),1);
+        await client.evaluate('editorFixture.nextFrame()');await button('#fixture-report');await waitFor(client,"document.querySelector('dialog.measurement-report img')?.complete&&document.querySelector('dialog.measurement-report img')?.naturalWidth===800");
+        assert.match(await client.evaluate("document.querySelector('dialog.measurement-report table').textContent"),/Editable pile/);assert.match(await client.evaluate("document.querySelector('dialog.measurement-report table').textContent"),/Net|Cut|Volume/i);
+        const reportPixel=await client.evaluate("(()=>{const image=document.querySelector('dialog.measurement-report img'),canvas=document.createElement('canvas');canvas.width=800;canvas.height=600;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);return [...ctx.getImageData(500,500,1,1).data];})()");assert.deepEqual(reportPixel,[70,80,90,255]);assert.equal(await client.evaluate('editorFixture.captures()'),2);assert.equal(await client.evaluate('JSON.stringify(editorFixture.saved())'),original);
+        await button('dialog.measurement-report [data-close]');await waitFor(client,"!document.querySelector('dialog.measurement-report')");t.diagnostic(`captureView downloaded actual ${bytes.length}-byte 800x600 PNG; openReport rendered measurement table and a freshly captured current frame.`);
+      }
+      await button('[data-m=edit-record]');await waitFor(client,"document.querySelectorAll('[data-measurement-insert]').length===4");
+      await click(200,100);await waitFor(client,'editorFixture.draft().vertices.length===5');
+      // Selected midpoint can move; original source is unchanged until Finish.
+      await mouse('mousePressed',200,100);await mouse('mouseMoved',200,70,{buttons:1});await mouse('mouseReleased',200,70);await waitFor(client,'editorFixture.draft().vertices[1][1]===70');
+      assert.equal((await client.evaluate('editorFixture.saved().vertices')).length,4);
+      await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Backspace',code:'Backspace'});await waitFor(client,'editorFixture.draft().vertices.length===4');
+      // Contextual delete is offset from the selected vertex, not on top of it.
+      await click(300,100);await waitFor(client,"Number(document.querySelector('[data-measurement-delete] rect')?.getAttribute('x'))===320");
+      const box=await client.evaluate("(()=>{const r=document.querySelector('[data-measurement-delete] rect').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};})()");assert.ok(box.x>300&&box.y+box.height<100);
+      await click(box.x+box.width/2,box.y+box.height/2);await waitFor(client,'editorFixture.draft().vertices.length===3');
+      await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Backspace',code:'Backspace'});assert.equal((await client.evaluate('editorFixture.draft().vertices')).length,3,'minimum polygon vertices retained');
+      // Shift lets navigation through and does not place/move a measurement.
+      const before=await client.evaluate('JSON.stringify(editorFixture.draft().vertices)');await mouse('mousePressed',150,150,{modifiers:8});await mouse('mouseReleased',180,160,{modifiers:8});assert.equal(await client.evaluate('JSON.stringify(editorFixture.draft().vertices)'),before);
+      await button('[data-m=finish]');await waitFor(client,'editorFixture.draft()===null');const saved=await client.evaluate('editorFixture.saved()');assert.equal(saved.vertices.length,3);assert.equal(saved.results.volumeInvalidated,true);assert.equal(saved.results.cutM3,undefined);
+      await button('[data-m=edit-record]');await waitFor(client,'editorFixture.draft()!==null');await client.evaluate('editorFixture.deny()');assert.equal(await client.evaluate('editorFixture.draft()'),null);assert.equal(await client.evaluate("document.querySelector('.measurement-overlay').innerHTML"),'');
+    }
+    assert.deepEqual(client.errors,[]);
+  }finally{
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-measurement-editor-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated editor profile retained: ${absolute}`);}}
   }
 });

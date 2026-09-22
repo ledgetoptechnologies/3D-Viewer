@@ -53,7 +53,7 @@ test('native profile exports create real CSV and PNG files using browser downloa
     const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);
     await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:1100,deviceScaleFactor:1,mobile:false});
     await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});await waitUntil(()=>client.evaluate("document.body?.dataset.ready==='true'"),'fixture mount');
-    await click(client,'[data-update]');await waitUntil(()=>client.evaluate("!document.querySelector('[data-profile-csv]').disabled"),'profile result');
+    await waitUntil(()=>client.evaluate("!document.querySelector('[data-profile-csv]').disabled"),'automatic profile result');
     await click(client,'[data-profile-csv]');const csvFile=path.join(downloads,'elevation-profile.csv');await waitUntil(()=>existsSync(csvFile),'CSV actual download');
     const csv=readFileSync(csvFile,'utf8');assert.equal(csv.split('\r\n').length,5);assert.ok(csv.split('\r\n').every(row=>row.split(',').length===19));assert.match(csv,/"-2"/);assert.match(csv,/"nodata"/);assert.match(csv,/EPSG:32616/);assert.match(csv,new RegExp('a'.repeat(64)));
     await click(client,'[data-profile-png]');const pngFile=path.join(downloads,'elevation-profile.png');await waitUntil(()=>existsSync(pngFile),'PNG actual download');const png=readFileSync(pngFile),dimensions=verifyPng(png);assert.ok(png.length>5000);
