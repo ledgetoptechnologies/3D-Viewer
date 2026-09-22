@@ -2362,7 +2362,8 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
 async function resolveMeasurementDisplayVertices(record,{signal}={}){
   const preferred=record.source?.kind;
   const source=preferred==='dtm'&&DTM_URL?{type:'dtm',url:DTM_URL}:DSM_URL?{type:'dsm',url:DSM_URL}:DTM_URL?{type:'dtm',url:DTM_URL}:null;
-  return resolveMeasurementDisplayElevations(record,{modelVersionId:PROJECT?.activeVersion?.id,expectedCrs:measurementCoordinateReference().crs,source,signal,openTiff:openGeoTiff,preflight:preflightBrowserRasterHeader,pool:ensureGeoTiffPool()});
+  if(source)source.reviewedEvidence=PROJECT?.displayElevationEvidence?.[source.type];
+  return resolveMeasurementDisplayElevations(record,{modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,expectedCrs:measurementCoordinateReference().crs,source,signal,openTiff:openGeoTiff,preflight:preflightBrowserRasterHeader,pool:ensureGeoTiffPool()});
 }
 
 function installMeasurementWorkspace() {

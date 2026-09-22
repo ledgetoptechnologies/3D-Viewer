@@ -20,16 +20,16 @@ class Element {
   removeEventListener(k,fn){this.handlers.set(k,(this.handlers.get(k)||[]).filter(f=>f!==fn));}
   closest(){return null;}fire(k,event){for(const fn of this.handlers.get(k)||[])fn(event);}
 }
-function fixture(){
+function fixture({storeFactory=createMeasurementStore,token=()=>null}={}){
   const counts={layout:0,project:0,signature:0},window=new Element(),document={defaultView:window,createElement(tag){const e=new Element(tag);e.ownerDocument=this;return e;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
   let mode='cloud',signature='view-1',permission=true,width=400;
   canvas.getBoundingClientRect=()=>{counts.layout++;return{left:0,top:0,width,height:300};};
   const context=()=>({mode,element:canvas,host,viewSignature(){counts.signature++;return signature;},project(p,viewport){counts.project++;assert.ok(viewport.width);return p.slice(0,2);},pick:e=>[e.clientX,e.clientY,0]});
-  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,openSurfaceDialog:()=>{},openAdminCalculationDialog:()=>{},document,window,crypto,structuredClone,console,setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000}});
+  const scope=vm.createContext({...geometry,createMeasurementStore:storeFactory,createMeasurementListLayout,openSurfaceDialog:()=>{},openAdminCalculationDialog:()=>{},document,window,crypto,structuredClone,console,setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{}});
   const controls=panel.children[0];workspace.tick();
   return{workspace,counts,controls,canvas,svg:()=>host.children.find(e=>e.tagName==='svg'),camera(){signature+='c';},resize(){width=600;signature+='r';},setMode(next){mode=next;},deny(){permission=false;},
     action(name,record){controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'?{dataset:{record}}:null}});},
@@ -38,6 +38,14 @@ function fixture(){
   };
 }
 const record=()=>({id:crypto.randomUUID(),name:'Distance',kind:'distance',collection:'spatial3d',vertices:[[10,10,0],[120,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+
+test('signed-in retry loading control stays hidden until failure and hides after recovery across rerenders',async()=>{
+  let fail=false;const f=fixture({token:()=> 'signed-in',storeFactory:({changed})=>({records:new Map(),statuses:new Map(),load:async()=>{if(fail)throw new Error('Temporary failure');changed();},invalidate(){}})});
+  const retry=f.controls.querySelector('[data-m="reload"]'),flush=()=>new Promise(resolve=>setImmediate(resolve));
+  assert.equal(retry.hidden,true);await flush();assert.equal(retry.hidden,true);f.units('metric');assert.equal(retry.hidden,true);
+  fail=true;f.action('reload');await flush();assert.equal(retry.hidden,false);f.units('feet');assert.equal(retry.hidden,false);
+  fail=false;f.action('reload');await flush();assert.equal(retry.hidden,true);f.units('metric');assert.equal(retry.hidden,true);f.workspace.dispose();
+});
 
 test('centered polygon label and card preserve negative net volume rather than converting fill to positive',async()=>{
   const f=fixture();f.units('metric');const r={...record(),name:'Below base',kind:'polygon',vertices:[[20,20,0],[380,20,0],[380,280,0],[20,280,0]],results:{status:'calculated',method:'surface-cut-fill',cutM3:2,fillM3:7,netM3:-5}};

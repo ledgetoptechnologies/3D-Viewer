@@ -108,27 +108,46 @@ function integralHeight(polygon) {
   for (let i = 1; i + 1 < polygon.length; i++) result += Math.abs(cross(polygon[0], polygon[i], polygon[i + 1])) / 2 * (polygon[0][2] + polygon[i][2] + polygon[i + 1][2]) / 3;
   return result;
 }
-export function createSurfaceAccumulator({ vertices, reference = {}, referenceBase, maxCells = 16_000_000, maxWork = 30_000_000 }) {
+function patchGridSpans(patches, {width,height,bounds}) {
+  const dx=(bounds.maxE-bounds.minE)/width,dy=(bounds.maxN-bounds.minN)/height;
+  return patches.map(patch=>{
+    const xs=patch.polygon.map(p=>p[0]),ys=patch.polygon.map(p=>p[1]);
+    // One-cell padding prevents rounded projected coordinates from culling a
+    // fractional boundary. The existing exact geometric predicates still own it.
+    return {patch,left:Math.max(0,Math.floor((Math.min(...xs)-bounds.minE)/dx)-1),right:Math.min(width,Math.ceil((Math.max(...xs)-bounds.minE)/dx)+1),top:Math.max(0,Math.floor((bounds.maxN-Math.max(...ys))/dy)-1),bottom:Math.min(height,Math.ceil((bounds.maxN-Math.min(...ys))/dy)+1)};
+  }).filter(s=>s.right>s.left&&s.bottom>s.top);
+}
+export function estimateSurfacePatchWork(patches, grid) {
+  return patchGridSpans(patches,grid).reduce((sum,s)=>sum+(s.right-s.left)*(s.bottom-s.top),0);
+}
+export function createSurfaceAccumulator({ vertices, reference = {}, referenceBase, spatialPatchCulling = false, maxCells = 16_000_000, maxWork = 30_000_000 }) {
   const polygon = validatePolygon(vertices), base = referenceBase || createReference(polygon, reference), footprintM2 = Math.abs(polygonArea(polygon));
   const patches = base.patches.map(patch => ({ ...patch,
     minX: Math.min(...patch.polygon.map(p => p[0])), maxX: Math.max(...patch.polygon.map(p => p[0])),
     minY: Math.min(...patch.polygon.map(p => p[1])), maxY: Math.max(...patch.polygon.map(p => p[1])),
     edges: patch.polygon.map((a, i) => { const b = patch.polygon[(i + 1) % patch.polygon.length]; return { x: -(b[1] - a[1]), y: b[0] - a[0], origin: a }; })
   }));
-  let cutM3 = 0, fillM3 = 0, coveredAreaM2 = 0, validAreaM2 = 0, cellsVisited = 0, sampleCount = 0;
+  let cutM3 = 0, fillM3 = 0, coveredAreaM2 = 0, validAreaM2 = 0, cellsVisited = 0, sampleCount = 0, workVisited = 0;
   function addGrid({ values, width, height, bounds, nodata = NaN }) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || values?.length !== width * height) invalid('Invalid native raster grid.');
     if (!bounds || !Object.values(bounds).every(Number.isFinite)) invalid('Raster bounds must be finite.');
     const dx = (bounds.maxE - bounds.minE) / width, dy = (bounds.maxN - bounds.minN) / height;
     if (!(dx > 0 && dy > 0)) invalid('Raster must have positive metric cell dimensions.');
     if (cellsVisited + width * height > maxCells) invalid('Selection exceeds the native-resolution cell limit; reduce its extent.', 'measurement_limit');
-    if ((cellsVisited + width * height) * base.patches.length > maxWork) invalid('Selection and boundary complexity exceed the calculation work limit.', 'measurement_limit');
+    const spans=spatialPatchCulling?patchGridSpans(patches,{width,height,bounds}):null;
+    const work=spans?spans.reduce((sum,s)=>sum+(s.right-s.left)*(s.bottom-s.top),0):width*height*base.patches.length;
+    if (workVisited + work > maxWork) invalid('Selection and boundary complexity exceed the calculation work limit.', 'measurement_limit');
+    workVisited += work;
     cellsVisited += width * height;
-    for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
+    for (let row = 0; row < height; row++) {
+      const events=spans?spans.filter(s=>row>=s.top&&row<s.bottom).flatMap(s=>[{col:s.left,patch:s.patch,add:true},{col:s.right,patch:s.patch,add:false}]).sort((a,b)=>a.col-b.col):null;
+      const active=events?new Set():patches;let eventIndex=0;
+      for (let col = 0; col < width; col++) {
+      if(events){while(eventIndex<events.length&&events[eventIndex].col===col){const event=events[eventIndex++];if(event.add)active.add(event.patch);else active.delete(event.patch);}if(!active.size)continue;}
       const minX = bounds.minE + col * dx, maxY = bounds.maxN - row * dy, value = Number(values[row * width + col]);
       const valid = Number.isFinite(value) && (!Number.isFinite(nodata) || value !== nodata);
       let cellValid = false;
-      for (const patch of patches) {
+      for (const patch of active) {
         if (minX >= patch.maxX || minX + dx <= patch.minX || maxY <= patch.minY || maxY - dy >= patch.maxY) continue;
         const centerX = minX + dx / 2, centerY = maxY - dy / 2;
         let interior = true, outside = false;
@@ -164,6 +183,7 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
         fillM3 -= integralHeight(clipHalfPlane(differences, p => -p[2]));
       }
       if (cellValid) sampleCount++;
+      }
     }
   }
   function result() {

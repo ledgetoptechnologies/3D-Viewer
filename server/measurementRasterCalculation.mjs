@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fromFile } from 'geotiff';
-import { createSurfaceAccumulator } from '../measurement-volume.mjs';
+import { createSurfaceAccumulator, estimateSurfacePatchWork } from '../measurement-volume.mjs';
 import { insideSelection } from './measurementSelection.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from '../raster-source-metadata.mjs';
 import { validateMeasurementTiffHeader } from './measurementTiffHeader.mjs';
@@ -92,8 +92,8 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
       }
     }
     const referenceBase=(!request.reference?.type||request.reference.type==='boundary-triangulated')?createDelaunayReference(vertices,request.reference):undefined;
-    const accumulator = createSurfaceAccumulator({ vertices, reference: request.reference, referenceBase, maxCells, maxWork: 1_000_000_000 });
-    if(cells*accumulator.reference.patches.length>1_000_000_000)fail('measurement_limit');
+    const accumulator = createSurfaceAccumulator({ vertices, reference: request.reference, referenceBase, spatialPatchCulling:true, maxCells, maxWork: 1_000_000_000 });
+    if(cells&&estimateSurfacePatchWork(accumulator.reference.patches,{width:right-left,height:bottom-top,bounds:{minE:ox+left*dx,maxE:ox+right*dx,maxN:oy+top*dy,minN:oy+bottom*dy}})>1_000_000_000)fail('measurement_limit');
     let processed = 0;
     const previewSamples = [], previewStride = Math.max(1, Math.ceil(cells / 4096));
     for (let row = top; row < bottom; row += windowSize) for (let col = left; col < right; col += windowSize) {

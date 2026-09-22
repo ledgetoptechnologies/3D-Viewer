@@ -9,6 +9,7 @@ const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
 const { receiptVerifiedLodProvenance, verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
 const { createMeasurementApi } = require('./measurementApi');
+const { reviewedAssetUnitEvidence } = require('./measurementUnitEvidence');
 
 const VIEWER_COOKIE = 'ltds_viewer';
 
@@ -65,6 +66,12 @@ function toViewerConfig(model, { assetToken = null, assetFilter = null, sessionM
     // this authority marker and therefore retain the browser's fail-closed
     // validation path.
     lodProvenanceVerified: Boolean(serverVerifiedLodProvenance),
+    // Display-only evidence is emitted only for an exact authorized registered
+    // source. It does not authorize calculation or accept client unit claims.
+    displayElevationEvidence: Object.fromEntries(['dsm', 'dtm'].flatMap(kind => {
+      const evidence = reviewedAssetUnitEvidence(model.id, model.activeVersion.id, byKind[kind]);
+      return evidence ? [[kind, { ...evidence, url: encodedAssetUrl(model.id, byKind[kind], assetToken) }]] : [];
+    })),
     assets: {
       glb: encodedAssetUrl(model.id, byKind.glb, assetToken),
       tiles: encodedAssetUrl(model.id, byKind.tiles, assetToken),

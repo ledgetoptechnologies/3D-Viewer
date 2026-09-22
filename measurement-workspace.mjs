@@ -16,7 +16,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
   const selectedExports=new Set(),reportDialogs=new Set();
   const metricCache=new WeakMap();
-  let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null;
+  let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null,loadFailed=false;
   const displayCache=new Map();
   let displayRequests=0;
   let adminAllowed=false,specialistAllowed=false,activeDialog=null,invalidated=false,viewGeneration=0,dialogGeneration=0;
@@ -119,7 +119,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const edit=controls.querySelector('[data-m="edit"]');
     edit.textContent=crossFamily?(chosen.collection==='map'?'Edit in map view':'Edit in 3D view'):'Edit selected';
     edit.title=crossFamily?'Switch to the original view type to move vertices without changing the meaning of measured heights.':'Move the selected measurement’s vertices';
-    controls.querySelector('[data-m="reload"]').hidden=!token();
+    controls.querySelector('[data-m="reload"]').hidden=!token()||!loadFailed;
   }
   function draftRecord(){return {...draft,vertices:draft.vertices.map(p=>p.slice())};}
   function releaseCursor(){if(cursorOwner){cursorOwner.style.cursor=previousCursor;cursorOwner=null;}}
@@ -339,7 +339,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='edit-record'){selected=id;editRecord(record);}
       if(action==='focus'){const chosen=store.records.get(selected);if(chosen){const vertices=displayGeometry(chosen);if(vertices)context()?.focus?.(vertices);else tell(displayStatus(chosen));}else tell('Select a measurement name first.');}
       if(action==='select'){selected=id;if(restoredUnits[record.displayPreferences?.units]){units=restoredUnits[record.displayPreferences.units];controls.querySelector('[data-m="units"]').value=units;}renderPanel();}
-      if(action==='reload'){clearDisplayRequests({all:true});const notice=await store.load();ready=true;controls.querySelector('[data-m="reload"]').hidden=true;tell(notice||'Saved measurements reloaded.');}
+      if(action==='reload'){clearDisplayRequests({all:true});try{const notice=await store.load();ready=true;loadFailed=false;renderPanel();tell(notice||'Saved measurements reloaded.');}catch(error){loadFailed=true;renderPanel();throw error;}}
       if(action==='visibility')await store.patch(record,{visible:record.visible===false});
       if(action==='delete'){await store.remove(id);selectedExports.delete(id);if(draft?.id===id)disarm();}
       if(action==='rename'){
@@ -355,7 +355,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='volume')showSurface(record);
     }catch(error){tell(error.message);}
   });
-  store.load().then(notice=>{ready=true;if(notice)tell(notice);}).catch(error=>{controls.querySelector('[data-m="reload"]').hidden=false;tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});
+  store.load().then(notice=>{ready=true;loadFailed=false;renderPanel();if(notice)tell(notice);}).catch(error=>{loadFailed=true;renderPanel();tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});
   if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){adminAllowed=result.capabilities?.serverCalculations===true;specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
   renderPanel();
   return {setTool,store,tick:draw,invalidate,captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){viewGeneration++;clearDisplayRequests();void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};

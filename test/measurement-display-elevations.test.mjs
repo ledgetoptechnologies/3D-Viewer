@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {fromArrayBuffer} from 'geotiff';
 import {resolveMeasurementDisplayElevations,retainedDisplayBoundary} from '../measurement-display-elevations.mjs';
 import {nativeTiffFixture} from './helpers/native-tiff-fixture.mjs';
+import {createRequire} from 'node:module';
+import {countyReferenceRequest} from '../scripts/validate-county-stockpile-reference.mjs';
+const {toViewerConfig}=createRequire(import.meta.url)('../server/apiV1.js');
 const record=()=>({collection:'map',kind:'polygon',coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},vertices:[[.25,.25,0],[1.75,.25,0],[1.75,1.75,0],[.25,1.75,0]],source:{kind:'ortho'},results:{status:'geometry-only',elevationBasis:'not-sampled'}});
 function fixture(overrides={}){
   const counts={preflight:0,open:0,close:0,reads:[]};
@@ -54,10 +57,40 @@ test('missing elevations or unverified units fail closed instead of fabricating 
   ]){const f=fixture(overrides);await assert.rejects(f.run(),pattern);assert.equal(f.counts.close,1);}
   const f=fixture();await assert.rejects(f.run(record(),{source:null}),/no existing DSM/);assert.equal(f.counts.open,0);
 });
-test('out-of-bounds, oversized native extent and oversized block are rejected before pixel reads',async()=>{
+test('out-of-bounds and oversized blocks fail while sparse large extents read only deduplicated vertex cells',async()=>{
   const outside=record();outside.vertices[0][0]=-1;const f=fixture();await assert.rejects(f.run(outside),/outside/);assert.equal(f.counts.reads.length,0);
-  const wide=record();wide.vertices=[[.25,.25,0],[1999.75,.25,0],[1999.75,1999.75,0],[.25,1999.75,0]];const large=fixture({getWidth:()=>2000,getHeight:()=>2000,getOrigin:()=>[0,2000]});await assert.rejects(large.run(wide),/sampling limit/);assert.equal(large.counts.reads.length,0);
+  const wide=record();wide.vertices=[[.25,.25,0],[1999.75,.25,0],[1999.75,1999.75,0],[.25,1999.75,0],[.25,.25,0]];
+  const windows=[],large=fixture({getWidth:()=>2000,getHeight:()=>2000,getOrigin:()=>[0,2000],readRasters:async({window})=>{windows.push(window);return new Float32Array([123]);}});
+  const sampled=await large.run(wide);assert.equal(windows.length,4);assert.ok(windows.every(([x,y,r,b])=>r-x===1&&b-y===1));assert.ok(sampled.vertices.every(p=>p[2]===123));assert.ok(wide.vertices.every(p=>p[2]===0));
   const block=fixture({fileDirectory:{BitsPerSample:[64],RowsPerStrip:2},getWidth:()=>20_000_000});await assert.rejects(block.run(),/decode blocks/);assert.equal(block.counts.reads.length,0);
+});
+
+test('authorized config exposes reviewed display evidence only for the exact visible asset identity',()=>{
+  const req=countyReferenceRequest(),asset={...req.source,rootKey:'data',relativePath:'dsm.tif'},model={id:req.modelId,metadata:{},status:'ready',activeVersion:{id:req.modelVersionId,status:'ready',metadata:{},assets:[asset]}};
+  const config=toViewerConfig(model,{assetToken:'fixture'}),evidence=config.displayElevationEvidence.dsm;
+  assert.equal(evidence.basis,'reviewed-source-provenance');assert.equal(evidence.url,config.assets.dsm);assert.equal(evidence.sha256,asset.sha256);
+  for(const key of ['id','kind','sha256','byteSize']){const altered=structuredClone(model);altered.activeVersion.assets[0][key]=key==='byteSize'?1:'wrong';assert.deepEqual(toViewerConfig(altered).displayElevationEvidence,{});}
+  const wrongVersion=structuredClone(model);wrongVersion.activeVersion.id='other';assert.deepEqual(toViewerConfig(wrongVersion).displayElevationEvidence,{});
+  const wrongModel=structuredClone(model);wrongModel.id='other';assert.deepEqual(toViewerConfig(wrongModel).displayElevationEvidence,{});
+  assert.deepEqual(toViewerConfig(model,{assetFilter:()=>false}).displayElevationEvidence,{});
+});
+
+test('reviewed display units require matching source context and never override explicit conflicting metadata',async()=>{
+  const req=countyReferenceRequest(),asset={...req.source,rootKey:'data',relativePath:'dsm.tif'},model={id:req.modelId,metadata:{},activeVersion:{id:req.modelVersionId,metadata:{},assets:[asset]}};
+  const evidence=toViewerConfig(model).displayElevationEvidence.dsm;
+  const f=fixture({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616}),getWidth:()=>evidence.width,getHeight:()=>evidence.height});
+  const options={modelId:req.modelId,modelVersionId:req.modelVersionId,source:{type:'dsm',url:evidence.url,reviewedEvidence:evidence}};
+  const result=await f.run(record(),options);assert.match(result.basis,/reviewed-source-provenance/);assert.deepEqual(result.vertices.map(p=>p[2]),[3,4,2,1]);
+  for(const key of ['modelId','modelVersionId','url','kind','crs','width','height']){
+    const altered={...options,source:{...options.source,reviewedEvidence:{...evidence,[key]:'other'}}};await assert.rejects(f.run(record(),altered),/does not encode elevation units/);
+  }
+  const conflict=fixture({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616,VerticalUnitsGeoKey:9002}),getWidth:()=>evidence.width,getHeight:()=>evidence.height});await assert.rejects(conflict.run(record(),options),/conflict/);
+});
+
+test('large-extent per-vertex sampling stops immediately when authority cancellation aborts',async()=>{
+  const controller=new AbortController(),r=record();r.vertices=[[.25,.25,0],[1999.75,.25,0],[1999.75,1999.75,0]];let reads=0;
+  const f=fixture({getWidth:()=>2000,getHeight:()=>2000,getOrigin:()=>[0,2000],readRasters:async()=>{reads++;controller.abort();return new Float32Array([123]);}});
+  await assert.rejects(f.run(r,{signal:controller.signal}),{name:'AbortError'});assert.equal(reads,1);assert.equal(f.counts.close,1);
 });
 test('cancellation before or during native sampling never returns display geometry and closes source',async()=>{
   const pre=new AbortController();pre.abort();const f=fixture();await assert.rejects(f.run(record(),{signal:pre.signal}),{name:'AbortError'});assert.equal(f.counts.preflight,0);

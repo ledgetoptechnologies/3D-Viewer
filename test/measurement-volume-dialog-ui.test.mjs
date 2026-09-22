@@ -167,6 +167,14 @@ test('unchanged completed volume opens in view mode while invalidated geometry a
   assert.equal(stale.dialog.querySelector('h2').textContent,'Calculate volume');assert.equal(stale.dialog.querySelector('[data-calculate]').hidden,false);assert.equal(stale.dialog.querySelector('[data-status]').dataset.state,'stale');assert.match(stale.dialog.querySelector('[data-status]').textContent,/outline changed.*old volume is no longer current/);stale.handle.close();
 });
 
+test('persisted server complete surface result opens as current without weakening source or job guards',()=>{
+  const saved={...result,status:'complete',method:'surface-cut-fill',calculationJobId:'server-job',source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'v1',boundaryElevationBasis:'native-raster'}};
+  for(const patch of [null,{status:'incomplete'},{source:{...saved.source,modelVersionId:'other'}},{calculationJobId:''},{volumeInvalidated:true},{coverage:NaN}]){
+    const f=fixture(()=>{throw new Error('must not calculate on open');},{execution:'server',record:{name:'Saved feed pile',modelVersionId:'v1',results:{...saved,...patch}}});
+    assert.equal(f.dialog.querySelector('[data-calculate]').hidden,patch===null);assert.equal(f.saved(),0);f.handle.close();
+  }
+});
+
 test('accepted volume notice is polite, contains no private measurement data and survives ordinary close',async()=>{
   const wait=deferred(),f=fixture((_record,{onJob})=>{onJob({cancel:async()=>{}});onJob({cancel:async()=>{}});return wait.promise;});
   const pending=f.calculate();assert.equal(f.notices.length,1);assert.equal(f.notices[0].attributes.role,'status');assert.match(f.notices[0].textContent,/while your access remains valid/);assert.doesNotMatch(f.notices[0].textContent,/Pile A/);f.handle.close();assert.equal(f.notices[0].removed,undefined);wait.resolve(result);await pending;assert.equal(f.saved(),0);

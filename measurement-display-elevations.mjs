@@ -16,7 +16,7 @@ export function retainedDisplayBoundary(record,modelVersionId){
 
 // Display geometry only. This never persists vertices/results, starts a job,
 // calculates volume, interpolates NoData, or guesses unencoded vertical units.
-export async function resolveMeasurementDisplayElevations(record,{modelVersionId,expectedCrs,source,signal,openTiff,preflight,pool}={}){
+export async function resolveMeasurementDisplayElevations(record,{modelId,modelVersionId,expectedCrs,source,signal,openTiff,preflight,pool}={}){
   check(signal);
   if(record.collection!=='map'||!Array.isArray(record.vertices)||record.vertices.length<2||record.vertices.length>2000||!record.vertices.every(finiteVertex))fail('invalid map measurement geometry.');
   if(!/^EPSG:\d+$/.test(expectedCrs||'')||record.coordinateReference?.crs!==expectedCrs)fail('the measurement has no matching verified coordinate reference.');
@@ -35,16 +35,39 @@ export async function resolveMeasurementDisplayElevations(record,{modelVersionId
     if(Number(keys.GTRasterTypeGeoKey||1)!==1||(transform&&[1,2,4,6,8,9,12,13,14].some(i=>transform[i]!==0))||![ox,oy,dx,dy].every(Number.isFinite)||dx<=0||dy>=0||!Number.isSafeInteger(w)||!Number.isSafeInteger(h)||w<1||h<1)fail('the source grid is rotated, point-sampled, or invalid.');
     const blockBytes=rasterDecodedBlockBytes(image);if(!Number.isFinite(blockBytes)||blockBytes<=0||blockBytes>MAX_BLOCK)fail('the source decode blocks exceed the safe browser limit.');
     await validateRasterEncodedBlocks(image,{maxBlockBytes:MAX_BLOCK});check(signal);
-    const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata:await readRasterBandMetadata(image)});check(signal);
+    // This marker comes only from the authorized server config, never from a
+    // saved measurement or a client unit declaration. Actual volume jobs still
+    // hash and validate the source independently on the server.
+    const candidate=source.reviewedEvidence;
+    const reviewed=candidate?.basis==='reviewed-source-provenance'&&candidate.verticalUnit==='m'&&
+      candidate.modelId===modelId&&candidate.modelVersionId===modelVersionId&&candidate.url===source.url&&
+      candidate.kind===source.type&&candidate.crs===expectedCrs&&candidate.width===w&&candidate.height===h&&
+      typeof candidate.assetId==='string'&&candidate.assetId.length>0&&/^[a-f0-9]{64}$/.test(candidate.sha256||'')&&Number.isSafeInteger(candidate.byteSize)&&candidate.byteSize>0;
+    let units;
+    try{units=resolveRasterVerticalUnits(image,{bandMetadata:await readRasterBandMetadata(image)});}
+    catch(error){if(error.code!=='measurement_source_vertical_units_required'||!reviewed)throw error;units={verticalFactor:1,verticalUnitBasis:candidate.basis};}
+    if(reviewed&&units.verticalFactor!==1)fail('explicit elevation units conflict with the reviewed source evidence.');
+    const {verticalFactor,verticalUnitBasis}=units;check(signal);
     const cells=vertices.map(([e,n])=>[Math.floor((e-ox)/dx),Math.floor((n-oy)/dy)]);
     if(cells.some(([x,y])=>x<0||y<0||x>=w||y>=h))fail('a measurement vertex is outside the elevation coverage.');
     const left=Math.min(...cells.map(p=>p[0])),right=Math.max(...cells.map(p=>p[0]))+1,top=Math.min(...cells.map(p=>p[1])),bottom=Math.max(...cells.map(p=>p[1]))+1,width=right-left,height=bottom-top;
-    if(width*height>MAX_CELLS)fail('the vertex extent exceeds the native-resolution browser sampling limit.');
-    const values=await image.readRasters({window:[left,top,right,bottom],samples:[0],interleave:true,signal,pool});check(signal);
-    if(!values||values.length!==width*height)fail('the elevation window is incomplete.');
+    const cellValues=new Map();
+    if(width*height<=MAX_CELLS){
+      const values=await image.readRasters({window:[left,top,right,bottom],samples:[0],interleave:true,signal,pool});check(signal);
+      if(!values||values.length!==width*height)fail('the elevation window is incomplete.');
+      for(const [x,y]of cells)cellValues.set(`${x},${y}`,values[(y-top)*width+x-left]);
+    }else{
+      // Only vertices need elevations, not the entire polygon interior. Bound
+      // output to <=2000 native cells, deduplicate, and cancel between reads.
+      for(const [x,y]of cells){
+        const key=`${x},${y}`;if(cellValues.has(key))continue;check(signal);
+        const values=await image.readRasters({window:[x,y,x+1,y+1],samples:[0],interleave:true,signal,pool});check(signal);
+        if(!values||values.length!==1)fail('the elevation window is incomplete.');cellValues.set(key,values[0]);
+      }
+    }
     const nodata=image.getGDALNoData?.(),missing=nodata===null||nodata===undefined?null:Number(nodata);
     const sampled=vertices.map((p,i)=>{
-      const [x,y]=cells[i],raw=Number(values[(y-top)*width+x-left]);
+      const [x,y]=cells[i],raw=Number(cellValues.get(`${x},${y}`));
       if(!Number.isFinite(raw)||(missing!==null&&raw===missing))fail('a vertex has no source elevation; missing data is not zero.');
       const z=raw*verticalFactor;if(!Number.isFinite(z)||Math.abs(z)>1e9)fail('an elevation conversion is invalid or outside the supported coordinate range.');return[p[0],p[1],z];
     });
