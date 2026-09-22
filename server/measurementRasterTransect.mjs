@@ -128,7 +128,7 @@ export async function calculateNativeRasterTransect(absolutePath,request,{signal
     check();const finalStat=await fs.promises.stat(absolutePath);if(['size','ino','dev','mtimeMs','ctimeMs'].some(k=>sourceStat[k]!==finalStat[k]))fail('measurement_source_changed');
     const declared=definition.verticalUnitBasis==='requester-declared'||definition.verticalUnitBasis==='administrator-declared';
     return {schemaVersion:1,status:'calculated',method:'surface-transect',calculationOrigin:'server-native-raster',sampling:'native-cell-step',parentCalculationId:request.parentCalculationId,baseHash,reference:request.reference,line,lengthM,segments,cellCount:cells.filter(c=>c.col!==null).length,
-      source:{assetId:request.source.id,kind:request.source.kind,sha256:request.source.sha256,modelVersionId:request.modelVersionId,resolutionM:[definition.dx,-definition.dy],crs:definition.crs,verticalUnit:'m',verticalUnitBasis:definition.verticalUnitBasis,verticalDatum:'unknown'},
+      source:{assetId:request.source.id,kind:request.source.kind,sha256:request.source.sha256,modelVersionId:request.modelVersionId,resolutionM:[definition.dx,-definition.dy],crs:definition.crs,verticalUnit:'m',verticalUnitBasis:definition.verticalUnitBasis,...(definition.verticalUnitEvidence?{verticalUnitEvidence:definition.verticalUnitEvidence}:{}),verticalDatum:'unknown'},
       warnings:['Elevations use constant native cell values; the base follows the completed measurement’s frozen reference triangles. Gaps are not interpolated. Vertical datum has not been verified.',...(declared?['Source height units were requester-declared, not encoded in the raster or independently verified.']:[])]};
   }catch(error){check();throw error;}finally{await tiff.close();}
 }

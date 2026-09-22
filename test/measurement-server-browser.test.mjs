@@ -17,7 +17,7 @@ const token='synthetic_viewer_bearer_1234567890abcdef';
 const record={id,name:'Synthetic feed pile',revision:1,modelId:'fixture-model',modelVersionId:'fixture-version',collection:'map',kind:'polygon',vertices:[[0,0,0],[10,0,0],[10,10,0],[0,10,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},source:{kind:'dsm',assetId:'fixture-dsm'}};
 // UI-response fixture only: synthetic totals do not derive from the reduced
 // display grid. Native integration/source validation has separate backend tests.
-const completedResult=()=>({method:'surface-cut-fill',status:'calculated',cutM3:12345.6789,fillM3:2,netM3:12343.6789,coverage:1,source:{assetId:'fixture-dsm',kind:'dsm',modelVersionId:'fixture-version'},reference:{type:'boundary-triangulated',offsetM:0},warnings:[],preview:{samples:Array.from({length:121},(_,index)=>{const x=index%11,y=Math.floor(index/11);return [x,y,Math.max(0,6-Math.hypot(x-5,y-5)),0];})}});
+const completedResult=()=>({method:'surface-cut-fill',status:'calculated',cutM3:12345.6789,fillM3:2,netM3:12343.6789,coverage:1,source:{assetId:'fixture-dsm',kind:'dsm',modelVersionId:'fixture-version',boundaryElevationBasis:'native-raster'},reference:{type:'boundary-triangulated',offsetM:0},warnings:[],preview:{samples:Array.from({length:121},(_,index)=>{const x=index%11,y=Math.floor(index/11);return [x,y,Math.max(0,6-Math.hypot(x-5,y-5)),0];})}});
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const executable=()=>[process.env.CHROME_PATH,process.env.EDGE_PATH,'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','/usr/bin/google-chrome','/usr/bin/chromium'].filter(Boolean).find(existsSync);
 

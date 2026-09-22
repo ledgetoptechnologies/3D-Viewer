@@ -46,6 +46,12 @@ test('actual GeoTIFF native windows preserve zero and fractional pixels, source 
   await assert.rejects(calculateNativeRaster(file, { ...request, source: { ...request.source, sha256: '0'.repeat(64) } }), { code: 'measurement_source_changed' });
   const map={...request,collection:'map',vertices:[[.25,.25,0],[1.75,.25,0],[1.75,1.75,0],[.25,1.75,0]],reference:{type:'boundary-triangulated'}};
   const sampled=await calculateNativeRaster(file,map);assert.ok(Math.abs(sampled.netM3)<1e-9);assert.ok(sampled.preview.samples.some(p=>p[3]>0));
+  const spatial=await calculateNativeRaster(file,{...map,collection:'spatial3d',vertices:map.vertices.map(([x,y])=>[x,y,999])});
+  assert.equal(spatial.netM3,sampled.netM3,'picked heights and originating view do not change a raster-based volume');
+  assert.deepEqual(spatial.preview.referencePatches,sampled.preview.referencePatches);
+  assert.deepEqual(spatial.boundaryVertices,sampled.boundaryVertices);
+  assert.ok(spatial.boundaryVertices.every(p=>p[2]<999));
+  assert.equal(spatial.source.boundaryElevationBasis,'native-raster');
   await assert.rejects(calculateNativeRaster(file,{...map,vertices:request.vertices}),{code:'measurement_boundary_elevation_unavailable'});
   const triangle=await calculateNativeRaster(file,{...request,vertices:[[0,0,0],[2,0,0],[0,2,0]]});
   assert.ok(triangle.preview.samples.every(([e,n])=>e+n<=2));

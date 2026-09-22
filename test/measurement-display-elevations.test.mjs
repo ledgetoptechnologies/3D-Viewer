@@ -34,6 +34,13 @@ test('requester-declared saved boundaries retain honest provenance and legacy de
     assert.equal(retainedDisplayBoundary(r,'other'),null);
   }
 });
+
+test('reviewed source boundary is reused without opening or sampling the untagged TIFF',async()=>{
+  const r=record();r.results={method:'surface-cut-fill',source:{modelVersionId:'v1',verticalUnitBasis:'reviewed-source-provenance',boundaryElevationBasis:'native-raster'},boundaryVertices:r.vertices.map((p,i)=>[p[0],p[1],170+i])};
+  const before=structuredClone(r),f=fixture({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616})}),value=await f.run(r);
+  assert.deepEqual(value.vertices,r.results.boundaryVertices);assert.match(value.basis,/reviewed-source-provenance/);assert.deepEqual(f.counts,{preflight:0,open:0,close:0,reads:[]});assert.deepEqual(r,before);
+  assert.equal(retainedDisplayBoundary(r,'other'),null);r.results.boundaryVertices[0][0]++;assert.equal(retainedDisplayBoundary(r,'v1'),null);
+});
 test('missing elevations or unverified units fail closed instead of fabricating zero or reusing stale preview',async()=>{
   for(const [overrides,pattern]of [
     [{getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616})},/does not encode elevation units/],

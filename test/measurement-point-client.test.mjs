@@ -15,21 +15,21 @@ function volumeFixture({response=result,capabilities=caps}={}){
   const calculate=createServerSurfaceCalculator({request:async(op,payload)=>{calls.push([op,payload]);if(op==='capabilities')return capabilities;if(op==='list')return{calculations:[]};return{calculation:{id:'volume',measurementId:'polygon',revision:2,status:'complete',result:response}};}});
   return{calculate,calls};
 }
-test('ordinary 3D and cloud polygons select original EPT without staff access or unit assertion',async()=>{
-  for(const kind of ['mesh','pointCloud','glb','obj','ept']){
-    const f=volumeFixture();assert.equal((await f.calculate({...record,source:{kind}},{confirmMeters:true})).method,'point-surface-cut-fill');
+test('all views fall back to original EPT only when no eligible DSM exists, without unit assertion',async()=>{
+  for(const kind of ['mesh','pointCloud','glb','obj','ept','ortho','dsm','dtm']){
+    const f=volumeFixture({capabilities:{...caps,calculationSources:[caps.calculationSources[0]]}});assert.equal((await f.calculate({...record,collection:['ortho','dsm','dtm'].includes(kind)?'map':'spatial3d',source:{kind}},{confirmMeters:true})).method,'point-surface-cut-fill');
     assert.deepEqual(f.calls.find(([op])=>op==='create')[1].request,{revision:2,method:'point-surface-cut-fill',sourceAssetId:'points',reference,cellSizeM:.1,classFilter:'all'});
   }
 });
 test('missing saved point asset and missing point capability never substitute a raster',async()=>{
-  for(const [input,capabilities] of [[{...record,results:{...result,source:{...source,assetId:'retired'}}},caps],[record,{...caps,capabilities:{rasterCalculations:true}}]]){
+  for(const [input,capabilities] of [[{...record,results:{...result,source:{...source,assetId:'retired'}}},caps],[{...record,results:result},{...caps,capabilities:{rasterCalculations:true}}]]){
     const f=volumeFixture({capabilities});await assert.rejects(f.calculate(input),/surface.*unavailable/);assert.equal(f.calls.length,1);
   }
 });
 test('saved point base and construction settings are retained, and bad point provenance rejected',async()=>{
   const saved={...result,reference:{type:'custom',elevationM:12,offsetM:2},source:{...source,classFilter:'ground',samplingGrid:{...samplingGrid,cellSizeM:.2}}};
   const f=volumeFixture({response:saved});await f.calculate({...record,results:saved});const body=f.calls.find(([op])=>op==='create')[1].request;assert.deepEqual(body.reference,saved.reference);assert.equal(body.cellSizeM,.2);assert.equal(body.classFilter,'ground');assert.equal(Object.hasOwn(body,'sourceVerticalUnit'),false);
-  for(const patch of [{verticalUnitBasis:'administrator-declared'},{manifestSha256:'bad'},{classFilter:'ground'},{samplingGrid:{...samplingGrid,emptyCells:'zero'}}])await assert.rejects(volumeFixture({response:{...result,source:{...source,...patch}}}).calculate(record));
+  for(const patch of [{verticalUnitBasis:'administrator-declared'},{manifestSha256:'bad'},{classFilter:'ground'},{samplingGrid:{...samplingGrid,emptyCells:'zero'}}])await assert.rejects(volumeFixture({response:{...result,source:{...source,...patch}}}).calculate({...record,results:result}));
 });
 const line={start:[0,0],end:[1,0]},baseHash='c'.repeat(64);
 const profile={method:'surface-transect',calculationOrigin:'server-original-point-surface',sampling:'point-grid-step',source,parentCalculationId:'volume',baseHash,line,lengthM:1,cellCount:1,segments:[{startM:0,endM:.5,start:[0,0],end:[.5,0],status:'sample',cell:[0,0],surfaceM:2,baseStartM:0,baseEndM:0},{startM:.5,endM:1,start:[.5,0],end:[1,0],status:'outside-surface'}]};

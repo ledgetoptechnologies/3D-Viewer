@@ -9,7 +9,7 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const index=await fs.readFile(path.join(root,'index.html'),'utf8');
 const style=index.match(/<style>([\s\S]*?)<\/style>/)?.[1];
 function panel(id,next){const start=index.indexOf(`<div class="panel" id="${id}"`),end=index.indexOf(`<div class="panel" id="${next}"`,start);if(start<0||end<start)throw new Error(`Missing shipped panel ${id}`);return index.slice(start,end);}
-const sidebar=panel('panel-camera-positions','panel-nav')+panel('panel-nav','panel-measure')+panel('panel-measure','panel-camera');
+const sidebar=panel('panel-nav','panel-camera-positions')+panel('panel-camera-positions','panel-measure')+panel('panel-measure','panel-camera');
 const hiddenLayers=index.match(/<div class="panel" id="panel-3d-layers"[^>]*>/)?.[0]||'<div class="panel" id="panel-3d-layers" hidden>';
 const base={collection:'spatial3d',coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true,source:{kind:'mesh'},displayPreferences:{units:'m'},revision:1};
 const seeds=[{...base,id:'10000000-0000-4000-8000-000000000001',name:'Synthetic feed pile — 572 m³ above zero base',kind:'polygon',vertices:[[30,20,0],[52,20,0],[52,33,0],[30,33,0]]},...Array.from({length:4},(_,i)=>({...base,id:`10000000-0000-4000-8000-00000000000${i+2}`,name:`Synthetic pad distance ${i+1}`,kind:'distance',vertices:[[12+i*3,8+i*6,0],[40+i*3,8+i*6,0]]}))];

@@ -6,7 +6,7 @@ import {measurementGeometryHash} from '../measurement-surface-client.mjs';
 const record={id:'polygon',modelVersionId:'version',revision:2,kind:'polygon',source:{kind:'ortho'}};
 const options={reference:{type:'boundary-triangulated',offsetM:0},sourceKind:'auto'};
 const capabilities={capabilities:{serverCalculations:true},calculationSources:[{assetId:'dsm-source',kind:'dsm',methods:['surface-cut-fill']},{assetId:'dtm-source',kind:'dtm',methods:['surface-cut-fill']}]};
-const result={method:'surface-cut-fill',status:'calculated',cutM3:10,fillM3:2,netM3:8,coverage:1,source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version'},reference:{type:'boundary-triangulated',offsetM:0},preview:{samples:[[1,2,3,0]]}};
+const result={method:'surface-cut-fill',status:'calculated',cutM3:10,fillM3:2,netM3:8,coverage:1,source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:{type:'boundary-triangulated',offsetM:0},preview:{samples:[[1,2,3,0]]}};
 const job=(status='complete',extra={})=>({id:'job',measurementId:'polygon',revision:2,status,result,...extra});
 function setup({responses=[],existing=[],caps=capabilities,current=()=>true,getRecord,wait=async()=>{}}={}){
   const calls=[];const calculate=createServerSurfaceCalculator({isCurrent:current,getRecord,wait,request:async(operation,payload)=>{calls.push([operation,payload]);if(operation==='capabilities')return caps;if(operation==='list')return{calculations:existing};return{calculation:responses.shift()||job()};}});
@@ -28,6 +28,22 @@ test('server reference values are already meters and explicit vertical-unit conf
 test('scoped raster capability supports client volumes without advanced processing capability',async()=>{
   const f=setup({caps:{...capabilities,capabilities:{rasterCalculations:true,serverCalculations:false}}});
   const output=await f.calculate(record,options);assert.equal(output.cutM3,10);assert.equal(f.calls[2][1].request.method,'surface-cut-fill');
+});
+
+test('new outlines prefer the same DSM across model, cloud and all map sources',async()=>{
+  const caps={...capabilities,capabilities:{rasterCalculations:true,pointSurfaceCalculations:true},calculationSources:[{assetId:'points',kind:'ept',methods:['point-surface-cut-fill']},...capabilities.calculationSources]};
+  for(const kind of ['mesh','pointCloud','glb','obj','ept','ortho','dsm','dtm']){
+    const f=setup({caps});await f.calculate({...record,collection:['ortho','dsm','dtm'].includes(kind)?'map':'spatial3d',source:{kind}},options);
+    assert.equal(f.calls[2][1].request.sourceAssetId,'dsm-source');assert.equal(f.calls[2][1].request.method,'surface-cut-fill');
+  }
+});
+
+test('saved missing DSM is not replaced by points and saved second DSM remains pinned',async()=>{
+  const saved={...record,results:{...result,source:{...result.source,assetId:'saved-dsm'}}};
+  const caps={...capabilities,capabilities:{rasterCalculations:true,pointSurfaceCalculations:true},calculationSources:[...capabilities.calculationSources,{assetId:'points',kind:'ept',methods:['point-surface-cut-fill']}]};
+  const missing=setup({caps});await assert.rejects(missing.calculate(saved,options),/surface.*unavailable/);assert.equal(missing.calls.length,1);
+  const f=setup({caps:{...caps,calculationSources:[...caps.calculationSources,{assetId:'saved-dsm',kind:'dsm',methods:['surface-cut-fill']}]},responses:[job('complete',{result:saved.results})]});
+  await f.calculate(saved,options);assert.equal(f.calls[2][1].request.sourceAssetId,'saved-dsm');
 });
 test('client capabilities and missing DSM never dispatch server processing or silently substitute DTM',async()=>{
   const denied=setup({caps:{...capabilities,capabilities:{serverCalculations:false}}});await assert.rejects(denied.calculate(record,options),/does not allow/);assert.equal(denied.calls.length,1);
@@ -74,6 +90,29 @@ test('completed result source, version and reference provenance must match the s
 });
 
 const parameters={revision:2,method:'surface-cut-fill',sourceAssetId:'dsm-source',reference:{type:'boundary-triangulated',offsetM:0},sourceVerticalUnit:null};
+const legacyResult={...result,source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version'}};
+test('explicit calculate replaces only legacy completed raster work, preserving the saved record',async()=>{
+  const saved={...record,results:{...legacyResult,calculationJobId:'old'}},before=structuredClone(saved);
+  for(const listed of [true,false]){
+    const old=job('complete',{id:'old',revision:1,attachmentRevision:2,parameters,result:legacyResult});
+    const f=setup({existing:listed?[old]:[],responses:listed?[job()]:[old,job()]});
+    await f.calculate(saved,options);assert.equal(f.calls.filter(([op])=>op==='create').length,1);assert.deepEqual(saved,before);
+  }
+  const f=setup({existing:[job('complete',{parameters,result:legacyResult})]});await f.calculate(saved,options);assert.equal(f.calls.filter(([op])=>op==='create').length,1);
+});
+test('current attached raster result is recovered without a duplicate and legacy custom base stays valid',async()=>{
+  for(const listed of [true,false]){
+    const old=job('complete',{id:'old',revision:1,attachmentRevision:2,parameters});
+    const f=setup({existing:listed?[old]:[],responses:[old]});await f.calculate({...record,results:{...result,calculationJobId:'old'}},options);assert.equal(f.calls.some(([op])=>op==='create'),false);
+  }
+  const reference={type:'custom',elevationM:3,offsetM:0},f=setup({existing:[job('complete',{parameters:{...parameters,reference},result:{...legacyResult,reference}})]});
+  await f.calculate(record,{reference});assert.equal(f.calls.some(([op])=>op==='create'),false);
+});
+test('legacy active raster work is observed without duplication and never attached as an updated result',async()=>{
+  const f=setup({existing:[job('running',{parameters})],responses:[job('complete',{result:legacyResult})]});
+  await assert.rejects(f.calculate(record,options),/older ground reference.*No new volume was saved.*Calculate volume again/);
+  assert.deepEqual(f.calls.map(([op])=>op),['capabilities','list','status']);
+});
 test('reopening resumes the matching active job or retrieves its completed result without duplicate work',async()=>{
   for(const status of ['queued','complete']){
     const f=setup({existing:[job(status,{parameters})]});await f.calculate(record,options);

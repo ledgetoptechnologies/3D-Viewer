@@ -6,6 +6,8 @@ import { insideSelection } from './measurementSelection.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from '../raster-source-metadata.mjs';
 import { validateMeasurementTiffHeader } from './measurementTiffHeader.mjs';
 import { readRasterBandMetadata, resolveRasterVerticalUnits } from '../raster-vertical-units.mjs';
+import { reviewedRasterUnitEvidence } from './measurementUnitEvidence.mjs';
+import { createDelaunayReference } from './measurementDelaunayReference.mjs';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export const NATIVE_RASTER_BLOCK_LIMIT = 256 * 1024 * 1024;
 export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, bandMetadata = null } = {}) {
@@ -14,7 +16,17 @@ export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_
   if (!metres || rasterCrs !== epsg) fail('measurement_source_crs_mismatch');
   if (Number(keys.GTRasterTypeGeoKey || 1) !== 1) fail('measurement_pixel_is_point_unsupported');
   const staffDeclaration=request.authority?.adminHash&&!request.authority.scope;
-  const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:request.sourceVerticalUnit==='m',confirmationBasis:staffDeclaration?'administrator-declared':'requester-declared'});
+  const evidence=reviewedRasterUnitEvidence(request,image);
+  let units;
+  try { units=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:request.sourceVerticalUnit==='m',confirmationBasis:staffDeclaration?'administrator-declared':'requester-declared'}); }
+  catch(error) {
+    if(error.code!=='measurement_source_vertical_units_required'||!evidence)throw error;
+    units={verticalFactor:1,verticalUnitBasis:evidence.basis};
+  }
+  // A reviewed metre source never silently overrides conflicting explicit units.
+  if(evidence&&units.verticalFactor!==1)fail('measurement_source_vertical_units_conflict');
+  if(evidence&&['requester-declared','administrator-declared'].includes(units.verticalUnitBasis))units.verticalUnitBasis=evidence.basis;
+  const {verticalFactor,verticalUnitBasis}=units;
   const transform = rasterDirectoryValue(directory, 'ModelTransformation');
   if (transform && [1,2,4,6,8,9,12,13,14].some(i => transform[i] !== 0)) fail('measurement_rotated_raster_unsupported');
   const [ox, oy] = image.getOrigin(), [dx, dy] = image.getResolution();
@@ -30,7 +42,7 @@ export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_
   for (const count of typeof encodedCounts === 'number' ? [encodedCounts] : encodedCounts) {
     if (!Number.isFinite(Number(count)) || Number(count) <= 0 || Number(count) > limit) fail('measurement_raster_block_too_large');
   }
-  return { ox, oy, dx, dy, crs: `EPSG:${rasterCrs}`, verticalUnit: 'm', verticalFactor, verticalUnitBasis, blockBytes, width: image.getWidth(), height: image.getHeight() };
+  return { ox, oy, dx, dy, crs: `EPSG:${rasterCrs}`, verticalUnit: 'm', verticalFactor, verticalUnitBasis, ...(evidence?{verticalUnitEvidence:evidence}:{}), blockBytes, width: image.getWidth(), height: image.getHeight() };
 }
 // Header-only preflight never reads/decompresses pixel blocks. Source hashes and
 // live authority are checked again by the isolated worker before integration.
@@ -42,7 +54,7 @@ export async function preflightNativeRaster(absolutePath, request, options = {})
   try { const image=await tiff.getImage(0),definition=nativeRasterDefinition(image, request, {...options,bandMetadata:await readRasterBandMetadata(image)});await validateRasterEncodedBlocks(image,{maxBlockBytes:Math.min(options.maxBlockBytes || NATIVE_RASTER_BLOCK_LIMIT,NATIVE_RASTER_BLOCK_LIMIT)});return definition; }
   finally { await tiff.close(); }
 }
-export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 2_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 128, onProgress = () => {} } = {}) {
+export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 30_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 128, onProgress = () => {} } = {}) {
   const check = () => { if (signal?.aborted) fail('measurement_cancelled'); };
   const sourceStat = await fs.promises.stat(absolutePath);
   if (!sourceStat.isFile() || sourceStat.size !== Number(request.source.byteSize)) fail('measurement_source_changed');
@@ -62,7 +74,9 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
     const cells = Math.max(0, right - left) * Math.max(0, bottom - top);
     if (cells > maxCells) fail('measurement_limit');
     let vertices=request.vertices;
-    if(request.collection==='map'&&request.reference?.type!=='custom'){
+    // The calculation source, not the view used to draw the outline, defines
+    // the base heights. Mesh/point picks may be a different LOD or surface.
+    if(request.reference?.type!=='custom'){
       vertices=[];
       for(const [e,n]of request.vertices){
         const x=Math.floor((e-ox)/dx),y=Math.floor((n-oy)/dy);
@@ -72,7 +86,8 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
         vertices.push([e,n,z * definition.verticalFactor]);
       }
     }
-    const accumulator = createSurfaceAccumulator({ vertices, reference: request.reference, maxCells });
+    const referenceBase=(!request.reference?.type||request.reference.type==='boundary-triangulated')?createDelaunayReference(vertices,request.reference):undefined;
+    const accumulator = createSurfaceAccumulator({ vertices, reference: request.reference, referenceBase, maxCells, maxWork: 300_000_000 });
     let processed = 0;
     const previewSamples = [], previewStride = Math.max(1, Math.ceil(cells / 4096));
     for (let row = top; row < bottom; row += windowSize) for (let col = left; col < right; col += windowSize) {
@@ -97,8 +112,8 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
     check();
     const finalStat = await fs.promises.stat(absolutePath);
     if (['size','ino','dev','mtimeMs','ctimeMs'].some(k => sourceStat[k] !== finalStat[k])) fail('measurement_source_changed');
-    const result = accumulator.result();
+    const result = { ...accumulator.result(), ...(request.reference?.type!=='custom'?{boundaryVertices:vertices}: {}) };
     const declaredBy=definition.verticalUnitBasis==='administrator-declared'?'requesting administrator':definition.verticalUnitBasis==='requester-declared'?'requester':null;
-    return { ...result, calculationOrigin: 'server-native-raster', preview:{previewOnly:true,samples:previewSamples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))}, source: { assetId: request.source.id, kind: request.source.kind, sha256: request.source.sha256, modelVersionId: request.modelVersionId, resolutionM: [dx, -dy], crs: definition.crs, verticalUnit: definition.verticalUnit, verticalUnitBasis: definition.verticalUnitBasis }, warnings: [...result.warnings, ...(declaredBy ? [`Raster vertical units were declared as metres by the ${declaredBy}; they were not encoded in the raster or independently verified by this calculation.`] : [])] };
+    return { ...result, calculationOrigin: 'server-native-raster', preview:{previewOnly:true,samples:previewSamples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))}, source: { assetId: request.source.id, kind: request.source.kind, sha256: request.source.sha256, modelVersionId: request.modelVersionId, resolutionM: [dx, -dy], crs: definition.crs, verticalUnit: definition.verticalUnit, verticalUnitBasis: definition.verticalUnitBasis, ...(definition.verticalUnitEvidence?{verticalUnitEvidence:definition.verticalUnitEvidence}:{}), boundaryElevationBasis:request.reference?.type==='custom'?'custom-reference':'native-raster' }, warnings: [...result.warnings, ...(declaredBy ? [`Raster vertical units were declared as metres by the ${declaredBy}; they were not encoded in the raster or independently verified by this calculation.`] : [])] };
   } finally { await tiff.close(); }
 }

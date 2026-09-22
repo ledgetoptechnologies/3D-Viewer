@@ -15,7 +15,7 @@ function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution
   const scope=vm.createContext({document:{createElement:()=>dialog,body:{append(){}}},AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
   const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord});
-  if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';dialog.querySelector('[name=source]').value='dsm';}
+  if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';if(execution!=='server')dialog.querySelector('[name=source]').value='dsm';}
   return{dialog,handle,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
 const result={status:'calculated',cutM3:12345.678912,fillM3:0,netM3:12345.678912,coverage:1,preview:{samples:[[0,0,2,0],[1,1,2,0]]}};
@@ -93,9 +93,16 @@ test('standard calculation cannot declare missing elevation units and surfaces r
   await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.confirmMeters,false);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-status]').dataset.state,'error');assert.equal(f.dialog.querySelector('.surface-settings').open,true);f.handle.close();
 });
 
-test('new client stockpile uses the pile-containing surface even when drawn on terrain',async()=>{
+test('new client stockpile delegates source selection even when drawn on terrain',async()=>{
   let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{record:{name:'Terrain outline',source:{kind:'dtm'}},autoCalculate:true});
-  await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.sourceKind,'dsm');assert.equal(settings.confirmMeters,false);f.handle.close();
+  await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.sourceKind,'auto');assert.equal(settings.confirmMeters,false);f.handle.close();
+});
+
+test('server inspector delegates a consistent automatic source for every new viewing-mode outline',async()=>{
+  for(const kind of ['mesh','pointCloud','ortho','dsm','dtm']){
+    let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{execution:'server',record:{name:'New outline',source:{kind}}});
+    await f.calculate();assert.equal(settings.sourceKind,'auto');assert.equal(settings.confirmMeters,false);f.handle.close();
+  }
 });
 
 test('client recalculation preserves an explicitly saved terrain source and custom base',async()=>{
@@ -222,7 +229,7 @@ test('a cancellation response for previous settings cannot replace the newer cal
 });
 
 test('normal inspector retrieves a completed matching job with its preview without creating another job',async()=>{
-  const calls=[],complete={...queuedJob,status:'complete',result:{...result,method:'surface-cut-fill',source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version'},reference:serverParameters.reference}};
+  const calls=[],complete={...queuedJob,status:'complete',result:{...result,method:'surface-cut-fill',source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:serverParameters.reference}};
   const calculate=createServerSurfaceCalculator({request:async operation=>{calls.push(operation);if(operation==='capabilities')return serverCapabilities;if(operation==='list')return{calculations:[complete]};throw new Error('Unexpected duplicate create');}});
   const f=fixture(calculate,{execution:'server',record:serverRecord});await f.calculate();
   assert.deepEqual(calls,['capabilities','list']);assert.equal(f.saved(),1);assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,false);assert.equal(f.dialog.querySelector('[data-cancel-job]').hidden,true);f.handle.close();

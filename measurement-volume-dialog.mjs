@@ -31,7 +31,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   if(!advancedSettings){
     // New client stockpiles use the pile-containing surface in every view.
     // restoreSavedResult below still preserves an explicitly saved source/base.
-    dialog.querySelector('[name=source]').value=record.collection==='spatial3d'||['mesh','pointCloud','glb','obj','ept'].includes(record.source?.kind)?'auto':'dsm';
+    dialog.querySelector('[name=source]').value='auto';
     for(const name of ['source','reference','elevation','offset'])dialog.querySelector(`[name=${name}]`).disabled=true;
     dialog.querySelector('[data-status]').textContent='Your outline is ready. Calculate volume when you are ready; your area is already available.';
   }

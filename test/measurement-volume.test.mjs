@@ -45,3 +45,19 @@ test('invalid polygons, references and oversized native selections fail closed',
   assert.throws(() => integrateSurfaceVolume({ ...grid, values: [1, 1, 1, 1], maxCells: 3 }), { code: 'measurement_limit' });
   assert.throws(() => createReference(square, { type: 'custom', elevationM: NaN }), /required/);
 });
+
+test('interior-cell optimization keeps exact sloping-plane cut and fill at large coordinates', () => {
+  const vertices = [[0,0,0],[10,0,10],[10,10,10],[0,10,0]].map(([x,y,z])=>[600000+x,4500000+y,z]);
+  const result = integrateSurfaceVolume({vertices,values:new Float64Array(100).fill(4.25),width:10,height:10,bounds:{minE:600000,minN:4500000,maxE:600010,maxN:4500010}});
+  near(result.cutM3, 4.25 * 4.25 * 5);
+  near(result.fillM3, 5.75 * 5.75 * 5);
+  near(result.validAreaM2,100); assert.equal(result.sampleCount,100);
+});
+
+test('work limits apply cumulatively across streamed grids independently of cell limits', () => {
+  const a=createSurfaceAccumulator({...grid,maxCells:100,maxWork:7});
+  a.addGrid({values:[12,12],width:2,height:1,bounds:{minE:0,minN:1,maxE:2,maxN:2}});
+  assert.throws(()=>a.addGrid({values:[12,12],width:2,height:1,bounds:{minE:0,minN:0,maxE:2,maxN:1}}),{code:'measurement_limit'});
+  const result=integrateSurfaceVolume({...grid,values:[12,12,12,12],maxWork:8});
+  near(result.cutM3,8);
+});

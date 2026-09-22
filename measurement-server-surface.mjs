@@ -52,7 +52,10 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
     if(!['auto','dsm','dtm','ept'].includes(sourceKind))throw new Error('The calculation source needs review by the model owner. Your outline and area are unchanged.');
     const savedSource=record.results?.source;
     const savedKind=savedSource?.kind||record.results?.sourceKind;
-    const kind=sourceKind==='auto'?(savedKind||(['mesh','pointCloud','glb','obj','ept'].includes(record.source?.kind)||record.collection==='spatial3d'?'ept':'dsm')):sourceKind;
+    // Viewing mode is presentation, not a calculation setting. Prefer the same
+    // original DSM for every new outline; only use points if no eligible DSM
+    // exists. Saved sources remain pinned, including when no longer available.
+    const kind=sourceKind==='auto'?(savedKind||(sources.some(s=>s.kind==='dsm')?'dsm':'ept')):sourceKind;
     // Do not silently substitute bare-earth DTM for a missing stockpile DSM.
     const source=sources.find(s=>s.kind===kind&&(!(savedSource?.assetId&&savedKind===kind)||s.assetId===savedSource.assetId));
     if(!source)throw new Error('The survey surface needed for this calculation is unavailable. Your outline and area are unchanged. Contact the model owner to check the elevation data.');
@@ -66,7 +69,8 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       return job.measurementId===record.id&&(!temporary||job.geometryHash===geometryHash)&&p?.method===body.method&&p.sourceAssetId===body.sourceAssetId&&p.reference?.type===body.reference.type&&(p.reference?.offsetM??0)===body.reference.offsetM&&(body.reference.type!=='custom'||p.reference?.elevationM===body.reference.elevationM)&&(p.sourceVerticalUnit??null)===(body.sourceVerticalUnit??null)&&(source.kind!=='ept'||p.cellSizeM===body.cellSizeM&&p.classFilter===body.classFilter);
     };
     const matches=job=>job.revision===record.revision&&matchesParameters(job);
-    const attachedMatch=job=>!temporary&&job?.status==='complete'&&job.id===record.results?.calculationJobId&&Number.isSafeInteger(job.revision)&&job.revision<record.revision&&job.attachmentRevision===record.revision&&matchesParameters(job);
+    const currentBasePolicy=job=>source.kind==='ept'||body.reference.type==='custom'||job?.result?.source?.boundaryElevationBasis==='native-raster';
+    const attachedMatch=job=>!temporary&&job?.status==='complete'&&currentBasePolicy(job)&&job.id===record.results?.calculationJobId&&Number.isSafeInteger(job.revision)&&job.revision<record.revision&&job.attachmentRevision===record.revision&&matchesParameters(job);
     const exposeCancel=job=>onJob({cancel:()=>send('cancel',{measurementId:record.id,jobId:job.id})});
     const recover=async()=>{
       const response=await send('list',{measurementId:record.id});
@@ -74,7 +78,7 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       const relevant=response.calculations.filter(j=>j.measurementId===record.id&&j.revision===record.revision);
       const active=relevant.find(j=>['queued','running'].includes(j.status));
       if(active&&!matches(active)){exposeCancel(active);throw surfaceCalculationError({code:'measurement_calculation_already_active'});}
-      const existing=active||relevant.find(j=>j.status==='complete'&&matches(j))||response.calculations.find(attachedMatch);
+      const existing=active||relevant.find(j=>j.status==='complete'&&currentBasePolicy(j)&&matches(j))||response.calculations.find(attachedMatch);
       if(existing)return existing;
       if(!temporary&&record.results?.calculationJobId&&!response.calculations.some(j=>j.id===record.results.calculationJobId)){
         let attached;try{attached=(await send('status',{measurementId:record.id,jobId:record.results.calculationJobId}))?.calculation;}catch(error){if(error.code!=='measurement_calculation_not_found')throw error;}
@@ -96,6 +100,7 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       if(job?.id!==jobId||job.measurementId!==record.id||(job.revision!==record.revision&&!attachedMatch(job))||(temporary&&job.geometryHash!==geometryHash))throw new Error('The calculation does not match this polygon revision. No result was attached.');
       if(job.status==='complete'){
         onJob(null);
+        if(!currentBasePolicy(job))throw new Error('This calculation used an older ground reference. No new volume was saved. Choose Calculate volume again to use the updated survey surface; your outline and previously saved result are unchanged.');
         const result=job.result;
         if(result?.method!==body.method||!['cutM3','fillM3','netM3','coverage'].every(key=>Number.isFinite(result[key]))||result.cutM3<0||result.fillM3<0||result.coverage<0||result.coverage>1)throw new Error('The surface result is unusable. No result was attached.');
         if(source.kind==='ept'){

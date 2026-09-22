@@ -108,8 +108,13 @@ function integralHeight(polygon) {
   for (let i = 1; i + 1 < polygon.length; i++) result += Math.abs(cross(polygon[0], polygon[i], polygon[i + 1])) / 2 * (polygon[0][2] + polygon[i][2] + polygon[i + 1][2]) / 3;
   return result;
 }
-export function createSurfaceAccumulator({ vertices, reference = {}, maxCells = 16_000_000 }) {
-  const polygon = validatePolygon(vertices), base = createReference(polygon, reference), footprintM2 = Math.abs(polygonArea(polygon));
+export function createSurfaceAccumulator({ vertices, reference = {}, referenceBase, maxCells = 16_000_000, maxWork = 30_000_000 }) {
+  const polygon = validatePolygon(vertices), base = referenceBase || createReference(polygon, reference), footprintM2 = Math.abs(polygonArea(polygon));
+  const patches = base.patches.map(patch => ({ ...patch,
+    minX: Math.min(...patch.polygon.map(p => p[0])), maxX: Math.max(...patch.polygon.map(p => p[0])),
+    minY: Math.min(...patch.polygon.map(p => p[1])), maxY: Math.max(...patch.polygon.map(p => p[1])),
+    edges: patch.polygon.map((a, i) => { const b = patch.polygon[(i + 1) % patch.polygon.length]; return { x: -(b[1] - a[1]), y: b[0] - a[0], origin: a }; })
+  }));
   let cutM3 = 0, fillM3 = 0, coveredAreaM2 = 0, validAreaM2 = 0, cellsVisited = 0, sampleCount = 0;
   function addGrid({ values, width, height, bounds, nodata = NaN }) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || values?.length !== width * height) invalid('Invalid native raster grid.');
@@ -117,13 +122,37 @@ export function createSurfaceAccumulator({ vertices, reference = {}, maxCells = 
     const dx = (bounds.maxE - bounds.minE) / width, dy = (bounds.maxN - bounds.minN) / height;
     if (!(dx > 0 && dy > 0)) invalid('Raster must have positive metric cell dimensions.');
     if (cellsVisited + width * height > maxCells) invalid('Selection exceeds the native-resolution cell limit; reduce its extent.', 'measurement_limit');
-    if ((cellsVisited + width * height) * base.patches.length > 30_000_000) invalid('Selection and boundary complexity exceed the calculation work limit.', 'measurement_limit');
+    if ((cellsVisited + width * height) * base.patches.length > maxWork) invalid('Selection and boundary complexity exceed the calculation work limit.', 'measurement_limit');
     cellsVisited += width * height;
     for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
       const minX = bounds.minE + col * dx, maxY = bounds.maxN - row * dy, value = Number(values[row * width + col]);
       const valid = Number.isFinite(value) && (!Number.isFinite(nodata) || value !== nodata);
       let cellValid = false;
-      for (const patch of base.patches) {
+      for (const patch of patches) {
+        if (minX >= patch.maxX || minX + dx <= patch.minX || maxY <= patch.minY || maxY - dy >= patch.maxY) continue;
+        const centerX = minX + dx / 2, centerY = maxY - dy / 2;
+        let interior = true, outside = false;
+        for (const edge of patch.edges) {
+          const center = edge.x * (centerX - edge.origin[0]) + edge.y * (centerY - edge.origin[1]);
+          const radius = Math.abs(edge.x) * dx / 2 + Math.abs(edge.y) * dy / 2;
+          if (center + radius < -EPS) { outside = true; break; }
+          if (center - radius < EPS) interior = false;
+        }
+        if (outside) continue;
+        // A linear plane integrates exactly at a rectangle's center. Only
+        // boundary cells and cells crossing zero need polygon allocation.
+        if (interior) {
+          const area = dx * dy;
+          if (!valid) { coveredAreaM2 += area; continue; }
+          const d0 = value - patch.sample(minX, maxY), d1 = value - patch.sample(minX + dx, maxY);
+          const d2 = value - patch.sample(minX, maxY - dy), d3 = value - patch.sample(minX + dx, maxY - dy);
+          if (Math.min(d0, d1, d2, d3) >= 0 || Math.max(d0, d1, d2, d3) <= 0) {
+            coveredAreaM2 += area; validAreaM2 += area; cellValid = true;
+            const volume = area * (value - patch.sample(centerX, centerY));
+            if (volume >= 0) cutM3 += volume; else fillM3 -= volume;
+            continue;
+          }
+        }
         const clipped = clipRectangle(patch.polygon, minX, maxY - dy, minX + dx, maxY);
         const area = Math.abs(polygonArea(clipped));
         if (area <= EPS) continue;
@@ -139,7 +168,7 @@ export function createSurfaceAccumulator({ vertices, reference = {}, maxCells = 
   }
   function result() {
     const coverage = Math.min(1, validAreaM2 / footprintM2), complete = coverage >= 1 - 1e-8;
-    return { method: 'surface-cut-fill', status: complete ? 'complete' : 'incomplete', cutM3, fillM3, netM3: cutM3 - fillM3, footprintM2, validAreaM2, missingAreaM2: Math.max(0, footprintM2 - validAreaM2), coverage, sampleCount, cellsVisited, reference: { ...reference, type: base.type }, numericalModel: 'native-cell-constant surface; fractional boundary cells; piecewise-linear reference', warnings: complete ? [] : ['Missing or out-of-raster elevations are not treated as zero; totals cover valid samples only.'] };
+    return { method: 'surface-cut-fill', status: complete ? 'complete' : 'incomplete', cutM3, fillM3, netM3: cutM3 - fillM3, footprintM2, validAreaM2, missingAreaM2: Math.max(0, footprintM2 - validAreaM2), coverage, sampleCount, cellsVisited, reference: { ...reference, type: base.type }, numericalModel: base.numericalModel || 'native-cell-constant surface; fractional boundary cells; piecewise-linear reference', warnings: complete ? [] : ['Missing or out-of-raster elevations are not treated as zero; totals cover valid samples only.'] };
   }
   return { addGrid, result, reference: base };
 }
