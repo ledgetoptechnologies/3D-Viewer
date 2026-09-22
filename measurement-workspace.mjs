@@ -334,7 +334,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
         editor.onsubmit=async e=>{e.preventDefault();const name=input.value.trim();if(!name)return;editor.querySelector('[type=submit]').disabled=true;try{await store.patch(record,{name});tell('Measurement name saved.');}catch(error){tell(error.message);editor.querySelector('[type=submit]').disabled=false;}};
       }
       if(action==='export'){const format=controls.querySelector('[data-m="format"]').value;download(exportMeasurements(exportRecords(),format,{toLonLat,units}),`measurements.${format}`,format==='json'||format==='geojson'?'application/json':'text/plain');}
-      if(action==='screenshot'){const generation=viewGeneration,displayUnits=units;const canvas=await screenshot();const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(disposed||!allowed()||generation!==viewGeneration||displayUnits!==units)throw new Error('The view changed during capture. Capture the current view again.');if(!blob)throw new Error('View capture unavailable.');download(blob,'measured-view.png');}
+      if(action==='screenshot'){const generation=viewGeneration,displayUnits=units;const canvas=await screenshot();const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(disposed||!allowed()||generation!==viewGeneration||displayUnits!==units)throw new Error('The view changed during capture. Capture the current view again.');if(!blob)throw new Error('View capture unavailable.');download(blob,'measured-view.png');tell('View PNG download requested.');}
       if(action==='report')await report();
       if(action==='volume')showSurface(record);
     }catch(error){tell(error.message);}

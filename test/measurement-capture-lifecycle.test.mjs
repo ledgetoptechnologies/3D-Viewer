@@ -49,6 +49,19 @@ test('PNG encoding cannot download after a late access or view change',async()=>
   }
 });
 
+test('successful PNG retry replaces an earlier capture error only after requesting download',async()=>{
+  const action=source.slice(source.indexOf("      if(action==='screenshot')"),source.indexOf("      if(action==='report')"));
+  let message='Cannot capture all visible measurements yet.',failure=true;
+  const events=[],scope=vm.createContext({action:'screenshot',viewGeneration:1,units:'imperial',disposed:false,allowed:()=>true,
+    screenshot:async()=>{if(failure)throw new Error('Placement unavailable');return{toBlob(callback){callback(new Blob(['image']));}};},
+    download(_blob,name){events.push(['download',name]);},tell(value){message=value;events.push(['message',value]);}});
+  await assert.rejects(vm.runInContext(`(async()=>{${action}})()`,scope),/Placement unavailable/);
+  assert.equal(events.length,0);assert.match(message,/Cannot capture/);
+  failure=false;await vm.runInContext(`(async()=>{${action}})()`,scope);
+  assert.deepEqual(events,[['download','measured-view.png'],['message','View PNG download requested.']]);
+  assert.equal(message,'View PNG download requested.');
+});
+
 function reportFixture(){
   const reports=new Set(),body={children:[],append(node){this.children.push(node);}};let printed=0;
   const document={body,createElement(){const nodes=new Map();return{innerHTML:'',showModal(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,{removeAttribute(key){delete this[key];}});return nodes.get(selector);},remove(){body.children=body.children.filter(n=>n!==this);}};}};
