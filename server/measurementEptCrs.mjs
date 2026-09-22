@@ -92,7 +92,8 @@ function projectionParameters(root,wkt2){
   return(south?32700:32600)+zone;
 }
 function wktUtmCode(text){
-  const root=parseWkt(text),wkt2=root.tag==='PROJCRS';if(!wkt2&&root.tag!=='PROJCS')fail();
+  const parsed=parseWkt(text);let parts;try{parts=compoundParts(parsed);}catch{fail();}
+  const root=parts?.horizontal||parsed,wkt2=root.tag==='PROJCRS';if(!wkt2&&root.tag!=='PROJCS')fail();
   shape(root,1,wkt2?['BASEGEOGCRS','CONVERSION','CS','AXIS','LENGTHUNIT','ID','USAGE','REMARK']:['GEOGCS','PROJECTION','PARAMETER','UNIT','AXIS','AUTHORITY']);
   if(wkt2)descriptiveMetadata(root);
   geographic(one(root,wkt2?'BASEGEOGCRS':'GEOGCS'),wkt2);
@@ -114,4 +115,68 @@ export function resolveEptUtmCrs(srs,expected){
   for(const key of ['wkt','wkt2'])if(Object.hasOwn(srs,key))codes.push(wktUtmCode(srs[key]));
   if(!codes.length||codes.some(code=>code!==expected))fail();
   return expected;
+}
+
+const verticalFail=code=>{throw Object.assign(new Error(code),{code});};
+const verticalInvalid=()=>verticalFail('measurement_source_vertical_metadata_invalid');
+const verticalText=value=>typeof value==='string'&&value.trim().length>0;
+// An EPSG identifier labels the encoded definition; it never supplies missing
+// units. No registry lookup or vertical datum transformation is performed here.
+function verticalIdentifier(parent,tag){
+  const item=one(parent,tag,false);if(!item)return null;
+  if(item.args.length!==2||norm(item.args[0])!=='epsg'||!/^\d{4,6}$/.test(String(item.args[1])))verticalInvalid();
+  return Number(item.args[1]);
+}
+function verticalUnit(value){
+  shape(value,2,['AUTHORITY','ID']);
+  const specs=[{names:['metre','meter','metres','meters'],factor:1,id:9001},{names:['foot','feet','internationalfoot','internationalfeet'],factor:.3048,id:9002},{names:['ussurveyfoot','ussurveyfeet','footus'],factor:1200/3937,id:9003}];
+  const spec=specs.find(item=>item.names.includes(norm(value.args[0])));
+  if(!spec||!near(value.args[1],spec.factor))verticalFail('measurement_source_vertical_units_unsupported');
+  for(const tag of ['AUTHORITY','ID']){const id=verticalIdentifier(value,tag);if(id!==null&&id!==spec.id)verticalFail('measurement_source_vertical_units_conflict');}
+  return spec.factor;
+}
+function compoundParts(root){
+  const wkt2=root.tag==='COMPOUNDCRS';if(!wkt2&&root.tag!=='COMPD_CS')return null;
+  try{
+    shape(root,1,wkt2?['PROJCRS','VERTCRS','ID','USAGE','REMARK']:['PROJCS','VERT_CS','AUTHORITY']);
+    if(!verticalText(root.args[0]))verticalInvalid();
+    const horizontal=one(root,wkt2?'PROJCRS':'PROJCS'),vertical=one(root,wkt2?'VERTCRS':'VERT_CS');
+    // Compound coordinates must be horizontal first, then upward height.
+    if(root.args[1]!==horizontal||root.args[2]!==vertical)verticalInvalid();
+    verticalIdentifier(root,wkt2?'ID':'AUTHORITY');if(wkt2)descriptiveMetadata(root);
+    shape(vertical,1,wkt2?['VDATUM','CS','AXIS','LENGTHUNIT','ID','USAGE','REMARK']:['VERT_DATUM','UNIT','AXIS','AUTHORITY']);
+    if(!verticalText(vertical.args[0]))verticalInvalid();
+    const datum=one(vertical,wkt2?'VDATUM':'VERT_DATUM');shape(datum,wkt2?1:2,[wkt2?'ID':'AUTHORITY']);
+    if(!verticalText(datum.args[0])||(!wkt2&&datum.args[1]!==2005))verticalInvalid();
+    verticalIdentifier(datum,wkt2?'ID':'AUTHORITY');
+    const id=verticalIdentifier(vertical,wkt2?'ID':'AUTHORITY');
+    if(wkt2){descriptiveMetadata(vertical);const cs=one(vertical,'CS');if(cs.args.length!==2||cs.args[0]?.symbol!=='VERTICAL'||cs.args[1]!==1)verticalInvalid();}
+    const axis=one(vertical,'AXIS');shape(axis,2,wkt2?['ORDER','LENGTHUNIT']:[]);
+    if(!verticalText(axis.args[0])||axis.args[1]?.symbol!=='UP')verticalInvalid();
+    if(wkt2){const order=one(axis,'ORDER',false);if(order&&(order.args.length!==1||order.args[0]!==1))verticalInvalid();}
+    const rootUnit=one(vertical,wkt2?'LENGTHUNIT':'UNIT',!wkt2),axisUnit=wkt2?one(axis,'LENGTHUNIT',false):null;
+    if(!rootUnit&&!axisUnit)verticalFail('measurement_source_vertical_units_required');
+    const factor=rootUnit?verticalUnit(rootUnit):verticalUnit(axisUnit);
+    if(axisUnit&&verticalUnit(axisUnit)!==factor)verticalFail('measurement_source_vertical_units_conflict');
+    return{horizontal,factor,id};
+  }catch(error){if(error.code==='measurement_source_crs_mismatch')verticalInvalid();throw error;}
+}
+
+export function resolveEptVerticalUnits(srs,expected){
+  if(!srs||typeof srs!=='object'||Array.isArray(srs))fail();
+  const evidence=[];
+  for(const key of ['wkt','wkt2'])if(Object.hasOwn(srs,key)){const parts=compoundParts(parseWkt(srs[key]));if(parts)evidence.push(parts);}
+  resolveEptUtmCrs(srs,expected);
+  if(!evidence.length)verticalFail('measurement_source_vertical_units_required');
+  if(evidence.some(item=>item.factor!==evidence[0].factor))verticalFail('measurement_source_vertical_units_conflict');
+  const identifiers=evidence.map(item=>item.id).filter(id=>id!==null);
+  if(Object.hasOwn(srs,'vertical')){
+    if(!['number','string'].includes(typeof srs.vertical)||!/^\d{4,6}$/.test(String(srs.vertical)))verticalInvalid();
+    // A second numeric declaration is accepted only when the explicit vertical
+    // WKT also identifies that CRS, never by interpreting a horizontal unit.
+    if(!identifiers.length)verticalFail('measurement_source_vertical_units_unsupported');
+    identifiers.push(Number(srs.vertical));
+  }
+  if(identifiers.some(id=>id!==identifiers[0]))verticalFail('measurement_source_vertical_units_conflict');
+  return{verticalFactor:evidence[0].factor,verticalUnitBasis:'ept-vertical-crs',verticalUnit:'m',verticalDatum:'unknown'};
 }

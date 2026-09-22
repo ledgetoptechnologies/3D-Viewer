@@ -16,7 +16,7 @@ export function createServerProfileCalculator({request, getRecord, isCurrent = (
   return async function calculateProfile(record, {line, signal, onProgress = () => {}, onJob = () => {}} = {}) {
     record = structuredClone(getRecord?.() || record);
     const original = structuredClone(record), parentCalculationId = record.results?.calculationJobId;
-    if (!parentCalculationId || record.results?.method !== 'surface-cut-fill') throw new Error('Calculate and save this polygon’s surface volume before requesting a cross-section.');
+    if (!parentCalculationId || !['surface-cut-fill','point-surface-cut-fill'].includes(record.results?.method)) throw new Error('Calculate and save this polygon’s surface volume before requesting a cross-section.');
     const fingerprint = r => JSON.stringify([r?.id, r?.modelVersionId, r?.revision, r?.collection, r?.vertices, r?.coordinateReference, r?.results?.calculationJobId]);
     const current = () => {
       if (signal?.aborted) throw stopped();
@@ -33,7 +33,7 @@ export function createServerProfileCalculator({request, getRecord, isCurrent = (
       record = {...record, revision: 1, modelVersionId: caps.modelVersionId};
     }
     const parent = (await send('status', {measurementId: record.id, jobId: parentCalculationId}))?.calculation;
-    if (parent?.id !== parentCalculationId || parent.measurementId !== record.id || parent.status !== 'complete' || parent.result?.method !== 'surface-cut-fill' || (parent.revision !== record.revision && parent.attachmentRevision !== record.revision) || (temporary && parent.geometryHash !== geometryHash)) throw new Error('The saved volume is no longer available for this polygon revision. Calculate the surface again before requesting a section.');
+    if (parent?.id !== parentCalculationId || parent.measurementId !== record.id || parent.status !== 'complete' || parent.result?.method !== record.results.method || (parent.revision !== record.revision && parent.attachmentRevision !== record.revision) || (temporary && parent.geometryHash !== geometryHash)) throw new Error('The saved volume is no longer available for this polygon revision. Calculate the surface again before requesting a section.');
     const source = parent.result.source;
     if (!source?.sha256 || source.modelVersionId !== record.modelVersionId) throw new Error('The saved volume does not identify this immutable elevation source.');
     const body = {revision: record.revision, method: 'surface-transect', parentCalculationId, line: structuredClone(line)};

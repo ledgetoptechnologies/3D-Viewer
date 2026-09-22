@@ -35,9 +35,9 @@ function measurementAdmin(req, principal, database) {
   return processing.adminSessionLive(session) && session.subject === principal.subject && session.permissions?.includes('viewer.processing.write') ? session : null;
 }
 
-function createMeasurementApi(repository, { preflightRaster } = {}) {
+function createMeasurementApi(repository, { preflightRaster, preflightPoint } = {}) {
   const router = express.Router();
-  router.use('/temporary',createEphemeralMeasurementApi(repository,{config,preflightRaster}));
+  router.use('/temporary',createEphemeralMeasurementApi(repository,{config,preflightRaster,preflightPoint}));
   const measurements = new MeasurementRepository(repository.database);
   const principalFor = (req) => getMeasurementPrincipal(req, repository);
   const adminFor = (req, principal) => measurementAdmin(req, principal, repository.database);
@@ -60,11 +60,11 @@ function createMeasurementApi(repository, { preflightRaster } = {}) {
     const version = rasterAuthorized ? repository.getModelVersion(req.measurementPrincipal.modelId, req.measurementPrincipal.modelVersionId)?.activeVersion : null;
     const hasMeshCrs = Number(version?.georef?.epsg) > 0 || (Number(version?.georef?.utmZone) >= 1 && Number(version?.georef?.utmZone) <= 60);
     const calculationSources = (version?.assets || []).filter(asset => asset.sha256).flatMap(asset => {
-      const methods = ['dsm','dtm'].includes(asset.kind) && /^(tif|tiff|geotiff)$/i.test(asset.format || '') ? ['surface-cut-fill','surface-transect'] : authorized && asset.kind === 'obj' && asset.format === 'obj' && hasMeshCrs ? ['closed-mesh'] : authorized && asset.kind === 'ept' && asset.format === 'ept' && asset.manifestSha256 ? ['point-surface-cut-fill'] : [];
-      if(methods.length&&hasMeshCrs&&['obj','ept'].includes(asset.kind)&&reconstructionAvailable(config))methods.push('reconstructed-estimate');
+      const methods = ['dsm','dtm'].includes(asset.kind) && /^(tif|tiff|geotiff)$/i.test(asset.format || '') ? ['surface-cut-fill','surface-transect'] : authorized && asset.kind === 'obj' && asset.format === 'obj' && hasMeshCrs ? ['closed-mesh'] : asset.kind === 'ept' && asset.format === 'ept' && asset.manifestSha256 ? ['point-surface-cut-fill','surface-transect'] : [];
+      if(authorized&&methods.length&&hasMeshCrs&&['obj','ept'].includes(asset.kind)&&reconstructionAvailable(config))methods.push('reconstructed-estimate');
       return methods.length ? [{ assetId: asset.id, kind: asset.kind, format: asset.format, byteSize: asset.byteSize ?? null, methods }] : [];
     });
-    res.json({ capabilities: { personalPersistence: true, rasterCalculations: rasterAuthorized, transectCalculations:rasterAuthorized, serverCalculations: authorized }, calculationSources, calculationMethods: [...new Set(calculationSources.flatMap(source => source.methods))] });
+    res.json({ capabilities: { personalPersistence: true, rasterCalculations: rasterAuthorized, pointSurfaceCalculations:rasterAuthorized, transectCalculations:rasterAuthorized, serverCalculations: authorized }, calculationSources, calculationMethods: [...new Set(calculationSources.flatMap(source => source.methods))] });
   }));
   router.get('/', endpoint((req, res) => {
     const collection = req.query.collection;
@@ -86,7 +86,7 @@ function createMeasurementApi(repository, { preflightRaster } = {}) {
     measurements.delete(req.measurementPrincipal, req.params.id, req.body.revision);
     res.status(204).end();
   }));
-  router.use(createMeasurementCalculationApi({ repository, measurements, getPrincipal: principalFor, admin: adminFor, config, preflightRaster }));
+  router.use(createMeasurementCalculationApi({ repository, measurements, getPrincipal: principalFor, admin: adminFor, config, preflightRaster, preflightPoint }));
   router.use((error, _req, res, next) => {
     if (!error.status) return next(error);
     res.status(error.status).json({ error: error.code, code: error.code });

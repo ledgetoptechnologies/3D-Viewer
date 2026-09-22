@@ -13,7 +13,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   <p class="surface-description">Draw around the bottom of the pile on surrounding ground, then calculate its volume above a reference ground surface. This does not measure solid material inside a car or building.</p>
   <div class="surface-area"><span>Outline area</span><strong data-area></strong></div>
   <details class="surface-settings" ${advancedSettings?'':'hidden'}><summary>Advanced settings · staff only</summary><div class="surface-settings-grid">
-  <label>Elevation surface<select name="source"><option value="auto">Current surface / DSM</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground</option></select></label>
+  <label>Elevation surface<select name="source"><option value="auto">Current surface</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground</option><option value="ept" hidden>Original point surface</option></select></label>
   <label>Reference base<select name="reference"><option value="boundary-triangulated">Ground from boundary</option><option value="fitted-plane">Fitted sloping plane</option><option value="lowest-boundary">Lowest boundary</option><option value="highest-boundary">Highest boundary</option><option value="average-boundary">Average boundary</option><option value="custom">Custom horizontal elevation</option></select></label>
   <label data-custom hidden>Custom elevation (${unit[0]})<input name="elevation" type="number" step="any" value="0"></label><label>Base offset (${unit[0]})<input name="offset" type="number" step="any" value="0"></label></div>
   <p class="hint">For Ground from boundary, place the outline around the pile toe on surrounding ground. This estimates a base; it is not surveyed ground. Choose a custom elevation only when that height is known. A DTM may remove the pile itself.</p>
@@ -31,7 +31,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   if(!advancedSettings){
     // New client stockpiles use the pile-containing surface in every view.
     // restoreSavedResult below still preserves an explicitly saved source/base.
-    dialog.querySelector('[name=source]').value='dsm';
+    dialog.querySelector('[name=source]').value=record.collection==='spatial3d'||['mesh','pointCloud','glb','obj','ept'].includes(record.source?.kind)?'auto':'dsm';
     for(const name of ['source','reference','elevation','offset'])dialog.querySelector(`[name=${name}]`).disabled=true;
     dialog.querySelector('[data-status]').textContent='Your outline is ready. Calculate volume when you are ready; your area is already available.';
   }
@@ -47,7 +47,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   function showNativeProfile(){
     clearNativeProfile();
     const current=getRecord()||record;
-    if(typeof calculateProfile!=='function'||current.results?.method!=='surface-cut-fill'||!current.results?.calculationJobId)return;
+    if(typeof calculateProfile!=='function'||!['surface-cut-fill','point-surface-cut-fill'].includes(current.results?.method)||!current.results?.calculationJobId)return;
     const host=dialog.querySelector('[data-native-profile]');host.hidden=false;
     nativeProfile=mountNativeProfile(host,{record:current,getRecord,units,calculate:calculateProfile});
     dialog.querySelector('[data-preview-empty]').hidden=true;
@@ -66,7 +66,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
       if(reference.type==='custom')field('elevation').value=String(reference.elevationM/unit[1]);
     }
     if(Number.isFinite(reference.offsetM))field('offset').value=String(reference.offsetM/unit[1]);
-    const source=saved.sourceKind||saved.source?.kind;if(['dsm','dtm'].includes(source))field('source').value=source;
+    const source=saved.sourceKind||saved.source?.kind;if(['dsm','dtm','ept'].includes(source))field('source').value=source;
     if(hasSurface){
       for(const [name,key]of [['cut','cutM3'],['fill','fillM3'],['net','netM3']])dialog.querySelector(`[data-result=${name}]`).textContent=Number.isFinite(saved[key])?measurementValue(saved[key],3,units):'Unavailable';
       dialog.querySelector('[data-result=coverage]').textContent=Number.isFinite(saved.coverage)&&saved.coverage>=0&&saved.coverage<=1?`${(saved.coverage*100).toFixed(3)}%`:'Unavailable';dialog.querySelector('[data-results]').hidden=false;
@@ -135,7 +135,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   dialog.querySelector('.region-disclosure').ontoggle=()=>{if(!retired&&dialog.querySelector('.region-disclosure').open&&preview&&!regionPreview)regionPreview=mountMeasurementRegionPreview(dialog.querySelector('[data-region-preview]'),{preview,units});};
   dialog.querySelector('[data-calculate]').onclick=async()=>{
     if(retired||(typeof openSpecialist==='function'&&dialog.querySelector('.surface-specialist').open))return;
-    abort?.abort();abort=new AbortController();const mine=abort;let cancelPending=false;dialog.querySelector('[data-cancel-job]').hidden=true;status.textContent='Checking source units and calculating the native-resolution surface…';status.dataset.state='loading';dialog.setAttribute('aria-busy','true');dialog.querySelector('[data-calculate]').disabled=true;
+    abort?.abort();abort=new AbortController();const mine=abort;let cancelPending=false;dialog.querySelector('[data-cancel-job]').hidden=true;status.textContent='Checking source units and calculating the surface…';status.dataset.state='loading';dialog.setAttribute('aria-busy','true');dialog.querySelector('[data-calculate]').disabled=true;
     clearNativeProfile();preview=null;section=null;selected=null;chartBounds=null;regionPreview?.dispose();regionPreview=null;dialog.removeAttribute('data-calculated');dialog.querySelector('[data-results]').hidden=true;dialog.querySelector('[data-preview-content]').hidden=true;dialog.querySelector('[data-preview-empty]').hidden=false;dialog.querySelector('[data-preview-empty]').textContent='Calculating. The preview will appear only when a valid result is available.';
     const reference={type:field('reference').value,offsetM:value('offset')*unit[1]};if(reference.type==='custom')reference.elevationM=value('elevation')*unit[1];
     try{

@@ -29,6 +29,40 @@ function fixture(t) {
   return { database, repository, processing, measurements, jobs, model, principal, measurement, document, viewerToken, adminToken, body, request };
 }
 
+test('ordinary point jobs require encoded-unit preflight and narrowly scoped worker authority',async t=>{
+ const f=fixture(t);
+ f.database.prepare("UPDATE model_assets SET kind='ept',format='ept',manifest_sha256=? WHERE id=?").run('b'.repeat(64),f.request.source.id);
+ const app=express();let preflightCalls=0,rejectUnits=true;
+ app.use(express.json());app.use('/measurements',createMeasurementApi(f.repository,{preflightPoint:async request=>{preflightCalls++;assert.equal(request.requireEncodedVerticalUnits,true);assert.equal(request.sourceVerticalUnit,null);if(rejectUnits)throw Object.assign(new Error('units'),{code:'measurement_source_vertical_units_required'});}}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const url=`http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`;
+ const body={revision:1,method:'point-surface-cut-fill',sourceAssetId:f.request.source.id};
+ const call=body=>fetch(url,{method:'POST',headers:{Authorization:`Bearer ${f.viewerToken}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
+ assert.equal((await call({...body,sourceVerticalUnit:'m'})).status,422);assert.equal(preflightCalls,0);
+ assert.equal((await call(body)).status,422);assert.equal(f.jobs.list(f.measurement.id).length,0);
+ rejectUnits=false;const response=await call(body);assert.equal(response.status,202);
+ const job=(await response.json()).calculation;assert.equal(job.parameters.requireEncodedVerticalUnits,true);assert.equal(job.parameters.cellSizeM,.1);
+ const request=f.jobs.parent(f.measurement.id,job.id).request;
+ assert.equal(request.authority.scope,'personal-point-surface');assert.equal(authorizationLive(request,f.repository,f.processing),true);
+ for(const patch of [{method:'reconstructed-estimate'},{sourceVerticalUnit:'m'},{requireEncodedVerticalUnits:false},{source:{...request.source,kind:'obj'}}])assert.equal(authorizationLive({...request,...patch},f.repository,f.processing),false);
+ f.database.prepare('UPDATE viewer_sessions SET revoked_at=?').run(new Date().toISOString());assert.equal(authorizationLive(request,f.repository,f.processing),false);
+});
+
+test('attached point result survives rename but not manifest replacement',t=>{
+ const f=fixture(t),manifest='b'.repeat(64);
+ f.database.prepare("UPDATE model_assets SET kind='ept',format='ept',manifest_sha256=? WHERE id=?").run(manifest,f.request.source.id);
+ const request={...f.request,method:'point-surface-cut-fill',source:{...f.request.source,kind:'ept',manifestSha256:manifest},cellSizeM:1,classFilter:'all'};
+ const queued=f.jobs.enqueue(f.measurement,request),claimed=f.jobs.claim('worker');
+ const result={method:'point-surface-cut-fill',cutM3:1,fillM3:0,netM3:1,coverage:1,source:{assetId:request.source.id,kind:'ept',sha256:request.source.sha256,manifestSha256:manifest,modelVersionId:request.modelVersionId},reference:request.reference};
+ f.jobs.finish(claimed,'worker',result);
+ let current=f.measurements.update(f.principal,f.measurement.id,{...f.document,revision:1,results:{...result,calculationJobId:queued.id}});
+ assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,2);
+ current=f.measurements.update(f.principal,current.id,{...f.document,name:'Renamed',revision:2,results:current.results});
+ assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,3);
+ f.database.prepare('UPDATE model_assets SET manifest_sha256=? WHERE id=?').run('c'.repeat(64),request.source.id);
+ assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,null);
+});
+
 test('historical result reuse requires explicit stored attachment, exact coordinate frame and source identity',t=>{
   const f=fixture(t),queued=f.jobs.enqueue(f.measurement,f.request),claimed=f.jobs.claim('worker'),result={method:'surface-cut-fill',cutM3:1,fillM3:0,netM3:1,coverage:1,source:{assetId:f.request.source.id,kind:'dsm',sha256:f.request.source.sha256,modelVersionId:f.request.modelVersionId},reference:f.request.reference};f.jobs.finish(claimed,'worker',result);
   f.measurements.update(f.principal,f.measurement.id,{...f.document,revision:1,results:{...result,calculationJobId:crypto.randomUUID()}});assert.equal(f.jobs.get(f.measurement.id,queued.id).attachmentRevision,null);
@@ -128,7 +162,8 @@ test('client own raster jobs use scoped Viewer authority; cross-person and advan
  const base=`http://127.0.0.1:${server.address().port}/measurements`,headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json'};
  const call=(path,method='GET',body)=>fetch(base+path,{method,headers,...(body?{body:JSON.stringify(body)}:{})});
  const caps=await(await call('/capabilities')).json();assert.equal(caps.capabilities.rasterCalculations,true);assert.equal(caps.capabilities.transectCalculations,true);assert.equal(caps.capabilities.serverCalculations,false);assert.deepEqual(caps.calculationMethods,['surface-cut-fill','surface-transect']);
- for(const method of ['closed-mesh','point-surface-cut-fill','reconstructed-estimate'])assert.equal((await call(`/${own.id}/calculations`,'POST',{...f.body,method})).status,403);
+ for(const method of ['closed-mesh','reconstructed-estimate'])assert.equal((await call(`/${own.id}/calculations`,'POST',{...f.body,method})).status,403);
+ assert.equal((await call(`/${own.id}/calculations`,'POST',{...f.body,method:'point-surface-cut-fill'})).status,422,'a raster asset cannot be used as a point-cloud source');
  assert.equal(preflights,0);assert.equal((await call(`/${foreign.id}/calculations`,'POST',f.body)).status,404);
  const response=await call(`/${own.id}/calculations`,'POST',f.body);assert.equal(response.status,202);const queued=(await response.json()).calculation;
  assert.equal(queued.method,'surface-cut-fill');assert.equal(queued.request,undefined);assert.equal(queued.authority,undefined);

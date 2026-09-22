@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { calculatePointSurface, pointSurfaceGrid } from '../server/measurementPointSurface.mjs';
+import { calculatePointSurface, pointSurfaceGrid, preflightPointSurface } from '../server/measurementPointSurface.mjs';
+import {calculatePointSurfaceTransect} from '../server/measurementPointTransect.mjs';
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'measurement-point-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));fs.mkdirSync(path.join(root,'ept-hierarchy'));fs.mkdirSync(path.join(root,'ept-data'));
   const files=[],write=(relative,bytes)=>{bytes=Buffer.isBuffer(bytes)?bytes:Buffer.from(JSON.stringify(bytes));fs.writeFileSync(path.join(root,relative),bytes);const file={relativePath:relative,byteSize:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};files.push(file);return file;};
@@ -20,9 +21,46 @@ test('point surface reads every intersecting hierarchy level at full point count
   assert.equal(result.cutM3,10);assert.equal(result.coverage,1);assert.equal(result.source.pointsRead,4);assert.equal(result.source.nodesRead,2);assert.equal(result.source.allIntersectingHierarchyLevels,true);
   const ground=await calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,classFilter:'ground'},{sourceFiles:f.files});assert.equal(ground.cutM3,8);assert.equal(ground.coverage,.75);assert.equal(ground.status,'incomplete');
 });
+test('point result identifies its source and exact sampling policy without claiming verified height units',async t=>{
+  const f=fixture(t),request={...f.request,method:'point-surface-cut-fill',source:{...f.request.source,kind:'ept'}};
+  const result=await calculatePointSurface(path.join(f.root,'ept.json'),request,{sourceFiles:f.files});
+  assert.equal(result.method,request.method);
+  assert.equal(result.source.kind,'ept');
+  assert.equal(result.source.manifestSha256,request.source.manifestSha256);
+  assert.equal(result.source.verticalUnitBasis,'administrator-declared');
+  assert.deepEqual(result.source.samplingGrid,{version:1,width:2,height:2,bounds:{minE:0,minN:0,maxE:2,maxN:2},cellSizeM:1,rowOrder:'north-to-south',reduction:'maximum-z',emptyCells:'missing'});
+  assert.equal(result.preview.previewOnly,true);
+  assert.equal(result.cutM3,10);
+  await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),{...request,sourceVerticalUnit:undefined},{sourceFiles:f.files}),{code:'measurement_source_vertical_units_required'});
+});
 test('point surface missing or changed node fails instead of reporting partial full-resolution success',async t=>{
   const f=fixture(t);await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),f.request,{sourceFiles:f.files.filter(file=>!file.relativePath.endsWith('1-0-0-0.bin'))}),{code:'measurement_ept_file_unavailable'});
   fs.writeFileSync(path.join(f.root,'ept-data/1-0-0-0.bin'),Buffer.alloc(50));await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),f.request,{sourceFiles:f.files}),{code:'measurement_source_changed'});
+});
+test('point preflight verifies metadata before hierarchy or point reads',async t=>{
+  const f=fixture(t);
+  // Metadata preflight must not perform the expensive source-node traversal.
+  fs.unlinkSync(path.join(f.root,'ept-data/0-0-0-0.bin'));
+  const result=await preflightPointSurface(path.join(f.root,'ept.json'),f.request);
+  assert.equal(result.expected,32616);
+  await assert.rejects(preflightPointSurface(path.join(f.root,'ept.json'),{...f.request,sourceVerticalUnit:null}),{code:'measurement_source_vertical_units_required'});
+  await assert.rejects(preflightPointSurface(path.join(f.root,'ept.json'),{...f.request,source:{...f.request.source,sha256:'0'.repeat(64)}}),{code:'measurement_source_changed'});
+});
+test('point section rebuilds the parent grid and frozen base, with missing cells remaining gaps',async t=>{
+  const f=fixture(t),source={...f.request.source,kind:'ept'};
+  const parent=await calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,source},{sourceFiles:f.files});
+  const referencePatches=parent.preview.referencePatches;
+  const request={...f.request,source,method:'surface-transect',parentCalculationId:'parent',samplingGrid:parent.source.samplingGrid,referencePatches,baseHash:crypto.createHash('sha256').update(JSON.stringify(referencePatches)).digest('hex'),line:{start:[0,.5],end:[2,.5]}};
+  const result=await calculatePointSurfaceTransect(path.join(f.root,'ept.json'),request,{sourceFiles:f.files});
+  assert.equal(result.sampling,'point-grid-step');
+  assert.equal(result.calculationOrigin,'server-original-point-surface');
+  assert.equal(result.source.manifestSha256,source.manifestSha256);
+  assert.ok(result.segments.every(s=>s.status==='sample'&&s.baseStartM===0&&s.baseEndM===0));
+  assert.equal(result.segments.reduce((sum,s)=>sum+(s.endM-s.startM)*s.surfaceM,0),3);
+  const ground=await calculatePointSurfaceTransect(path.join(f.root,'ept.json'),{...request,classFilter:'ground'},{sourceFiles:f.files});
+  assert.ok(ground.segments.some(s=>s.status==='nodata'&&!('surfaceM' in s)));
+  await assert.rejects(calculatePointSurfaceTransect(path.join(f.root,'ept.json'),{...request,samplingGrid:{...request.samplingGrid,width:3}},{sourceFiles:f.files}),{code:'measurement_transect_source_mismatch'});
+  await assert.rejects(calculatePointSurfaceTransect(path.join(f.root,'ept.json'),{...request,baseHash:'bad'},{sourceFiles:f.files}),{code:'measurement_transect_reference_invalid'});
 });
 test('point surface explicit sampling limits reject oversize; no automatic cell enlargement',()=>{
   assert.throws(()=>pointSurfaceGrid([[0,0,0],[1000,0,0],[1000,1000,0]],.001),{code:'measurement_limit'});

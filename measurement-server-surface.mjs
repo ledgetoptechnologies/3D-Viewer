@@ -1,5 +1,6 @@
 import {availableAdminSources,adminCalculationRequest} from './measurement-admin-dialog.mjs';
 import {measurementGeometryHash} from './measurement-surface-client.mjs';
+import {validatePointSamplingGrid} from './measurement-native-profile.mjs';
 
 const guidance=Object.freeze({
   measurement_source_crs_mismatch:'The survey coordinates for this model need to be checked by the model owner before volume can be calculated. Your outline and area are unchanged.',
@@ -39,23 +40,30 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
     onProgress('Checking the elevation data for your outline…');
     const capabilities=await send('capabilities',{});
     const rasterAllowed=capabilities?.capabilities?.rasterCalculations===true||capabilities?.capabilities?.serverCalculations===true;
-    if(!rasterAllowed)throw new Error('Your current access does not allow volume calculations.');
+    const pointAllowed=capabilities?.capabilities?.pointSurfaceCalculations===true;
+    if(!rasterAllowed&&!pointAllowed)throw new Error('Your current access does not allow volume calculations.');
     const temporary=capabilities.capabilities.temporaryCalculations===true;
     const geometryHash=temporary?await measurementGeometryHash(record):null;current();
     if(temporary){
       if(!capabilities.modelVersionId||(record.modelVersionId&&record.modelVersionId!==capabilities.modelVersionId))throw new Error('The model version could not be verified. Reopen the model before calculating.');
       record={...record,revision:1,modelVersionId:capabilities.modelVersionId};
     }
-    const sources=availableAdminSources({...capabilities,capabilities:{...capabilities.capabilities,serverCalculations:rasterAllowed}}).filter(s=>['dsm','dtm'].includes(s.kind)&&s.methods.includes('surface-cut-fill'));
-    if(!['auto','dsm','dtm'].includes(sourceKind))throw new Error('The calculation source needs review by the model owner. Your outline and area are unchanged.');
-    const kind=sourceKind==='auto'?(record.source?.kind==='dtm'?'dtm':'dsm'):sourceKind;
+    const sources=availableAdminSources({...capabilities,capabilities:{...capabilities.capabilities,serverCalculations:true}}).filter(s=>rasterAllowed&&['dsm','dtm'].includes(s.kind)&&s.methods.includes('surface-cut-fill')||pointAllowed&&s.kind==='ept'&&s.methods.includes('point-surface-cut-fill'));
+    if(!['auto','dsm','dtm','ept'].includes(sourceKind))throw new Error('The calculation source needs review by the model owner. Your outline and area are unchanged.');
+    const savedSource=record.results?.source;
+    const savedKind=savedSource?.kind||record.results?.sourceKind;
+    const kind=sourceKind==='auto'?(savedKind||(['mesh','pointCloud','glb','obj','ept'].includes(record.source?.kind)||record.collection==='spatial3d'?'ept':'dsm')):sourceKind;
     // Do not silently substitute bare-earth DTM for a missing stockpile DSM.
-    const source=sources.find(s=>s.kind===kind);
+    const source=sources.find(s=>s.kind===kind&&(!(savedSource?.assetId&&savedKind===kind)||s.assetId===savedSource.assetId));
     if(!source)throw new Error('The survey surface needed for this calculation is unavailable. Your outline and area are unchanged. Contact the model owner to check the elevation data.');
-    const body=adminCalculationRequest(record,{method:'surface-cut-fill',sourceAssetId:source.assetId,reference:reference?.type,offsetM:reference?.offsetM??0,elevationM:reference?.elevationM,displayUnits:'metric',confirmMeters},sources);
+    reference=reference||record.results?.reference||{type:'boundary-triangulated',offsetM:0};
+    // Reuse base validation, but ordinary point requests never assert source units.
+    const baseSource={...source,methods:['surface-cut-fill']};
+    const body=adminCalculationRequest(record,{method:'surface-cut-fill',sourceAssetId:source.assetId,reference:reference?.type,offsetM:reference?.offsetM??0,elevationM:reference?.elevationM,displayUnits:'metric',confirmMeters:source.kind!=='ept'&&confirmMeters},[baseSource]);
+    if(source.kind==='ept')Object.assign(body,{method:'point-surface-cut-fill',cellSizeM:savedKind==='ept'?(savedSource?.samplingGrid?.cellSizeM??savedSource?.cellSizeM??.1):.1,classFilter:savedKind==='ept'?(savedSource?.classFilter??'all'):'all'});
     const matchesParameters=job=>{
       const p=job.parameters;
-      return job.measurementId===record.id&&(!temporary||job.geometryHash===geometryHash)&&p?.method===body.method&&p.sourceAssetId===body.sourceAssetId&&p.reference?.type===body.reference.type&&(p.reference?.offsetM??0)===body.reference.offsetM&&(body.reference.type!=='custom'||p.reference?.elevationM===body.reference.elevationM)&&(p.sourceVerticalUnit??null)===(body.sourceVerticalUnit??null);
+      return job.measurementId===record.id&&(!temporary||job.geometryHash===geometryHash)&&p?.method===body.method&&p.sourceAssetId===body.sourceAssetId&&p.reference?.type===body.reference.type&&(p.reference?.offsetM??0)===body.reference.offsetM&&(body.reference.type!=='custom'||p.reference?.elevationM===body.reference.elevationM)&&(p.sourceVerticalUnit??null)===(body.sourceVerticalUnit??null)&&(source.kind!=='ept'||p.cellSizeM===body.cellSizeM&&p.classFilter===body.classFilter);
     };
     const matches=job=>job.revision===record.revision&&matchesParameters(job);
     const attachedMatch=job=>!temporary&&job?.status==='complete'&&job.id===record.results?.calculationJobId&&Number.isSafeInteger(job.revision)&&job.revision<record.revision&&job.attachmentRevision===record.revision&&matchesParameters(job);
@@ -89,7 +97,11 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       if(job.status==='complete'){
         onJob(null);
         const result=job.result;
-        if(result?.method!=='surface-cut-fill'||!['cutM3','fillM3','netM3','coverage'].every(key=>Number.isFinite(result[key]))||result.cutM3<0||result.fillM3<0||result.coverage<0||result.coverage>1)throw new Error('The surface result is unusable. No result was attached.');
+        if(result?.method!==body.method||!['cutM3','fillM3','netM3','coverage'].every(key=>Number.isFinite(result[key]))||result.cutM3<0||result.fillM3<0||result.coverage<0||result.coverage>1)throw new Error('The surface result is unusable. No result was attached.');
+        if(source.kind==='ept'){
+          validatePointSamplingGrid(result.source?.samplingGrid);
+          if(result.calculationOrigin!=='server-original-point-surface'||!['sha256','manifestSha256'].every(k=>/^[a-f0-9]{64}$/i.test(result.source?.[k]||''))||result.source?.verticalUnit!=='m'||result.source?.verticalUnitBasis!=='ept-vertical-crs'||result.source?.classFilter!==body.classFilter||result.source?.samplingGrid.cellSizeM!==body.cellSizeM)throw new Error('The point surface is missing matching source and grid provenance. No result was attached.');
+        }
         if(result.source?.assetId!==source.assetId||result.source?.kind!==source.kind||!record.modelVersionId||result.source?.modelVersionId!==record.modelVersionId||result.reference?.type!==body.reference.type||(result.reference?.offsetM??0)!==body.reference.offsetM||(body.reference.type==='custom'&&result.reference?.elevationM!==body.reference.elevationM))throw new Error('The result does not match the selected source, model version, or reference base. No result was attached.');
         return {...result,calculationJobId:jobId};
       }

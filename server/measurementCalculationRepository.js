@@ -31,15 +31,17 @@ class MeasurementCalculationRepository {
     if(!row)return null;
     const request=JSON.parse(row.request_json),reference=request.reference||{};
     const parameters={revision:row.revision,method:request.method,sourceAssetId:request.source?.id,reference:{type:reference.type,...(Number.isFinite(reference.elevationM)?{elevationM:reference.elevationM}:{}),...(Number.isFinite(reference.offsetM)?{offsetM:reference.offsetM}:{})},sourceVerticalUnit:request.sourceVerticalUnit||null,...(request.method==='surface-transect'?{parentCalculationId:request.parentCalculationId,parentRevision:request.parentRevision,line:request.line,baseHash:request.baseHash}:{})};
+    if(request.source?.kind==='ept')Object.assign(parameters,{sourceKind:'ept',cellSizeM:request.cellSizeM,classFilter:request.classFilter||'all',requireEncodedVerticalUnits:request.requireEncodedVerticalUnits===true});
     const result=row.result_json?JSON.parse(row.result_json):null,document=JSON.parse(row.current_document);
     // Attaching a result is itself a document revision. Reuse only the exact
     // explicitly attached job, never any arbitrary historical result. Recheck
     // its immutable input geometry and registered source, not browser assertions.
     const geometry=value=>JSON.stringify([value.collection,value.vertices,[value.coordinateReference?.crs,value.coordinateReference?.verticalUnit]]);
     let attachmentRevision=null;
-    if(row.status==='complete'&&request.method==='surface-cut-fill'&&document.kind==='polygon'&&document.results?.calculationJobId===row.id&&row.current_revision>row.revision&&request.modelId===row.current_model_id&&request.modelVersionId===row.current_version_id&&geometry(document)===geometry(request)){
-      const asset=this.database.prepare('SELECT version_id,kind,root_key,relative_path,sha256,byte_size FROM model_assets WHERE id=?').get(request.source?.id||'');
-      if(asset&&asset.version_id===request.modelVersionId&&asset.kind===request.source.kind&&asset.root_key===request.source.rootKey&&asset.relative_path===request.source.relativePath&&asset.sha256===request.source.sha256&&asset.byte_size===request.source.byteSize&&result?.source?.assetId===request.source.id&&result.source.sha256===request.source.sha256&&result.source.kind===request.source.kind&&result.source.modelVersionId===request.modelVersionId)attachmentRevision=row.current_revision;
+    if(row.status==='complete'&&['surface-cut-fill','point-surface-cut-fill'].includes(request.method)&&document.kind==='polygon'&&document.results?.calculationJobId===row.id&&row.current_revision>row.revision&&request.modelId===row.current_model_id&&request.modelVersionId===row.current_version_id&&geometry(document)===geometry(request)){
+      const asset=this.database.prepare('SELECT version_id,kind,root_key,relative_path,sha256,byte_size,manifest_sha256 FROM model_assets WHERE id=?').get(request.source?.id||'');
+      const pointMatches=request.method!=='point-surface-cut-fill'||(asset?.manifest_sha256===request.source.manifestSha256&&result?.source?.manifestSha256===request.source.manifestSha256&&result?.method===request.method);
+      if(pointMatches&&asset&&asset.version_id===request.modelVersionId&&asset.kind===request.source.kind&&asset.root_key===request.source.rootKey&&asset.relative_path===request.source.relativePath&&asset.sha256===request.source.sha256&&asset.byte_size===request.source.byteSize&&result?.source?.assetId===request.source.id&&result.source.sha256===request.source.sha256&&result.source.kind===request.source.kind&&result.source.modelVersionId===request.modelVersionId)attachmentRevision=row.current_revision;
     }
     return { id: row.id, measurementId: row.measurement_id, revision: row.revision, method: request.method, parameters, attachmentRevision, status: row.status, result, errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at };
   }

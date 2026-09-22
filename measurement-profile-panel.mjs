@@ -2,6 +2,7 @@ import {measurementValue} from './measurement-document.mjs';
 import {profileLine, profileStation, exportNativeProfile, validateNativeProfile} from './measurement-native-profile.mjs';
 
 export function mountNativeProfile(host, {record, getRecord = () => record, units = 'imperial', calculate}) {
+  const pointProfile=record.results?.source?.kind==='ept';
   host.innerHTML = `<section class="surface-section native-profile"><div class="surface-section-header"><h3>Elevation cross-section</h3><p>Inspect the original elevation cells along a line through this polygon, using the same reference base as its saved volume.</p></div>
   <div class="section-controls"><label>Direction <output data-direction>0° · east → west axis</output><input data-azimuth type="range" min="0" max="179" value="0" aria-label="Native section direction"></label><label>Position <output data-position>Center</output><input data-position-input type="range" min="-100" max="100" value="0" aria-label="Native section position"></label><div class="profile-actions"><button data-update>Update profile</button><button data-cancel hidden>Cancel</button></div></div>
   <p data-profile-status role="status" class="section-provenance">Choose a section, then update it. The saved polygon and volume will not change.</p>
@@ -10,6 +11,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   <p class="section-provenance" data-profile-provenance>Orange: above base · Blue: below base · Gray: reference base. Gaps are missing data, not zero elevation. Section area is not volume.</p>
   <div class="profile-export"><button data-profile-csv disabled>Export profile CSV</button><button data-profile-png disabled>Save profile PNG</button><span class="hint">Unrounded source values in CSV · vertical datum unverified</span></div></section>`;
   const find = selector => host.querySelector(selector), chart = find('[data-profile-chart]'), plan = find('[data-profile-plan]');
+  if(pointProfile){host.querySelector('.surface-section-header p').textContent='Inspect the saved volume’s maximum-height point grid along a line, using its same reference base. Empty cells remain gaps.';chart.setAttribute('aria-label','Point surface section. Use left and right arrows to inspect grid cells; Home and End go to the endpoints.');}
   const ctx = chart.getContext('2d'), pc = plan.getContext('2d'), status = find('[data-profile-status]'), readout = find('[data-profile-readout]');
   const chartImage=document.createElement('canvas'),planImage=document.createElement('canvas');chartImage.width=chart.width;chartImage.height=chart.height;planImage.width=plan.width;planImage.height=plan.height;
   const factor = {imperial: .3048, feet: .3048, metric: 1, yards: .9144, centimeters: .01}[units] || .3048;
@@ -60,10 +62,10 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     chartImage.getContext('2d').drawImage(chart,0,0);planImage.getContext('2d').drawImage(plan,0,0);cachedResult=result;paintInspection();
   }
   function paintInspection(){if(!inspected||!scales)return;const{x,y,top,bottom}=scales;ctx.strokeStyle='#ffd0ad';ctx.beginPath();ctx.moveTo(x(inspected.station),top);ctx.lineTo(x(inspected.station),bottom);ctx.stroke();if(inspected.segment.status==='sample'){ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(x(inspected.station),y(inspected.segment.surfaceM),3,0,2*Math.PI);ctx.fill();}pc.fillStyle='#fff';pc.beginPath();pc.arc(...project([inspected.x,inspected.y]),4,0,Math.PI*2);pc.fill();}
-  const gapNames = {nodata: 'NoData · elevation missing', 'outside-raster': 'Outside elevation raster', 'outside-selection': 'Outside selected polygon'};
+  const gapNames = {nodata: 'NoData · elevation missing', 'outside-raster': 'Outside elevation raster', 'outside-surface': 'Outside point surface', 'outside-selection': 'Outside selected polygon'};
   function inspect(station) {
     inspected = station === null ? null : profileStation(result, station);
-    if (!inspected) readout.textContent = result ? 'Hover the profile, or focus it and use arrow keys to inspect each native cell.' : 'Update the profile to see the elevations along this section.';
+    if (!inspected) readout.textContent = result ? 'Hover the profile, or focus it and use arrow keys to inspect each elevation cell.' : 'Update the profile to see the elevations along this section.';
     else { const p = inspected, s = p.segment; readout.textContent = `Distance ${format(p.station)} · ${s.status === 'sample' ? `Surface ${format(s.surfaceM)} · Base ${format(p.base)} · Δ ${format(p.difference)}` : gapNames[s.status]} · X ${p.x.toFixed(3)}, Y ${p.y.toFixed(3)} (source coordinates, m)`; }
     plot();
   }
@@ -92,7 +94,8 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
       const next = await calculate(getRecord() || record, {line: selectedLine, signal: mine.signal, onProgress: text => { if (current()) status.textContent = text; }, onJob: job => { if (current() && !cancelling) { cancelJob = job; find('[data-cancel]').hidden = !job; find('[data-cancel]').disabled = false; } }});
       if (!current() || cancelling) return;
       result = validateNativeProfile(next, {line: selectedLine}); status.textContent = `Native section ready · ${result.cellCount.toLocaleString('en-US')} crossed cells. Your saved volume is unchanged.`;
-      find('[data-profile-provenance]').textContent = `Every crossed native cell is represented without interpolation; gaps remain missing data. Source: ${result.source.kind.toUpperCase()} · ${result.source.crs} · cell size ${result.source.resolutionM?.map(format).join(' × ') || 'unavailable'}. Height-unit basis: ${result.source.verticalUnitBasis || 'unspecified'}. Vertical datum unverified. Orange: above base · Blue: below base · Gray: saved reference. Section area is not volume.`;
+      const point=result.source.kind==='ept';
+      find('[data-profile-provenance]').textContent = `${point?'Every crossed cell of the saved maximum-height point grid':'Every crossed native cell'} is represented without interpolation; gaps remain missing data. Source: ${result.source.kind.toUpperCase()} · ${result.source.crs} · cell size ${point?format(result.source.samplingGrid.cellSizeM):result.source.resolutionM?.map(format).join(' × ') || 'unavailable'}. Height-unit basis: ${result.source.verticalUnitBasis || 'unspecified'}. Vertical datum unverified. Orange: above base · Blue: below base · Gray: saved reference. Section area is not volume.`;
       find('[data-profile-csv]').disabled = false; find('[data-profile-png]').disabled = false; inspect(null);
     } catch (error) { if (current() && !cancelling) { clearResult(); plot(); status.textContent = `Profile unavailable. ${error.message}`; } }
     finally { if (current() && !cancelling) { host.removeAttribute('aria-busy'); find('[data-update]').disabled = false; } }
@@ -108,7 +111,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   find('[data-profile-csv]').onclick = () => { if (!retired && result) download(new Blob([exportNativeProfile(result)], {type: 'text/csv;charset=utf-8'}), 'elevation-profile.csv'); };
   find('[data-profile-png]').onclick = () => {
     if (retired || !result) return; const snapshot = result, key = generation, output = document.createElement('canvas'); output.width = plan.width+chart.width; output.height = Math.max(plan.height,chart.height)+105;
-    const c = output.getContext('2d'); c.fillStyle = '#0d141d'; c.fillRect(0,0,output.width,output.height); c.fillStyle = '#ecf2f9'; c.font = 'bold 17px system-ui'; c.fillText(`${initialRecord.name} · native elevation section`,18,27,output.width-36); c.drawImage(plan,0,40); c.drawImage(chart,plan.width,40);
+    const c = output.getContext('2d'); c.fillStyle = '#0d141d'; c.fillRect(0,0,output.width,output.height); c.fillStyle = '#ecf2f9'; c.font = 'bold 17px system-ui'; c.fillText(`${initialRecord.name} · ${pointProfile?'point surface':'native elevation'} section`,18,27,output.width-36); c.drawImage(plan,0,40); c.drawImage(chart,plan.width,40);
     c.fillStyle = '#b9c6d6'; c.font = '11px system-ui'; c.fillText(`${snapshot.source.kind.toUpperCase()} · ${snapshot.source.crs} · elevations (${suffix}) · vertical datum unverified · missing cells are gaps`,18,output.height-42,output.width-36); c.fillText(`Source SHA-256 ${snapshot.source.sha256} · section is not volume`,18,output.height-22,output.width-36);
     output.toBlob(blob => { if (blob && !retired && generation === key && result === snapshot) download(blob, 'elevation-profile.png'); }, 'image/png');
   };

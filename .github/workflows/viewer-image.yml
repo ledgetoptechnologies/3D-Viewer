@@ -141,6 +141,11 @@ jobs:
               test/measurement-native-raster.test.mjs \
               test/measurement-raster-transect.test.mjs \
               test/measurement-point-surface.test.mjs \
+              test/measurement-ept-crs.test.mjs \
+              test/measurement-ept-vertical-units.test.mjs \
+              test/measurement-point-encoded-units.test.mjs \
+              test/measurement-point-transect-request.test.js \
+              test/ephemeral-point-measurements.test.js \
               test/measurement-closed-mesh.test.mjs \
               test/measurement-reconstruction.test.mjs \
               test/measurement-calculation-jobs.test.js \

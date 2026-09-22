@@ -12,18 +12,28 @@ export function profileLine(vertices, azimuth = 0, offsetPercent = 0) {
   return {start: at(min), end: at(max)};
 }
 
+export function validatePointSamplingGrid(grid) {
+  if(!grid||grid.version!==1||!Number.isSafeInteger(grid.width)||grid.width<1||!Number.isSafeInteger(grid.height)||grid.height<1||grid.width*grid.height>2000000||!Number.isFinite(grid.cellSizeM)||grid.cellSizeM<.001||grid.cellSizeM>100||grid.rowOrder!=='north-to-south'||grid.reduction!=='maximum-z'||grid.emptyCells!=='missing'||!['minE','minN','maxE','maxN'].every(k=>Number.isFinite(grid.bounds?.[k]))||grid.bounds.maxE<=grid.bounds.minE||grid.bounds.maxN<=grid.bounds.minN)throw new Error('The point surface is missing a valid sampling grid.');
+  return grid;
+}
 export function validateNativeProfile(result, {line, parentCalculationId, source} = {}) {
+  const point=result?.source?.kind==='ept';
   const finitePair = p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite);
   const near = (a, b) => Number.isFinite(a) && Math.abs(a - b) <= 1e-7 * Math.max(1, Math.abs(b));
-  if (result?.method !== 'surface-transect' || result.sampling !== 'native-cell-step' || !Number.isFinite(result.lengthM) || result.lengthM <= 0 || !finitePair(result.line?.start) || !finitePair(result.line?.end) || !Array.isArray(result.segments) || !result.segments.length || result.segments.length > 20000) throw new Error('The server did not return a bounded native elevation profile.');
+  if (result?.method !== 'surface-transect' || result.sampling !== (point?'point-grid-step':'native-cell-step') || !Number.isFinite(result.lengthM) || result.lengthM <= 0 || !finitePair(result.line?.start) || !finitePair(result.line?.end) || !Array.isArray(result.segments) || !result.segments.length || result.segments.length > 20000) throw new Error('The server did not return a bounded elevation profile.');
   if (!near(result.lengthM, Math.hypot(...result.line.start.map((v, i) => result.line.end[i] - v)))) throw new Error('The section length does not match its endpoints.');
   if (line && ['start', 'end'].some(k => !finitePair(line[k]) || line[k].some((v, i) => Math.abs(v - result.line[k][i]) > 1e-6))) throw new Error('The returned section is from a different line.');
   if (parentCalculationId && result.parentCalculationId !== parentCalculationId) throw new Error('The section does not match this volume calculation.');
-  if (result.source?.verticalUnit !== 'm' || !/^[a-f0-9]{64}$/i.test(result.source?.sha256 || '') || !result.source?.modelVersionId || !/^[a-f0-9]{64}$/i.test(result.baseHash || '') || !/^EPSG:\d{4,6}$/.test(result.source?.crs || '') || !['dsm','dtm'].includes(result.source?.kind) || typeof result.source.verticalUnitBasis !== 'string' || !result.source.verticalUnitBasis || !finitePair(result.source?.resolutionM) || result.source.resolutionM.some(v=>v<=0) || !Number.isSafeInteger(result.cellCount) || result.cellCount < 0 || result.cellCount > 20000) throw new Error('The section is missing source or reference-base provenance.');
+  if (result.source?.verticalUnit !== 'm' || !/^[a-f0-9]{64}$/i.test(result.source?.sha256 || '') || !result.source?.modelVersionId || !/^[a-f0-9]{64}$/i.test(result.baseHash || '') || !/^EPSG:\d{4,6}$/.test(result.source?.crs || '') || !['dsm','dtm','ept'].includes(result.source?.kind) || typeof result.source.verticalUnitBasis !== 'string' || !result.source.verticalUnitBasis || (!point&&(!finitePair(result.source?.resolutionM)||result.source.resolutionM.some(v=>v<=0))) || !Number.isSafeInteger(result.cellCount) || result.cellCount < 0 || result.cellCount > 20000) throw new Error('The section is missing source or reference-base provenance.');
+  if(point){
+    validatePointSamplingGrid(result.source.samplingGrid);
+    if(result.calculationOrigin!=='server-original-point-surface'||!/^[a-f0-9]{64}$/i.test(result.source.manifestSha256||'')||result.source.verticalUnitBasis!=='ept-vertical-crs'||!['all','ground'].includes(result.source.classFilter))throw new Error('The section is missing point-source provenance.');
+    if(source&&(source.manifestSha256!==result.source.manifestSha256||source.classFilter!==result.source.classFilter||JSON.stringify(source.samplingGrid)!==JSON.stringify(result.source.samplingGrid)))throw new Error('The section uses a different point surface grid or source.');
+  }
   if (source && ['assetId', 'sha256', 'modelVersionId', 'kind'].some(k => source[k] !== result.source[k])) throw new Error('The section uses a different elevation source.');
   let previous = 0;
   for (const s of result.segments) {
-    if (!['sample', 'nodata', 'outside-raster', 'outside-selection'].includes(s.status) || !near(s.startM, previous) || !(s.endM > s.startM) || s.endM > result.lengthM + 1e-6 || !finitePair(s.start) || !finitePair(s.end)) throw new Error('The section contains invalid or missing station intervals.');
+    if (!['sample', 'nodata', point?'outside-surface':'outside-raster', 'outside-selection'].includes(s.status) || !near(s.startM, previous) || !(s.endM > s.startM) || s.endM > result.lengthM + 1e-6 || !finitePair(s.start) || !finitePair(s.end)) throw new Error('The section contains invalid or missing station intervals.');
     for (const [key, station] of [['start',s.startM],['end',s.endM]]) if(s[key].some((v,i)=>Math.abs(v-(result.line.start[i]+(result.line.end[i]-result.line.start[i])*station/result.lengthM))>1e-6))throw new Error('Section coordinates do not match their station on the requested line.');
     if ((['sample','nodata'].includes(s.status)||s.cell!==undefined) && (!Array.isArray(s.cell)||s.cell.length!==2||!s.cell.every(v=>Number.isSafeInteger(v)&&v>=0)))throw new Error('The section contains invalid native cell indices.');
     if (s.status === 'sample' && ![s.surfaceM, s.baseStartM, s.baseEndM].every(Number.isFinite)) throw new Error('The section contains an invalid elevation sample.');
