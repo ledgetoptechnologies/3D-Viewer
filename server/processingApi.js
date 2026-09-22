@@ -9,6 +9,7 @@ const auth = require('./auth');
 const { verifyServiceRequest, sha256Hex } = require('./serviceAuth');
 const { idempotent } = require('./serviceIdempotency');
 const { NodeOdmProvider } = require('./nodeOdmProvider');
+const { providerSubmissionState } = require('./providerSelection.mjs');
 const { NO_AUTH_MARKER } = require('./providerAuth');
 const { admitProviderEndpoint } = require('./providerAdmission');
 const { adminOutputAssetKind, publicDerivativeKind, safeRelativePath, sanitizeLogMessage } = require('./processingSecurity');
@@ -18,6 +19,7 @@ const { trashOutput, trashTaskTree, trashProjectTree, restoreContainerTrash, pur
 const { mountGcpRoutes } = require('./gcpApi');
 const { createClientGrantProxy, LOCAL_PATH: CLIENT_GRANTS_PATH } = require('./clientGrantProxy');
 const { browseImportRoot, validateImportSelection } = require('./importBrowser');
+const { mountTaskPhotoImports } = require('./taskPhotoImports');
 const { viewerEligibleAssets } = require('./lodDerivativePolicy');
 const { inspectLodRecoverySource } = require('./lodRecovery');
 const { createStorageUsageMonitor } = require('./storageUsage');
@@ -85,7 +87,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     const rawBody=req.rawBody||Buffer.alloc(0),requestHash=req.path.startsWith('/api/v1/processing/providers')
       ?providerCredentials.idempotencyFingerprint(req.method,req.originalUrl,rawBody)
       :sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),rawBody]));
-    const durableOperation=/^\/api\/v1\/(?:admin\/uploads\/[^/]+\/finalize|dataset-imports\/(?:preview|adopt)|processing\/(?:catalog-imports\/(?:scans|candidates\/[^/]+\/map)|outputs\/[^/]+\/(?:lod-recovery-attempts|companion-repair-attempts)))$/.test(req.path);
+    const durableOperation=/^\/api\/v1\/(?:admin\/uploads\/[^/]+\/finalize|dataset-imports\/(?:preview|adopt|copy)|processing\/(?:catalog-imports\/(?:scans|candidates\/[^/]+\/map)|outputs\/[^/]+\/(?:lod-recovery-attempts|companion-repair-attempts)))$/.test(req.path);
     const shareReceipt=shareReceiptDefinition(req);
     const reservation=durableOperation
       ?processing.reserveSubjectOperationReceipt({subject:req.actorId,key,method:req.method,path:req.originalUrl,requestHash})
@@ -122,6 +124,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   }
   const providerView=(provider)=>providerCredentials?providerCredentials.view(provider):provider;
   const subjectReceipt=(req)=>({subject:req.actorId,key:req.get('Idempotency-Key'),method:req.method,path:req.originalUrl,requestHash:sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),req.rawBody||Buffer.alloc(0)]))});
+  mountTaskPhotoImports(router,{processing,storage,authorize,mutate,subjectReceipt,config});
   const providerAdmission=(endpoint)=>admitProviderEndpoint(endpoint,{exactOrigins:config.processingProviderOrigins,allowedCidrs:config.processingProviderAllowedCidrs});
   const providerCredentialFailure=(res,e)=>error(res,e.code==='provider_in_use'?409:e.code==='invalid_provider_credential'?400:503,e.code||'provider_credential_unavailable');
   const providerProbeFailure=(res,e)=>{
@@ -145,6 +148,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   }
   function validatedAttemptInput(taskId,body,datasetId=null){
     const p=processing.getProvider(body?.providerId);if(!p||!p.enabled)return{error:'provider_not_enabled',status:409};
+    const availability=providerSubmissionState(p);if(!availability.eligible)return{error:availability.reason,status:409};
     if(!Array.isArray(p.capabilities?.options)||!p.capabilityFingerprint)return{error:'provider_capabilities_required',status:409};
     const preset=body?.presetId?processing.getPreset(body.presetId):null;if(body?.presetId&&(!preset||!preset.enabled))return{error:'invalid_preset',status:400};
     if(preset&&((preset.providerType&&preset.providerType!==p.type)||(preset.capabilityFingerprint&&preset.capabilityFingerprint!==p.capabilityFingerprint)))return{error:'stale_preset_capabilities',status:409};

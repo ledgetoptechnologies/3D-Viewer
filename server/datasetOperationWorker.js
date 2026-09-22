@@ -6,6 +6,7 @@ const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
 const { importWebodmTask } = require('./webodmTaskImport');
 const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
 const { processingReadyEvent } = require('./processingReadyEvent');
+const { copyTaskPhotos } = require('./taskPhotoImports');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -120,7 +121,9 @@ async function processOneDatasetOperation(deps, owner) {
         throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
       return true;
     }
-    else if (operation.operation_type === 'import_adopt') result = await adoptImport(operation, deps, owner, updateProgress);
+    else if (operation.operation_type === 'import_adopt') result = JSON.parse(operation.payload_json || '{}').rawPhotoCopy
+      ? await copyTaskPhotos(operation, deps, updateProgress, controller.signal)
+      : await adoptImport(operation, deps, owner, updateProgress);
     else if (operation.operation_type === 'catalog_scan') {
       const payload=JSON.parse(operation.payload_json||'{}'),candidates=await scanCatalog(payload.provider,deps.config,updateProgress);
       result=deps.processing.upsertCatalogScanCandidates({scanId:payload.scanId,provider:payload.provider,generation:payload.generation,candidates});

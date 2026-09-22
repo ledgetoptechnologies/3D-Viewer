@@ -1,6 +1,14 @@
 # New task workflow — implementation plan
 
-Status: planning only. No processing jobs launched, application changes made, upstream watcher scheduled, or Operations code changed for this request.
+Status: implementation authorized on 22 September 2026 after the read-only audit. The focused photo-to-task phase is in progress locally. No real processing jobs launched, upstream watcher scheduled, or Operations code changed for this request. Do not treat this plan as a completed-feature checklist.
+
+## Current focused implementation
+
+- Project toolbar now places New task and Share first, with Rename, Import existing results and Delete in More. Empty projects can open New task.
+- New task controller is being integrated with fresh managed datasets, PC photos/recursive folder uploads, copy-preserving server raw selection, queued preparation, explicit submission and health-aware nodes. Task name defaults to project name and local date.
+- Browser/controller tests and server copy lifecycle tests are in progress. No release has been made for this phase.
+- Photo-location preview is implemented with bounded strict EXIF parsing on PC and server paths, location markers and recorded true heading on hover. It intentionally has no external basemap or inferred flight paths. Browser lifecycle acceptance is in progress. GCP changes, image resizing, a new typed preset editor/import-export and reconstruction-boundary editing are not part of the initial form replacement and remain tracked below. Existing optional preset selection remains usable.
+- Existing finished-model importer is preserved. Raw selections use the same configured import mount, including a raw/ subfolder when present, without moving original images.
 
 ## Intended experience
 
@@ -37,7 +45,7 @@ New task → Select from server storage should default to `raw/`, select one sur
 
 Keep staging outside the application-managed dataset directories. On confirmed ingestion create a uniquely identified managed dataset and copy/verify the chosen originals into it; do not delete or relocate source photos automatically. Explain the extra disk space and leave staging cleanup as a separate explicit action. PC-selected photos enter managed upload staging directly and need not be duplicated into `raw/`. This is a proposed layout, not an already-created server directory or mount change.
 
-## Current repository evidence
+## Original read-only audit evidence (before this implementation)
 
 - `workspace-projects.js:263`: New task is disabled unless a finalized dataset and enabled provider already exist; current toolbar exposes Import/Rename/Delete directly.
 - `workspace-projects.js:405`: processing modal starts with Finalized dataset and Enabled provider, ends with task name and sends empty option overrides. This is a submission form, not a photo-first creation workflow.

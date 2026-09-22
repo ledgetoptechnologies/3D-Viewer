@@ -74,6 +74,20 @@ test('project summary counts ready tasks once and distinguishes source collectio
   const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>source sets/);assert.doesNotMatch(html,/<small>published/);
 });
 
+test('project actions prioritize enabled new task for empty projects and keep secondary actions in More',()=>{
+  const f=fixture(['viewer.processing.write','viewer.projects.write','viewer.datasets.import','viewer.shares.create']);
+  f.state.tasks=[];f.state.datasets=[];f.state.providers=[];
+  vm.runInContext(source.slice(source.indexOf('function selectedProject('),source.indexOf('function datasetActions(')),f.context);
+  const html=f.context.selectedProject();
+  assert.match(html,/data-action="project-process"[^>]*>New task/);
+  assert.doesNotMatch(html,/data-action="project-process"[^>]*disabled/);
+  assert.ok(html.indexOf('New task')<html.indexOf('>Share<'));
+  assert.ok(html.indexOf('>Share<')<html.indexOf('<details'));
+  const menu=html.slice(html.indexOf('<details'),html.indexOf('</details>'));
+  assert.match(menu,/Rename project/);assert.match(menu,/Import existing results/);assert.match(menu,/Delete project/);
+  f.state.projects[0].status='archived';assert.doesNotMatch(f.context.selectedProject(),/data-action="project-process"/);
+});
+
 test('expanded project is one unified card, without repeated name, description or all-projects control',()=>{
   const f=fixture();f.state.projectQuery='';f.state.projects[0].description='Keep this once';
   vm.runInContext(declaration('projectRows'),f.context);
