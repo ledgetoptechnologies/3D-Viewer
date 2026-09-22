@@ -138,7 +138,11 @@ jobs:
               -v "$PWD/test:/app/test:ro" "$VERIFY_IMAGE" --test \
               test/potree-visibility-patch.test.mjs \
               test/measurement-volume.test.mjs \
-              test/measurement-native-raster.test.mjs \
+            test/measurement-native-raster.test.mjs \
+            test/measurement-worker-transport.test.js \
+            test/measurement-unit-evidence.test.mjs \
+            test/measurement-delaunay-reference.test.mjs \
+            test/measurement-delaunay-frozen-review.test.mjs \
               test/measurement-raster-transect.test.mjs \
               test/measurement-point-surface.test.mjs \
               test/measurement-ept-crs.test.mjs \

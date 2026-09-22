@@ -67,6 +67,20 @@ selection, and rejection of references exceeding the 254-patch profile bound.
 
 ## Repeatable verification
 
+### Production worker verification
+
+The original DSM was also tested through `childCalculation` inside the production
+runtime container, with read-only input mounts and networking disabled. The worker
+returned 5647.2716911718235 m³ in 9.259 seconds, within the explicit 1 m³ comparison
+tolerance. This exercises the actual child process, not only the calculation engine.
+
+This check exposed an IPC lifetime bug: the child could exit successfully during
+asynchronous work before delivering its result. The child now keeps its channel
+referenced and awaits the final send callback; the parent allows buffered messages
+to drain before reporting interruption. A real multi-megabyte transport regression
+and 56 other runtime measurement, permission, geometry, unit and capacity checks
+passed (57 total, zero skipped). The image release gate includes the transport test.
+
 Run the current Viewer implementation, read-only, against the exact DSM:
 
 ```text
