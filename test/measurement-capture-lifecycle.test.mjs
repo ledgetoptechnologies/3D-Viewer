@@ -69,9 +69,9 @@ test('successful PNG retry replaces an earlier capture error only after requesti
   assert.equal(message,'View PNG download requested.');
 });
 
-function reportFixture(){
+function reportFixture({decode=()=>Promise.resolve(),fonts=Promise.resolve()}={}){
   const reports=new Set(),body={children:[],append(node){this.children.push(node);}};let printed=0;
-  const document={body,createElement(){const nodes=new Map();return{innerHTML:'',showModal(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,{following:[],after(node){this.following.push(node);},removeAttribute(key){delete this[key];}});return nodes.get(selector);},remove(){body.children=body.children.filter(n=>n!==this);}};}};
+  const document={body,fonts:{ready:fonts},createElement(){const nodes=new Map();return{innerHTML:'',showModal(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,{decode,following:[],after(node){this.following.push(node);},removeAttribute(key){delete this[key];}});return nodes.get(selector);},remove(){body.children=body.children.filter(n=>n!==this);}};}};
   const scope=vm.createContext({document,reportDialogs:reports,viewGeneration:1,disposed:false,allowed:()=>true,units:'imperial',structuredClone,exportRecords:()=>[],screenshot:async()=>({toDataURL:()=> 'data:image/png;private'}),coordinateReference:()=>({crs:'EPSG:32616'}),summary:r=>r.name+' geometry',calculationSummary:()=> 'Volume 10',measurementMetrics:()=>({edgeLengthsM:[1,2,3]}),measurementValue:String,escape:String,window:{print(){printed++;}}});
   vm.runInContext(source.slice(source.indexOf('  async function report()'),source.indexOf("  controls.addEventListener('change'")),scope);
   vm.runInContext(source.slice(source.indexOf('  function closeReports()'),source.indexOf('  function closeDialogs()')),scope);
@@ -84,6 +84,25 @@ test('open report cleanup clears private image and markup, and is idempotent',as
   const close=source.slice(source.indexOf('  function closeDialogs()'),source.indexOf('  function invalidate('));assert.match(close,/closeReports\(\)/);
   assert.match(source.slice(source.indexOf('  function invalidate('),source.indexOf('  async function finish()')),/closeDialogs\(\)/);
   assert.match(source.slice(source.indexOf('  return {setTool,store')),/dispose\(\).*closeDialogs\(\)/);
+});
+
+test('report print waits for image decode and fonts, then requires a fresh explicit click',async()=>{
+  const image=deferred(),fonts=deferred(),started=deferred(),f=reportFixture({decode:()=>{started.resolve();return image.promise;},fonts:fonts.promise}),pending=f.scope.report();await started.promise;
+  const dialog=f.body.children[0],button=dialog.querySelector('[data-print]');assert.equal(button.disabled,true);assert.match(button.textContent,/Preparing/);button.onclick();assert.equal(f.printed(),0);
+  image.resolve();await Promise.resolve();assert.equal(button.disabled,true,'font readiness is independently required');fonts.resolve();await pending;
+  assert.equal(button.disabled,false);assert.equal(f.printed(),0,'readiness never automatically opens print');button.onclick();assert.equal(f.printed(),1);
+});
+
+test('report preparation cannot revive a closed or unauthorized report after delayed decode',async()=>{
+  for(const change of [f=>f.scope.closeReports(),f=>{f.scope.allowed=()=>false;},f=>{f.scope.viewGeneration++;},f=>{f.scope.units='metric';},f=>{f.scope.disposed=true;}]){
+    const image=deferred(),started=deferred(),f=reportFixture({decode:()=>{started.resolve();return image.promise;}}),pending=f.scope.report();await started.promise;const button=f.body.children[0].querySelector('[data-print]');change(f);image.resolve();await pending;
+    assert.equal(f.body.children.length,0);assert.equal(button.disabled,true);assert.equal(f.printed(),0);
+  }
+});
+
+test('failed image decode keeps tables printable with an explicit image-unavailable warning',async()=>{
+  const f=reportFixture({decode:()=>Promise.reject(new Error('decode failed'))});await f.scope.report();const dialog=f.body.children[0],img=dialog.querySelector('img');
+  assert.equal(img.hidden,true);assert.equal(img.src,undefined);assert.match(dialog.querySelector('h1').following[0].textContent,/View image unavailable/);assert.equal(dialog.querySelector('[data-print]').disabled,false);assert.equal(f.printed(),0);
 });
 
 test('report print fails closed and clears the report after access or view change',async()=>{

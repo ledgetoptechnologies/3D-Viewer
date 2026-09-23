@@ -20,7 +20,7 @@ export async function scanPhotoLocations(files,{signal,onProgress=()=>{},maxFile
 export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
   const doc=container.ownerDocument,summary=doc.createElement('p'),surface=doc.createElement('div');
   summary.className='form-note';summary.setAttribute('role','status');summary.textContent='Select photos to preview recorded GPS positions.';
-  surface.style.cssText='height:230px;min-height:180px;border:1px solid #38424d;border-radius:8px;background:#17212c;';surface.setAttribute('aria-label','Photo GPS positions');
+  surface.style.cssText='height:clamp(260px,38vh,430px);min-height:230px;border:1px solid #38424d;border-radius:8px;background:#17212c;';surface.setAttribute('aria-label','Photo GPS positions');
   container.append(summary,surface);let map=null,layer=null,disposed=false,generation=0,controller=null;
   const ready=loadLeaflet().then(async module=>{
     if(disposed)return;const L=module.default||module;
@@ -36,7 +36,15 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
       onRemove(...args){this.previewRemoved=true;return L.Canvas.prototype.onRemove.apply(this,args);},
       _redraw(...args){if(this.previewRemoved)return;return L.Canvas.prototype._redraw.apply(this,args);},
     });
-    map=L.map(surface,{preferCanvas:true,...(PreviewCanvas?{renderer:new PreviewCanvas()}:{}),attributionControl:false,scrollWheelZoom:false}).setView([0,0],2);
+    map=L.map(surface,{preferCanvas:true,...(PreviewCanvas?{renderer:new PreviewCanvas()}:{}),attributionControl:true,scrollWheelZoom:false}).setView([0,0],2);
+    // Reuse the Viewer basemap host and anonymous CORS policy. Imagery is
+    // visual context only: photo positions still come from recorded EXIF.
+    const imagery=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{
+      crossOrigin:'anonymous',maxZoom:22,maxNativeZoom:19,
+      attribution:'Tiles © Esri — Sources: Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+    });
+    imagery.addTo(map);
+    L.control.layers({'Satellite imagery':imagery,'No basemap':L.layerGroup()},null,{collapsed:true}).addTo(map);
     layer=L.featureGroup().addTo(map);return L;
   }).catch(()=>{if(!disposed)summary.textContent='Photo map unavailable. Your selected photos are unchanged.';return null;});
   async function render(result,epoch,signal){
@@ -46,7 +54,7 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
       L.circleMarker([item.latitude,item.longitude],{radius:4,color:'#ff7417',weight:1,fillColor:'#ff7417',fillOpacity:.75}).bindTooltip(label).addTo(layer);
       if((i+1)%128===0){await new Promise(resolve=>setTimeout(resolve,0));check(signal);}
     }if(result.locations.length)map.fitBounds(layer.getBounds(),{padding:[20,20],maxZoom:18});map.invalidateSize();}
-    summary.textContent=`${L?'':'Map unavailable. '}${result.locations.length.toLocaleString()} ${result.locations.length===1?'photo':'photos'} located · ${result.missingGps.toLocaleString()} without readable GPS${result.omitted?` · ${result.omitted.toLocaleString()} not scanned (preview limit)`:''}. GPS positions without a basemap; recorded true heading appears on hover. No flight paths are inferred.`;return result;
+    summary.textContent=`${L?'':'Map unavailable. '}${result.locations.length.toLocaleString()} ${result.locations.length===1?'photo':'photos'} located · ${result.missingGps.toLocaleString()} without readable GPS${result.omitted?` · ${result.omitted.toLocaleString()} not scanned (preview limit)`:''}. Recorded true heading appears on hover. Satellite imagery is background context, not your survey. No flight paths are inferred.`;return result;
   }
   return {
     async setLocations(preview,{signal}={}){

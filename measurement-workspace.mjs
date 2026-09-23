@@ -318,7 +318,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     return canvas;
   }
   async function report(){
-    const generation=viewGeneration,chosen=structuredClone(exportRecords());let reportImage=null,captureWarning='';
+    const generation=viewGeneration,reportUnits=units,chosen=structuredClone(exportRecords());let reportImage=null,captureWarning='';
     try{const canvas=await screenshot({allowIncomplete:true});reportImage=canvas.toDataURL('image/png');}catch(error){captureWarning=`View image unavailable: ${error.message}. The saved measurement tables are included below.`;}
     if(disposed||!allowed()||generation!==viewGeneration)throw new Error('Access or view changed during report capture.');
     const dialog=document.createElement('dialog');dialog.className='measurement-report';
@@ -326,7 +326,23 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     dialog.retire=()=>{if(!reportDialogs.delete(dialog))return;dialog.querySelector('img').removeAttribute('src');dialog.innerHTML='';dialog.remove();};
     if(reportImage)dialog.querySelector('img').src=reportImage;else{dialog.querySelector('img').hidden=true;const warning=document.createElement('p');warning.textContent=captureWarning;dialog.querySelector('h1').after(warning);}
     dialog.querySelector('h1').textContent='Model report';
-    reportDialogs.add(dialog);document.body.append(dialog);dialog.showModal();dialog.querySelector('[data-close]').onclick=()=>dialog.retire();dialog.onclose=()=>dialog.retire();dialog.querySelector('[data-print]').onclick=()=>{if(disposed||!allowed()||generation!==viewGeneration){dialog.retire();return;}window.print();};
+    const print=dialog.querySelector('[data-print]');let reportReady=false;
+    print.disabled=true;print.textContent='Preparing report…';
+    const current=()=>!disposed&&allowed()&&generation===viewGeneration&&reportUnits===units&&reportDialogs.has(dialog);
+    reportDialogs.add(dialog);document.body.append(dialog);dialog.showModal();dialog.querySelector('[data-close]').onclick=()=>dialog.retire();dialog.onclose=()=>dialog.retire();
+    print.onclick=()=>{if(!current()){dialog.retire();return;}if(!reportReady)return;window.print();};
+    // The captured data URL can still be decoding when the modal first opens.
+    // Fonts may also load asynchronously. Never open print automatically: make
+    // the user's explicit button available only once printable content is ready.
+    dialog.getBoundingClientRect?.(); // Trigger layout/font discovery before awaiting FontFaceSet.ready.
+    const imageReady=reportImage?dialog.querySelector('img').decode().catch(()=>{
+      if(!current())return;const img=dialog.querySelector('img');img.hidden=true;img.removeAttribute('src');
+      const warning=document.createElement('p');warning.textContent='View image unavailable. The saved measurement tables are included below.';dialog.querySelector('h1').after(warning);
+    }):Promise.resolve();
+    try{await Promise.all([imageReady,document.fonts?.ready||Promise.resolve()]);}
+    catch{if(current())print.textContent='Report preparation unavailable';return;}
+    if(!current()){dialog.retire();return;}
+    dialog.getBoundingClientRect?.();reportReady=true;print.disabled=false;print.textContent='Print / Save as PDF';
   }
   controls.addEventListener('change',event=>{if(event.target.dataset.m==='units'){units=event.target.value;const record=store.records.get(selected);if(record&&!draft)void store.patch(record,{displayPreferences:{...record.displayPreferences,units:savedUnits[units]}}).catch(error=>tell(error.message));renderPanel();}if(event.target.dataset.m==='export-check'){const id=event.target.closest('[data-record]').dataset.record;event.target.checked?selectedExports.add(id):selectedExports.delete(id);}});
   controls.addEventListener('click',async event=>{

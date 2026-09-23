@@ -32,9 +32,19 @@ test('cancellation after a delayed header read prevents stale metadata from bein
 function mapFixture(){
   const node=()=>({children:[],style:{},textContent:'',setAttribute(){},append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}}),doc={createElement:()=>node()},container={...node(),ownerDocument:doc};let removed=0;const markers=[];
   const layer={addTo(){return this;},clearLayers(){assert.equal(removed,0,'paths must detach before the map destroys its renderer');markers.length=0;},getBounds(){return[];}},map={setView(){return this;},fitBounds(){},invalidateSize(){},remove(){assert.equal(markers.length,0,'no paths may outlive renderer teardown');removed++;}};
-  const L={map:()=>map,featureGroup:()=>layer,circleMarker(position){return{position,bindTooltip(label){this.label=label;return this;},addTo(){markers.push(this);return this;}};}};
-  return{container,markers,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L})};
+  const tiles=[],controls=[];let mapOptions;
+  const L={map:(_host,options)=>{mapOptions=options;return map;},tileLayer:(url,options)=>{const item={url,options,addTo(){return this;}};tiles.push(item);return item;},layerGroup:()=>({}),control:{layers:(...args)=>{controls.push(args);return{addTo(){return this;}};}},featureGroup:()=>layer,circleMarker(position){return{position,bindTooltip(label){this.label=label;return this;},addTo(){markers.push(this);return this;}};}};
+  return{container,markers,tiles,controls,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L})};
 }
+
+test('photo preview uses attributed anonymous satellite tiles with an optional blank basemap',async()=>{
+  const f=mapFixture();await f.preview.setFiles([photo()]);
+  assert.equal(f.mapOptions().attributionControl,true);assert.equal(f.tiles.length,1);
+  assert.match(f.tiles[0].url,/^https:\/\/server\.arcgisonline\.com\//);assert.equal(f.tiles[0].options.crossOrigin,'anonymous');
+  assert.match(f.tiles[0].options.attribution,/Esri/);assert.equal(f.tiles[0].options.maxNativeZoom,19);
+  assert.deepEqual(Object.keys(f.controls[0][0]),['Satellite imagery','No basemap']);
+  assert.match(f.container.children[0].textContent,/background context, not your survey/);f.preview.dispose();
+});
 test('map renders canvas markers without flight paths, treats filenames as text, and disposes pending work',async()=>{
   const f=mapFixture();await f.preview.setFiles([photo(jpeg(),'<img src=x>.jpg')]);assert.equal(f.markers.length,1);assert.equal(f.markers[0].label.textContent,'<img src=x>.jpg · Heading 123.0° true');assert.match(f.container.children[0].textContent,/No flight paths/);
   let release;const pending=f.preview.setFiles([{name:'late.jpg',slice(){return{arrayBuffer:()=>new Promise(resolve=>{release=resolve;})};}}]);f.preview.dispose();release(jpeg().buffer);assert.equal(await pending,null);assert.equal(f.removed(),1);assert.equal(f.container.children.length,0);assert.equal(await f.preview.setFiles([photo()]),null);
