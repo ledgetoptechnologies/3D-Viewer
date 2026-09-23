@@ -63,7 +63,7 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
   for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Outputs','Task disk usage'])assert.ok(source.includes(label),label);
-  assert.match(source,/Unavailable means the processing API did not provide an authoritative value/);
+  assert.match(source,/Some survey statistics are not available yet\. These fields are separate from node connection health\./);
   assert.match(source,/class="task-facts"/);
   assert.doesNotMatch(source,/class="task-metrics"/);
   for(const destination of ['Task settings','Processing history','Ground control points','Model files','Task files'])assert.ok(source.includes(destination),destination);
@@ -72,7 +72,10 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(css,/prefers-reduced-motion/);
   assert.match(source,/logLimit=100/);
   assert.match(source,/\.slice\(-100\)/);
-  assert.match(source,/Live tail refreshes every five seconds/);
+  assert.match(source,/Live output refreshes every five seconds/);
+  assert.match(source,/setInterval\(\(\)=>refreshTaskDetails\(task\.id,true\),5000\)/);
+  assert.match(source,/Latest 100 recorded lines/);
+  assert.match(source,/taskDetailRefreshes\.has\(taskId\)/);
   assert.match(source,/download-logs/);
   assert.match(source,/fullscreen-logs/);
   assert.match(source,/artifactActions\(output,/);

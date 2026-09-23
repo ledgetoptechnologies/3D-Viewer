@@ -30,11 +30,11 @@ test('cancellation after a delayed header read prevents stale metadata from bein
   await assert.rejects(scanPhotoLocations([file],{signal:controller.signal}),{name:'AbortError'});
 });
 function mapFixture(){
-  const node=()=>({children:[],style:{},textContent:'',setAttribute(){},append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}}),doc={createElement:()=>node()},container={...node(),ownerDocument:doc};let removed=0;const markers=[];
-  const layer={addTo(){return this;},clearLayers(){assert.equal(removed,0,'paths must detach before the map destroys its renderer');markers.length=0;},getBounds(){return[];}},map={setView(){return this;},fitBounds(){},invalidateSize(){},remove(){assert.equal(markers.length,0,'no paths may outlive renderer teardown');removed++;}};
+  const node=()=>({children:[],listeners:{},style:{},textContent:'',setAttribute(){},addEventListener(name,fn){this.listeners[name]=fn;},removeEventListener(name){delete this.listeners[name];},append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}}),doc={createElement:()=>node()},container={...node(),ownerDocument:doc};let removed=0;const markers=[],fits=[];
+  const layer={addTo(){return this;},clearLayers(){assert.equal(removed,0,'paths must detach before the map destroys its renderer');markers.length=0;},getBounds(){return markers.map(m=>m.position);}},map={setView(){return this;},fitBounds(bounds,options){fits.push({bounds,options});},invalidateSize(){},remove(){assert.equal(markers.length,0,'no paths may outlive renderer teardown');removed++;}};
   const tiles=[],controls=[];let mapOptions;
   const L={map:(_host,options)=>{mapOptions=options;return map;},tileLayer:(url,options)=>{const item={url,options,addTo(){return this;}};tiles.push(item);return item;},layerGroup:()=>({}),control:{layers:(...args)=>{controls.push(args);return{addTo(){return this;}};}},featureGroup:()=>layer,circleMarker(position){return{position,bindTooltip(label){this.label=label;return this;},addTo(){markers.push(this);return this;}};}};
-  return{container,markers,tiles,controls,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L})};
+  return{container,markers,fits,tiles,controls,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L})};
 }
 
 test('photo preview uses attributed anonymous satellite tiles with an optional blank basemap',async()=>{
@@ -52,4 +52,27 @@ test('map renders canvas markers without flight paths, treats filenames as text,
 test('server positions reuse map without inventing heading and preserve unscanned versus missing GPS counts',async()=>{
   const f=mapFixture();await f.preview.setLocations({points:[{latitude:45,longitude:-90,name:'Server photo'},{latitude:999,longitude:0}],missingGpsCount:2,unscannedCount:12});
   assert.equal(f.markers.length,1);assert.equal(f.markers[0].label.textContent,'Server photo · Heading not recorded');assert.match(f.container.children[0].textContent,/2 without readable GPS · 12 not scanned/);f.preview.dispose();
+});
+
+test('first GPS marker and fit appear before later headers resolve; interaction preserves chosen view',async()=>{
+  const f=mapFixture();let release,started;
+  const reached=new Promise(resolve=>{started=resolve;});
+  const slow={name:'slow.jpg',slice(){return{arrayBuffer:()=>{started();return new Promise(resolve=>{release=resolve;});}};}};
+  const pending=f.preview.setFiles([photo(),slow,photo()]);await reached;
+  assert.equal(f.markers.length,1,'first valid location is rendered while subsequent files are pending');assert.equal(f.fits.length,1);assert.deepEqual(f.fits[0].bounds,[[45.5,-90.25]]);assert.equal(f.fits[0].options.animate,false);
+  f.container.children[1].listeners.pointerdown();release(jpeg().buffer);
+  await pending;assert.equal(f.markers.length,3);assert.equal(f.fits.length,1,'background metadata cannot move the map after interaction');
+  await f.preview.setFiles([photo()]);assert.equal(f.markers.length,1);assert.equal(f.fits.length,2,'a new selection restores initial framing');f.preview.dispose();
+});
+
+test('progressive scan delivers each location exactly once in bounded batches',async()=>{
+  const batches=[];const result=await scanPhotoLocations(Array.from({length:70},()=>photo()),{onLocations:async points=>batches.push(points)});
+  assert.deepEqual(batches.map(points=>points.length),[1,31,32,6]);assert.deepEqual(batches.flat(),result.locations);
+});
+
+test('reselection cancels an in-flight scan without appending stale markers or summary',async()=>{
+  const f=mapFixture();let release,started;const reached=new Promise(resolve=>{started=resolve;});
+  const pending=f.preview.setFiles([photo(),{name:'old.jpg',slice(){return{arrayBuffer:()=>{started();return new Promise(resolve=>{release=resolve;});}};}}]);await reached;
+  await f.preview.setLocations({points:[{latitude:40,longitude:-80,name:'New selection'}]});release(jpeg().buffer);
+  assert.equal(await pending,null);assert.equal(f.markers.length,1);assert.deepEqual(f.markers[0].position,[40,-80]);assert.match(f.container.children[0].textContent,/1 photo located/);f.preview.dispose();
 });

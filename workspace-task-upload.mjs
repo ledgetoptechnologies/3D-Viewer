@@ -35,13 +35,22 @@ export function inspectTaskPhotos(files,{limits=TASK_PHOTO_LIMITS}={}) {
 
 export async function prepareTaskPhotos(files,{signal,onProgress=()=>{},limits=TASK_PHOTO_LIMITS}={}) {
   check(signal);const selection=inspectTaskPhotos(files,{limits}),items=[];
-  for(const item of selection.items){check(signal);const bytes=await item.file.arrayBuffer();check(signal);if(bytes.byteLength!==item.file.size)throw new Error('A selected photo changed while being read.');const sha256=await digest(bytes);check(signal);items.push({...item,spec:{id:item.id,relativePath:item.relativePath,byteSize:item.file.size,sha256,contentType:item.file.type||'application/octet-stream',processingRole:'image'}});onProgress({phase:'preparing',completed:items.length,total:selection.items.length});}
+  const specFor=(item,sha256)=>({id:item.id,relativePath:item.relativePath,byteSize:item.file.size,sha256,contentType:item.file.type||'application/octet-stream',processingRole:'image'});
+  // Reject an oversized manifest using metadata before reading any photo pixels.
+  // SHA-256 has a fixed encoded length. The server requires these digests up front
+  // to identify resumable uploads and verify assembled originals, not for EXIF or
+  // reconstruction analysis. Keep one file buffer at a time for large selections.
+  if(new TextEncoder().encode(JSON.stringify(selection.items.map(item=>specFor(item,'0'.repeat(64))))).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
+  let completedBytes=0;
+  const report=()=>onProgress({phase:'preparing',completed:items.length,total:selection.items.length,completedBytes,totalBytes:selection.totalBytes});
+  report();
+  for(const item of selection.items){check(signal);const bytes=await item.file.arrayBuffer();check(signal);if(bytes.byteLength!==item.file.size)throw new Error('A selected photo changed while being read.');const sha256=await digest(bytes);check(signal);items.push({...item,spec:specFor(item,sha256)});completedBytes+=item.file.size;report();}
   const manifest=items.map(item=>item.spec);
   if(new TextEncoder().encode(JSON.stringify(manifest)).byteLength>limits.maxManifestBytes)throw new Error('Photo manifest is too large. Select fewer photos or shorter folder names.');
   return {...selection,items,manifest};
 }
 
-export async function uploadTaskPhotos({datasetId,prepared,api,token,fetcher=fetch,signal,onProgress=()=>{}}) {
+export async function uploadTaskPhotos({datasetId,prepared,api,token,fetcher=fetch,signal,onProgress=()=>{},now=()=>performance.now()}) {
   check(signal);if(!datasetId||!prepared?.items?.length||!token())throw new Error('A signed-in upload dataset and prepared photos are required.');
   const created=await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}/uploads`,{method:'POST',body:{files:prepared.manifest},signal});check(signal);
   const {upload,uploadToken}=created||{};
@@ -50,15 +59,21 @@ export async function uploadTaskPhotos({datasetId,prepared,api,token,fetcher=fet
   if(remoteFiles.size!==prepared.items.length)throw new Error('The server returned duplicate upload files.');
   // Validate the complete server manifest before transmitting any bytes.
   for(const {spec} of prepared.items){const remote=remoteFiles.get(spec.id),count=Math.ceil(spec.byteSize/upload.chunkSize)||1;if(!remote||remote.relativePath!==spec.relativePath||remote.sha256!==spec.sha256||remote.byteSize!==spec.byteSize||remote.chunkCount!==count||!Array.isArray(remote.missingChunks)||new Set(remote.missingChunks).size!==remote.missingChunks.length||remote.missingChunks.some(index=>!Number.isSafeInteger(index)||index<0||index>=count))throw new Error('The server upload manifest does not match the selected photos.');}
-  let completedBytes=0;
+  let completedBytes=0,completed=0,transferredBytes=0;
+  // Previously accepted chunks count toward completion, never transfer speed.
+  for(const {spec} of prepared.items){const remote=remoteFiles.get(spec.id),missing=new Set(remote.missingChunks);if(!missing.size)completed++;for(let index=0;index<remote.chunkCount;index++)if(!missing.has(index))completedBytes+=Math.min(upload.chunkSize,spec.byteSize-index*upload.chunkSize);}
+  const resumedBytes=completedBytes,startedAt=now();
+  const report=phase=>{const elapsedSeconds=Math.max(0,(now()-startedAt)/1000);onProgress({phase,completed,total:prepared.items.length,completedBytes,totalBytes:prepared.totalBytes,transferredBytes,resumedBytes,elapsedSeconds,bytesPerSecond:elapsedSeconds>0?transferredBytes/elapsedSeconds:0});};
+  report('uploading');
   for(const {file,spec} of prepared.items){const remote=remoteFiles.get(spec.id),missing=new Set(remote.missingChunks);for(let index=0;index<remote.chunkCount;index++){
     check(signal);const start=index*upload.chunkSize,end=Math.min(start+upload.chunkSize,file.size);
     if(missing.has(index)){const bytes=await file.slice(start,end).arrayBuffer();check(signal);if(bytes.byteLength!==end-start)throw new Error('A selected photo changed while uploading.');const sha256=await digest(bytes);check(signal);const credential=token();if(!credential)throw new Error('Sign in again before resuming the upload.');const response=await fetcher(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/files/${encodeURIComponent(spec.id)}/chunks/${index}`,{method:'PUT',signal,headers:{Authorization:`Bearer ${credential}`,'Content-Type':'application/octet-stream','X-Upload-Token':uploadToken,'X-Chunk-SHA256':sha256},body:bytes});check(signal);if(!response.ok)throw new Error(`Photo chunk upload failed (${response.status}). Reselect the same photos to resume.`);}
-    completedBytes+=end-start;onProgress({phase:'uploading',completedBytes,totalBytes:prepared.totalBytes});
-  }}
+    if(missing.has(index)){completedBytes+=end-start;transferredBytes+=end-start;report('uploading');}
+  }if(missing.size){completed++;report('uploading');}}
   check(signal);if(!token())throw new Error('Sign in again before finalizing the upload.');
+  report('finalizing');
   const finalized=await api(`/api/v1/admin/uploads/${encodeURIComponent(upload.id)}/finalize`,{method:'POST',body:{uploadToken},signal});check(signal);
-  onProgress({phase:'queued',completedBytes,totalBytes:prepared.totalBytes});
+  report('queued');
   // HTTP 202 means assembly was queued, not that the dataset is ready to submit.
   return {...finalized,uploadId:upload.id,datasetId,renamed:prepared.renamed};
 }

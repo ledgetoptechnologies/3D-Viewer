@@ -65,7 +65,7 @@ async function fakeProvider({ loseFirstInitResponse=false, rejectRemove=false, o
       if (loseFirstInitResponse && !lost) { lost = true; request.socket.destroy(); return; }
       return respondJson(response, 200, { uuid });
     }
-    if (request.method === 'POST' && /^\/task\/new\/upload\//.test(url.pathname)) { await readBody(request); response.writeHead(200); response.end(); return; }
+    if (request.method === 'POST' && /^\/task\/new\/upload\//.test(url.pathname)) { await readBody(request);return respondJson(response,200,{success:true}); }
     if (request.method === 'POST' && /^\/task\/new\/commit\//.test(url.pathname)) {
       const uuid = decodeURIComponent(url.pathname.split('/').pop());
       const task = tasks.get(uuid);

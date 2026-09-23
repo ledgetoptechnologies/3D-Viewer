@@ -22,12 +22,43 @@ test('preparation hashes one original file at a time with stable resumable manif
   const progress=[],prepared=await prepareTaskPhotos(files,{onProgress:p=>progress.push(p)}),again=await prepareTaskPhotos([...files].reverse());assert.equal(max,1);assert.deepEqual(prepared.manifest,again.manifest);assert.ok(prepared.manifest.every(x=>x.processingRole==='image'&&/^[a-f0-9]{64}$/.test(x.sha256)));assert.equal(progress.at(-1).completed,3);
   await assert.rejects(prepareTaskPhotos(files,{limits:{...TASK_PHOTO_LIMITS,maxManifestBytes:1}}),/manifest is too large/);
 });
-async function transport({mutate=()=>{},rejectChunk=false,signal,onChunk=()=>{}}={}){
+async function transport({mutate=()=>{},rejectChunk=false,signal,onChunk=()=>{},onProgress,now}={}){
   const prepared=await prepareTaskPhotos([file('a.jpg','abcdef')]),calls=[],chunks=[];let active=0,max=0;
   const api=async(path,options)=>{calls.push({path,options});if(path.endsWith('/uploads')){const response={uploadToken:'scoped-upload',upload:{id:'upload-id',datasetId:'dataset',status:'open',chunkSize:2,files:prepared.manifest.map(x=>({...x,chunkCount:3,missingChunks:[1,2]}))}};mutate(response);return response;}return {operation:{id:'assembly',status:'queued'}};};
   const fetcher=async(path,options)=>{max=Math.max(max,++active);chunks.push({path,options});await new Promise(resolve=>setImmediate(resolve));active--;onChunk();return {ok:!rejectChunk,status:rejectChunk?503:201};};
-  return {prepared,calls,chunks,max:()=>max,run:()=>uploadTaskPhotos({datasetId:'dataset',prepared,api,token:()=> 'staff-token',fetcher,signal})};
+  return {prepared,calls,chunks,max:()=>max,run:()=>uploadTaskPhotos({datasetId:'dataset',prepared,api,token:()=> 'staff-token',fetcher,signal,onProgress,now})};
 }
+
+test('preparation reports local byte/photo progress and rejects oversized manifests before reading',async()=>{
+  const progress=[],photos=[file('a.jpg','abc'),file('b.jpg','defgh')];
+  await prepareTaskPhotos(photos,{onProgress:value=>progress.push(value)});
+  assert.deepEqual(progress.map(({completed,completedBytes,total,totalBytes})=>[completed,completedBytes,total,totalBytes]),[[0,0,2,8],[1,3,2,8],[2,8,2,8]]);
+  let reads=0;photos[0].arrayBuffer=async()=>{reads++;throw new Error('must not read');};
+  await assert.rejects(prepareTaskPhotos(photos,{limits:{...TASK_PHOTO_LIMITS,maxManifestBytes:1}}),/manifest is too large/);
+  assert.equal(reads,0);
+});
+
+test('upload reports acknowledged progress and average speed excluding resumed bytes',async()=>{
+  let clock=1000;const progress=[],f=await transport({now:()=>clock,onChunk:()=>{clock+=1000;},onProgress:value=>progress.push(value)});
+  await f.run();
+  assert.equal(progress[0].completedBytes,2);assert.equal(progress[0].resumedBytes,2);assert.equal(progress[0].completed,0);assert.equal(progress[0].bytesPerSecond,0);
+  const last=progress.at(-1);
+  assert.equal(last.phase,'queued');assert.equal(last.completed,1);assert.equal(last.total,1);assert.equal(last.completedBytes,6);assert.equal(last.totalBytes,6);assert.equal(last.transferredBytes,4);assert.equal(last.bytesPerSecond,2);
+  assert.equal(progress.at(-2).phase,'finalizing');
+  assert.ok(progress.every((p,i)=>i===0||p.completedBytes>=progress[i-1].completedBytes));
+});
+
+test('fully resumed photos count as complete without invented transfer speed',async()=>{
+  const progress=[],f=await transport({mutate:r=>r.upload.files[0].missingChunks=[],onProgress:value=>progress.push(value),now:()=>1000});
+  await f.run();assert.equal(f.chunks.length,0);
+  assert.ok(progress.every(p=>p.completed===1&&p.completedBytes===6&&p.transferredBytes===0&&p.bytesPerSecond===0));
+});
+
+test('failed chunks never inflate acknowledged progress or announce finalizing',async()=>{
+  const progress=[],f=await transport({rejectChunk:true,onProgress:value=>progress.push(value)});
+  await assert.rejects(f.run(),/503/);
+  assert.deepEqual(progress.map(p=>[p.phase,p.completed,p.completedBytes,p.transferredBytes]),[['uploading',0,2,0]]);
+});
 test('upload sends only missing sequential hashed chunks then queues assembly without claiming task completion',async()=>{
   const f=await transport(),result=await f.run();assert.equal(f.max(),1);assert.equal(f.chunks.length,2);assert.match(f.chunks[0].path,/chunks\/1$/);assert.equal(new TextDecoder().decode(f.chunks[0].options.body),'cd');assert.equal(f.chunks[0].options.headers.Authorization,'Bearer staff-token');assert.equal(f.chunks[0].options.headers['X-Upload-Token'],'scoped-upload');assert.match(f.chunks[0].options.headers['X-Chunk-SHA256'],/^[a-f0-9]{64}$/);assert.equal(result.operation.status,'queued');assert.equal(f.calls.length,2);assert.match(f.calls[1].path,/\/finalize$/);
 });

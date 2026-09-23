@@ -11,7 +11,7 @@ function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.proce
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
 const context=vm.createContext({state,URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),ACTIVE:new Set(['running','queued_upstream','derivatives']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),duration:attempt=>`runtime:${attempt.id||'none'}`,durationFromMs:value=>`${value} ms`,formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
-  vm.runInContext(names.map(declaration).join('\n'),context);
+  vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -35,6 +35,14 @@ test('collapsed task retains one summary and quick actions without nested conten
   assert.match(html,/aria-expanded="false"/);assert.match(html,/ inert/);
   assert.match(html,/data-action="view-output"/);assert.match(html,/data-action="download-output"/);
   assert.doesNotMatch(html,/compact-task-detail|task-gcp|<summary/);
+});
+
+test('active expanded task exposes live output without forcing a settings detour',()=>{
+  const f=fixture(['viewer.processing.read']);f.task.latestAttempt.status='running';f.task.latestAttempt.progress=.25;
+  f.state.taskDetails.task.attempt=f.task.latestAttempt;f.state.taskDetails.task.logs=[{message:'Running odm_meshing'}];
+  const html=f.context.taskPanel(f.task);assert.match(html,/Task output/);assert.match(html,/Building mesh/);assert.match(html,/25% reported by processing node/);
+  f.task.latestAttempt.status='ready_for_review';assert.doesNotMatch(f.context.taskPanel(f.task),/Task output/);
+  f.state.taskPage='settings';assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/Task output/);
 });
 
 test('daily task overview has no destructive duplicate and Settings owns explicit lifecycle actions',()=>{

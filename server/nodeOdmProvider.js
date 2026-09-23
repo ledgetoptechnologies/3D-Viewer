@@ -3,11 +3,22 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { sanitizeLogMessage } = require('./processingSecurity');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
 
 async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
 async function boundedJson(response,maxBytes=1024*1024){if(!String(response.headers.get('content-type')||'').includes('json'))throw new Error('provider returned an unexpected content type');return JSON.parse(await boundedText(response,maxBytes));}
+
+function checkedAction(value, action, uuid=null) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error(`ODM ${action} returned an invalid response`), {code:'provider_request_failed'});
+  if (Object.hasOwn(value,'error') || value.success === false) {
+    const detail=typeof value.error==='string'?sanitizeLogMessage(value.error).slice(0,1000):'The provider rejected the request';
+    throw Object.assign(new Error(`ODM ${action} failed: ${detail}`), {code:'provider_request_failed'});
+  }
+  if(uuid && Object.hasOwn(value,'uuid') && value.uuid!==uuid)throw Object.assign(new Error(`ODM ${action} returned a different task UUID`),{code:'provider_request_failed'});
+  return value;
+}
 
 function optionArray(options) {
   return Object.entries(options || {}).map(([name, value]) => ({ name, value }));
@@ -96,7 +107,7 @@ class NodeOdmProvider {
     body.set('options', JSON.stringify(optionArray(options)));
     if (outputs) body.set('outputs', JSON.stringify(outputs));
     const response = await this.request('/task/new/init', { method:'POST', headers:{ 'set-uuid': uuid }, body }, {}, {signal});
-    const result = await boundedJson(response);
+    const result = checkedAction(await boundedJson(response),'initialize',uuid);
     if (!result.uuid || result.uuid !== uuid) throw new Error('provider did not honor the assigned task UUID');
     return result;
   }
@@ -110,10 +121,10 @@ class NodeOdmProvider {
         new Blob([Buffer.from(file.buffer)], { type: 'text/plain' });
       body.append('images', blob, path.basename(file.relativePath || file.absolutePath));
     }
-    await this.request(`/task/new/upload/${encodeURIComponent(uuid)}`, { method:'POST', body }, {}, {timeoutMs:this.transferTimeoutMs,signal});
+    return checkedAction(await boundedJson(await this.request(`/task/new/upload/${encodeURIComponent(uuid)}`, { method:'POST', body }, {}, {timeoutMs:this.transferTimeoutMs,signal})),'upload');
   }
 
-  async commit(uuid,{signal=null}={}) { return boundedJson(await this.request(`/task/new/commit/${encodeURIComponent(uuid)}`, { method:'POST' },{}, {signal})); }
+  async commit(uuid,{signal=null}={}) { return checkedAction(await boundedJson(await this.request(`/task/new/commit/${encodeURIComponent(uuid)}`, { method:'POST' },{}, {signal})),'commit',uuid); }
   async status(uuid,{signal=null}={}) {
     const info = await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/info`,{}, {}, {signal}),1024*1024);
     if (typeof info?.error === 'string') {
@@ -125,12 +136,24 @@ class NodeOdmProvider {
     return { uuid:info.uuid, status:STATUS[Number(info.status?.code)] || 'unknown', statusCode:Number(info.status?.code),
       progress:Math.max(0,Math.min(1,Number(info.progress||0)/100)), imagesCount:info.imagesCount };
   }
-  async output(uuid, fromLine = 0,{signal=null}={}) { const value=await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/output`, {}, { line:fromLine },{signal}),4*1024*1024);const lines=String(value||'').split(/\r?\n/).filter(Boolean);return{lines,nextLine:fromLine+lines.length}; }
+  async output(uuid, fromLine = 0,{signal=null}={}) {
+    if(!Number.isSafeInteger(fromLine)||fromLine<0)throw new Error('invalid provider output cursor');
+    const value=await boundedJson(await this.request(`/task/${encodeURIComponent(uuid)}/output`, {}, { line:fromLine },{signal}),4*1024*1024);
+    if(value&&typeof value==='object'&&!Array.isArray(value))checkedAction(value,'output');
+    let lines;
+    // NodeODM/NodeODX and ClusterODM return arrays. Preserve blank entries and
+    // commas: the cursor counts provider records, not nonempty display lines.
+    if(Array.isArray(value)&&value.every(line=>typeof line==='string'))lines=value;
+    else if(typeof value==='string'){lines=value?value.split(/\r?\n/):[];if(lines.at(-1)==='')lines.pop();}
+    else throw Object.assign(new Error('ODM output returned an invalid response'),{code:'provider_request_failed'});
+    const nextLine=fromLine+lines.length;if(!Number.isSafeInteger(nextLine))throw new Error('provider output cursor overflow');
+    return{lines,nextLine};
+  }
   async cancel(uuid,{signal=null}={}) {
     const body = new URLSearchParams({ uuid });
-    return boundedJson(await this.request('/task/cancel', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body },{}, {signal}));
+    return checkedAction(await boundedJson(await this.request('/task/cancel', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body },{}, {signal})),'cancel');
   }
-  async remove(uuid,{signal=null}={}) { const body=new URLSearchParams({uuid});return boundedJson(await this.request('/task/remove',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body},{},{signal})); }
+  async remove(uuid,{signal=null}={}) { const body=new URLSearchParams({uuid});return checkedAction(await boundedJson(await this.request('/task/remove',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body},{},{signal})),'remove'); }
   async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
 }
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,7 +57,7 @@ const fixtures = {
       enabled: true, admissionLimit: 2, runtimeHealth: 'healthy', capabilityFingerprint: 'browser-fingerprint', credential: { configured: true, mode: 'token' },
       capabilities: {
         providerType: 'nodeodm', apiVersion: '2.2.3', engine: 'ODM', engineVersion: '3.5.0', taskQueueCount: 1,
-        maxParallelTasks: 2, options: [{ name: 'orthophoto-resolution', type: 'integer', value: 5 }],
+        maxParallelTasks: 99999999999, options: [{ name: 'orthophoto-resolution', type: 'integer', value: 5 }],
       },
     },
   ],
@@ -322,7 +322,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     const sequence = ++runtime.logSequence;
     return json({
       attempt: fixtures.tasks[0].latestAttempt,
-      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `browser refresh ${sequence}` }],
+      logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` }],
     });
   }
   if (pathname === '/api/v1/attempts/attempt-johnson-old/diagnostics') return json({ diagnostics: {
@@ -624,6 +624,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: task details did not expand`);
+    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /separate from node connection health/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
@@ -661,12 +662,21 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('[data-action=\"toggle-task\"][data-id=\"task-johnson\"]')?.getAttribute('aria-expanded')==='true'", `${viewport.name}: browser Forward did not restore the task`);
     await client.command('Page.reload');
     await waitFor(client, "new URL(location.href).searchParams.get('task')==='task-johnson' && document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: refresh did not restore the selected project and expanded task`);
-    assert.equal(await client.evaluate(`document.querySelector('.task-detail .log-tail') === null`), true, `${viewport.name}: compact task must not embed diagnostic logs`);
-    // Live detail polling remains active, while log presentation is now on Diagnostics.
+    await waitFor(client, "document.querySelector('.task-detail .task-live-output .log-tail')?.textContent.includes('browser refresh')", `${viewport.name}: expanded task must show current task output`);
+    assert.equal(await client.evaluate(`document.querySelector('.task-live-output .task-output-status strong')?.textContent`), 'Elevation models', `${viewport.name}: reported processing stage must be human-readable`);
+    assert.equal(await client.evaluate(`document.querySelector('.task-live-output progress') === null`), true, `${viewport.name}: absent node progress must not be fabricated`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-live-output .row-actions button')].map(button=>button.textContent)`), ['Download tail', 'Fullscreen'], `${viewport.name}: task output must expose its own viewing/export controls`);
+    assert.equal(await client.evaluate(`document.querySelector('.task-live-output .log-tail')?.getAttribute('tabindex')`), '0', `${viewport.name}: task output must be keyboard-scrollable`);
+    await client.evaluate(`document.querySelector('.task-live-output [data-action="fullscreen-logs"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.fullscreen-log')?.textContent.includes('Running stage odm_dem')", `${viewport.name}: task output fullscreen did not preserve recorded lines`);
+    await client.evaluate(`document.querySelector('.modal-close').click()`);
+    // Expanded task output refreshes in place; full historical diagnostics
+    // remain available through the separately exercised Diagnostics route.
     const firstLog = runtime.logSequence;
     const refreshStart = runtime.requests.length;
     await waitForRequest(runtime, refreshStart, 'GET', '/api/v1/attempts/attempt-johnson');
     assert.ok(runtime.logSequence > firstLog, `${viewport.name}: running-task log data did not refresh`);
+    await waitFor(client, `document.querySelector('.task-live-output .log-tail')?.textContent.includes('browser refresh ${runtime.logSequence}')`, `${viewport.name}: refreshed task output did not reach the visible panel`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: expanded task overflows horizontally`);
     await waitFor(client, "document.querySelector('.task-ortho-preview canvas')?.getAttribute('aria-label') === 'Published orthophoto preview' || document.querySelector('.task-ortho-preview img') !== null", `${viewport.name}: real orthophoto preview did not render`);
     assert.equal(await client.evaluate(`(() => { const canvas=document.querySelector('.task-ortho-preview canvas'); if(!canvas)return true; return [...canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data].some(value=>value>0) })()`), true, `${viewport.name}: orthophoto preview canvas is empty`);
@@ -769,29 +779,43 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "document.querySelectorAll('.trash-group').length === 2 && document.querySelectorAll('[data-action=\"restore-trash\"]').length === 2", `${viewport.name}: Recycle Bin retry did not render grouped recoverable items`);
 
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
-    await waitFor(client, "document.querySelector('[data-action=\"open-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
+    await waitFor(client, "document.querySelector('.provider-workspace [data-action=\"select-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
     assert.equal(await client.evaluate(`Number(document.querySelector('#background-work-count')?.textContent) >= 1`), true, `${viewport.name}: background count did not persist across navigation`);
-    await client.evaluate(`document.querySelector('[data-action="open-provider"][data-id="provider-nodeodm"]').click()`);
-    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: provider modal did not open`);
-    assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider modal selection`);
+    await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').click()`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && document.querySelector('#provider-inline-detail .provider-detail') !== null", `${viewport.name}: provider selection must show inline, not in a modal`);
+    assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider inline selection`);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Cluster-managed capacity/);
+    assert.equal(await client.evaluate(`document.querySelector('.provider-detail').textContent.includes('99999999999')`), false, `${viewport.name}: cluster sentinel must not imply real upstream slots`);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Viewer admission2 concurrent jobs/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
+    assert.equal(await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').getAttribute('aria-pressed')`), 'true');
+    assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.provider-workspace .provider-list')).overflowY`), 'auto', `${viewport.name}: node list must scroll independently`);
+    assert.equal(await client.evaluate(`(()=>{const left=document.querySelector('.provider-workspace>aside').getBoundingClientRect(),right=document.querySelector('#provider-inline-detail').getBoundingClientRect();return innerWidth>720?left.right<right.left:right.top>=left.bottom;})()`),true,`${viewport.name}: node list/detail must be side-by-side on desktop and stacked on mobile`);
+    if(process.env.LTDS_PROVIDER_SCREENSHOTS==='1'){
+      await client.evaluate(`document.querySelector('.provider-workspace').scrollIntoView({block:'start'})`);
+      const shot=await client.command('Page.captureScreenshot',{format:'png'}),directory=path.join(root,'tmp','provider-browser-qa');
+      mkdirSync(directory,{recursive:true});writeFileSync(path.join(directory,`${viewport.name.replace(/[^a-z0-9]+/gi,'-')}.png`),Buffer.from(shot.data,'base64'));
+    }
     await client.evaluate(`document.querySelector('[data-action="edit-provider"]').click()`);
     await waitFor(client, "document.querySelector('#provider-edit-form') !== null", `${viewport.name}: provider edit form did not open`);
+    await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#provider-edit-form'); form.elements.admissionLimit.value='3'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
-    await waitFor(client, "document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to node detail`);
+    await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);
     await waitFor(client, "document.querySelector('#provider-token-form') !== null", `${viewport.name}: provider token form did not open`);
+    await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#provider-token-form'); form.elements.token.value='browser-secret-token'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
-    await waitFor(client, "document.querySelector('[data-action=\"new-preset\"]') !== null", `${viewport.name}: provider token update did not return to node detail`);
+    await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"new-preset\"]') !== null", `${viewport.name}: provider token update did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="new-preset"]').click()`);
     await waitFor(client, "document.querySelector('#preset-form') !== null", `${viewport.name}: preset form did not open`);
+    await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
     await client.evaluate(`(() => { const form=document.querySelector('#preset-form'); form.elements.displayName.value='Browser preset'; form.elements.options.value='{}'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
-    await waitFor(client, "document.querySelector('[data-action=\"delete-preset\"]') !== null", `${viewport.name}: preset creation did not return to node detail`);
+    await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"delete-preset\"]') !== null", `${viewport.name}: preset creation did not return to refreshed node detail`);
     await confirmAppAction(client, runtime, '[data-action="delete-preset"]', { title: 'Delete preset', cancelFirst: true });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/presets/preset-fast');
-    await waitFor(client, "document.querySelector('#workspace-modal')?.open === true && document.querySelector('.provider-master-detail') !== null", `${viewport.name}: preset deletion did not return to node detail`);
-    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: provider modal overflows horizontally`);
+    await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && document.querySelector('#provider-inline-detail') !== null", `${viewport.name}: preset deletion did not return to inline node detail`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: provider workspace overflows horizontally`);
 
-    await client.evaluate(`document.querySelector('.modal-close').click(); document.querySelector('[data-section="diagnostics"]').click()`);
+    await client.evaluate(`document.querySelector('[data-section="diagnostics"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-trash\"]') !== null", `${viewport.name}: diagnostics did not link to the dedicated Recycle Bin`);
     assert.deepEqual(await client.evaluate(`Object.fromEntries([...document.querySelectorAll('#storage-usage-cards .metric-card')].slice(0,6).map(card=>[card.querySelector('p').textContent,card.querySelector('strong').textContent]))`), {
       'Total Viewer files': '40.0 MB', 'Original photos & source inputs': '4.0 MB',

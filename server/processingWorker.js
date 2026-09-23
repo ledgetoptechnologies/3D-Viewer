@@ -61,10 +61,22 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   transition(processing,job,known?.status==='running'?'running':'queued_upstream',{progress:known?.progress||0});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
 }
 
-async function processReconcile(job,{processing,config,providerCredentials,signal}){
-  const attempt=processing.getAttempt(job.attempt_id),provider=processing.getProvider(attempt.providerId),adapter=adapterFor(provider,config,providerCredentials);
-  const status=await adapter.status(attempt.providerTaskId,{signal}),output=await adapter.output(attempt.providerTaskId,attempt.providerOutputCursor,{signal});
-  for(const line of output.lines)processing.appendLog(attempt.id,'provider',line);processing.setOutputCursor(attempt.id,output.nextLine);
+async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  const attempt=processing.getAttempt(job.attempt_id),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
+  const status=await adapter.status(attempt.providerTaskId,{signal});
+  let output=null;
+  try{output=await adapter.output(attempt.providerTaskId,attempt.providerOutputCursor,{signal});}
+  catch(error){
+    // Output is observational: an oversized/unavailable log must not turn a
+    // healthy upstream job into a failed attempt or block completed ingestion.
+    // Cancellation/lease loss remains authoritative and is never downgraded.
+    if(signal?.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error?.code))throw error;
+  }
+  signal?.throwIfAborted();
+  // Keep storage errors outside the best-effort provider read catch. Advance
+  // the provider cursor only after successfully persisting the received batch.
+  if(output){for(const line of output.lines)processing.appendLog(attempt.id,'provider',line);processing.setOutputCursor(attempt.id,output.nextLine);}
+  else processing.appendLog(attempt.id,'warn','Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.');
   if(status.status==='completed'){transition(processing,job,'ingesting',{progress:1,upstreamCompletedAt:new Date().toISOString()});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'ingest'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
   else if(status.status==='failed'||status.status==='cancelled'){const task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),code=`provider_${status.status}`,message=`ODM processing ${status.status}`,terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'});if(!terminal)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
   else{transition(processing,job,status.status,{progress:status.progress});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+15000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}

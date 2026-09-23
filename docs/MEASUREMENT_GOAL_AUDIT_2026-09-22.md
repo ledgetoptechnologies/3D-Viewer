@@ -1,5 +1,23 @@
 # Measurement goal completion audit
 
+## Deployment acceptance on 23 September 2026 UTC
+
+This section supersedes the release/deployment blockers in the chronological notes below; it does not supersede remaining live acceptance checks.
+
+- Release run 35808118541 succeeded for `611cd7fe34190c3fd857b9e8a9a5a60ce3d87be4`. The downloaded image attestation identifies digest `sha256:61cf78e2e468123bc44534ec032bb39f7afb05dc21371a6756f958802ea408e4`, schema 33, runtime UID/GID 568:568, and passing repository, pull-by-digest, revision, source-stamp and runtime checks. The exact-container gate passed 122/122 checks.
+- At 02:47:48 UTC, the production health HEAD returned HTTP 200 and the same `611cd7f` revision. Deployment is verified, not merely requested.
+- Reloaded the workspace and opened a fresh County Road D session through its View button. All five personal records loaded automatically, including saved net volumes 78,542.712 ft³ and 208,355.048 ft³, with View volume actions. No recalculation or geometry edit was performed.
+- The fresh 3D tab reported loading complete overview and 0 FPS. Screenshot capture failed and an Orthophoto click timed out in browser control. Reopening the same authorized session directly in Orthophoto restored the five records, but screenshot capture and the report-button click still failed. These failures span both render modes; they do not establish a point-cloud regression or prove an application freeze. The Codex request to show the tab returned queued, not confirmation that the tab was foregrounded.
+- Report readiness and natural renewal of an existing live session remain unverified on this deployment. Fresh-session restoration is not renewal proof. No authentication state was inspected or bypassed, and Operations code and saved measurement data were left unchanged.
+
+Follow-up: browser control recovered without an application change. At 02:54:52 UTC, the Orthophoto report opened with all five records and a complete 885×822 measured-view image; Print / Save as PDF was enabled. Its explicit click completed without a browser-control error. The screenshot still showed the report, and no new PDF appeared in Downloads, so native print-dialog/file delivery remains unobserved rather than accepted. The earlier user-supplied PDF remains the evidence for actual export delivery on the previous build.
+
+Loaded point-cloud navigation was then repeated on 611cd7f: before orbit/zoom/pan the visible overlay reported 10.0M points, active/requested 10M/10M, 225 nodes and 144 FPS. After those gestures, the camera visibly rotated and moved closer, with 10.0M points, 250 nodes and 144 FPS. The budget was untouched. These are actual view interaction and refinement observations, not GPU timing or a guarantee for other hardware/datasets. Saved labels and both volumes remained visible. Natural live-session renewal is still outstanding.
+
+The same deployed session also passed the saved Polygon 1 profile interaction: View volume loaded 4,209 native cells automatically at 0°; entering 45° produced 9,148 cells automatically with net volume unchanged at 208,355.048 ft³. Reset returned to 0° and 4,209 cells. The inspector was closed using its accessible Close measurement inspector button. No volume calculation or outline edit was requested. At this point both workspace and existing model session still displayed authorized data; this alone does not prove a renewal event.
+
+Further 3D acceptance: two successive zoom-in gestures at the Polygon 1 ground boundary retained the yellow line, visible short edge label and small orange vertices at close range. Quick Save view image was exercised, but no new measured-view PNG appeared in Downloads; initiated export is not verified file delivery. No model geometry was changed.
+
 ## Current acceptance snapshot after e909dde (supersedes older pending notes below)
 
 The entries below this snapshot are chronological evidence, not a claim that every earlier blocker remains open.

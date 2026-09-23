@@ -20,9 +20,12 @@ test('expired workspaces use a fixed Operations reauthorization bounce with same
 test('auth loss redirects once and preserves model routing only for known expiry',()=>{
   const clear=source.split(/\r?\n/).find(line=>line.startsWith('function clearWorkspaceAuthorization('));
   for(const reason of ['expired','revoked','unauthorized']){
+    let uploadDisposals=0;
     const calls=[],state={token:'existing',adminSession:{expiresAt:new Date(Date.now()+(reason==='unauthorized'?60000:-1000)).toISOString()}};
     const context=vm.createContext({workspaceAuthorizationClearing:false,state,reviewSessionController:{suspend:options=>calls.push(['suspend',options.preserve])},storageUsagePoll:{stop(){}},workspaceRenewal:{dispose(){}},releaseAllGcpImages(){},sessionStorage:{removeItem(){}},TOKEN_KEY:'token',clearInterval(){},clearTimeout(){},beginWorkspaceReauthorization:()=>{calls.push(['redirect']);return true;},renderNav(){},access(){}});
+    context.activeNewTask={dispose(){uploadDisposals++;}};
     vm.runInContext(`${clear};clearWorkspaceAuthorization(${JSON.stringify(reason)});clearWorkspaceAuthorization('unauthorized');`,context);
+    assert.equal(uploadDisposals,1,'authorization loss disposes browser-owned uploads exactly once');
     assert.equal(calls.filter(call=>call[0]==='suspend').length,1);
     assert.equal(calls[0][1],reason==='expired');
     assert.equal(calls.filter(call=>call[0]==='redirect').length,reason==='revoked'?0:1);
