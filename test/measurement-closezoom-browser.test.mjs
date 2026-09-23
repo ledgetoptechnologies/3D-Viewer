@@ -154,6 +154,17 @@ test('real editor inserts midpoint, moves/deletes selected vertices and retains 
         await client.evaluate('editorFixture.nextFrame()');await button('#fixture-report');await waitFor(client,"document.querySelector('dialog.measurement-report img')?.complete&&document.querySelector('dialog.measurement-report img')?.naturalWidth===800");
         assert.match(await client.evaluate("document.querySelector('dialog.measurement-report table').textContent"),/Editable pile/);assert.match(await client.evaluate("document.querySelector('dialog.measurement-report table').textContent"),/Net|Cut|Volume/i);
         const reportPixel=await client.evaluate("(()=>{const image=document.querySelector('dialog.measurement-report img'),canvas=document.createElement('canvas');canvas.width=800;canvas.height=600;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);return [...ctx.getImageData(500,500,1,1).data];})()");assert.deepEqual(reportPixel,[70,80,90,255]);assert.equal(await client.evaluate('editorFixture.captures()'),2);assert.equal(await client.evaluate('JSON.stringify(editorFixture.saved())'),original);
+        // Exercise the real browser print renderer, not an overridden print()
+        // function. This proves printable content/CSS, not native dialog support
+        // in an embedding application's webview.
+        await client.command('Emulation.setEmulatedMedia',{media:'print'});
+        assert.equal(await client.evaluate("getComputedStyle(document.querySelector('#view')).display"),'none');
+        assert.equal(await client.evaluate("getComputedStyle(document.querySelector('dialog.measurement-report .measurement-actions')).display"),'none');
+        assert.equal(await client.evaluate("getComputedStyle(document.querySelector('dialog.measurement-report')).display"),'block');
+        const printed=await client.command('Page.printToPDF',{printBackground:true,preferCSSPageSize:true}),pdf=Buffer.from(printed.data,'base64');
+        assert.equal(pdf.subarray(0,5).toString(),'%PDF-');assert.ok(pdf.length>10000);assert.match(pdf.toString('latin1'),/\/Type\s*\/Page\b/);
+        await client.command('Emulation.setEmulatedMedia',{media:''});
+        t.diagnostic(`Browser print backend produced ${pdf.length}-byte PDF; native host print UI is not asserted.`);
         await button('dialog.measurement-report [data-close]');await waitFor(client,"!document.querySelector('dialog.measurement-report')");t.diagnostic(`captureView downloaded actual ${bytes.length}-byte 800x600 PNG; openReport rendered measurement table and a freshly captured current frame.`);
       }
       await button('[data-m=edit-record]');await waitFor(client,"document.querySelectorAll('[data-measurement-insert]').length===4");

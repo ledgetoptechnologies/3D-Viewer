@@ -53,6 +53,71 @@ function expiring(channel, overrides = {}) {
 
 function continuityStorage(){const values=new Map();return{getItem:key=>values.get(key)||null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key),values};}
 
+test('stalled grant issuance times out, retries once at a time, and ignores late grants', async () => {
+  const requests = [];
+  const f = harness({ issueGrant: (context, { signal }) => new Promise(resolve => requests.push({ resolve, signal })) });
+  f.controller.track(CHANNEL_ID, CONTEXT);
+  const channel = f.channels[0];
+  await ready(channel);
+  const pending = expiring(channel);
+  assert.equal(requests.length, 1);
+  assert.equal(f.controller.navigate(CHANNEL_ID, 'https://other.example/'), false);
+  assert.equal(requests[0].signal.aborted, false, 'invalid navigation cannot cancel renewal');
+  assert.equal(await expiring(channel, { requestId: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa' }), false);
+  const deadline = f.timers.find(timer => timer.delay === 10_000 && !timer.cleared);
+  deadline.handler();
+  assert.equal(await pending, false);
+  assert.equal(requests[0].signal.aborted, true);
+  assert.equal(f.controller.records.get(CHANNEL_ID).pending, false);
+  const retry = f.timers.find(timer => timer.delay === 10 && !timer.cleared);
+  assert.ok(retry);
+  const retryPending = retry.handler();
+  assert.equal(requests.length, 2);
+  requests[0].resolve({ grant: GRANT, sessionMode: 'review', ...CONTEXT });
+  await Promise.resolve();
+  assert.equal(channel.posts.length, 0, 'late successful issuance cannot deliver an obsolete grant');
+  requests[1].resolve({ grant: GRANT, sessionMode: 'review', ...CONTEXT });
+  assert.equal(await retryPending, true);
+  assert.equal(channel.posts.filter(item => item.type === 'ltds-viewer:renew-session').length, 1);
+  assert.equal(await expiring(channel, { requestId: 'dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb' }), false);
+  f.controller.dispose();
+});
+
+test('closing or revoking a controller aborts pending issuance and fences its late result', async () => {
+  for (const revoke of [false, true]) {
+    let resolve, signal;
+    const f = harness({ issueGrant: (_, options) => { signal = options.signal; return new Promise(done => { resolve = done; }); } });
+    f.controller.track(CHANNEL_ID, CONTEXT);
+    const channel = f.channels[0];
+    await ready(channel);
+    const pending = expiring(channel);
+    if (revoke) f.controller.unavailable(f.controller.records.get(CHANNEL_ID), 'authorization-required');
+    else f.controller.dispose();
+    assert.equal(signal.aborted, true);
+    assert.equal(await pending, false);
+    resolve({ grant: GRANT, sessionMode: 'review', ...CONTEXT });
+    await Promise.resolve();
+    assert.equal(channel.posts.some(item => item.type === 'ltds-viewer:renew-session'), false);
+    assert.equal(f.timers.some(timer => !timer.cleared), false);
+    assert.equal(f.controller.has(CHANNEL_ID), false);
+  }
+});
+
+test('synchronous issuance failure clears its deadline and retries remain bounded', async () => {
+  let calls = 0;
+  const f = harness({ issueGrant: () => { calls++; throw new Error('transport unavailable'); } });
+  f.controller.track(CHANNEL_ID, CONTEXT);
+  await ready(f.channels[0]);
+  assert.equal(await expiring(f.channels[0]), false);
+  await f.timers.find(timer => timer.delay === 10 && !timer.cleared).handler();
+  await f.timers.find(timer => timer.delay === 20 && !timer.cleared).handler();
+  assert.equal(calls, 3);
+  assert.equal(f.timers.some(timer => !timer.cleared), false);
+  assert.equal(f.controller.records.get(CHANNEL_ID).pending, false);
+  assert.equal(f.channels[0].posts.length, 0);
+  f.controller.dispose();
+});
+
 test('same authenticated subject restores non-secret channels after workspace bounce and reissues through server',async()=>{
   const storage=continuityStorage(),first=harness({storage});first.controller.setAuthenticatedSubject('ops:one');first.controller.track(CHANNEL_ID,CONTEXT);await ready(first.channels[0]);
   const saved=JSON.parse([...storage.values.values()][0]);
@@ -98,7 +163,7 @@ test('suspended issuance completion cannot deliver grants or schedule stale retr
   let reject;
   const context=harness({issueGrant:()=>new Promise((_resolve,fail)=>{reject=fail;})});context.controller.track(CHANNEL_ID,CONTEXT);await ready(context.channels[0]);
   const pending=expiring(context.channels[0]);context.controller.suspend({preserve:true});reject(Error('late network failure'));await pending;
-  assert.equal(context.timers.length,0);assert.equal(context.channels[0].posts.length,0);
+  assert.equal(context.timers.filter(timer=>!timer.cleared).length,0);assert.equal(context.channels[0].posts.length,0);
 });
 
 test('storage quota failure retires stale descriptors without disrupting active channels',()=>{

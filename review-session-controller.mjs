@@ -7,6 +7,7 @@ const CLOCK_SKEW_MS = 60 * 1000;
 const CONTINUITY_KEY = 'ltds-viewer-model-controller-contexts-v1';
 const MAX_CONTEXTS = 32;
 const CONTEXT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const GRANT_ISSUANCE_TIMEOUT_MS = 10_000;
 
 function exactKeys(value, keys) {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -146,6 +147,7 @@ export class ReviewSessionController {
       expiresAt: null,
       expiresAtMs: 0,
       pending: false,
+      issuance: null,
       awaitingRenewed: false,
       activeRequestId: null,
       usedRequestIds: new Set(),
@@ -181,6 +183,8 @@ export class ReviewSessionController {
   untrack(channelId, { persist = true } = {}) {
     const record = this.records.get(channelId);
     if (!record) return false;
+    record.issuance?.abortController.abort();
+    record.issuance?.reject(new Error('renewal controller closed'));
     if (record.retryTimer) this.clearTimer(record.retryTimer);
     if (record.renewedTimer) this.clearTimer(record.renewedTimer);
     record.channel.onmessage = null;
@@ -314,8 +318,21 @@ export class ReviewSessionController {
       record.retryTimer = null;
     }
     record.pending = true;
+    const issuance = { abortController: new AbortController(), timer: null, reject: null };
+    record.issuance = issuance;
     try {
-      const result = await this.issueGrant(record.context);
+      // Bound issuance itself, not only the subsequent grant redemption. A
+      // stalled fetch otherwise keeps pending true and rejects every retry.
+      const deadline = new Promise((_, reject) => {
+        issuance.reject = reject;
+        issuance.timer = this.setTimer(() => {
+          issuance.abortController.abort();
+          reject(new Error('renewal grant issuance timed out'));
+        }, GRANT_ISSUANCE_TIMEOUT_MS);
+      });
+      const result = await Promise.race([
+        this.issueGrant(record.context, { signal: issuance.abortController.signal }), deadline,
+      ]);
       if (!validIssuedGrant(result, record.context) || this.records.get(record.channelId) !== record) {
         this.unavailable(record, 'scope-changed');
         return false;
@@ -343,7 +360,11 @@ export class ReviewSessionController {
       }
       return false;
     } finally {
-      record.pending = false;
+      if (issuance.timer) this.clearTimer(issuance.timer);
+      if (record.issuance === issuance) {
+        record.issuance = null;
+        record.pending = false;
+      }
     }
   }
 

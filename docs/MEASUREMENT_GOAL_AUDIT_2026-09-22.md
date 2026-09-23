@@ -1,5 +1,19 @@
 # Measurement goal completion audit
 
+## Live acceptance after deployment of ad6e404
+
+Additional isolated browser export acceptance produced a 30,694-byte measured-view PNG (800×600 with current-frame pixel assertions), a 1,451-byte profile CSV, a 28,901-byte profile PNG, and a 44,652-byte PDF through Chromium's print renderer. Sixteen capture/report/profile tests passed without console errors. Production print CSS hid Viewer controls and retained the report. The test explicitly enables browser downloads; it does not prove the embedded host permits them or exposes a native print dialog. No speculative application export rewrite was made.
+
+Subsequent fresh-session navigation accepted orbit, zoom and pan at unchanged active/requested 10M. Screenshots showed changed camera orientation and framing; visible nodes changed from 159 to 133 to 104 as the view changed. Later on-screen diagnostics reported 4,386,720 submitted points, 104 nodes, 7.8 ms CPU frame average and 17.9 ms maximum, with 0.4 ms update and 0.7 ms render submission. These are UI CPU observations, not GPU timings or a universal smoothness claim.
+
+The same live session repeatedly displayed renewing/retrying access and eventually hid personal measurements until access restoration. This is an unresolved lifecycle acceptance failure; loaded cloud rendering continued. No authentication bypass or Operations edit was made. Report generation before expiry included the measured image and all five rows, including Polygon 1's saved result. PNG reported a download request but no new file appeared in Downloads, and native print/PDF delivery was not observed. Thirteen fresh capture lifecycle/profile-download tests passed, including actual isolated CSV and PNG file delivery; those do not prove native delivery in the in-app browser.
+
+The user confirmed updating, and the public health header independently confirmed `ad6e4043615fd755812c2bbdb0e93d17955118e3`. A fresh County Road D Orthophoto tab restored all five personal measurements automatically; the unnecessary Retry button was absent. The existing QA feed-pile result remained 78,542.712 ft³ with View volume.
+
+The current saved Polygon 1 outline is 25,955.143 ft² (different from the earlier CSV's 26,122.202 ft²). Explicit server calculation succeeded: cut 208,409.265 ft³, fill 54.217 ft³, net 208,355.048 ft³, coverage 100.000%. The card and inspector changed to View volume. This verifies the currently saved outline, not the older CSV geometry or independent field accuracy.
+
+Its native section loaded automatically: 4,209 crossed cells at 0°, then 9,148 at 45° after numeric input, without changing the saved volume. Source displayed DSM, EPSG:32616, reviewed-source-provenance and vertical datum unverified. Reset section was exercised. No original source or measurement geometry was edited. Final PNG/PDF delivery and refreshed loaded-navigation acceptance remain separate checks.
+
 Audited current checkout `be8e853` on 22 September 2026. The separate new-task/import workflow is planning work and is not evidence of completion for this measurement goal.
 
 | Requirement | Evidence inspected | Conclusion |
