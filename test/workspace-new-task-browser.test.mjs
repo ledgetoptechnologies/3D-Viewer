@@ -9,12 +9,13 @@ import {fileURLToPath} from 'node:url';
 import {acquireBrowserHarnessLock} from './browser-lock.mjs';
 import {createServer as createViteServer} from 'vite';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),delay=ms=>new Promise(r=>setTimeout(r,ms));
+async function bounded(promise,ms,label){let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(`${label} timed out after ${ms}ms`)),ms);})]);}finally{clearTimeout(timer);}}
 class Cdp {
   constructor(socket){this.socket=socket;this.id=0;this.pending=new Map();this.errors=[];this.choosers=[];socket.addEventListener('message',event=>{const value=JSON.parse(event.data),p=this.pending.get(value.id);if(value.method==='Page.fileChooserOpened')this.choosers.push(value.params);if(value.method==='Runtime.exceptionThrown')this.errors.push(value.params.exceptionDetails);if(p){this.pending.delete(value.id);clearTimeout(p.timer);value.error?p.reject(new Error(value.error.message)):p.resolve(value.result);}});}
-  static async connect(url){const socket=new WebSocket(url);await new Promise((resolve,reject)=>{socket.addEventListener('open',resolve,{once:true});socket.addEventListener('error',reject,{once:true});});return new Cdp(socket);}
-  command(method,params={}){const id=++this.id;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(`CDP timeout ${method}`)),12000);this.pending.set(id,{resolve,reject,timer});this.socket.send(JSON.stringify({id,method,params}));});}
+  static async connect(url){const socket=new WebSocket(url);try{await bounded(new Promise((resolve,reject)=>{socket.addEventListener('open',resolve,{once:true});socket.addEventListener('error',reject,{once:true});}),5000,'CDP connection');return new Cdp(socket);}catch(error){socket.close();throw error;}}
+  command(method,params={}){const id=++this.id;return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error(`CDP timeout ${method}`));},12000);this.pending.set(id,{resolve,reject,timer});this.socket.send(JSON.stringify({id,method,params}));});}
   async eval(expression){const r=await this.command('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw new Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result?.value;}
-  close(){this.socket.close();for(const p of this.pending.values())clearTimeout(p.timer);}
+  close(){this.socket.close();for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('CDP fixture closed'));}this.pending.clear();}
 }
 async function until(fn){const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await delay(30);}throw new Error('Fixture timeout');}
 const html=`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/workspace-management.css"><dialog class="workspace-modal" open><header class="modal-heading"><h2>New task</h2></header><div id="host"></div></dialog><script type="module">
@@ -41,15 +42,15 @@ fixture.mount();document.body.dataset.ready='true';
 </script>`;
 
 test('New task uses real form controls with isolated upload/copy APIs, retry and cancellation',{timeout:60000},async t=>{
-  const executable=[process.env.CHROME_PATH,process.env.EDGE_PATH,'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','/usr/bin/chromium'].filter(Boolean).find(existsSync);if(!executable)return t.skip('Chromium-family browser required');
-  const unlock=await acquireBrowserHarnessLock({root});let server,browser,client,temp,vite;
+  const executable=[process.env.CHROME_PATH,process.env.EDGE_PATH,'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','/usr/bin/google-chrome','/usr/bin/chromium'].filter(Boolean).find(existsSync);if(!executable)return t.skip('Chromium-family browser required');
+  const unlock=await acquireBrowserHarnessLock({root});let server,browser,client,temp,vite,failure;const sockets=new Set();let browserStderr='';
   try{
     temp=mkdtempSync(path.join(tmpdir(),'ltds-new-task-test-'));
-    server=createServer((req,res)=>{const pathname=new URL(req.url,'http://fixture').pathname;if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(html);}vite.middlewares(req,res);});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+    server=createServer((req,res)=>{const pathname=new URL(req.url,'http://fixture').pathname;if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(html);}vite.middlewares(req,res);});server.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});await new Promise(r=>server.listen(0,'127.0.0.1',r));
     // Vite 8 still imports its client for CSS with HMR disabled. Attach that
     // client's transport to this fixture's ephemeral server, never port24678.
     vite=await createViteServer({root,configFile:false,server:{middlewareMode:true,hmr:false,ws:{server}},appType:'custom',logLevel:'error'});
-    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${temp}`,'about:blank'],{windowsHide:true,stdio:'ignore'});const active=path.join(temp,'DevToolsActivePort');await until(()=>existsSync(active));const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);await client.command('Page.enable');await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});await until(()=>client.eval("document.body?.dataset.ready==='true'"));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${temp}`,'about:blank'],{windowsHide:true,stdio:['ignore','ignore','pipe']});browser.stderr.on('data',chunk=>{browserStderr=(browserStderr+chunk.toString()).slice(-8000);});let launchError;browser.on('error',error=>{launchError=error;});const active=path.join(temp,'DevToolsActivePort');await until(()=>{if(launchError)throw launchError;if(browser.exitCode!==null)throw new Error(`Browser exited (${browser.exitCode}) before CDP startup: ${browserStderr}`);return existsSync(active);}).catch(error=>{throw new Error(`${error.message}\nBrowser startup (${executable}): ${browserStderr}`);});const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`,{signal:AbortSignal.timeout(5000)})).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);await client.command('Page.enable');await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});await until(()=>client.eval("document.body?.dataset.ready==='true'"));
     await client.command('Runtime.enable');
     await t.test('PC action immediately opens image picker; compact folder alternate and cancellation preserve selection',async()=>{
       await client.command('Page.setInterceptFileChooserDialog',{enabled:true});
@@ -115,5 +116,15 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false});await client.eval("document.querySelector('dialog').open=false;const card=document.createElement('div');card.className='project-row selected';card.style.cssText='position:absolute;top:20px;left:20px;width:500px;height:70px;padding:10px';card.innerHTML='<details class=project-more-actions open style=width:44px;margin-left:auto><summary>…</summary><div class=project-more-menu><button>Import</button><button>Rename</button><button>Delete project</button></div></details>';document.body.append(card)");assert.equal(await client.eval("getComputedStyle(document.querySelector('.project-row')).overflow"),'visible');assert.equal(await client.eval("(()=>{const b=document.querySelector('.project-more-menu button:last-child'),r=b.getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===b;})()"),true);
     });
     await delay(80);assert.deepEqual(client.errors,[],'no late renderer errors after preview removal');
-  }finally{client?.close();if(browser){const exit=new Promise(r=>browser.once('exit',r));browser.kill();await Promise.race([exit,delay(2500)]);}if(server){server.closeAllConnections?.();await new Promise(r=>server.close(r));}await vite?.close();unlock();if(temp){assert.ok(path.resolve(temp).startsWith(path.resolve(tmpdir(),'ltds-new-task-test-')));try{rmSync(temp,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;}}}
+  }catch(error){failure=error;throw error;}finally{
+    const cleanupErrors=[];client?.close();
+    if(browser&&browser.exitCode===null&&browser.signalCode===null){const exit=new Promise(r=>browser.once('exit',r));browser.kill();try{await bounded(exit,2500,'Browser exit');}catch{browser.kill('SIGKILL');try{await bounded(exit,2500,'Forced browser exit');}catch(error){cleanupErrors.push(error);}}}
+    // HTTP close does not close upgraded WebSockets. Retire Vite's transport
+    // first, then force-close only connections owned by this fixture.
+    try{await bounded(Promise.resolve(vite?.close()),5000,'Vite cleanup');}catch(error){cleanupErrors.push(error);}
+    for(const socket of sockets)socket.destroy();
+    if(server){server.closeAllConnections?.();try{await bounded(new Promise(r=>server.close(r)),3000,'HTTP fixture cleanup');}catch(error){cleanupErrors.push(error);}}
+    unlock();if(temp){assert.ok(path.resolve(temp).startsWith(path.resolve(tmpdir(),'ltds-new-task-test-')));try{rmSync(temp,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))cleanupErrors.push(error);}}
+    if(cleanupErrors.length){if(failure)failure.message+=`\nCleanup also failed: ${cleanupErrors.map(error=>error.message).join('; ')}`;else throw new AggregateError(cleanupErrors,'Browser fixture cleanup failed');}
+  }
 });

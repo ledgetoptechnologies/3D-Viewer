@@ -1,5 +1,23 @@
 # Measurement goal completion audit
 
+## Current acceptance snapshot after e909dde (supersedes older pending notes below)
+
+The entries below this snapshot are chronological evidence, not a claim that every earlier blocker remains open.
+
+- The user supplied `measured-view.png`, `measured-view (1).png` and the exported County Road D PDF. Both PNGs visibly contain the model and measurement overlays. Both PDF pages were rendered and inspected: page one contains the captured view and all five records (including Polygon 1's saved 208,355.048 ft³ net volume); page two contains the accuracy note. Actual file delivery is therefore verified for these user-supplied exports. The reported early-print issue prompted a readiness guard in e909dde; native post-fix browser interaction is not yet accepted.
+- Latest Windows isolated browser checks passed: 11 New Task tests and 3 measurement/sidebar/editor/capture tests. The latter generated an actual PNG and print-backend PDF. Linux source/build verification passed 1,580 tests, with 31 explicitly skipped browser/native/host-dependent checks (1,611 total). Skips are not live acceptance.
+- Fresh current-code numerical replay against the original 556,007,817-byte DSM returned 5,647.271691175985 m³ in 6.301 seconds. This is +0.218291175986 m³ (+0.0038655766%) against WebODM's 5,647.0534 m³, within the documented 1 m³ comparison tolerance, without downsampling. This is numerical compatibility, not independently surveyed field accuracy.
+- Fresh list-layout, capture-lifecycle and review-controller suites passed 46/46. They cover two-card overflow, explicit print readiness, revocation/late-response retirement and bounded grant issuance.
+- The open live cloud still renders but its personal measurements are hidden; the Operations reauthorization tab is at Cloudflare sign-in. Sign-in/reopening was requested for the remaining renewal soak check. This does not justify bypassing authentication or extending authorization. The displayed cloud currently reports adaptive 4.2M active / 10M requested; this stationary observation is NOT counted as unchanged-full-budget navigation acceptance.
+- e909dde is pushed to main. Release run 35807283155 is still in source verification at the time of this snapshot. The prior run 35804280532 was superseded/cancelled; its logs show a New Task browser-test failure followed by a non-exiting runner. Linux browser teardown is being investigated separately. Neither pending build is a verified published container.
+- Raw-photo selection/import and task options are now implemented; older statements calling that work planning-only are obsolete. Survey-date comparison, reconstruction-boundary authoring and processing alignment remain separate unfinished features in TASK_WORKFLOW_NEXT_PHASE_2026-09-22.md.
+
+The active measurement goal remains unproven until release verification and authorized live renewal acceptance complete. Operations code and existing measurements/source data remain unchanged by this audit.
+
+Follow-up after the user signed back in: the old model tabs were closed, so this is fresh-session recovery, not proof of renewal in an existing tab. A new County Road D session restored all five records automatically. Polygon 1 retained 208,355.048 ft³ and View volume. Its native profile loaded automatically with 4,209 cells at 0°, updated to 9,148 at 45°, and retained the volume; the section was reset and closed without changing geometry. Another 16 explicit-volume/permission tests and 13 reference/native-profile tests passed.
+
+The test-only build follow-up prefers Google Chrome on Linux before Chromium wrappers, bounds browser startup/discovery/CDP and teardown, closes Vite before HTTP upgraded sockets, and preserves original assertion failures. It passes 11/11 on Windows Edge and 11/11 on Linux Chromium. A deliberately failing `/bin/false` browser executable exits nonzero in 1.25 seconds with startup diagnostics rather than hanging. The historical CI failure's exact cause is still unconfirmed; these checks prove the corrected failure path, not a guessed retrospective diagnosis.
+
 ## Live acceptance after deployment of ad6e404
 
 Additional isolated browser export acceptance produced a 30,694-byte measured-view PNG (800×600 with current-frame pixel assertions), a 1,451-byte profile CSV, a 28,901-byte profile PNG, and a 44,652-byte PDF through Chromium's print renderer. Sixteen capture/report/profile tests passed without console errors. Production print CSS hid Viewer controls and retained the report. The test explicitly enables browser downloads; it does not prove the embedded host permits them or exposes a native print dialog. No speculative application export rewrite was made.
