@@ -318,7 +318,7 @@ router.get('/session-products/:token/:id', async (req,res,next) => {
     if(!access?.download)return res.status(403).json({error:'Downloads are not permitted for this model'});
     res.setHeader('Cache-Control','private, no-store');
     const base=`/session-products/${encodeURIComponent(req.params.token)}/${encodeURIComponent(req.params.id)}`;
-    res.json({products:registeredProducts(access.model?.activeVersion?.assets,{review:access.review,cameras:access.cameras})
+    res.json({products:registeredProducts(access.model?.activeVersion?.assets,{review:access.review,cameras:access.cameras,modelReport:true})
       .map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
   }catch(error){next(error);}
 });
@@ -331,7 +331,7 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
     const access=await pathTokenAuthorization(req,req.params.id);
     if(!access?.download)return res.sendStatus(403);
     const asset=access.model?.activeVersion?.assets.find(candidate=>candidate.kind===req.params.kind);
-    const product=productDescriptor(asset,{review:access.review,cameras:access.cameras});
+    const product=productDescriptor(asset,{review:access.review,cameras:access.cameras,modelReport:true});
     if(!product)return res.sendStatus(404);
     // Retain only a minimal authorization request; never retain Express req
     // objects, bodies or sockets for the duration of a capability.
@@ -340,7 +340,7 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
       const current=await pathTokenAuthorization(original,id);
       if(!current?.download||current.model?.activeVersion?.id!==versionId)return null;
       const registered=current.model.activeVersion.assets.find(candidate=>candidate.id===asset.id&&candidate.sha256===asset.sha256);
-      const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras});
+      const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras,modelReport:true});
       return descriptor?{model:current.model,asset:registered,product:descriptor}:null;
     });
     res.setHeader('Cache-Control','private, no-store');

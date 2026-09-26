@@ -1,6 +1,8 @@
 import { measurementCollection, measurementMetrics, measurementValue, validateMeasurementGeometry, exportMeasurements, changeMeasurementVertex, measurementEditHandles } from './measurement-document.mjs';
 import { createMeasurementStore } from './measurement-store.mjs';
 import './measurement-workspace.css';
+import './measurement-report-document.css';
+import {renderMeasurementReport} from './measurement-report-document.mjs';
 import {openSurfaceDialog} from './measurement-volume-dialog.mjs';
 import {openAdminCalculationDialog,availableAdminSources} from './measurement-admin-dialog.mjs';
 import {createServerSurfaceCalculator} from './measurement-server-surface.mjs';
@@ -12,9 +14,9 @@ const interactive = event => event.target?.closest?.('input,textarea,select,butt
 const savedUnits = {imperial:'imperial',feet:'ft',yards:'yd',metric:'m',centimeters:'cm'};
 const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yards',metric:'metric',m:'metric',cm:'centimeters'};
 
-export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, accessGeneration=()=>0 }) {
+export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
-  const selectedExports=new Set(),reportDialogs=new Set();
+  const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set();
   const metricCache=new WeakMap();
   let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null,loadFailed=false;
   const displayCache=new Map();
@@ -125,7 +127,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function releaseCursor(){if(cursorOwner){cursorOwner.style.cursor=previousCursor;cursorOwner=null;}}
   function updateCursor(){if(!bound?.element)return;const element=bound.element;element.classList.toggle('measurement-placing',!!draft&&!shift);element.classList.toggle('measurement-navigating',!!draft&&shift);element.classList.toggle('measurement-editing',!!draft&&!shift&&(editing||space));if(draft){if(cursorOwner!==element){releaseCursor();cursorOwner=element;previousCursor=element.style.cursor||'';}element.style.cursor=shift?'grab':editing||space?'move':'crosshair';}else releaseCursor();}
   function disarm(){draft=null;editing=false;selectedVertex=-1;editBaseline=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
-  function closeReports(){for(const dialog of [...reportDialogs])dialog.retire();}
+  function closeReports(){for(const capture of reportCaptures)capture.abort();reportCaptures.clear();for(const dialog of [...reportDialogs])dialog.retire();}
   function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;closeReports();}
   function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
     if(invalidated)return;invalidated=true;viewGeneration++;clearDisplayRequests({all:true});recordSnapshot=[];orderedRecords=[];ready=false;adminAllowed=false;selected=null;selectedExports.clear();disarm();closeDialogs();store.invalidate?.();svg.innerHTML='';lastSvg='';controls.hidden=true;tell(reason);if(notify)onAccessLost();
@@ -318,31 +320,38 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     return canvas;
   }
   async function report(){
-    const generation=viewGeneration,reportUnits=units,chosen=structuredClone(exportRecords());let reportImage=null,captureWarning='';
+    const generation=viewGeneration,reportUnits=units,chosen=structuredClone(exportRecords()),metadata=reportMetadata();let reportImage=null,captureWarning='',ortho=null;
+    const capture=new AbortController();reportCaptures.add(capture);
+    tell('Preparing measurements report and overview images…');
     try{const canvas=await screenshot({allowIncomplete:true});reportImage=canvas.toDataURL('image/png');}catch(error){captureWarning=`View image unavailable: ${error.message}. The saved measurement tables are included below.`;}
-    if(disposed||!allowed()||generation!==viewGeneration)throw new Error('Access or view changed during report capture.');
+    try{if(captureReportOrtho&&!capture.signal.aborted&&allowed()&&generation===viewGeneration)ortho=await captureReportOrtho({records:chosen,signal:capture.signal});}
+    catch{captureWarning+=(captureWarning?' ':'')+'Orthophoto overview unavailable. Your saved measurements are still included.';}
+    finally{reportCaptures.delete(capture);}
+    if(disposed||!allowed()||generation!==viewGeneration||capture.signal.aborted||reportUnits!==units)throw new Error('Access or view changed during report capture.');
     const dialog=document.createElement('dialog');dialog.className='measurement-report';
-    dialog.innerHTML=`<div class="measurement-actions"><button data-print>Print / Save as PDF</button><button data-close>Close</button></div><h1>Measurement report</h1><p>${escape(coordinateReference().crs)} · ${escape(units)} · ${escape(new Date().toISOString())}</p><img alt="Measured view"><table><thead><tr><th>Name</th><th>Geometry</th><th>Calculation</th></tr></thead><tbody>${chosen.map(r=>`<tr><td>${escape(r.name)}</td><td>${escape(summary(r))}<br>Edges: ${escape(measurementMetrics(r).edgeLengthsM.map(v=>measurementValue(v,1,units)).join(' · '))}</td><td style="white-space:pre-line">${escape(calculationSummary(r))}</td></tr>`).join('')}</tbody></table><p>Display precision does not establish survey accuracy. Estimated geometry and missing coverage must be considered before using quantities. Coordinates and calculation provenance are available in the JSON export. Map-only geometry has no measured elevation until a surface calculation is performed.</p>`;
-    dialog.retire=()=>{if(!reportDialogs.delete(dialog))return;dialog.querySelector('img').removeAttribute('src');dialog.innerHTML='';dialog.remove();};
-    if(reportImage)dialog.querySelector('img').src=reportImage;else{dialog.querySelector('img').hidden=true;const warning=document.createElement('p');warning.textContent=captureWarning;dialog.querySelector('h1').after(warning);}
-    dialog.querySelector('h1').textContent='Model report';
+    const reportWarnings=[captureWarning,...(!ortho?.dataUrl?(ortho?.warnings||[]):[])].filter(Boolean);
+    dialog.innerHTML=renderMeasurementReport({records:chosen,units:reportUnits,modelName:metadata.modelName,coordinateReference:coordinateReference(),currentView:reportImage?{src:reportImage}:null,orthographicView:ortho?.dataUrl?{src:ortho.dataUrl,caption:[ortho.caption,...new Set(ortho.warnings||[])].filter(Boolean).join(' ')}:null,captureWarning:[...new Set(reportWarnings)].join(' ')});
+    dialog.retire=()=>{if(!reportDialogs.delete(dialog))return;for(const img of dialog.querySelectorAll('img'))img.removeAttribute('src');dialog.innerHTML='';dialog.remove();};
+    if(reportImage)dialog.querySelector('img').src=reportImage;else dialog.querySelector('img').hidden=true;
     const print=dialog.querySelector('[data-print]');let reportReady=false;
     print.disabled=true;print.textContent='Preparing report…';
     const current=()=>!disposed&&allowed()&&generation===viewGeneration&&reportUnits===units&&reportDialogs.has(dialog);
     reportDialogs.add(dialog);document.body.append(dialog);dialog.showModal();dialog.querySelector('[data-close]').onclick=()=>dialog.retire();dialog.onclose=()=>dialog.retire();
+    for(const toggle of dialog.querySelectorAll('[data-report-toggle]'))toggle.onchange=()=>{if(!current()){dialog.retire();return;}const figure=dialog.querySelector(`[data-report-figure="${toggle.dataset.reportToggle}"]`);if(figure)figure.hidden=!toggle.checked;};
     print.onclick=()=>{if(!current()){dialog.retire();return;}if(!reportReady)return;window.print();};
     // The captured data URL can still be decoding when the modal first opens.
     // Fonts may also load asynchronously. Never open print automatically: make
     // the user's explicit button available only once printable content is ready.
     dialog.getBoundingClientRect?.(); // Trigger layout/font discovery before awaiting FontFaceSet.ready.
-    const imageReady=reportImage?dialog.querySelector('img').decode().catch(()=>{
-      if(!current())return;const img=dialog.querySelector('img');img.hidden=true;img.removeAttribute('src');
+    const imageReady=Promise.all([...dialog.querySelectorAll('img')].filter(img=>img.getAttribute('src')).map(img=>img.decode().catch(()=>{
+      if(!current())return;img.hidden=true;img.removeAttribute('src');
       const warning=document.createElement('p');warning.textContent='View image unavailable. The saved measurement tables are included below.';dialog.querySelector('h1').after(warning);
-    }):Promise.resolve();
+    })));
     try{await Promise.all([imageReady,document.fonts?.ready||Promise.resolve()]);}
     catch{if(current())print.textContent='Report preparation unavailable';return;}
     if(!current()){dialog.retire();return;}
     dialog.getBoundingClientRect?.();reportReady=true;print.disabled=false;print.textContent='Print / Save as PDF';
+    tell('Measurements report ready. Choose images to include, then print or save as PDF.');
   }
   controls.addEventListener('change',event=>{if(event.target.dataset.m==='units'){units=event.target.value;const record=store.records.get(selected);if(record&&!draft)void store.patch(record,{displayPreferences:{...record.displayPreferences,units:savedUnits[units]}}).catch(error=>tell(error.message));renderPanel();}if(event.target.dataset.m==='export-check'){const id=event.target.closest('[data-record]').dataset.record;event.target.checked?selectedExports.add(id):selectedExports.delete(id);}});
   controls.addEventListener('click',async event=>{

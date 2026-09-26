@@ -92,6 +92,50 @@ test('registered orthophoto cutline download streams unchanged geometry and revo
   c.session.permissions.download=false;assert.equal((await fetch(c.base+grant.url)).status,403);
 });
 
+test('original report is an explicit download product without entering public asset publication',()=>{
+  const report=asset('report','odm_report/report.pdf',{format:'pdf',contentType:'application/pdf',published:false});
+  assert.equal(productDescriptor(report),null);
+  assert.equal(productDescriptor(report,{modelReport:true}).label,'Model report — processing & quality');
+  assert.equal(productDescriptor({...report,contentType:'text/html'},{modelReport:true}),null);
+  assert.equal(productDescriptor({...report,relativePath:'odm_report/report.html'},{modelReport:true}),null);
+  assert.equal(require('../server/processingSecurity').publicDerivativeKind('report'),false);
+});
+
+test('imported and node-processed original PDF reports download unchanged with version-scoped authorization',async t=>{
+  const c=await fixture(t),relative='odm_report/report.pdf',body=Buffer.from('%PDF-1.7\nOriginal processing quality report\n%%EOF');
+  fs.mkdirSync(path.join(c.root,'odm_report'));fs.writeFileSync(path.join(c.root,relative),body);
+  const imported=(await require('../server/catalogImport').discoverAssets(c.root)).assets.find(a=>a.kind==='report');
+  assert.ok(imported,'import discovers the original PDF');
+  const processed=require('../server/processingWorker').discoverOutputs(c.root).find(a=>a.kind==='report');
+  assert.equal(processed.relativePath,relative,'node processing discovers the same original PDF');
+  const report={...imported,id:'original-report',rootKey:'fixture',published:false};c.version.assets.push(report);
+  const base=`${c.base}/session-products/${c.viewerToken}/model`;
+  const products=(await(await fetch(base)).json()).products,product=products.find(p=>p.kind==='report');assert.ok(product);
+  const grant=await(await fetch(c.base+product.grantUrl,{method:'POST'})).json();
+  const downloaded=await fetch(c.base+grant.url);assert.equal(downloaded.status,200);assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()),body);
+  assert.equal(report.published,false,'download does not publish the original source');
+  assert.equal((await fetch(`${c.base}/session-assets/${c.viewerToken}/model/fixture/${relative}`)).status,404);
+  c.session.permissions.download=false;assert.equal((await fetch(c.base+grant.url)).status,403);
+  assert.equal((await fetch(c.base+product.grantUrl,{method:'POST'})).status,403);
+  c.session.permissions.download=true;
+  const next=await(await fetch(c.base+product.grantUrl,{method:'POST'})).json();
+  fs.writeFileSync(path.join(c.root,relative),Buffer.alloc(body.length,32));assert.equal((await fetch(c.base+next.url)).status,409);
+  c.model.activeVersionId='replacement';assert.equal((await fetch(c.base+next.url)).status,403);
+});
+
+test('shared original model reports honor existing download permission and share revocation',async t=>{
+  const c=await fixture(t),body=Buffer.from('%PDF-original');fs.writeFileSync(path.join(c.root,'report.pdf'),body);
+  c.version.assets.push(asset('report','report.pdf',{format:'pdf',contentType:'application/pdf',published:false,byteSize:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')}));
+  const share={id:'share',modelId:'model',permissions:{view:true,download:false},versionPolicy:'active'};
+  c.repository.getPublicShare=id=>id==='share'?share:null;c.repository.publicShareLive=value=>!!value&&!value.revokedAt;
+  const token=auth.sign({kind:'share-asset',shareId:'share',modelId:'model'},60000),base=`${c.base}/session-products/${token}/model`;
+  assert.equal((await fetch(base)).status,403);
+  share.permissions.download=true;
+  const grant=await(await fetch(`${base}/report/download-grants`,{method:'POST'})).json();assert.ok(grant.url);
+  assert.deepEqual(Buffer.from(await(await fetch(c.base+grant.url)).arrayBuffer()),body);
+  share.revokedAt=new Date().toISOString();assert.equal((await fetch(c.base+grant.url)).status,403);
+});
+
 test('staff capability binds output state and exact registered asset without revealing admin bearer',async(t)=>{
   const c=await fixture(t),endpoint=`${c.base}/api/v1/processing/outputs/version/products/ortho/download-grants`,headers={authorization:`Bearer ${c.adminToken}`,'content-type':'application/json'};
   assert.equal((await fetch(endpoint,{method:'POST',headers:{authorization:`Bearer ${c.viewerToken}`,'content-type':'application/json'},body:'{}'})).status,401);

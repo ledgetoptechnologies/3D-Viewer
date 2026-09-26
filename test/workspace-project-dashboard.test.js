@@ -84,7 +84,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/output\.status==='ready'&&output\.attemptId&&can\('viewer\.processing\.publish'\)/);
   assert.match(source,/button\('open-review',output\.attemptId,'View',true\)/);
   assert.match(source,/if\(canShareOutput\(output\)\)/);
-  for(const label of ["'View'","'Download'","'Report'","'Share'"])assert.ok(source.includes(label),label);
+  for(const label of ["'View'","'Download'","'Model report'","'Share'"])assert.ok(source.includes(label),label);
   assert.match(source,/class="task-quick-actions row-actions"/);
   assert.match(source,/class="task-summary-toggle"/);
   assert.match(css,/\.task-quick-actions .*min-height:46px/);

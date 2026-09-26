@@ -16,17 +16,21 @@ const PRODUCTS = {
   texturedModel: ['Textured model package', ['.zip']],
   cameraParameters: ['Camera parameters', ['.json', '.txt', '.xml']],
   shots: ['Camera positions', ['.geojson', '.json']],
-  report: ['Quality report', ['.pdf']],
+  report: ['Model report — processing & quality', ['.pdf']],
   allAssets: ['All assets archive', ['.zip']],
   backup: ['Backup archive', ['.zip']],
 };
 
 // A manifest is not its product. EPT, 3D Tiles and loose glTF/OBJ texture
 // dependencies must never be presented as complete original downloads.
-function productDescriptor(asset, { staff = false, review = false, cameras = true } = {}) {
+function productDescriptor(asset, { staff = false, review = false, cameras = true, modelReport = false } = {}) {
   const spec = PRODUCTS[asset?.kind];
   if (asset?.kind === 'orthoCutline' && !CUTLINE_PATTERN.test(asset.relativePath || '')) return null;
-  if (!spec || (!staff && (!publicDerivativeKind(asset.kind) || (!review && !asset.published)))) return null;
+  // Only the download-capability routes opt into the original report. It stays
+  // outside the public asset allowlist and does not require publishing raw files.
+  const originalReport = modelReport && asset?.kind === 'report'
+    && asset.format === 'pdf' && asset.contentType === 'application/pdf';
+  if (!spec || (!staff && !originalReport && (!publicDerivativeKind(asset.kind) || (!review && !asset.published)))) return null;
   if (asset.kind === 'shots' && !cameras) return null;
   if (!asset.sha256 || !Number.isSafeInteger(asset.byteSize) || asset.byteSize < 0
     || safeRelativePath(asset.relativePath) !== asset.relativePath) return null;

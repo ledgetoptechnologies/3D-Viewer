@@ -163,6 +163,14 @@ test('real editor inserts midpoint, moves/deletes selected vertices and retains 
         assert.equal(await client.evaluate("getComputedStyle(document.querySelector('dialog.measurement-report')).display"),'block');
         const printed=await client.command('Page.printToPDF',{printBackground:true,preferCSSPageSize:true}),pdf=Buffer.from(printed.data,'base64');
         assert.equal(pdf.subarray(0,5).toString(),'%PDF-');assert.ok(pdf.length>10000);assert.match(pdf.toString('latin1'),/\/Type\s*\/Page\b/);
+        if(process.env.MEASUREMENT_REPORT_QA_DIR){
+          const artifacts=path.resolve(process.env.MEASUREMENT_REPORT_QA_DIR);mkdirSync(artifacts,{recursive:true});
+          writeFileSync(path.join(artifacts,'measurement-report-browser.pdf'),pdf);
+          writeFileSync(path.join(artifacts,'measured-view-browser.png'),bytes);
+          const screenshot=await client.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});
+          writeFileSync(path.join(artifacts,'measurement-report-print-preview.png'),Buffer.from(screenshot.data,'base64'));
+          t.diagnostic(`Report QA artifacts preserved in ${artifacts}`);
+        }
         await client.command('Emulation.setEmulatedMedia',{media:''});
         t.diagnostic(`Browser print backend produced ${pdf.length}-byte PDF; native host print UI is not asserted.`);
         await button('dialog.measurement-report [data-close]');await waitFor(client,"!document.querySelector('dialog.measurement-report')");t.diagnostic(`captureView downloaded actual ${bytes.length}-byte 800x600 PNG; openReport rendered measurement table and a freshly captured current frame.`);

@@ -67,12 +67,12 @@ async function waitFor(client, expression, description, timeoutMs = 30_000) {
   throw new Error(description);
 }
 
-async function startFixture() {
+async function startFixture({ proactive = false } = {}) {
   const vite = await createViteServer({ root, appType: 'spa', logLevel: 'silent', optimizeDeps: { force: true },
     server: { middlewareMode: true, hmr: false } });
   const base = '/session-assets/session-token/session-browser-fixture/derivatives';
   const model = {
-    id: 'session-browser-fixture', title: 'Session renewal fixture', displayUnits: 'imperial',
+    id: 'session-browser-fixture', title: 'Session renewal fixture', displayUnits: 'imperial', activeVersion: { id: 'version-one' },
     assets: { glb: `${base}/original.glb`, obj: null, tiles: `${base}/tileset.json`,
       shots: null, cameraPhotos: null, ortho: null, dsm: null, dtm: null, ept: null,
       pointCloud: null, pointCloudFormat: null },
@@ -92,8 +92,8 @@ async function startFixture() {
   const requests = [];
   let expired = false, unavailable = false, issued = false, redemptions = 0;
   let deferLate = false, lateDenial = null;
-  let expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
-  const session = () => ({ model, sessionId: 'session-browser', sessionMode: 'published',
+  let expiresAt = new Date(Date.now() + (proactive ? 5 * 60_000 + 15_000 : 10 * 60_000)).toISOString();
+  const session = () => ({ model, sessionId: 'session-browser', sessionMode: 'published', subject: 'ops:fixture', audience: 'ops',
     accessToken: 'session-token', expiresAt, permissions: { view: true, measure: true, cameras: true },
     displayUnits: 'imperial', allowedEmbedOrigins: [] });
   const server = createServer(async (request, reply) => {
@@ -105,15 +105,18 @@ async function startFixture() {
     };
     if (url.pathname === '/controller.html') return send(200, `<!doctype html><script type="module">
       import { ReviewSessionController } from '/review-session-controller.mjs';
-      window.controller = new ReviewSessionController({ origin: location.origin, issueGrant: async () => {
+      window.controller = new ReviewSessionController({ origin: location.origin, storage: localStorage, issueGrant: async () => {
         const response = await fetch('/issue-grant', { method: 'POST' });
         if (!response.ok) throw Object.assign(new Error('grant unavailable'), { status: response.status });
         return response.json();
       } });
-      window.controller.track('${channelId}', { sessionMode:'published', outputId:'version-one',
+      const authentication = await fetch('/workspace-current').then(response => response.json());
+      window.controller.setAuthenticatedSubject(authentication.subject);
+      if (!new URL(location.href).searchParams.has('restore')) window.controller.track('${channelId}', { sessionMode:'published', outputId:'version-one',
         modelId:'session-browser-fixture', modelVersionId:'version-one', sessionTtlSeconds:1800 });
       window.controllerReady = true;
     </script>`, 'text/html');
+    if (url.pathname === '/workspace-current') return send(200, { subject: 'ops:fixture' });
     if (url.pathname === '/api/v1/health') return send(200, { ok: true });
     if (url.pathname === '/api/v1/sessions/current') return send(200, session());
     if (url.pathname === '/issue-grant') {
@@ -149,14 +152,16 @@ async function startFixture() {
     redemptions: () => redemptions };
 }
 
-test('published session renews denied tiles over BroadcastChannel and retains the view when authorization ends',
+for (const scenario of ['denied', 'proactive', 'restored']) {
+const proactive = scenario === 'proactive';
+test(`published session renews ${proactive ? 'proactively without denied tiles' : scenario === 'restored' ? 'after an expired viewer reconnects to a fresh workspace' : 'denied tiles'} over BroadcastChannel and retains the view when authorization ends`,
   { timeout: 180_000 }, async t => {
     const executable = browserPath();
     if (!executable) return t.skip('Chromium/Edge browser unavailable');
     const release = await acquireBrowserHarnessLock({ root });
     let fixture, browser, profile, viewer, controller;
     try {
-      fixture = await startFixture();
+      fixture = await startFixture({ proactive });
       profile = mkdtempSync(path.join(tmpdir(), 'ltds-session-renewal-browser-'));
       const portServer = createNetServer();
       await new Promise(resolve => portServer.listen(0, '127.0.0.1', resolve));
@@ -196,6 +201,41 @@ test('published session renews denied tiles over BroadcastChannel and retains th
             renderer.lruCache.remove(leaf); renderer.requestTileContents(leaf);
           } })()`);
       };
+      if (scenario === 'restored') {
+        // Match a workspace document going away: persist only routing hints,
+        // close its real channel, and retain the already-open Viewer document.
+        await controller.evaluate(`window.controller.suspend({ preserve: true }); true;`);
+        const saved = await controller.evaluate(`JSON.parse(localStorage.getItem('ltds-viewer-model-controller-contexts-v1'))`);
+        assert.equal(saved.subject, 'ops:fixture');
+        assert.equal(saved.records.length, 1);
+        assert.deepEqual(Object.keys(saved.records[0]).sort(), ['channelId', 'context', 'updatedAt']);
+        assert.doesNotMatch(JSON.stringify(saved), /accessToken|Bearer|grant|permissions|embedUrl/);
+        await controller.command('Page.navigate', { url: 'about:blank' });
+        // Resume an overnight tab through its public lifecycle event. The real
+        // unanswered-controller timeout must hide expired access before restore.
+        await viewer.evaluate(`window.clockAdvance = 11 * 60_000; window.dispatchEvent(new Event('focus')); true;`);
+        await waitFor(viewer, `window.__ltds.sessionDiagnostics().access === 'unavailable'
+          && window.__ltds.sessionDiagnostics().expiresInSeconds < 0`, 'expired viewer did not hide access without its workspace', 45_000);
+        assert.equal(fixture.redemptions(), 0);
+        assert.equal(fixture.requests.some(item => item.path === '/issue-grant'), false);
+        await controller.command('Page.addScriptToEvaluateOnNewDocument', { source: 'window.clockAdvance = 11 * 60_000;' });
+        await controller.command('Page.navigate', { url: `${fixture.origin}/controller.html?restore=1` });
+        await waitFor(controller, `window.controllerReady === true && window.controller.records.size === 1`, 'fresh authenticated workspace did not restore its saved channel');
+        await waitFor(viewer, `window.__ltds.sessionDiagnostics().access === 'active'
+          && window.__ltds.sessionDiagnostics().expiresInSeconds > 1000`, 'fresh workspace did not restore the expired viewer');
+        assert.equal(fixture.redemptions(), 1);
+        assert.equal(fixture.requests.filter(item => item.path === '/issue-grant').length, 1);
+        assert.equal(fixture.requests.filter(item => item.path === '/workspace-current').length, 2);
+        assert.equal(fixture.requests.some(item => item.status === 401 || item.status === 403), false,
+          'workspace restoration must not require a denied asset request');
+      } else if (proactive) {
+        await waitFor(viewer, `window.__ltds.sessionDiagnostics().access === 'active'
+          && window.__ltds.sessionDiagnostics().expiresInSeconds > 1000`, 'scheduled proactive renewal did not redeem a grant');
+        assert.equal(fixture.redemptions(), 1);
+        assert.equal(fixture.requests.filter(item => item.path === '/issue-grant').length, 1);
+        assert.equal(fixture.requests.some(item => item.status === 401 || item.status === 403), false,
+          'proactive renewal must not depend on an authorization failure');
+      } else {
       fixture.expire(false);
       await denyLeaf(6 * 60_000);
       await waitFor(viewer, `window.__ltds.sessionDiagnostics().access === 'active'
@@ -208,6 +248,7 @@ test('published session renews denied tiles over BroadcastChannel and retains th
       assert.equal(fixture.requests.filter(item => item.path === '/issue-grant').length, 1, 'late denial must not request another grant');
       assert.equal(await viewer.evaluate("window.__ltds.sessionDiagnostics().access"), 'active');
       assert.ok(fixture.requests.some(item => item.path.endsWith('/leaf.glb') && item.status === 403));
+      }
       assert.ok(fixture.requests.some(item => item.path === '/api/v1/sessions/redeem' && item.status === 200));
       assert.equal(await viewer.evaluate('window.__ltds.tiles() === window.originalRenderer'), true);
       assert.equal(await viewer.evaluate('window.__ltds.tiles().root.children[0].engineData.scene === window.originalShell'), true);
@@ -250,3 +291,4 @@ test('published session renews denied tiles over BroadcastChannel and retains th
       release();
     }
   });
+}

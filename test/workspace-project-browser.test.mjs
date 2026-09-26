@@ -628,7 +628,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Download', 'Report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
+      ['View', 'Download', 'Model report', 'Share'], `${viewport.name}: published task shortcuts must remain focused on viewing and sharing`);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
@@ -732,7 +732,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Alpha Quarry tasks and actions'", `${viewport.name}: terminal project selection failed`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions button')].map(button=>button.textContent)`),
-      ['View', 'Download', 'Report', 'Share'], `${viewport.name}: ready output did not expose focused View, download, report, and Share shortcuts`);
+      ['View', 'Download', 'Model report', 'Share'], `${viewport.name}: ready output did not expose focused View, download, report, and Share shortcuts`);
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-quarry"]').click()`);
     await waitFor(client, "document.querySelector('[data-action=\"task-settings\"]') !== null", `${viewport.name}: ready task tools did not load`);
     await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);

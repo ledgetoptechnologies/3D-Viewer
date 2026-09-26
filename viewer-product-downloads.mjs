@@ -21,7 +21,7 @@ function formatSize(bytes) {
   return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
-export function mountViewerProductDownloads({ host, getAssetRoot, permitted, documentRef = document, fetchRef = fetch,
+export function mountViewerProductDownloads({ host, reportHost, getAssetRoot, permitted, documentRef = document, fetchRef = fetch,
   origin = location.origin } = {}) {
   if (!host || typeof getAssetRoot !== 'function') throw new Error('Product chooser needs a host and asset root');
   let disposed = false, controller = null, generation = 0, currentBase = null;
@@ -32,6 +32,10 @@ export function mountViewerProductDownloads({ host, getAssetRoot, permitted, doc
   const container = element('section', '', 'viewer-product-controls');
   const open = element('button', 'Download products', 'viewer-product-open'); open.type = 'button';
   container.append(open); host.append(container);
+  const reportContainer = element('section', '', 'viewer-product-controls');
+  const reportOpen = element('button', 'Model report — processing & quality', 'viewer-product-open'); reportOpen.type = 'button';
+  const reportStatus = element('p'); reportStatus.setAttribute('role', 'status'); reportStatus.setAttribute('aria-live', 'polite');
+  reportContainer.append(reportOpen, reportStatus); reportHost?.append(reportContainer);
   const dialog = element('dialog', '', 'viewer-product-dialog'); dialog.setAttribute('aria-label', 'Download model products');
   const heading = element('h2', 'Download products');
   const close = element('button', 'Close', 'viewer-product-close'); close.type = 'button';
@@ -41,7 +45,7 @@ export function mountViewerProductDownloads({ host, getAssetRoot, permitted, doc
   const style = element('style');
   style.textContent = '.viewer-product-controls{margin-top:12px}.viewer-product-open{width:100%;padding:9px}.viewer-product-dialog{width:min(440px,calc(100vw - 32px));max-height:80vh;overflow:auto;background:#111216;color:#eee;border:1px solid #444;border-radius:12px;padding:18px}.viewer-product-dialog::backdrop{background:#000a}.viewer-product-dialog h2{font-size:17px;margin:0 60px 14px 0}.viewer-product-close{position:absolute;right:14px;top:12px}.viewer-product-list{display:grid;gap:8px}.viewer-product-item{display:block;width:100%;text-align:left;padding:12px;background:#1b1c21;color:#eee;border:1px solid #444;border-radius:8px;cursor:pointer}.viewer-product-item small{display:block;color:#a9b2c1;margin-top:4px}.viewer-product-item:focus-visible,.viewer-product-dialog button:focus-visible{outline:2px solid #ee5007;outline-offset:2px}.viewer-product-item:disabled{opacity:.6;cursor:wait}.viewer-product-dialog p{font-size:12px;line-height:1.5;color:#adb6c4}';
   documentRef.head.append(style);
-  const cancel = () => { generation++; controller?.abort(); controller = null; };
+  const cancel = () => { generation++; controller?.abort(); controller = null; reportOpen.disabled = false; };
   close.onclick = () => dialog.close();
   dialog.addEventListener('close', () => { cancel(); open.focus(); });
   async function load() {
@@ -55,7 +59,7 @@ export function mountViewerProductDownloads({ host, getAssetRoot, permitted, doc
       if (!response.ok) throw new Error(response.status === 403 ? 'Downloads are not permitted for this model.' : 'Could not load products. Close and retry.');
       const data = await response.json();
       if (disposed || epoch !== generation || !allowed()) return;
-      const products = Array.isArray(data.products) ? data.products : [];
+      const products = Array.isArray(data.products) ? data.products.filter(product => !reportHost || product.kind !== 'report') : [];
       status.textContent = products.length ? 'Choose an existing product. Progress appears in your browser Downloads panel.' : 'No downloadable products are registered for this view.';
       for (const product of products) {
         const expected = `${base}/${encodeURIComponent(product.kind)}/download-grants`;
@@ -82,12 +86,38 @@ export function mountViewerProductDownloads({ host, getAssetRoot, permitted, doc
     } catch (error) { if (error.name !== 'AbortError' && epoch === generation) status.textContent = error.message; }
   }
   open.onclick = () => { if (allowed()) { dialog.showModal(); void load(); } };
+  reportOpen.onclick = async () => {
+    const base = sessionProductsUrl(getAssetRoot(), origin);
+    if (disposed || !allowed() || !base) return;
+    cancel(); const epoch = generation;
+    controller = new AbortController(); const signal = controller.signal;
+    reportOpen.disabled = true; reportStatus.textContent = 'Finding the original model report…';
+    try {
+      const response = await fetchRef(base, { signal, credentials: 'same-origin' });
+      if (!response.ok) throw new Error(response.status === 403 ? 'Downloads are not permitted for this model.' : 'Could not load the model report. Please retry.');
+      const data = await response.json();
+      if (disposed || epoch !== generation || !allowed()) return;
+      const expected = `${base}/report/download-grants`;
+      const report = Array.isArray(data.products) && data.products.find(product => product.kind === 'report' && product.grantUrl === expected);
+      if (!report) { reportStatus.textContent = 'No original processing and quality report is available for this model version.'; return; }
+      const issued = await fetchRef(expected, { method: 'POST', signal, credentials: 'same-origin' });
+      if (!issued.ok) throw new Error(issued.status === 403 ? 'Download access expired or was revoked.' : 'The model report could not be downloaded.');
+      const grant = await issued.json(), url = safeProductTicket(grant.url, origin);
+      if (!url) throw new Error('Invalid download response.');
+      if (disposed || epoch !== generation || !allowed()) return;
+      const link = element('a'); link.href = url; link.download = String(grant.fileName || 'report.pdf'); link.referrerPolicy = 'no-referrer';
+      documentRef.body.append(link); link.click(); link.remove();
+      reportStatus.textContent = 'Original report download started. Check your browser Downloads panel.';
+    } catch (error) { if (error.name !== 'AbortError' && epoch === generation) reportStatus.textContent = error.message; }
+    finally { if (epoch === generation) reportOpen.disabled = false; }
+  };
   function refresh() {
     const nextBase = sessionProductsUrl(getAssetRoot(), origin), changed = currentBase !== nextBase;
     currentBase = nextBase;
     container.hidden = !allowed() || !nextBase;
-    if (container.hidden || changed) { cancel(); if (dialog.open) dialog.close(); }
+    reportContainer.hidden = container.hidden;
+    if (container.hidden || changed) { cancel(); reportOpen.disabled = false; reportStatus.textContent = ''; if (dialog.open) dialog.close(); }
   }
   refresh();
-  return { refresh, destroy() { disposed = true; cancel(); dialog.remove(); container.remove(); style.remove(); } };
+  return { refresh, destroy() { disposed = true; cancel(); dialog.remove(); container.remove(); reportContainer.remove(); style.remove(); } };
 }

@@ -1,0 +1,68 @@
+# Measurement acceptance follow-up
+
+## September 26 follow-up (local, not deployed)
+
+- Final isolated Linux current-source verification: production build passed; 1,665 tests, 1,625 passed, zero failures, 40 explicit environment/opt-in skips (browser/Potree/native Poisson/host-bind infrastructure). Source was copied from a read-only worktree mount into disposable container storage; no network or production services were used. The full log is retained locally under output/linux-current-source-full-tests.log and is not part of the release. Windows browser evidence above complements Linux's browser skips; the Windows full suite cannot pass Linux descriptor-storage fixtures.
+- Updated four-page synthetic report with both images and six measurements was rendered and all pages visually inspected. A discovered orphaned appendix edge-length line was fixed with print grouping; the rerender has no clipped or orphaned details. Renderer tests pass 8/8; isolated report-only browser stress case passes 1/1. This is layout evidence, not customer numerical data.
+- Original-PDF workspace actions now consistently read Model report. Focused workspace tests pass 30/30; rebuilt desktop/390px/320px browser suite passes 13/13. Initial browser label failure was the stale pre-change dist build and passed after rebuilding.
+- Latest broader measurement and product-download suite: 383 passed, zero failures, two skipped native reconstructed-estimate cases (385 total). Isolated browser checks produced a 96,486-byte PDF, 30,694-byte measured-view PNG, and native profile downloads. These are fixture results, not live Hickory Grove acceptance.
+- Latest report capture/ortho/document regression group: 32 passed, zero skipped. Branding now uses Ledge Top Drone Services; orthophoto errors remain visible when current-view capture succeeds, and repeated warnings are deduplicated. Production build passed with existing dependency/chunk-size warnings.
+- User supplied actual Bright Side Dairy Farm PDF and measured-view PNG exports, resolving the earlier uncertainty about native download delivery. This does not validate every report layout or browser.
+- Report document/orthographic capture/product download tests: 30 passed, zero failures or skips. Original processing PDFs remain unchanged and require the existing download authorization; report availability is not raw-asset publication.
+- Cross-view workspace and display-elevation tests: 22 passed, zero failures or skips. These cover shared lists, bounded sampling, cancellation, coordinate matching, and preservation of saved geometry/results.
+- User confirmed the Hickory Grove DSM measurement is listed in the 3D saved list but its outline is missing. The exact card status is still requested. Static review found that missing elevation-unit metadata can prevent 3D placement: the reviewed fallback registry currently recognizes only the exact County Road D source. No Hickory Grove unit assumption or saved-data change was made.
+- Live browser reconnection timed out twice. Do not treat isolated test success as proof that the Hickory Grove overlay issue is resolved.
+- Inspected both pages of the existing synthetic report PDF: readable summary and appendix without clipped table text. That artifact predates the latest branding and warning fixes; updated visual acceptance remains required.
+
+Deployed application source: `fae0935`. The post-update section supersedes historical deployment blockers below. Additional local test changes are identified separately; native in-app download/print delivery and overnight recovery are not assumed complete.
+
+## Current requirement ledger
+
+| Requirement | Evidence | Remaining limitation |
+| --- | --- | --- |
+| Two visible measurement cards, orange overflow, resizable navigation | 39-pass layout/editor/capture/profile browser group; measured deployed two-card height and orange scrollbar in chronological audit | No claim for every viewport or assistive technology |
+| Immediate polygon area, explicit Calculate volume; existing result View volume | Latest user direction supersedes original automatic-volume wording; deployed five-record restoration and Polygon 1 View volume | No implicit recomputation is permitted |
+| Interactive honest side-section | Deployed 0-degree/45-degree/reset native-cell checks; post-update 4,209-cell section; saved volume unchanged | Vertical datum remains unverified; this is a section, not an independent volume |
+| Numerical stockpile consistency and larger outline | Exact original DSM replay within 0.2183 m3 of WebODM; deployed large Polygon 1 succeeded and saved | Numerical agreement does not independently establish field accuracy |
+| Point-cloud regression and close refinement | Historical same-generation/default comparison, redundant frame/overlay work fixes, refinement tests and live orbit/pan/zoom at unchanged active/requested 10M | UI frame values are not GPU benchmarks or guarantees for other machines |
+| Permission/lifecycle | Focused controller/recovery/contract 44/44; real-browser denied-tile and proactive timer renewal 2/2 | Overnight workspace disappearance/restoration integration still under test |
+| Release and preservation | fae0935 release attestation and deployed health revision; no Operations edits or saved-data mutations | Native host PNG/print delivery after readiness fix remains unobserved; isolated actual files passed |
+
+## Additional local regression evidence
+
+The real-browser renewal suite now includes a proactive scenario with initial expiry five minutes plus fifteen seconds. The ordinary scheduled timer triggers BroadcastChannel issuance and redemption without a 401/403 response. Exactly one grant is issued/redeemed, access stays active, and renderer, resident shell and camera are preserved. Both scenarios also retain loaded geometry when subsequent authorization is denied. `node --test test/session-renewal-browser.test.mjs`: 2 passed, zero skipped, 33.3 seconds. This test does not contain a real personal-record API fixture; measurement preservation is covered separately by the actual-function VM tests and live saved-record observations.
+
+### Expired-viewer controller restoration
+
+The expanded browser suite passed 3/3 with zero skips or failures in 55.29 seconds. The new case suspends the original controller and navigates its document away, advances the existing Viewer past expiry, and waits for the real unanswered-controller timeout. A fresh document authenticates the same fixture subject, restores only persisted routing hints, and recovers the existing Viewer over BroadcastChannel with exactly one issuance/redemption. Renderer, resident geometry, and camera remain unchanged. Persisted descriptors are asserted to exclude credentials. A first run exposed mismatched fixture clocks; synchronizing the fresh controller clock before initialization corrected the fixture and the complete rerun passed. This closes the isolated restoration-integration gap, not observation of a production overnight renewal or real personal-record persistence in that fixture. No application source change was needed.
+
+## Fresh checks
+
+- `node --test test/session-renewal-browser.test.mjs`: 1 passed, no skips. A real isolated browser forces a tile denial, redeems one grant, rejects late redundant renewal, preserves renderer/loaded geometry/camera, and retains the view when authorization ends. This is controlled lifecycle evidence, not observation of a production renewal event.
+- Combined close-zoom, native-profile, profile-download, capture-lifecycle, list-layout and sidebar-resize suites: 39 passed, no skips. Real-browser editor checks insert/move/delete vertices across view adapters. List checks cover two natural-height cards and measured overflow for three or more. Capture guards reject late access/view changes.
+- That browser run produced an actual 30,694-byte 800×600 measured-view PNG, 44,653-byte print-renderer PDF, 1,451-byte native-profile CSV and 28,901-byte profile PNG. Native host print-dialog delivery remains a separate check.
+- The existing production County Road D tab still showed all five records. Reopening Polygon 1's View volume invoked fresh capability/parent-result/job-list requests (the current server-profile implementation has no cross-inspector result cache) and displayed 4,209 crossed native cells at 0°. Saved net volume stayed 208,355.048 ft³. The inspector was closed without editing geometry or recalculating volume.
+
+## Scope and remaining gates
+
+- Later user instructions explicitly replaced automatic volume submission with immediate area plus a Calculate volume button. Do not restore automatic volume merely to match the old goal wording.
+- Numerical reference evidence remains in `MEASUREMENT_GOAL_AUDIT_2026-09-22.md`: exact County DSM result 5,647.271691175985 m³ versus WebODM 5,647.0534 m³, without downsampling. This is consistency, not independent survey accuracy.
+- Previously observed deployed full-budget cloud orbit/pan/zoom and close-view refinement used unchanged requested/active 10M; see the same audit. No point-budget reduction or renderer change was made in this follow-up.
+- GitHub release 35816769694 for fae0935 was still running source checks when these observations were recorded. Production was last verified on 611cd7f. Do not claim fae0935 is deployed from a successful push.
+- A fresh protected profile response in the long-lived tab is stronger evidence than cached labels, but does not reveal exactly when production renewed authorization. Natural renewal and native in-app export delivery should remain clearly qualified.
+- Operations code, saved measurement geometry/results, original photos, and running provider jobs were not changed by these checks.
+
+## Release outcome
+
+Run 35816769694 subsequently completed successfully. Its downloaded attestation identifies commit `fae0935aeb45f5ac7d8d8c8158f303fb742437b9`, image digest `sha256:9ced4e2698facfbda95e6bc79302f5090a2a14617fada08a42e83cea154b0f02`, schema 33 and runtime user 568:568. Repository checks, pull-by-digest, revision/source stamp, runtime schema and component gates all passed. The verified image was promoted.
+
+At 04:12:46 UTC the public production health response was HTTP 200 but still reported `611cd7fe34190c3fd857b9e8a9a5a60ce3d87be4`. Therefore publication is complete and deployment of fae0935 still requires the operator's container update. Do not refresh away an active upload to perform acceptance. This local follow-up note has not been pushed as a second release-triggering commit.
+
+## Post-update live acceptance
+
+- After the operator reported updated, the public health header at 11:13:23 UTC confirmed `fae0935aeb45f5ac7d8d8c8158f303fb742437b9` (HTTP 200).
+- Refreshed the idle workspace. Visually confirmed the node list on the left and inline details on the right. Cluster reports healthy, API 1.5.3, ODM 3.5.6, zero queued, cluster-managed capacity, and 81 detected options.
+- Opened New task without submitting: separate Choose files / Choose folder buttons, automatically selected Cluster — Ready, project/date name, preset dropdown, Edit task options and Save as preset, followed by alignment. Closed without uploading or creating a job. Prior-survey alignment remains explicitly unavailable.
+- The old overnight model session was unavailable after reload. Opening View from the authenticated workspace successfully created a fresh session; this is not proof of seamless overnight session renewal.
+- Fresh County Road D session automatically restored five measurements, including saved volumes 78,542.712 and 208,355.048 ft³. Polygon 1 View volume loaded its original 4,209-cell cross-section without recalculating or changing the saved volume. Model reached full-detail (256 tiles). Closed inspector and left fresh model tab open.
+- No processing task was submitted, restarted, cancelled, or deleted. Production upload-through-completion and cancellation attribution remain unverified; no active Viewer processing tasks were present for live log testing.

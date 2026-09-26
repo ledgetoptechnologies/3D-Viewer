@@ -5,6 +5,7 @@ import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
+import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
@@ -2370,6 +2371,8 @@ function installMeasurementWorkspace() {
   measurementWorkspace?.dispose();
   measurementWorkspace=createMeasurementWorkspace({
     panel:document.getElementById('panel-measure'),context:measurementViewContext,
+    reportMetadata:()=>({modelName:PROJECT?.title||PROJECT?.id||'Model'}),
+    captureReportOrtho:async({records,signal})=>{if(!ORTHO_URL)return null;const dataset=await getDataset(ORTHO_URL,false,{signal});return captureMeasurementReportOrtho({dataset,records,signal,pool:geoPool,expectedCrs:measurementCoordinateReference().crs});},
     token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
     accessGeneration:()=>sessionAccessGeneration,
     permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
@@ -2386,7 +2389,7 @@ function installMeasurementWorkspace() {
   });
   viewerProductDownloads?.destroy();
   let productHost=document.getElementById('panel-products');if(!productHost){productHost=document.createElement('div');productHost.id='panel-products';productHost.className='panel';document.getElementById('sidebar-custom').append(productHost);}
-  viewerProductDownloads=mountViewerProductDownloads({host:productHost,getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true});
+  viewerProductDownloads=mountViewerProductDownloads({host:productHost,reportHost:document.getElementById('model-report-download'),getAssetRoot:()=>TILES_URL||EPT_URL||ORTHO_URL||DSM_URL||DTM_URL||GLB_URL,permitted:()=>SHARE_PERMISSIONS.download===true});
 }
 
 function setTool(tool) {

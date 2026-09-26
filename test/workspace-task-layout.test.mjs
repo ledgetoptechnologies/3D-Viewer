@@ -63,6 +63,18 @@ test('quick actions exclude tile generation status; unknown image count is expli
   f.task.metrics={sourceImageCount:0};assert.match(f.context.taskPanel(f.task),/<strong>0<\/strong><small>images/);
 });
 
+test('original processing PDF is consistently labeled Model report in quick actions and files',()=>{
+  const f=fixture(),output={id:'output',taskId:'task',status:'ready',attemptId:'active',reportUrl:'/report',assetKinds:['report']};
+  f.state.outputs=[output];
+  for(const html of [f.context.taskQuickActions(f.task),f.context.artifactActions(output)]){
+    assert.match(html,/data-action="download-report"[^>]*>Model report<\/button>/);
+    assert.doesNotMatch(html,/>Report<|>Measurements report</);
+  }
+  delete output.reportUrl;
+  assert.doesNotMatch(f.context.taskQuickActions(f.task),/download-report/);
+  assert.doesNotMatch(f.context.artifactActions(output),/download-report/);
+});
+
 test('streaming notices are noninteractive and disappear when ready, while queued/error work stays visible',()=>{
   const f=fixture();f.context.lodJobForOutput=()=>null;f.context.recoveryOperationForOutput=()=>null;
   vm.runInContext(source.slice(source.indexOf('function taskLodNotice('),source.indexOf('function selectedProject(')),f.context);
