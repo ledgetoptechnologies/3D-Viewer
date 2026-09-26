@@ -6,6 +6,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { calculatePointSurface, pointSurfaceGrid, preflightPointSurface } from '../server/measurementPointSurface.mjs';
 import {calculatePointSurfaceTransect} from '../server/measurementPointTransect.mjs';
+import {resolveMeasurementDisplayElevations} from '../measurement-display-elevations.mjs';
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'measurement-point-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));fs.mkdirSync(path.join(root,'ept-hierarchy'));fs.mkdirSync(path.join(root,'ept-data'));
   const files=[],write=(relative,bytes)=>{bytes=Buffer.isBuffer(bytes)?bytes:Buffer.from(JSON.stringify(bytes));fs.writeFileSync(path.join(root,relative),bytes);const file={relativePath:relative,byteSize:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};files.push(file);return file;};
@@ -74,6 +75,23 @@ test('map reference samples the native point grid, not placeholder zero, and pre
  await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),{...request,classFilter:'ground'},{sourceFiles:f.files}),{code:'measurement_boundary_elevation_unavailable'});
  const selected=await calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,selection:{minElevationM:1.5,maxElevationM:3.5}},{sourceFiles:f.files,collectOnly:true});
  assert.deepEqual(selected.points,[[1.5,.5,2],[.5,1.5,3]]);
+});
+
+test('sampled point boundary persists for display without changing volume or declaring DSM units',async t=>{
+ const f=fixture(t),request={...f.request,collection:'map',reference:{type:'boundary-triangulated'}},before=structuredClone(request);
+ const result=await calculatePointSurface(path.join(f.root,'ept.json'),request,{sourceFiles:f.files});
+ assert.deepEqual(result.boundaryVertices,[[0,0,1],[2,0,2],[2,2,4],[0,2,3]]);
+ assert.equal(result.source.boundaryElevationBasis,'point-grid');
+ assert.equal(result.source.verticalUnitBasis,'administrator-declared');
+ assert.equal(result.source.verticalUnit,'m');
+ assert.ok(Math.abs(result.netM3)<1e-9);assert.deepEqual(request,before);
+ const displayed=await resolveMeasurementDisplayElevations({...request,results:result},{modelVersionId:'v1',expectedCrs:'EPSG:32616',preflight:()=>{throw Error('Must not access DSM');}});
+ assert.deepEqual(displayed.vertices,result.boundaryVertices);assert.match(displayed.basis,/point-grid.*administrator-declared/);
+ displayed.vertices[0][2]=99;assert.equal(result.boundaryVertices[0][2],1);
+ for(const options of [{...request,reference:{type:'custom',elevationM:0}},{...request,collection:'spatial3d'}]){
+  const unsampled=await calculatePointSurface(path.join(f.root,'ept.json'),options,{sourceFiles:f.files});
+  assert.equal(unsampled.boundaryVertices,undefined);assert.equal(unsampled.source.boundaryElevationBasis,undefined);
+ }
 });
 
 test('native LAZ source decodes all points using bundled offline WASM',async t=>{

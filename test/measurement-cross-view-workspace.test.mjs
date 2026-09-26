@@ -6,6 +6,7 @@ import {readFileSync} from 'node:fs';
 import * as geometry from '../measurement-document.mjs';
 import {createMeasurementStore} from '../measurement-store.mjs';
 import {createMeasurementListLayout} from '../measurement-list-layout.mjs';
+import {retainedDisplayBoundary} from '../measurement-display-elevations.mjs';
 
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
@@ -29,19 +30,19 @@ class Element {
   setPointerCapture(){} releasePointerCapture(){} focus(){} click(){}
 }
 
-function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),viewCrs='EPSG:32616'}={}){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),viewCrs='EPSG:32616',surfaceRequest,adminRequest}={}){
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
   const projected=[],downloads=[],mutations=[],calculationCalls=[],resolverCalls=[],focused=[];
   let mode='model',permission=true;
   const context=()=>({mode,element:canvas,host,viewSignature:()=>mode,pick:event=>[event.clientX,event.clientY,0],project(point){projected.push({mode,point:Array.from(point)});return point.slice(0,2);},focus(vertices){focused.push({mode,vertices:structuredClone(vertices)});}});
-  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
+  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,retainedDisplayBoundary,availableAdminSources:()=>[],document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
     URL:{createObjectURL(blob){downloads.push(blob);return'blob:fixture';},revokeObjectURL(){}},
     setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>1000},
     openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,options});return resolveDisplayVertices(record,options);}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
   return{workspace,controls,panel,projected,downloads,mutations,calculationCalls,resolverCalls,focused,action,
@@ -55,6 +56,46 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
 }
 
 const document=(collection,name)=>({id:crypto.randomUUID(),name,collection,kind:'distance',vertices:collection==='map'?[[250,200,0],[390,230,0]]:[[20,40,132.123456789],[100,60,139.987654321]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true,source:{kind:collection==='map'?'ortho':'mesh'},results:{status:'geometry-only',method:'vertex-geometry',...(collection==='map'?{elevationBasis:'not-sampled'}:{})}});
+function attachedPoint(basis='ept-vertical-crs'){
+  const record={...document('map','Saved point boundary'),kind:'polygon',modelVersionId:'point-version',revision:2,vertices:[[250,200,0],[390,200,0],[390,300,0]],results:{method:'point-surface-cut-fill',calculationOrigin:'browser',calculationJobId:'point-job',source:{verticalUnitBasis:basis},netM3:77}};
+  const result={method:'point-surface-cut-fill',calculationOrigin:'server-original-point-surface',boundaryVertices:record.vertices.map(([e,n])=>[e,n,181]),source:{kind:'ept',assetId:'ept-source',modelVersionId:record.modelVersionId,crs:'EPSG:32616',verticalUnit:'m',verticalUnitBasis:basis,boundaryElevationBasis:'point-grid',sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64)}};
+  return{record,job:{id:'point-job',measurementId:record.id,method:'point-surface-cut-fill',status:'complete',attachmentRevision:2,result}};
+}
+
+test('saved point boundary reads one authorized attached result and never changes saved volume',async t=>{
+  const {record,job}=attachedPoint(),calls=[],f=fixture({surfaceRequest:async(op,payload)=>{calls.push([op,payload]);return{calculation:job};}});t.after(()=>f.workspace.dispose());
+  f.workspace.store.records.set(record.id,record);f.watchMutations();const before=JSON.stringify(record);
+  f.workspace.tick();await flush();for(let i=0;i<50;i++)f.workspace.tick();await flush();
+  assert.equal(calls.length,1);assert.equal(calls[0][0],'status');assert.equal(calls[0][1].jobId,job.id);
+  assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===181));assert.equal(f.resolverCalls.length,0);
+  assert.equal(JSON.stringify(record),before);assert.deepEqual(f.mutations,[]);assert.deepEqual(f.calculationCalls,[]);
+});
+
+test('unbound, wrong-source or untrusted point job replies never supply display geometry or fall back',async t=>{
+  for(const change of [j=>j.id='other',j=>j.measurementId='other',j=>j.attachmentRevision=1,j=>j.status='failed',j=>j.result.source.modelVersionId='other',j=>j.result.calculationOrigin='browser',j=>j.result.boundaryVertices[0][0]++]){
+    const {record,job}=attachedPoint();change(job);const f=fixture({surfaceRequest:async()=>({calculation:job})});t.after(()=>f.workspace.dispose());f.workspace.store.records.set(record.id,record);f.workspace.tick();await flush();f.workspace.tick();
+    assert.equal(f.projected.length,0);assert.equal(f.resolverCalls.length,0);assert.match(f.list(),/3D overlay unavailable/);
+  }
+});
+
+test('late attached job reads cannot restore overlays after access loss',async t=>{
+  const {record,job}=attachedPoint(),wait=deferred(),f=fixture({surfaceRequest:()=>wait.promise});t.after(()=>f.workspace.dispose());f.workspace.store.records.set(record.id,record);f.workspace.tick();await flush();f.deny();wait.resolve({calculation:job});await flush();f.workspace.tick();assert.equal(f.projected.length,0);assert.equal(f.svg().innerHTML,'');
+});
+
+test('verified staff capability arriving later retries only waiting declared-point placement',async t=>{
+  const {record,job}=attachedPoint('administrator-declared'),caps=deferred();let ordinaryCalls=0,staffReads=0;
+  const f=fixture({resolveDisplayVertices:async()=>{throw Error('No verified elevation surface');},surfaceRequest:async()=>{ordinaryCalls++;throw Error('No ordinary fallback');},adminRequest:async op=>{if(op==='capabilities')return caps.promise;staffReads++;return{calculation:job};}});t.after(()=>f.workspace.dispose());f.workspace.store.records.set(record.id,record);f.workspace.tick();await flush();assert.equal(staffReads,0);assert.match(f.list(),/No verified elevation surface/);
+  caps.resolve({capabilities:{serverCalculations:true}});await flush();f.workspace.tick();await flush();f.workspace.tick();assert.equal(staffReads,1);assert.equal(ordinaryCalls,0);assert.ok(f.projected.every(p=>p.point[2]===181));assert.ok(f.projected.length>0);
+});
+
+test('legacy point results and unavailable job reads retain strict elevation-resolver fallback',async t=>{
+  for(const type of ['no-boundary','no-transport','unavailable','staff-unavailable']){
+    const {record,job}=attachedPoint(type==='staff-unavailable'?'administrator-declared':'ept-vertical-crs');delete job.result.boundaryVertices;
+    const f=fixture({surfaceRequest:type==='no-transport'?undefined:async()=>{if(type==='unavailable')throw Error('Job unavailable');return{calculation:job};}});t.after(()=>f.workspace.dispose());
+    f.workspace.store.records.set(record.id,record);f.workspace.tick();await flush();f.workspace.tick();
+    assert.equal(f.resolverCalls.length,1);assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===145));assert.equal(record.results.calculationOrigin,'browser');
+  }
+});
 async function seed(f){
   const spatial=document('spatial3d','Measured roof'),map={...document('map','Map boundary'),kind:'polygon',vertices:[[250,200,0],[390,200,0],[390,300,0],[250,300,0]],
     results:{status:'complete',method:'surface-cut-fill',cutM3:1234.567890123,fillM3:2.123456789,netM3:1232.444433334,coverage:1,sourceKind:'dsm',modelVersionId:'fixture-version',reference:{type:'custom',elevationM:140,offsetM:0},calculationOrigin:'browser',verified:false,warnings:['Fixture source vertical datum'],boundaryVertices:[[250,200,145],[390,200,145],[390,300,145],[250,300,145]]}};

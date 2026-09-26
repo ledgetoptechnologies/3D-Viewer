@@ -8,6 +8,7 @@ import {openAdminCalculationDialog,availableAdminSources} from './measurement-ad
 import {createServerSurfaceCalculator} from './measurement-server-surface.mjs';
 import {createServerProfileCalculator} from './measurement-server-profile.mjs';
 import {createMeasurementListLayout} from './measurement-list-layout.mjs';
+import {retainedDisplayBoundary} from './measurement-display-elevations.mjs';
 const escape = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const field = event => event.target?.closest?.('input,textarea,select,[contenteditable=true]');
 const interactive = event => event.target?.closest?.('input,textarea,select,button,a,[contenteditable=true],.leaflet-control,[role=button]');
@@ -74,11 +75,34 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(displayRequests>=2)break;
       if(entry.state!=='queued')continue;
       entry.state='pending';displayRequests++;
-      const current=()=>!disposed&&allowed()&&!entry.controller.signal.aborted&&entry.generation===viewGeneration&&displayCache.get(entry.record.id)===entry&&store.records.get(entry.record.id)===entry.record;
-      Promise.resolve().then(()=>{
+      const current=()=>!disposed&&allowed()&&(!entry.staffAuthority||adminAllowed)&&!entry.controller.signal.aborted&&entry.generation===viewGeneration&&displayCache.get(entry.record.id)===entry&&store.records.get(entry.record.id)===entry.record;
+      Promise.resolve().then(async()=>{
         if(!current())throw new Error('View or measurement access changed.');
-        if(typeof resolveDisplayVertices!=='function')throw new Error('No verified elevation surface is available.');
-        return resolveDisplayVertices(structuredClone(entry.record),{signal:entry.controller.signal});
+        const fallback=()=>{
+          if(!current())throw new Error('View or measurement access changed.');
+          if(typeof resolveDisplayVertices!=='function')throw new Error('No verified elevation surface is available.');
+          return resolveDisplayVertices(structuredClone(entry.record),{signal:entry.controller.signal});
+        };
+        const saved=entry.record.results;
+        if(saved?.method==='point-surface-cut-fill'&&saved.calculationJobId){
+          const declared=saved.source?.verticalUnitBasis==='administrator-declared';
+          if(declared&&(!adminAllowed||typeof adminRequest!=='function')){entry.awaitingStaff=true;return fallback();}
+          entry.staffAuthority=declared;
+          const request=declared?adminRequest:surfaceRequest;
+          if(typeof request!=='function')return fallback();
+          let job;
+          try{job=(await request('status',{measurementId:entry.record.id,jobId:saved.calculationJobId},entry.record))?.calculation;}
+          catch{return fallback();}
+          if(!current())throw new Error('View or measurement access changed.');
+          if(job?.id!==saved.calculationJobId||job.measurementId!==entry.record.id||job.status!=='complete'||job.method!=='point-surface-cut-fill'||job.attachmentRevision!==entry.record.revision)throw new Error('The saved point-surface calculation does not match this measurement revision.');
+          if(!job.result?.boundaryVertices)return fallback(); // Legacy/custom bases may have no retained boundary.
+          // The saved document remains untrusted and unchanged. Only the
+          // authorized, bound server result can supply display-only heights.
+          const retained=retainedDisplayBoundary({...structuredClone(entry.record),results:structuredClone(job.result)},entry.record.modelVersionId);
+          if(!retained)throw new Error('The saved point-surface calculation has no matching retained boundary elevations.');
+          return retained;
+        }
+        return fallback();
       }).then(result=>{
         if(!current())return;
         const vertices=result?.vertices;
@@ -150,7 +174,15 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const server=typeof surfaceRequest==='function'||preferServerSurface()||adminAllowed;
     const calculate=server?createServerSurfaceCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):calculateSurface;
     activeDialog=openSurfaceDialog({record,units,autoCalculate,advancedSettings:adminAllowed,areaM2:measurementMetrics(record).horizontalAreaM2,execution:server?'server':'browser',getRecord:()=>snapshot,
-      calculateProfile:server?createServerProfileCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):null,
+      calculateProfile:server?async(...args)=>{
+        if(attachmentPending)await attachmentPending;
+        if(!isCurrent())throw new Error('Measurement access or view changed.');
+        // Declared-unit point results retain their staff authorization boundary.
+        // Result metadata selects transport only after verified staff capability;
+        // it never grants authority or retries ordinary failures with elevation.
+        const staffProfile=snapshot.results?.method==='point-surface-cut-fill'&&snapshot.results?.source?.verticalUnitBasis==='administrator-declared'&&adminAllowed&&typeof adminRequest==='function';
+        return createServerProfileCalculator({request:staffProfile?adminRequest:surfaceRequest||adminRequest,isCurrent:()=>isCurrent()&&(!staffProfile||adminAllowed),getRecord:()=>snapshot})(...args);
+      }:null,
       openSpecialist:adminAllowed&&specialistAllowed?async({host,isCurrent:panelCurrent,onOpened,onClose})=>{
         const current=()=>isCurrent()&&panelCurrent()&&adminAllowed&&specialistAllowed;
         if(attachmentPending)await attachmentPending;
@@ -381,7 +413,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     }catch(error){tell(error.message);}
   });
   store.load().then(notice=>{ready=true;loadFailed=false;renderPanel();if(notice)tell(notice);}).catch(error=>{loadFailed=true;renderPanel();tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});
-  if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){adminAllowed=result.capabilities?.serverCalculations===true;specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
+  if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){const newlyAllowed=!adminAllowed&&result.capabilities?.serverCalculations===true;adminAllowed=result.capabilities?.serverCalculations===true;if(newlyAllowed){for(const [id,entry]of displayCache)if(entry.awaitingStaff){entry.controller.abort();displayCache.delete(id);}lastOverlayFrame=null;}specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
   renderPanel();
   return {setTool,store,tick:draw,invalidate,captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){viewGeneration++;clearDisplayRequests();void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
 }

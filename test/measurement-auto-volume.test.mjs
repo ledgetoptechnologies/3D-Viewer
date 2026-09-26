@@ -69,6 +69,33 @@ test('authorized staff use the server calculator in the normal polygon inspector
   assert.equal(f.serverCalls[0].snapshot.id,dialog.record.id);
 });
 
+test('declared-unit point profiles select verified staff transport without elevating ordinary profiles',async()=>{
+  for(const [adminAllowed,basis] of [[true,'administrator-declared'],[false,'administrator-declared'],[true,'ept-vertical-crs']]){
+    const f=fixture({adminAllowed,preferServer:true}),ordinary=async()=>({}),staff=async()=>({});let options;
+    f.scope.surfaceRequest=ordinary;f.scope.adminRequest=staff;
+    f.scope.createServerProfileCalculator=value=>{options=value;return async()=>({profile:true});};
+    await f.finish();const inspector=f.opened[0];
+    await inspector.save({...inspector.record,results:{method:'point-surface-cut-fill',calculationJobId:'saved-parent',source:{verticalUnitBasis:basis}}});
+    const before=JSON.stringify(inspector.getRecord());await inspector.calculateProfile(inspector.record,{});
+    const elevated=adminAllowed&&basis==='administrator-declared';
+    assert.equal(options.request,elevated?staff:ordinary);
+    assert.equal(JSON.stringify(inspector.getRecord()),before,'viewing profile does not recalculate or mutate volume');
+    assert.equal(f.serverCalls.length,0);
+    assert.equal(options.isCurrent(),true);f.scope.adminAllowed=false;
+    assert.equal(options.isCurrent(),!elevated,'staff transport fails closed if verified capability is lost');
+  }
+});
+
+test('ordinary profile failures are never retried through staff transport',async()=>{
+  const f=fixture({adminAllowed:true,preferServer:true});let staffCalls=0,ordinaryCalls=0;
+  f.scope.adminRequest=async()=>{staffCalls++;return{};};
+  f.scope.surfaceRequest=async()=>{ordinaryCalls++;throw Object.assign(new Error('not found'),{code:'measurement_calculation_not_found'});};
+  await f.finish();const inspector=f.opened[0];
+  await inspector.save({...inspector.record,results:{method:'point-surface-cut-fill',calculationJobId:'saved-parent',source:{verticalUnitBasis:'ept-vertical-crs'}}});
+  await assert.rejects(inspector.calculateProfile(inspector.record,{}),/could not be accessed/);
+  assert.equal(ordinaryCalls,1);assert.equal(staffCalls,0);
+});
+
 test('isolated fixture may inject browser calculation, but a selected server never falls back',async()=>{
   const ordinary=fixture();await ordinary.finish();assert.equal(ordinary.opened[0].execution,'browser');
   await ordinary.opened[0].calculate(ordinary.opened[0].record,{});assert.equal(ordinary.serverCalls.length,0);

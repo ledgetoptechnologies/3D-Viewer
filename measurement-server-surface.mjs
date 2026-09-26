@@ -15,7 +15,7 @@ const guidance=Object.freeze({
   measurement_workspace_unavailable:'The Viewer workspace is not responding. Reopen the model from your workspace, then reopen this measurement to check its calculation.',
   measurement_surface_session_required:'Volume calculation needs an active model session. Your outline remains available in this view; reopen the model from your workspace to restore access.',
   measurement_surface_access_unavailable:'Volume calculation access is unavailable for this model. Your outline has not been deleted. Restore access and try again.',
-  measurement_calculation_not_found:'This calculation is no longer available. Temporary results expire. If your outline is still visible and you have access, calculate again to start a new result.',
+  measurement_calculation_not_found:'This calculation could not be accessed in the current session. Your saved outline and volume have not been changed. Reopen the model from your workspace and try again; ask the model owner to check access if it persists.',
   measurement_queue_full:'Other calculations are in progress. Your outline is unchanged; try calculating again shortly.',
   measurement_rate_limited:'Too many calculations were requested recently. Your outline is unchanged; wait a moment before trying again.',
   measurement_limit:'This area exceeds the calculation limit. Try a smaller outline around one pile.',

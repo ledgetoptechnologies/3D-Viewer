@@ -54,6 +54,14 @@ test('unknown units error from source preflight is propagated without retry or l
   await assert.rejects(calculate(record,options),/height units verified.*outline is saved.*do not guess/);assert.deepEqual(calls,['capabilities','list','create']);
 });
 
+test('missing calculation guidance does not misdiagnose persistent authorization as expiry',()=>{
+  const error=surfaceCalculationError({code:'measurement_calculation_not_found',status:404});
+  assert.match(error.message,/current session/);
+  assert.match(error.message,/saved outline and volume have not been changed/);
+  assert.doesNotMatch(error.message,/expire|calculate again|temporary/i);
+  assert.equal(error.code,'measurement_calculation_not_found');
+});
+
 test('stockpile setup and already-running errors provide plain-language next steps',()=>{
   const units=surfaceCalculationError({code:'measurement_source_vertical_units_required',status:422});
   assert.equal(units.code,'measurement_source_vertical_units_required');assert.equal(units.status,422);

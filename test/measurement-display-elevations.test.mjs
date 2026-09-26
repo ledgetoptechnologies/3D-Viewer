@@ -44,6 +44,20 @@ test('reviewed source boundary is reused without opening or sampling the untagge
   assert.deepEqual(value.vertices,r.results.boundaryVertices);assert.match(value.basis,/reviewed-source-provenance/);assert.deepEqual(f.counts,{preflight:0,open:0,close:0,reads:[]});assert.deepEqual(r,before);
   assert.equal(retainedDisplayBoundary(r,'other'),null);r.results.boundaryVertices[0][0]++;assert.equal(retainedDisplayBoundary(r,'v1'),null);
 });
+
+test('point boundaries require exact saved geometry, normalized units and source provenance',async()=>{
+ const r=record();r.results={method:'point-surface-cut-fill',calculationOrigin:'server-original-point-surface',boundaryVertices:r.vertices.map(p=>[p[0],p[1],12]),source:{kind:'ept',assetId:'ept',sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),modelVersionId:'v1',crs:'EPSG:32616',verticalUnit:'m',verticalUnitBasis:'ept-vertical-crs',boundaryElevationBasis:'point-grid'}};
+ const f=fixture();assert.deepEqual((await f.run(r)).vertices,r.results.boundaryVertices);assert.equal(f.counts.open,0);
+ for(const [key,value]of [['kind','dsm'],['assetId',''],['sha256','bad'],['manifestSha256','bad'],['modelVersionId','v2'],['crs','EPSG:32617'],['verticalUnit','ft'],['verticalUnitBasis','guessed'],['boundaryElevationBasis',undefined]]){
+  const changed=structuredClone(r);changed.results.source[key]=value;assert.equal(retainedDisplayBoundary(changed,'v1'),null,key);
+ }
+ for(const mutate of [x=>delete x.results.boundaryVertices,x=>x.results.boundaryVertices[0][0]++,x=>x.results.boundaryVertices[0][2]=NaN,x=>x.results.calculationOrigin='browser',x=>x.results.method='reconstructed-estimate']){
+  const changed=structuredClone(r);mutate(changed);assert.equal(retainedDisplayBoundary(changed,'v1'),null);
+ }
+ assert.equal(retainedDisplayBoundary(r,'v2'),null);
+ const legacy=structuredClone(r);delete legacy.results.boundaryVertices;delete legacy.results.source.boundaryElevationBasis;
+ await assert.rejects(f.run(legacy,{source:null}),/no existing DSM/,'legacy results are not repaired from previews');
+});
 test('missing elevations or unverified units fail closed instead of fabricating zero or reusing stale preview',async()=>{
   for(const [overrides,pattern]of [
     [{getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616})},/does not encode elevation units/],

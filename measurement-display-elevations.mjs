@@ -9,9 +9,15 @@ const knownBasis=new Set(['raster-metadata','gdal-band-unit','reviewed-source-pr
 
 export function retainedDisplayBoundary(record,modelVersionId){
   const result=record.results,vertices=result?.boundaryVertices,basis=result?.sourceVerticalUnitBasis||result?.source?.verticalUnitBasis,version=result?.modelVersionId||result?.source?.modelVersionId;
-  if(!modelVersionId||version!==modelVersionId||result?.method!=='surface-cut-fill'||!knownBasis.has(basis)||!Array.isArray(vertices)||vertices.length!==record.vertices.length)return null;
+  const point=result?.method==='point-surface-cut-fill',source=result?.source;
+  // Point-grid boundaries are normalized metres, but an administrator's unit
+  // declaration stays a declaration. Never transfer it to the DSM or recover
+  // missing legacy boundaries from reduced preview samples/reference planes.
+  const eligible=point?result.calculationOrigin==='server-original-point-surface'&&source?.kind==='ept'&&source.boundaryElevationBasis==='point-grid'&&source.verticalUnit==='m'&&source.modelVersionId===modelVersionId&&source.crs===record.coordinateReference?.crs&&/^EPSG:\d+$/.test(source.crs||'')&&['ept-vertical-crs','administrator-declared'].includes(source.verticalUnitBasis)&&typeof source.assetId==='string'&&source.assetId.length>0&&/^[a-f0-9]{64}$/.test(source.sha256||'')&&/^[a-f0-9]{64}$/.test(source.manifestSha256||''):
+    result?.method==='surface-cut-fill'&&knownBasis.has(basis);
+  if(!modelVersionId||version!==modelVersionId||!eligible||!Array.isArray(vertices)||vertices.length!==record.vertices.length)return null;
   if(!vertices.every((p,i)=>finiteVertex(p)&&p[0]===record.vertices[i][0]&&p[1]===record.vertices[i][1]))return null;
-  return{vertices:vertices.map(p=>p.slice()),basis:`Saved surface boundary elevations (${basis}); display only`};
+  return{vertices:vertices.map(p=>p.slice()),basis:`Saved ${point?'point-grid':'surface'} boundary elevations (${point?source.verticalUnitBasis:basis}); display only`};
 }
 
 // Display geometry only. This never persists vertices/results, starts a job,
