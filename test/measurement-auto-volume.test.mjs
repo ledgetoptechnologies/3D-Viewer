@@ -130,8 +130,12 @@ test('edit finish preserves unchanged volume or invalidates changed geometry wit
   for(const changed of [false,true]){
     const f=fixture(),saved={status:'calculated',method:'surface-cut-fill',cutM3:12,fillM3:0,netM3:12};
     f.scope.editing=true;f.scope.editBaseline=JSON.stringify(f.scope.draft.vertices);f.scope.draft.results=structuredClone(saved);
+    const original=structuredClone(f.scope.draft);f.records.set(original.id,original);
+    let saves=0;const save=f.scope.store.save;f.scope.store.save=async record=>{saves++;return save(record);};
     if(changed)f.scope.draft.vertices[0][0]=1;
     await f.scope.finish();const result=f.records.values().next().value.results;
+    assert.equal(saves,changed?1:0,'unchanged edit does not write a new revision');
+    if(!changed)assert.equal(f.records.get(original.id),original);
     if(changed){assert.equal(result.status,'geometry-only');assert.equal(result.volumeInvalidated,true);assert.equal(result.cutM3,undefined);}else assert.deepEqual(result,saved);
     assert.equal(f.opened.length,0);assert.equal(f.serverCalls.length,0);
   }
