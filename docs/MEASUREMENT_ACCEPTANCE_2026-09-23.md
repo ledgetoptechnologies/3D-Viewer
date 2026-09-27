@@ -1,5 +1,23 @@
 # Measurement acceptance follow-up
 
+## Post-update 6161d11 acceptance
+
+- Public health confirms revision `6161d1147af34f2081fc5ed606e0eac5aa2283fe` after the operator update.
+- Fresh Hickory Grove session displays Reports / Measurements report; workspace original-PDF action displays Model report.
+- Both saved records restore. Larger Feed Pile remains 36,268.307 ft² with net volume 174,886.944 ft³; opening View volume does not change those values.
+- Its staff-authorized cross-section progressed past the former inaccessible-parent error into reading original elevation data, then the browser rejected the returned administrator-declared provenance. This exposed a presentation validator that allowed only encoded vertical units. The follow-up accepts the explicit declared basis without relabelling it and requires exact agreement with the parent source; server permission gates are unchanged.
+- Follow-up validation: 52 focused tests, 2 runtime import guards, 9 native-profile browser tests and production build passed. Added regressions cover unchanged saved volume, profile-only creation, cached section reuse, honest CSV provenance and rejection of encoded/declared parent mismatches. Live success still requires deployment of this follow-up; the inspector was closed without a volume recalculation or measurement edit.
+- Both legacy map outlines still show missing DSM elevation-unit warnings; the new release does not retroactively supply absent boundary heights. Source evidence remains required.
+
+## Latest release outcome
+
+Corrected release run 36281370710 succeeded for `6161d1147af34f2081fc5ed606e0eac5aa2283fe`.
+Attestation confirms promoted digest `sha256:b5ba0e9795feaf4b89f291d0c9152c14fc52b88988f19958ab93f4975e38d4c0`,
+schema 33, runtime user 568:568, repository checks, pull-by-digest, revision/source
+stamps, runtime schema, Obj2Tiles and Potree checks all passed. Deployment and
+legacy Hickory Grove height evidence remain pending. This supersedes earlier
+in-progress release notes below; this post-release note is not a new release commit.
+
 ## September 26 follow-up (released source; deployment not verified)
 
 Current source is `8ea6bb5` on main. Report release `df41184` passed candidate verification and promotion; its image digest is `sha256:412fcc6b1f480b134b7a3072c8dbc997a9d3525692034a32df96eafc808814db`. The subsequent measurement-fix release is run 36280901503; consult its current status rather than treating this note as completion. The Hickory Grove section at the end supersedes the earlier missing-card-status and browser-connection observations below. No current-deployment claim follows from either push.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServerSurfaceCalculator} from '../measurement-server-surface.mjs';
 import {createServerProfileCalculator} from '../measurement-server-profile.mjs';
-import {validateNativeProfile} from '../measurement-native-profile.mjs';
+import {validateNativeProfile,exportNativeProfile} from '../measurement-native-profile.mjs';
 
 const samplingGrid={version:1,width:10,height:10,bounds:{minE:0,minN:0,maxE:1,maxN:1},cellSizeM:.1,rowOrder:'north-to-south',reduction:'maximum-z',emptyCells:'missing'};
 const source={assetId:'points',kind:'ept',sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),modelVersionId:'version',samplingGrid,cellSizeM:.1,classFilter:'all',verticalUnit:'m',verticalUnitBasis:'ept-vertical-crs',crs:'EPSG:32616'};
@@ -36,6 +36,18 @@ const profile={method:'surface-transect',calculationOrigin:'server-original-poin
 test('point profiles preserve gaps and require exact parent manifest and grid',()=>{
   assert.equal(validateNativeProfile(profile,{source}),profile);
   for(const patch of [{manifestSha256:'d'.repeat(64)},{samplingGrid:{...samplingGrid,cellSizeM:.2}},{classFilter:'ground'}])assert.throws(()=>validateNativeProfile({...profile,source:{...source,...patch}},{source}));
+});
+
+test('staff point profile presentation preserves declared units and rejects changed parent basis',()=>{
+  const declared={...profile,source:{...source,verticalUnitBasis:'administrator-declared'}};
+  assert.equal(validateNativeProfile(declared,{source:declared.source}),declared);
+  assert.match(exportNativeProfile(declared),/administrator-declared/);
+  assert.doesNotMatch(exportNativeProfile(declared),/ept-vertical-crs/);
+  assert.throws(()=>validateNativeProfile(declared,{source}),/different point surface/);
+  assert.throws(()=>validateNativeProfile(profile,{source:declared.source}),/different point surface/);
+  for(const patch of [{verticalUnitBasis:'guessed'},{verticalUnitBasis:''},{verticalUnit:'ft'},{crs:'EPSG:32617'}]){
+    assert.throws(()=>validateNativeProfile({...declared,source:{...declared.source,...patch}},{source:declared.source}));
+  }
 });
 test('ordinary profile follows the saved point parent and freezes its base hash',async()=>{
   const calls=[],saved={...record,results:{...result,calculationJobId:'volume'}};

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createServerProfileCalculator} from '../measurement-server-profile.mjs';
 import {measurementGeometryHash} from '../measurement-surface-client.mjs';
+import {exportNativeProfile} from '../measurement-native-profile.mjs';
 const source={assetId:'dsm',kind:'dsm',modelVersionId:'version',sha256:'a'.repeat(64),verticalUnit:'m',verticalUnitBasis:'raster-metadata',crs:'EPSG:32616',resolutionM:[1,1]};
 const line={start:[0,0],end:[1,0]},baseHash='b'.repeat(64);
 const record={id:'polygon',revision:3,modelVersionId:'version',collection:'map',kind:'polygon',vertices:[[0,0,0],[1,0,0],[0,1,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},results:{method:'surface-cut-fill',calculationJobId:'parent'}};
@@ -47,4 +48,38 @@ test('temporary profile binds public page geometry and revision one without pers
   const temporary={...record,revision:undefined,modelVersionId:undefined},geometryHash=await measurementGeometryHash(temporary),caps={modelVersionId:'version',capabilities:{transectCalculations:true,temporaryCalculations:true}},parentJob={...parent,revision:1,geometryHash};
   const response=job('complete',{revision:1,geometryHash,parameters:{...parameters,revision:1}}),f=setup({caps,parentJob,responses:[response],getRecord:()=>temporary});await f.calculate(temporary,{line});assert.equal(f.calls.find(([op])=>op==='create')[1].request.revision,1);
   const wrong=setup({caps,parentJob:{...parentJob,geometryHash:'other'},getRecord:()=>temporary});await assert.rejects(wrong.calculate(temporary,{line}));assert.equal(wrong.calls.some(([op])=>op==='create'),false);
+});
+
+function declaredPointFixture(parentBasis='administrator-declared',profileBasis=parentBasis){
+  const samplingGrid={version:1,width:1,height:1,bounds:{minE:0,minN:0,maxE:1,maxN:1},cellSizeM:1,rowOrder:'north-to-south',reduction:'maximum-z',emptyCells:'missing'};
+  const pointSource={assetId:'point-source',kind:'ept',modelVersionId:'version',sha256:'a'.repeat(64),manifestSha256:'c'.repeat(64),verticalUnit:'m',verticalUnitBasis:parentBasis,crs:'EPSG:32616',samplingGrid,cellSizeM:1,classFilter:'all'};
+  const saved={...record,results:{method:'point-surface-cut-fill',calculationJobId:'parent',netM3:1748.86944,source:pointSource}};
+  const parentJob={...parent,result:{method:'point-surface-cut-fill',calculationOrigin:'server-original-point-surface',source:pointSource}};
+  const profile={...result,sampling:'point-grid-step',calculationOrigin:'server-original-point-surface',source:{...pointSource,verticalUnitBasis:profileBasis}};
+  return{saved,parentJob,profile};
+}
+
+test('staff-declared parent profiles remain declared in calculator result and CSV without volume recalculation',async()=>{
+  for(const cached of [false,true]){
+    const {saved,parentJob,profile}=declaredPointFixture(),completed=job('complete',{result:profile});
+    const f=setup({parentJob,getRecord:()=>saved,existing:cached?[completed]:[],responses:cached?[]:[completed]}),before=JSON.stringify(saved);
+    const out=await f.calculate(saved,{line});
+    assert.equal(out.source.verticalUnitBasis,'administrator-declared');
+    assert.equal(out.source.verticalUnit,'m');
+    assert.equal(out.source.crs,'EPSG:32616');
+    const csv=exportNativeProfile(out);assert.match(csv,/"administrator-declared"/);assert.match(csv,/"unverified"/);assert.doesNotMatch(csv,/ept-vertical-crs/);
+    const creates=f.calls.filter(([op])=>op==='create');assert.equal(creates.length,cached?0:1);
+    assert.ok(creates.every(([,payload])=>payload.request.method==='surface-transect'));
+    assert.equal(JSON.stringify(saved),before,'original saved volume and provenance are untouched');
+  }
+});
+
+test('profiles cannot exchange declared and encoded height provenance from their saved point parent',async()=>{
+  for(const [parentBasis,profileBasis] of [['administrator-declared','ept-vertical-crs'],['ept-vertical-crs','administrator-declared']]){
+    const {saved,parentJob,profile}=declaredPointFixture(parentBasis,profileBasis);
+    const f=setup({parentJob,getRecord:()=>saved,existing:[job('complete',{result:profile})]}),before=JSON.stringify(saved);
+    await assert.rejects(f.calculate(saved,{line}));
+    assert.equal(f.calls.some(([op])=>op==='create'),false);
+    assert.equal(JSON.stringify(saved),before);
+  }
 });

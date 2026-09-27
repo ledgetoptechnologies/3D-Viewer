@@ -27,8 +27,10 @@ export function validateNativeProfile(result, {line, parentCalculationId, source
   if (result.source?.verticalUnit !== 'm' || !/^[a-f0-9]{64}$/i.test(result.source?.sha256 || '') || !result.source?.modelVersionId || !/^[a-f0-9]{64}$/i.test(result.baseHash || '') || !/^EPSG:\d{4,6}$/.test(result.source?.crs || '') || !['dsm','dtm','ept'].includes(result.source?.kind) || typeof result.source.verticalUnitBasis !== 'string' || !result.source.verticalUnitBasis || (!point&&(!finitePair(result.source?.resolutionM)||result.source.resolutionM.some(v=>v<=0))) || !Number.isSafeInteger(result.cellCount) || result.cellCount < 0 || result.cellCount > 20000) throw new Error('The section is missing source or reference-base provenance.');
   if(point){
     validatePointSamplingGrid(result.source.samplingGrid);
-    if(result.calculationOrigin!=='server-original-point-surface'||!/^[a-f0-9]{64}$/i.test(result.source.manifestSha256||'')||result.source.verticalUnitBasis!=='ept-vertical-crs'||!['all','ground'].includes(result.source.classFilter))throw new Error('The section is missing point-source provenance.');
-    if(source&&(source.manifestSha256!==result.source.manifestSha256||source.classFilter!==result.source.classFilter||JSON.stringify(source.samplingGrid)!==JSON.stringify(result.source.samplingGrid)))throw new Error('The section uses a different point surface grid or source.');
+    // Presentation validates provenance; the request API enforces authority.
+    // Staff-declared heights stay explicitly declared, never relabelled encoded.
+    if(result.calculationOrigin!=='server-original-point-surface'||!/^[a-f0-9]{64}$/i.test(result.source.manifestSha256||'')||!['ept-vertical-crs','administrator-declared'].includes(result.source.verticalUnitBasis)||!['all','ground'].includes(result.source.classFilter))throw new Error('The section is missing point-source provenance.');
+    if(source&&(['manifestSha256','classFilter','verticalUnitBasis','verticalUnit','crs'].some(k=>source[k]!==result.source[k])||JSON.stringify(source.samplingGrid)!==JSON.stringify(result.source.samplingGrid)))throw new Error('The section uses a different point surface grid or source.');
   }
   if (source && ['assetId', 'sha256', 'modelVersionId', 'kind'].some(k => source[k] !== result.source[k])) throw new Error('The section uses a different elevation source.');
   let previous = 0;
