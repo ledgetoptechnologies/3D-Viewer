@@ -1,5 +1,13 @@
 # Measurement acceptance follow-up
 
+## September 27: edit map-created outlines in Model and Point Cloud
+
+- The prior cross-view release recovered display placement but deliberately kept an origin-family edit guard. That guard prevented the user's map-created outlines from being edited in Model or Point Cloud, even when visible.
+- Map-created outlines now edit in either 3D view once placement is ready and the coordinate reference matches. Drag/insert/delete handles use a transient display-height array; saved vertices remain horizontal E/N/0 with the original collection, source and coordinate reference. True spatial measurements still require a 3D view for editing so map picks cannot erase their measured heights.
+- Unchanged Finish performs no write or revision bump and retains the existing result. A changed outline saves once, invalidates its old volume and requires explicit recalculation. No calculation is started by editing. Cancelled gestures, view changes during a drag and sub-threshold click jitter restore both stored-coordinate and display-coordinate previews.
+- Verification: 118 focused tests passed with zero skips, including cross-view editing, canonical height separation, result preservation/invalidation, access loss, placement/CRS guards, array synchronization and rollback. The real-browser close-zoom/editor/sidebar suite passed 4/4, including actual mesh ray picks and resident-cloud picks for map-created outline editing. Its initial drag failure was fixture-only root scrolling; constraining the synthetic sidebar kept the drag target in view and retained all behavioral assertions. Production build and diff checks passed with existing dependency/chunk-size warnings.
+- No production measurement was edited during testing. Release/deployment and a non-mutating live edit-mode check remain separate from these local results.
+
 ## Cross-section follow-up release
 
 Run 36291222027 succeeded for `2559595f22821b8b7bcf5242144d25902fad8534`.

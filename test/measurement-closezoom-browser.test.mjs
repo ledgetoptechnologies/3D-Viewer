@@ -52,20 +52,23 @@ async function fixture(){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));return{server,requests,origin:`http://127.0.0.1:${server.address().port}/`};
 }
 const overlay=client=>client.evaluate(`(()=>{const svg=document.querySelector('#view .measurement-overlay');return{markup:svg?.innerHTML||'',lines:[...svg.querySelectorAll('line')].map(line=>['x1','y1','x2','y2'].map(a=>Number(line.getAttribute(a)))),circles:[...svg.querySelectorAll('circle')].map(c=>['cx','cy','r'].map(a=>Number(c.getAttribute(a)))),fills:[...svg.querySelectorAll('polygon')].map(p=>({stroke:p.getAttribute('stroke'),points:p.getAttribute('points')}))};})()`);
-function renderedPage(){return `<!doctype html><html><head><style>#view{position:relative;width:800px;height:600px}#panel{position:absolute;left:820px;top:0;width:300px}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><div id="view"></div><aside id="panel"></aside><script type="module">
+function renderedPage(){return `<!doctype html><html><head><style>body{margin:0}#view{position:relative;width:800px;height:600px}#panel{position:absolute;left:820px;top:0;width:300px;height:600px;overflow:auto}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><div id="view"></div><aside id="panel"></aside><script type="module">
 import * as THREE from 'three';
 import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
 import {resolveRenderedMeshBoundary,resolveRenderedPointBoundary} from '/measurement-rendered-surface.mjs';
 const view=document.querySelector('#view'),crs={crs:'EPSG:32616',verticalUnit:'m'},vertices=[[100,100,0],[300,100,0],[300,300,0],[100,300,0]];
 const mesh=new THREE.Mesh(new THREE.PlaneGeometry(400,400),new THREE.MeshBasicMaterial({side:THREE.DoubleSide}));mesh.rotation.x=-Math.PI/2;mesh.position.set(200,20,-200);mesh.updateMatrixWorld(true);
-const positions=new THREE.Float32BufferAttribute(vertices.flatMap(([e,n])=>[e,n,30]),3),matrixWorld=new THREE.Matrix4(),bounds=new THREE.Box3(new THREE.Vector3(100,100,30),new THREE.Vector3(300,300,30));
+const points=[];for(let e=0;e<=400;e+=10)for(let n=0;n<=400;n+=10)points.push(e,n,30);
+const positions=new THREE.Float32BufferAttribute(points,3),matrixWorld=new THREE.Matrix4(),bounds=new THREE.Box3(new THREE.Vector3(0,0,30),new THREE.Vector3(400,400,30));
 let mode='model',permission=true;
-const context={get mode(){return mode;},element:view,host:view,pick:()=>null,project:p=>[p[0],p[1]-(mode==='model'||mode==='cloud'?p[2]:0)],viewSignature:()=>mode,getDisplaySurfaceRevision:()=>mode,
-resolveRenderedDisplayVertices:(record,{signal})=>mode==='cloud'?resolveRenderedPointBoundary({record,expectedCrs:crs.crs,nodes:[{positions,matrixWorld,spacing:1,bounds}],signal,surfaceRevision:mode}):resolveRenderedMeshBoundary({record,expectedCrs:crs.crs,roots:[mesh],worldBounds:new THREE.Box3().setFromObject(mesh),toWorld:(e,n,z)=>new THREE.Vector3(e,z,-n),fromWorld:p=>[p.x,-p.z,p.y],signal,surfaceRevision:mode})};
+const project=p=>[p[0],p[1]-(mode==='model'||mode==='cloud'?p[2]:0)];
+function pick(event){const r=view.getBoundingClientRect(),x=event.clientX-r.left,y=event.clientY-r.top;if(mode==='model'){const ray=new THREE.Raycaster(new THREE.Vector3(x,100,-y-100),new THREE.Vector3(0,-1,1).normalize());const hit=ray.intersectObject(mesh)[0];return hit?[hit.point.x,-hit.point.z,hit.point.y]:null;}if(mode==='cloud'){let best=null,distance=Infinity;for(let i=0;i<positions.count;i++){const p=[positions.getX(i),positions.getY(i),positions.getZ(i)],screen=project(p),d=Math.hypot(screen[0]-x,screen[1]-y);if(d<distance){best=p;distance=d;}}return distance<=8?best:null;}return [x,y,0];}
+const context={get mode(){return mode;},element:view,host:view,pick,project,viewSignature:()=>mode,getDisplaySurfaceRevision:()=>mode,
+resolveRenderedDisplayVertices:(record,{signal})=>mode==='cloud'?resolveRenderedPointBoundary({record,expectedCrs:crs.crs,nodes:[{positions,matrixWorld,spacing:10,bounds}],signal,surfaceRevision:mode}):resolveRenderedMeshBoundary({record,expectedCrs:crs.crs,roots:[mesh],worldBounds:new THREE.Box3().setFromObject(mesh),toWorld:(e,n,z)=>new THREE.Vector3(e,z,-n),fromWorld:p=>[p.x,-p.z,p.y],signal,surfaceRevision:mode})};
 const workspace=createMeasurementWorkspace({panel:document.querySelector('#panel'),context:()=>context,token:()=>null,permitted:()=>permission,toolChanged:()=>{},coordinateReference:()=>crs,toLonLat:p=>p,resolveDisplayVertices:async()=>{throw new Error('Raster height units are absent.');}});
-await workspace.store.save({id:'33333333-3333-4333-8333-333333333333',name:'Map outline without volume',collection:'map',kind:'polygon',vertices,coordinateReference:crs,source:{kind:'dsm'},visible:true});
+await workspace.store.save({id:'33333333-3333-4333-8333-333333333333',name:'Map outline',collection:'map',kind:'polygon',vertices,coordinateReference:crs,source:{kind:'dsm'},results:{method:'surface-cut-fill',status:'complete',cutM3:15,fillM3:3,netM3:12},visible:true});
 const tick=()=>{workspace.tick();requestAnimationFrame(tick);};tick();
-window.renderedFixture={saved:()=>JSON.stringify([...workspace.store.records.values()]),mode:value=>{workspace.modeChanged();mode=value;workspace.tick({force:true});},deny:()=>{permission=false;workspace.tick();}};document.body.dataset.ready='true';
+window.renderedFixture={saved:()=>JSON.stringify([...workspace.store.records.values()]),draft:()=>workspace.getDraft(),pick:(x,y)=>{const r=view.getBoundingClientRect();return pick({clientX:x+r.left,clientY:y+r.top});},mode:value=>{workspace.modeChanged();mode=value;workspace.tick({force:true});},deny:()=>{permission=false;workspace.tick();}};document.body.dataset.ready='true';
 </script></body></html>`;}
 
 test('map outline renders on actual mesh and point geometry across all views without rewriting saved heights',{timeout:60000},async t=>{
@@ -84,6 +87,34 @@ test('map outline renders on actual mesh and point geometry across all views wit
       try{await waitFor(client,`Math.abs(Number(document.querySelector('#view .measurement-overlay circle')?.getAttribute('cy'))-${y})<1e-6`);}catch(error){throw new Error(`${mode} placement: ${await client.evaluate('document.body.innerText')} ${JSON.stringify(await overlay(client))}`,{cause:error});}
       const geometry=await overlay(client);assert.equal(geometry.fills.length,1);assert.equal(geometry.fills[0].points.trim().split(/\s+/).length,4);assert.equal(geometry.circles.length,4);assert.doesNotMatch(geometry.markup,/NaN|Infinity/);
       assert.equal(await client.evaluate('renderedFixture.saved()'),original,`${mode} does not persist display heights`);
+    }
+    const mouse=(type,x,y,extra={})=>client.command('Input.dispatchMouseEvent',{type,x,y,button:'left',clickCount:1,...extra});
+    const click=async(x,y)=>{await mouse('mousePressed',x,y);await mouse('mouseReleased',x,y);};
+    const button=async selector=>{const p=await client.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2];})()`);await click(...p);};
+    for(const [mode,height]of [['model',20],['cloud',30]]){
+      await client.command('Page.navigate',{url:`${f.origin}?rendered=1`});await waitFor(client,"document.body?.dataset.ready==='true'");
+      await client.evaluate(`renderedFixture.mode(${JSON.stringify(mode)})`);
+      await waitFor(client,`Math.abs(Number(document.querySelector('#view .measurement-overlay circle')?.getAttribute('cy'))-${100-height})<1e-6`);
+      const before=JSON.parse(await client.evaluate('renderedFixture.saved()'))[0];
+      await button('[data-m=edit-record]');await waitFor(client,'renderedFixture.draft()!==null');
+      const handles=await overlay(client);assert.ok(handles.circles.some(c=>Math.abs(c[0]-100)<1e-6&&Math.abs(c[1]-(100-height))<1e-6),`${mode}: edit handles retain actual displayed surface height`);
+      assert.ok((await client.evaluate('renderedFixture.draft().vertices')).every(p=>p[2]===0),'display placement is not canonical edit geometry');
+      await button('[data-m=finish]');await waitFor(client,'renderedFixture.draft()===null');
+      const unchanged=JSON.parse(await client.evaluate('renderedFixture.saved()'))[0];assert.deepEqual(unchanged.results,before.results,'unchanged finish retains saved volume');assert.deepEqual(unchanged.vertices,before.vertices);
+      await button('[data-m=edit-record]');await waitFor(client,"document.querySelectorAll('[data-measurement-insert]').length===4");
+      const offset=await client.evaluate("(()=>{const r=document.querySelector('#view').getBoundingClientRect();return [r.left,r.top];})()");
+      const at=(x,y)=>[x+offset[0],y+offset[1]];
+      await click(...at(200,100-height));await waitFor(client,'renderedFixture.draft().vertices.length===5');
+      assert.deepEqual((await client.evaluate('renderedFixture.draft().vertices'))[1],[200,100,0],'midpoint insertion preserves map convention');
+      const picked=await client.evaluate(`renderedFixture.pick(220,${80-height})`);assert.ok(picked&&Math.abs(picked[1]-80)<1e-6,`${mode} fixture surface pick ${JSON.stringify(picked)}`);
+      await mouse('mousePressed',...at(200,100-height));await mouse('mouseMoved',...at(220,80-height),{buttons:1});await mouse('mouseReleased',...at(220,80-height));
+      try{await waitFor(client,'Math.abs(renderedFixture.draft().vertices[1][0]-220)<1e-6&&Math.abs(renderedFixture.draft().vertices[1][1]-80)<1e-6');}catch(error){throw new Error(`${mode} drag: ${await client.evaluate('JSON.stringify(renderedFixture.draft())')} ${await client.evaluate('document.body.innerText')}`,{cause:error});}
+      const moved=(await client.evaluate('renderedFixture.draft().vertices'))[1];assert.ok(Math.abs(moved[0]-220)<1e-6&&Math.abs(moved[1]-80)<1e-6);assert.equal(moved[2],0,'3D surface pick updates XY but never persists picked Z');
+      assert.deepEqual(JSON.parse(await client.evaluate('renderedFixture.saved()'))[0],unchanged,'draft operations do not mutate saved source');
+      await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Backspace',code:'Backspace'});await waitFor(client,'renderedFixture.draft().vertices.length===4');
+      await mouse('mousePressed',...at(100,100-height));await mouse('mouseMoved',...at(120,100-height),{buttons:1});await mouse('mouseReleased',...at(120,100-height));await waitFor(client,'renderedFixture.draft().vertices[0][0]===120');
+      await button('[data-m=finish]');await waitFor(client,'renderedFixture.draft()===null');
+      const changed=JSON.parse(await client.evaluate('renderedFixture.saved()'))[0];assert.equal(changed.collection,'map');assert.ok(changed.vertices.every(p=>p[2]===0));assert.ok(Math.abs(changed.vertices[0][0]-120)<1e-6&&Math.abs(changed.vertices[0][1]-100)<1e-6);assert.equal(changed.results.volumeInvalidated,true);assert.equal(changed.results.cutM3,undefined);
     }
     await client.evaluate('renderedFixture.deny()');assert.equal(await client.evaluate("document.querySelector('#view .measurement-overlay').innerHTML"),'');
     assert.deepEqual(f.requests,[],'display placement creates no server jobs');assert.deepEqual(client.errors,[]);

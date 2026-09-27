@@ -26,7 +26,9 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   let adminAllowed=false,specialistAllowed=false,activeDialog=null,invalidated=false,viewGeneration=0,dialogGeneration=0;
   const store=createMeasurementStore({token,accessGeneration,changed:renderPanel});
   let pendingPick=null,lastPickAt=0,cursorOwner=null,previousCursor='';
-  let selectedVertex=-1,editBaseline=null;
+  // A map outline remains E/N/0 while its 3D editing handles follow the visible
+  // surface. Never serialize these approximate display heights into the record.
+  let selectedVertex=-1,editBaseline=null,draftDisplayVertices=null;
   const allowed=()=>permitted()&&!invalidated&&!store.isInvalidated?.();
   const message=document.createElement('p');message.className='measurement-message';message.setAttribute('role','status');
   const controls=document.createElement('div');controls.className='measurement-workspace';
@@ -203,6 +205,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   }
   function displayGeometry(record){
     if(!matchingReference(record))return null;
+    if(record===draft)return draftDisplayVertices||record.vertices;
     if(record.collection!=='map'||measurementCollection(context()?.mode)==='map')return record.vertices;
     let entry=displayCache.get(record.id);
     if(entry?.record!==record){entry?.controller.abort();entry={record,state:'queued',controller:new AbortController(),generation:viewGeneration,requestSurfaceRevision:surfaceRevision()};displayCache.set(record.id,entry);pumpDisplayRequests();}
@@ -229,7 +232,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(focusedAction){const row=[...(list.querySelectorAll?.('[data-record]')||[])].find(node=>node.dataset.record===focusedRecord);[...(row?.querySelectorAll('[data-m]')||[])].find(node=>node.dataset.m===focusedAction)?.focus({preventScroll:true});}
     for(const action of ['finish','undo'])controls.querySelector(`[data-m="${action}"]`).disabled=!draft;
     for(const action of ['edit','focus'])controls.querySelector(`[data-m="${action}"]`).disabled=!store.records.has(selected);
-    const chosen=store.records.get(selected),crossFamily=chosen&&chosen.collection!==measurementCollection(context()?.mode);
+    const chosen=store.records.get(selected),crossFamily=chosen?.collection==='spatial3d'&&measurementCollection(context()?.mode)==='map';
     const edit=controls.querySelector('[data-m="edit"]');
     edit.textContent=crossFamily?(chosen.collection==='map'?'Edit in map view':'Edit in 3D view'):'Edit selected';
     edit.title=crossFamily?'Switch to the original view type to move vertices without changing the meaning of measured heights.':'Move the selected measurement’s vertices';
@@ -238,7 +241,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function draftRecord(){return {...draft,vertices:draft.vertices.map(p=>p.slice())};}
   function releaseCursor(){if(cursorOwner){cursorOwner.style.cursor=previousCursor;cursorOwner=null;}}
   function updateCursor(){if(!bound?.element)return;const element=bound.element;element.classList.toggle('measurement-placing',!!draft&&!shift);element.classList.toggle('measurement-navigating',!!draft&&shift);element.classList.toggle('measurement-editing',!!draft&&!shift&&(editing||space));if(draft){if(cursorOwner!==element){releaseCursor();cursorOwner=element;previousCursor=element.style.cursor||'';}element.style.cursor=shift?'grab':editing||space?'move':'crosshair';}else releaseCursor();}
-  function disarm(){draft=null;editing=false;selectedVertex=-1;editBaseline=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
+  function disarm(){draft=null;editing=false;selectedVertex=-1;editBaseline=null;draftDisplayVertices=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
   function closeReports(){for(const capture of reportCaptures)capture.abort();reportCaptures.clear();for(const dialog of [...reportDialogs])dialog.retire();}
   function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;closeReports();}
   function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
@@ -294,6 +297,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(draft.vertices.length<(draft.kind==='polygon'?3:2)){disarm();tell('Incomplete measurement cancelled.');return;}
     const record={...draftRecord(),displayPreferences:{...draft.displayPreferences,units:savedUnits[units]}},generation=viewGeneration,dialogId=dialogGeneration,mode=context()?.mode;
     const geometryChanged=!editing||editBaseline!==JSON.stringify(record.vertices),hadVolume=['cutM3','volumeM3','netM3'].some(key=>Number.isFinite(record.results?.[key]));
+    if(editing&&!geometryChanged){disarm();tell('No point changes to save. Your saved measurement and volume are unchanged.');return;}
     try{if(geometryChanged)record.results={...measurementMetrics(record),status:'geometry-only',method:'vertex-geometry',...(hadVolume||record.results?.volumeInvalidated?{volumeInvalidated:true}:{}),...(record.collection==='map'?{elevationBasis:'not-sampled',warnings:['Map geometry is two-dimensional; stored Z=0 is a placeholder, not measured elevation. Surface calculations sample native elevations separately.']}:{} )};validateMeasurementGeometry(record);selected=record.id;disarm();await store.save(record);if(disposed||!allowed()||generation!==viewGeneration)return;tell(hadVolume&&geometryChanged?'Outline saved. Calculate volume again for the changed outline.':store.persistent()?'Measurement saved privately.':'Temporary measurement — resets on refresh.');
       if(openVolume&&record.kind==='polygon'&&!draft&&selected===record.id&&dialogId===dialogGeneration&&mode===context()?.mode)showSurface(store.records.get(record.id),{autoCalculate:false});}
     catch(error){tell(error.message);}
@@ -310,10 +314,25 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     draft={id:crypto.randomUUID(),name:`${kind==='distance'?'Distance':'Polygon'} ${records().length+1}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
     editing=false;updateCursor();renderPanel();toolChanged(tool==='volume'?'area':tool);tell('Click to place points. Hold Shift to navigate.');
   }
-  function editRecord(record){if(!record)return;if(record.collection!==measurementCollection(context()?.mode)){tell(record.collection==='map'?'Edit these vertices in the orthophoto, DSM or DTM map view.':'Edit these vertices in the 3D model or point cloud to preserve measured heights.');return;}closeDialogs();draft=structuredClone(record);editing=true;selectedVertex=-1;editBaseline=JSON.stringify(record.vertices);selected=record.id;cursor=null;updateCursor();renderPanel();toolChanged('edit');tell('Drag a point; click + to insert. Select a point then Delete or Backspace to remove it. Shift navigates; Finish saves.'+(['cutM3','volumeM3','netM3'].some(key=>Number.isFinite(record.results?.[key]))?' Changing the outline clears its old volume when saved. Export first if you need to keep that result.':''));}
-  function editHandles(){const rect=bound.element.getBoundingClientRect();return measurementEditHandles(draft,draft.vertices.map(p=>bound.project(p,rect)),selectedVertex,rect.width,rect.height);}
-  function removeSelectedVertex(){try{draft.vertices=changeMeasurementVertex(draft,{type:'delete',index:selectedVertex});selectedVertex=Math.min(selectedVertex,draft.vertices.length-1);cursor=null;pendingPick=null;tell('Point removed. Finish to save your outline.');}catch(error){tell(error.message);}}
-  function nearest(event){if(!draft)return -1;const rect=bound.element.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;let best=-1,d=18;draft.vertices.forEach((p,i)=>{const q=bound.project(p);if(q){const n=Math.hypot(q[0]-x,q[1]-y);if(n<d){best=i;d=n;}}});return best;}
+  function editRecord(record){
+    if(!record||!allowed())return;
+    if(draft){tell('Finish the current measurement before editing another.');return;}
+    if(!matchingReference(record)){tell('Cannot edit this measurement: its coordinate reference does not match this view.');return;}
+    const mapIn3D=record.collection==='map'&&measurementCollection(context()?.mode)==='spatial3d';
+    if(record.collection==='spatial3d'&&measurementCollection(context()?.mode)==='map'){tell('Edit these vertices in the 3D model or point cloud to preserve measured heights.');return;}
+    const placed=mapIn3D?displayGeometry(record):null;
+    if(mapIn3D&&!placed){tell('Wait for the outline to appear on the 3D surface, then choose Edit again.');return;}
+    closeDialogs();draft=structuredClone(record);draftDisplayVertices=placed?.map(p=>p.slice())||null;editing=true;selectedVertex=-1;editBaseline=JSON.stringify(record.vertices);selected=record.id;cursor=null;pendingPick=null;updateCursor();renderPanel();toolChanged('edit');
+    tell('Drag a point; click + to insert. Select a point then Delete or Backspace to remove it. Shift navigates; Finish saves.'+(mapIn3D?' This stays a horizontal outline; surface heights are used only to position its handles.':'')+(['cutM3','volumeM3','netM3'].some(key=>Number.isFinite(record.results?.[key]))?' Changing the outline clears its old volume when saved. Export first if you need to keep that result.':''));
+  }
+  function editHandles(){const rect=bound.element.getBoundingClientRect();return measurementEditHandles(draft,(displayGeometry(draft)||[]).map(p=>bound.project(p,rect)),selectedVertex,rect.width,rect.height);}
+  function moveDraftVertex(index,point){
+    if(!Array.isArray(point)||point.length!==3||!point.every(Number.isFinite))return;
+    if(draftDisplayVertices)draftDisplayVertices[index]=point.slice();
+    draft.vertices[index]=draft.collection==='map'?[point[0],point[1],0]:point.slice();
+  }
+  function removeSelectedVertex(){try{draft.vertices=changeMeasurementVertex(draft,{type:'delete',index:selectedVertex});draftDisplayVertices?.splice(selectedVertex,1);selectedVertex=Math.min(selectedVertex,draft.vertices.length-1);cursor=null;pendingPick=null;tell('Point removed. Finish to save your outline.');}catch(error){tell(error.message);}}
+  function nearest(event){if(!draft)return -1;const rect=bound.element.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;let best=-1,d=18;(displayGeometry(draft)||[]).forEach((p,i)=>{const q=bound.project(p,rect);if(q){const n=Math.hypot(q[0]-x,q[1]-y);if(n<d){best=i;d=n;}}});return best;}
   function stop(event){event.preventDefault();event.stopImmediatePropagation();}
   function pointerDown(event){
     if(!allowed()||!draft||event.shiftKey||interactive(event))return;
@@ -321,10 +340,10 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     let index=(space||editing)?nearest(event):-1;
     if(editing&&event.button===0){const rect=bound.element.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top,handles=editHandles(),d=handles.deletion;
       if(d&&x>=d.x&&x<=d.x+d.width&&y>=d.y&&y<=d.y+d.height){removeSelectedVertex();stop(event);return;}
-      if(index<0){const mid=handles.midpoints.find(p=>Math.hypot(x-p.x,y-p.y)<=12);if(mid){try{draft.vertices=changeMeasurementVertex(draft,{type:'insert',index:mid.index});index=mid.index+1;tell('Point inserted. Drag it to adjust; Finish saves.');}catch(error){tell(error.message);stop(event);return;}}}
+      if(index<0){const mid=handles.midpoints.find(p=>Math.hypot(x-p.x,y-p.y)<=12);if(mid){try{draft.vertices=changeMeasurementVertex(draft,{type:'insert',index:mid.index});if(draftDisplayVertices){const a=draftDisplayVertices[mid.index],b=draftDisplayVertices[(mid.index+1)%draftDisplayVertices.length];draftDisplayVertices.splice(mid.index+1,0,a.map((v,i)=>(v+b[i])/2));}index=mid.index+1;pendingPick=null;tell('Point inserted. Drag it to adjust; Finish saves.');}catch(error){tell(error.message);stop(event);return;}}}
       selectedVertex=index;
     }
-    gesture={x:event.clientX,y:event.clientY,button:event.button,index,original:draft.vertices.map(p=>p.slice())};
+    gesture={x:event.clientX,y:event.clientY,button:event.button,index,original:draft.vertices.map(p=>p.slice()),originalDisplay:draftDisplayVertices?.map(p=>p.slice())||null};
     if(event.button===0)bound.element.setPointerCapture?.(event.pointerId);
     stop(event);
   }
@@ -339,7 +358,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(!gesture)return;
     const g=gesture;gesture=null;stop(event);
     pendingPick=null;
-    if(g.index>=0){const point=bound.pick(event);if(point&&Math.hypot(event.clientX-g.x,event.clientY-g.y)>2)draft.vertices[g.index]=point;if(editing||draft.vertices.length>=(draft.kind==='polygon'?3:2)){try{validateMeasurementGeometry(draft);}catch(error){draft.vertices=g.original;tell(error.message);}}}
+    if(g.index>=0){if(Math.hypot(event.clientX-g.x,event.clientY-g.y)<=2){draft.vertices=g.original;draftDisplayVertices=g.originalDisplay;}else{const point=bound.pick(event);if(point)moveDraftVertex(g.index,point);}if(editing||draft.vertices.length>=(draft.kind==='polygon'?3:2)){try{validateMeasurementGeometry(draft);}catch(error){draft.vertices=g.original;draftDisplayVertices=g.originalDisplay;tell(error.message);}}}
     try{bound.element.releasePointerCapture?.(event.pointerId);}catch{}
     if(event.shiftKey||Math.hypot(event.clientX-g.x,event.clientY-g.y)>6||g.index>=0)return;
     if(g.button===2){void finish();return;}
@@ -354,11 +373,12 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(event.key==='Shift'){shift=true;pendingPick=null;updateCursor();}
     if(!draft)return;
     if(event.code==='Space'){space=true;updateCursor();stop(event);}
-    else if(event.key==='Backspace'){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;}stop(event);}
+    else if(event.key==='Backspace'||(editing&&event.key==='Delete')){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;}stop(event);}
     else if(event.key==='Escape'||event.key==='Enter'){stop(event);void finish();}
   }
   function keyUp(event){if(event.code==='Space')space=false;if(event.key==='Shift')shift=false;updateCursor();}
-  function blur(){gesture=null;space=false;shift=false;cursor=null;pendingPick=null;updateCursor();}
+  function cancelGesture(){if(gesture?.index>=0&&draft){draft.vertices=gesture.original;draftDisplayVertices=gesture.originalDisplay;}gesture=null;pendingPick=null;}
+  function blur(){cancelGesture();space=false;shift=false;cursor=null;updateCursor();}
   const contextMenu=e=>{if(draft&&!e.shiftKey)stop(e);};
   function bind(next){
     if(bound?.element===next?.element){bound=next;return;}
@@ -380,13 +400,13 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(!permitted()){invalidate('Personal measurements are hidden until access is restored.');return;}
     if(!bound||!allowed()){if(!allowed()&&draft)disarm();if(lastSvg!=='')svg.innerHTML='';lastSvg='';lastOverlayFrame=null;return;}
     observeDisplaySurface();
-    if(pendingPick&&draft&&!shift&&performance.now()-lastPickAt>=66){const event=pendingPick;pendingPick=null;lastPickAt=performance.now();const point=bound.pick(event);if(point){if(gesture?.index>=0)draft.vertices[gesture.index]=point;else if(!editing)cursor=point;}}
+    if(pendingPick&&draft&&!shift&&performance.now()-lastPickAt>=66){const event=pendingPick;pendingPick=null;lastPickAt=performance.now();const point=bound.pick(event);if(point){if(gesture?.index>=0)moveDraftVertex(gesture.index,point);else if(!editing)cursor=point;}}
     const all=records().filter(r=>r.visible!==false&&r.id!==draft?.id).sort((a,b)=>Number(b.id===selected)-Number(a.id===selected));if(draft)all.unshift(draft);
     // Empty collections still check access above, but must not force layout,
     // camera projection or SVG mutation alongside a dense Potree render.
     if(!all.length){if(lastSvg!=='')svg.innerHTML='';lastSvg='';lastOverlayFrame=null;if(densityNotice.textContent) densityNotice.textContent='';return;}
     const signature=bound.viewSignature?.();
-    const draftSignature=draft?JSON.stringify([draft.id,draft.vertices,cursor,editing,selectedVertex]):null;
+    const draftSignature=draft?JSON.stringify([draft.id,draft.vertices,draftDisplayVertices,cursor,editing,selectedVertex]):null;
     if(!force&&typeof signature==='string'&&lastOverlayFrame&&lastOverlayFrame.element===bound.element&&lastOverlayFrame.mode===bound.mode&&lastOverlayFrame.generation===viewGeneration&&lastOverlayFrame.signature===signature&&lastOverlayFrame.units===units&&lastOverlayFrame.selected===selected&&lastOverlayFrame.draft===draftSignature&&lastOverlayFrame.records.length===all.length&&all.every((record,index)=>record===lastOverlayFrame.records[index]))return;
     const rect=bound.element.getBoundingClientRect(),viewBox=`0 0 ${rect.width} ${rect.height}`;
     if(svg.getAttribute?.('viewBox')!==viewBox)svg.setAttribute('viewBox',viewBox);
@@ -419,7 +439,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
         const detail=volume!==null?`${result.estimated||result.status==='estimate'||result.method==='reconstructed-estimate'?'Estimated ':''}Volume ${measurementValue(volume,3,units)}`:closed?`${measurementValue(metrics(r).horizontalAreaM2,2,units)} horizontal`:null;
         markup+=text(center[0],center[1]+15,detail?[r.name,detail]:r.name);
       }
-      if(vertices.length>=2){const lengths=(r===draft?measurementMetrics({...r,vertices}):metrics(r)).edgeLengthsM;for(let i=0;i<lengths.length;i++){const a=positions[i],b=positions[(i+1)%positions.length];if(!a||!b)continue;if(Math.hypot(a[0]-b[0],a[1]-b[1])<90&&r!==draft&&r.id!==selected){decluttered=true;continue;}markup+=text((a[0]+b[0])/2,(a[1]+b[1])/2-7,measurementValue(lengths[i],1,units));}}
+      if(vertices.length>=2){const lengths=(r===draft?measurementMetrics({...r,vertices:draftDisplayVertices?r.vertices:vertices}):metrics(r)).edgeLengthsM;for(let i=0;i<lengths.length;i++){const a=positions[i],b=positions[(i+1)%positions.length];if(!a||!b)continue;if(Math.hypot(a[0]-b[0],a[1]-b[1])<90&&r!==draft&&r.id!==selected){decluttered=true;continue;}markup+=text((a[0]+b[0])/2,(a[1]+b[1])/2-7,measurementValue(lengths[i],1,units));}}
     }
     const densityText=decluttered?'Display decluttered for responsiveness. Select a measurement to prioritize it, or hide others. Saved geometry and calculations are unchanged.':'';
     if(densityNotice.textContent!==densityText)densityNotice.textContent=densityText;
@@ -480,7 +500,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const action=event.target.closest('[data-m]')?.dataset.m,id=event.target.closest('[data-record]')?.dataset.record,record=store.records.get(id);
     try{
       if(action==='finish')await finish();
-      if(action==='undo'&&draft)draft.vertices.pop();
+      if(action==='undo'&&draft){draft.vertices.pop();draftDisplayVertices?.pop();}
       if(action==='edit')editRecord(store.records.get(selected));
       if(action==='edit-record'){selected=id;editRecord(record);}
       if(action==='focus'){const chosen=store.records.get(selected);if(chosen){const vertices=displayGeometry(chosen);if(vertices)context()?.focus?.(vertices);else tell(displayStatus(chosen));}else tell('Select a measurement name first.');}
@@ -504,5 +524,5 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   store.load().then(notice=>{ready=true;loadFailed=false;renderPanel();if(notice)tell(notice);}).catch(error=>{loadFailed=true;renderPanel();tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});
   if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){const newlyAllowed=!adminAllowed&&result.capabilities?.serverCalculations===true;adminAllowed=result.capabilities?.serverCalculations===true;if(newlyAllowed){for(const [id,entry]of displayCache)if(entry.awaitingStaff){entry.controller.abort();displayCache.delete(id);}lastOverlayFrame=null;}specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
   renderPanel();
-  return {setTool,store,tick:draw,invalidate,captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
+  return {setTool,store,tick:draw,invalidate,captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){cancelGesture();viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
 }

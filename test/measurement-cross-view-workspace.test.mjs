@@ -31,14 +31,14 @@ class Element {
   setPointerCapture(){} releasePointerCapture(){} focus(){} click(){}
 }
 
-function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest}={}){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2)}={}){
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
   const projected=[],downloads=[],mutations=[],calculationCalls=[],resolverCalls=[],renderedResolverCalls=[],focused=[];
   let mode='model',permission=true,surfaceRevision=displaySurfaceRevision,surfaceRevisionReads=0,now=1000;
   const context=()=>{
-    const view={mode,element:canvas,host,viewSignature:()=>mode,getDisplaySurfaceRevision:()=>{surfaceRevisionReads++;return surfaceRevision;},pick:event=>[event.clientX,event.clientY,0],project(point){projected.push({mode,point:Array.from(point)});return point.slice(0,2);},focus(vertices){focused.push({mode,vertices:structuredClone(vertices)});}};
+    const view={mode,element:canvas,host,viewSignature:()=>mode,getDisplaySurfaceRevision:()=>{surfaceRevisionReads++;return surfaceRevision;},pick,project(point){projected.push({mode,point:Array.from(point)});return project(point);},focus(vertices){focused.push({mode,vertices:structuredClone(vertices)});}};
     if(resolveRenderedDisplayVertices)view.resolveRenderedDisplayVertices=(record,options)=>{renderedResolverCalls.push({record:structuredClone(record),options,mode});return resolveRenderedDisplayVertices(record,options);};
     return view;
   };
@@ -50,7 +50,7 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
   const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
-  return{workspace,controls,panel,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
+  return{workspace,controls,panel,canvas,window,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
     svg:()=>host.children.find(node=>node.tagName==='svg'),list:()=>controls.querySelector('[data-m-list]').innerHTML,
     async switchTo(next){workspace.modeChanged();mode=next;workspace.tick();await flush();workspace.tick();},
     setSurfaceRevision(next,{advance=0}={}){surfaceRevision=next;now+=advance;},advance(ms){now+=ms;},
@@ -164,14 +164,82 @@ test('selection survives map/3D detours and export-all retains original geometry
   for(const key of ['vertices','collection','coordinateReference','source','results'])assert.deepEqual(exportedMap[key],map[key]);
 });
 
-test('cross-family editing is refused with guidance and never substitutes map pick Z for measured elevation',async t=>{
-  for(const [collection,mode]of [['spatial3d','ortho'],['map','cloud']]){
+test('spatial editing in maps remains refused and never substitutes placeholder Z for measured elevation',async t=>{
+  for(const [collection,mode]of [['spatial3d','ortho'],['spatial3d','dsm'],['spatial3d','dtm']]){
     const f=fixture();t.after(()=>f.workspace.dispose());const record=document(collection,'Original geometry');await f.workspace.store.save(record);await f.switchTo(mode);await f.action('select',record.id);f.watchMutations();
     await f.action('edit');assert.equal(f.workspace.getDraft(),null);
     assert.match(f.panel.children[1].textContent,/switch|return|open|edit/i);assert.match(f.panel.children[1].textContent,/map|3D|point cloud|orthophoto/i);
     assert.deepEqual(f.workspace.store.records.get(record.id).vertices,record.vertices);assert.deepEqual(f.mutations,[]);
     await f.switchTo(collection==='map'?'ortho':'model');await f.action('edit');assert.equal(f.workspace.getDraft()?.id,record.id,'editing still works in the origin family');
   }
+});
+
+const pointer=(x,y,extra={})=>({clientX:x,clientY:y,button:0,buttons:0,pointerId:1,target:{closest:()=>null},preventDefault(){},stopImmediatePropagation(){},...extra});
+test('map outlines edit on model/cloud display heights but persist only XY and never calculate automatically',async t=>{
+  for(const mode of ['model','cloud']){
+    const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:e=>[e.clientX,e.clientY+160,160]});t.after(()=>f.workspace.dispose());
+    const record={...document('map','Editable map outline'),kind:'polygon',vertices:[[100,200,0],[300,200,0],[300,400,0],[100,400,0]],results:{cutM3:85,fillM3:8,netM3:77}};
+    await f.workspace.store.save(record);await f.switchTo(mode);await f.action('select',record.id);f.watchMutations();
+    const before=JSON.stringify(f.workspace.store.records.get(record.id));await f.action('edit');f.workspace.tick();
+    assert.ok(f.workspace.getDraft());assert.ok(f.workspace.getDraft().vertices.every(p=>p[2]===0));assert.match(f.svg().innerHTML,/cy="55"/,'handles project at display Z, not zero');
+    await f.action('finish');assert.deepEqual(f.mutations,[],'unchanged finish must not bump saved revision or detach result');assert.equal(JSON.stringify(f.workspace.store.records.get(record.id)),before);
+    await f.action('edit');f.workspace.tick();
+    await f.canvas.fire('pointerdown',pointer(100,55));await f.canvas.fire('pointermove',pointer(120,65,{buttons:1}));f.advance(70);f.workspace.tick();await f.canvas.fire('pointerup',pointer(120,65));f.workspace.tick();
+    assert.deepEqual(Array.from(f.workspace.getDraft().vertices[0]),[120,225,0]);assert.match(f.svg().innerHTML,/cx="120" cy="65"/,'moved handle retains picked display height');
+    assert.equal(JSON.stringify(f.workspace.store.records.get(record.id)),before,'draft editing does not mutate saved record');
+    await f.action('finish');assert.deepEqual(f.mutations,['save']);const saved=f.workspace.store.records.get(record.id);
+    assert.equal(saved.collection,'map');assert.deepEqual(saved.source,record.source);assert.ok(saved.vertices.every(p=>p[2]===0));assert.equal(saved.results.volumeInvalidated,true);assert.equal(saved.results.netM3,undefined);assert.deepEqual(f.calculationCalls,[]);
+    await f.switchTo('ortho');assert.equal(f.workspace.store.records.get(record.id).vertices[0][0],120);
+  }
+});
+
+test('map 3D editing waits for placement, rejects mismatched CRS and retires its draft on access loss',async t=>{
+  const waiting=deferred(),f=fixture({resolveDisplayVertices:()=>waiting.promise});t.after(()=>f.workspace.dispose());const record=document('map','Waiting outline');await f.workspace.store.save(record);f.workspace.tick();await flush();await f.action('edit-record',record.id);
+  assert.equal(f.workspace.getDraft(),null);assert.match(f.panel.children[1].textContent,/Wait for the outline/);
+  waiting.resolve({vertices:record.vertices.map(([e,n])=>[e,n,145])});await flush();f.workspace.tick();await f.action('edit-record',record.id);assert.ok(f.workspace.getDraft());f.watchMutations();f.deny();assert.equal(f.workspace.getDraft(),null);assert.deepEqual(f.mutations,[]);
+  const mismatch=fixture({viewCrs:'EPSG:32615'});t.after(()=>mismatch.workspace.dispose());await mismatch.workspace.store.save(record);await mismatch.action('edit-record',record.id);assert.equal(mismatch.workspace.getDraft(),null);assert.match(mismatch.panel.children[1].textContent,/coordinate reference/);
+});
+
+test('map 3D edit insertion/deletion and invalid drags keep canonical and display vertices aligned',async t=>{
+  const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:e=>[e.clientX,e.clientY+145,145]});t.after(()=>f.workspace.dispose());
+  const record={...document('map','Edit rollback'),kind:'polygon',vertices:[[100,200,0],[300,200,0],[300,400,0],[100,400,0]],results:{cutM3:10,netM3:10,fillM3:0}};
+  await f.workspace.store.save(record);await f.switchTo('cloud');await f.action('edit-record',record.id);f.watchMutations();
+  await f.canvas.fire('pointerdown',pointer(200,55));await f.canvas.fire('pointerup',pointer(200,55));f.workspace.tick();
+  assert.equal(f.workspace.getDraft().vertices.length,5);assert.deepEqual(Array.from(f.workspace.getDraft().vertices[1]),[200,200,0]);assert.match(f.svg().innerHTML,/cx="200" cy="55"/);
+  await f.window.fire('keydown',pointer(0,0,{key:'Delete',code:'Delete'}));f.workspace.tick();assert.equal(f.workspace.getDraft().vertices.length,4);assert.doesNotMatch(f.svg().innerHTML,/data-measurement-vertex="4"/);
+  await f.canvas.fire('pointerdown',pointer(100,55));await f.canvas.fire('pointermove',pointer(300,55,{buttons:1}));f.advance(70);f.workspace.tick();await f.canvas.fire('pointerup',pointer(300,55));f.workspace.tick();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.workspace.getDraft().vertices)),record.vertices,'invalid overlapping point rolls back saved-coordinate draft');assert.match(f.svg().innerHTML,/cx="100" cy="55"/,'display point rolls back too');
+  await f.action('finish');assert.deepEqual(f.mutations,[]);assert.equal(f.workspace.store.records.get(record.id).results.netM3,10);
+});
+
+test('switching away from a changed map edit saves horizontal geometry once without invoking volume',async t=>{
+  const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:e=>[e.clientX,e.clientY+200,200]});t.after(()=>f.workspace.dispose());
+  const record=document('map','View switch edit');await f.workspace.store.save(record);await f.switchTo('cloud');await f.action('edit-record',record.id);f.watchMutations();
+  await f.canvas.fire('pointerdown',pointer(250,55));await f.canvas.fire('pointerup',pointer(270,65));
+  await f.switchTo('dsm');await flush();assert.equal(f.workspace.getDraft(),null);assert.deepEqual(f.mutations,['save']);assert.deepEqual(f.workspace.store.records.get(record.id).vertices[0],[270,265,0]);assert.deepEqual(f.calculationCalls,[]);
+});
+
+test('cancelled map 3D drags restore both coordinate arrays and never save a partial gesture',async t=>{
+  for(const cancel of ['pointercancel','blur','modeChanged']){
+    const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:e=>[e.clientX,e.clientY+200,200]});t.after(()=>f.workspace.dispose());const record=document('map','Cancelled edit');await f.workspace.store.save(record);await f.switchTo('model');await f.action('edit-record',record.id);f.watchMutations();
+    await f.canvas.fire('pointerdown',pointer(250,55));await f.canvas.fire('pointermove',pointer(270,65,{buttons:1}));f.advance(70);f.workspace.tick();assert.equal(f.workspace.getDraft().vertices[0][0],270);
+    if(cancel==='modeChanged')await f.switchTo('dtm');else{await(cancel==='blur'?f.window:f.canvas).fire(cancel,pointer(270,65));f.workspace.tick();assert.deepEqual(JSON.parse(JSON.stringify(f.workspace.getDraft().vertices)),record.vertices);assert.match(f.svg().innerHTML,/cx="250" cy="55"/);await f.action('finish');}
+    assert.deepEqual(f.mutations,[]);assert.deepEqual(f.workspace.store.records.get(record.id).vertices,record.vertices);
+  }
+});
+
+test('a different display height at unchanged map XY cannot invalidate the saved volume',async t=>{
+  const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:()=>[250,200,900]});t.after(()=>f.workspace.dispose());
+  const record={...document('map','Same XY'),results:{cutM3:11,fillM3:1,netM3:10,calculationJobId:'unchanged-job'}};await f.workspace.store.save(record);await f.switchTo('model');const before=JSON.stringify(f.workspace.store.records.get(record.id));await f.action('edit-record',record.id);f.watchMutations();
+  await f.canvas.fire('pointerdown',pointer(250,55));await f.canvas.fire('pointerup',pointer(270,65));await f.action('finish');
+  assert.deepEqual(f.mutations,[]);assert.equal(JSON.stringify(f.workspace.store.records.get(record.id)),before);assert.deepEqual(f.calculationCalls,[]);
+});
+
+test('click jitter on an elevated edit handle restores the preview and does not invalidate volume',async t=>{
+  const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:e=>[e.clientX,e.clientY+145,145]});t.after(()=>f.workspace.dispose());
+  const record={...document('map','No jitter edit'),results:{cutM3:11,fillM3:1,netM3:10}};await f.workspace.store.save(record);await f.switchTo('cloud');const before=JSON.stringify(f.workspace.store.records.get(record.id));await f.action('edit-record',record.id);f.watchMutations();
+  await f.canvas.fire('pointerdown',pointer(250,55));await f.canvas.fire('pointermove',pointer(251,55,{buttons:1}));f.advance(70);f.workspace.tick();await f.canvas.fire('pointerup',pointer(251,55));f.workspace.tick();assert.match(f.svg().innerHTML,/cx="250" cy="55"/);await f.action('finish');
+  assert.deepEqual(f.mutations,[]);assert.equal(JSON.stringify(f.workspace.store.records.get(record.id)),before);
 });
 
 test('pending map draping is bounded and never renders placeholder elevations; completion is display-only',async t=>{
