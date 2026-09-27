@@ -33,16 +33,21 @@ export function validateNativeProfile(result, {line, parentCalculationId, source
     if(source&&(['manifestSha256','classFilter','verticalUnitBasis','verticalUnit','crs'].some(k=>source[k]!==result.source[k])||JSON.stringify(source.samplingGrid)!==JSON.stringify(result.source.samplingGrid)))throw new Error('The section uses a different point surface grid or source.');
   }
   if (source && ['assetId', 'sha256', 'modelVersionId', 'kind'].some(k => source[k] !== result.source[k])) throw new Error('The section uses a different elevation source.');
-  let previous = 0;
-  for (const s of result.segments) {
-    if (!['sample', 'nodata', point?'outside-surface':'outside-raster', 'outside-selection'].includes(s.status) || !near(s.startM, previous) || !(s.endM > s.startM) || s.endM > result.lengthM + 1e-6 || !finitePair(s.start) || !finitePair(s.end)) throw new Error('The section contains invalid or missing station intervals.');
+  let previous = 0;const normalized=[];
+  for (const [index,s] of result.segments.entries()) {
+    const zeroContact=point&&Number.isFinite(s.startM)&&s.startM===s.endM&&s.startM===previous&&s.startM>=0&&s.endM<=result.lengthM&&(index===result.segments.length-1?s.endM===result.lengthM:result.segments[index+1]?.startM===s.endM);
+    if (!['sample', 'nodata', point?'outside-surface':'outside-raster', 'outside-selection'].includes(s.status) || !near(s.startM, previous) || (!(s.endM > s.startM)&&!zeroContact) || s.endM > result.lengthM + 1e-6 || !finitePair(s.start) || !finitePair(s.end)) throw new Error('The section contains invalid or missing station intervals.');
     for (const [key, station] of [['start',s.startM],['end',s.endM]]) if(s[key].some((v,i)=>Math.abs(v-(result.line.start[i]+(result.line.end[i]-result.line.start[i])*station/result.lengthM))>1e-6))throw new Error('Section coordinates do not match their station on the requested line.');
     if ((['sample','nodata'].includes(s.status)||s.cell!==undefined) && (!Array.isArray(s.cell)||s.cell.length!==2||!s.cell.every(v=>Number.isSafeInteger(v)&&v>=0)))throw new Error('The section contains invalid native cell indices.');
     if (s.status === 'sample' && ![s.surfaceM, s.baseStartM, s.baseEndM].every(Number.isFinite)) throw new Error('The section contains an invalid elevation sample.');
+    // Older point jobs could retain a zero-extent floating-point contact.
+    // Validate its provenance, geometry and neighbors before omitting it from
+    // presentation; never bridge positive gaps or change the stored result.
+    if(!zeroContact)normalized.push(s);
     previous = s.endM;
   }
   if (!near(previous, result.lengthM)) throw new Error('The section is incomplete.');
-  return result;
+  return normalized.length===result.segments.length?result:{...result,segments:normalized.map(segment=>structuredClone(segment))};
 }
 
 export function profileStation(result, station) {
@@ -59,7 +64,7 @@ export function profileStation(result, station) {
 // spreadsheet formulas; display-unit choices do not alter measured coordinates.
 const csv = value => { let text = String(value ?? ''); if (typeof value !== 'number' && /^[=+@\-\t\r]/.test(text)) text = `'${text}`; return `"${text.replaceAll('"', '""')}"`; };
 export function exportNativeProfile(result) {
-  validateNativeProfile(result);
+  result=validateNativeProfile(result);
   const header = ['station_start_m', 'station_end_m', 'status', 'surface_m', 'base_start_m', 'base_end_m', 'easting_start_m', 'northing_start_m', 'easting_end_m', 'northing_end_m', 'column', 'row', 'crs', 'vertical_unit_basis', 'vertical_datum', 'model_version', 'source_sha256', 'parent_calculation', 'base_hash'];
   const rows = result.segments.map(s => [s.startM, s.endM, s.status, s.status === 'sample' ? s.surfaceM : '', s.status === 'sample' ? s.baseStartM : '', s.status === 'sample' ? s.baseEndM : '', ...s.start, ...s.end, ...(s.cell || ['', '']), result.source.crs, result.source.verticalUnitBasis, 'unverified', result.source.modelVersionId, result.source.sha256, result.parentCalculationId, result.baseHash]);
   return [header, ...rows].map(row => row.map(csv).join(',')).join('\r\n');

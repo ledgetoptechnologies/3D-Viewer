@@ -103,8 +103,11 @@ test('Potree adapter creation/signature/projection do not force layout and picke
   const camera=new THREE.PerspectiveCamera(60,4/3,.1,100);camera.position.set(0,0,10);camera.lookAt(0,0,0);camera.updateMatrixWorld();
   const points={visible:true,visibleNodes:[{}],material:original,pick(){this.material={};return{position:new THREE.Vector3(0,0,0)};}},viewer={scene:{getActiveCamera:()=>camera,pointclouds:[points]},renderer:{domElement:canvas,setRenderTarget(){},setScissorTest(){},state:{reset(){}}}};
   const win={viewer,THREE,Potree:{measureTimings:false},performance:{clearMarks:n=>marks.push(n),clearMeasures:n=>marks.push(n)}};
+  const measurementDisplaySurfaceRevision=()=>{throw new Error('Adapter creation/projection must not scan resident geometry');},resolveRenderedMeasurementVertices=()=>{throw new Error('Adapter creation/projection must not resolve display placement');};
   const scope=vm.createContext({state:{activeMode:'cloud',cloudMode:'potree'},isMapMode:()=>false,document:{getElementById:()=>({contentWindow:win})},dom:{cloudContainer:{}},camera,renderer:viewer.renderer,THREE,projectMeasurementBoundary});
+  Object.assign(scope,{measurementDisplaySurfaceRevision,resolveRenderedMeasurementVertices});
   vm.runInContext(main.slice(start,end),scope);const adapter=scope.measurementViewContext();
+  assert.equal(adapter.getDisplaySurfaceRevision,measurementDisplaySurfaceRevision);assert.equal(adapter.resolveRenderedDisplayVertices,resolveRenderedMeasurementVertices);
   const signature=adapter.viewSignature();assert.deepEqual(adapter.project([0,0,0],{width:400,height:300}),[200,150]);assert.equal(layout,0);
   const boundary=adapter.projectBoundary([[-.2,-.2,9],[.2,-.2,9],[.2,.2,11],[-.2,.2,11]],{width:400,height:300},{closed:true});
   assert.equal(boundary.segments.length,3,'partly behind-camera polygon retains its original visible edges');

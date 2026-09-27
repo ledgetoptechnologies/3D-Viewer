@@ -6,6 +6,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { calculatePointSurface, pointSurfaceGrid, preflightPointSurface } from '../server/measurementPointSurface.mjs';
 import {calculatePointSurfaceTransect} from '../server/measurementPointTransect.mjs';
+import {traceRasterCells,frozenReferenceIntervals} from '../server/measurementRasterTransect.mjs';
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'measurement-point-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));fs.mkdirSync(path.join(root,'ept-hierarchy'));fs.mkdirSync(path.join(root,'ept-data'));
   const files=[],write=(relative,bytes)=>{bytes=Buffer.isBuffer(bytes)?bytes:Buffer.from(JSON.stringify(bytes));fs.writeFileSync(path.join(root,relative),bytes);const file={relativePath:relative,byteSize:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};files.push(file);return file;};
@@ -16,6 +17,38 @@ function fixture(t){
   const request={vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]],reference:{type:'custom',elevationM:0},coordinateReference:{crs:'EPSG:32616'},sourceVerticalUnit:'m',cellSizeM:1,source:{id:'ept',byteSize:manifest.byteSize,sha256:manifest.sha256,manifestSha256:'b'.repeat(64)},modelVersionId:'v1'};
   return{root,files,request,write};
 }
+
+test('UTM point sections omit only collapsed metric contacts and preserve continuous positive station coverage',async t=>{
+  const f=fixture(t),poly=[[500018.4621418826,4870020.323978993,0],[500094.7803548956,4870021.415496769,0],[500099.24383717007,4870047.501313193,0],[500018.4621418826,4870047.501313193,0]];
+  f.files.length=0;
+  const header=f.write('ept.json',{bounds:[500010,4870010,0,500110,4870060,10],dataType:'binary',srs:{horizontal:'32616'},schema:['X','Y','Z'].map(name=>({name,type:'floating',size:8}))});
+  f.write('ept-hierarchy/0-0-0-0.json',{'0-0-0-0':1});const bytes=Buffer.alloc(24);[500050,4870030,5].forEach((v,i)=>bytes.writeDoubleLE(v,i*8));f.write('ept-data/0-0-0-0.bin',bytes);
+  const grid=pointSurfaceGrid(poly,.1),samplingGrid={version:1,width:grid.width,height:grid.height,bounds:grid.bounds,cellSizeM:.1,rowOrder:'north-to-south',reduction:'maximum-z',emptyCells:'missing'};
+  const referencePatches=[[poly[0],poly[1],poly[2]],[poly[0],poly[2],poly[3]]],request={...f.request,vertices:poly,cellSizeM:.1,source:{id:'ept',kind:'ept',sha256:header.sha256,byteSize:header.byteSize,manifestSha256:'b'.repeat(64)},method:'surface-transect',parentCalculationId:'parent',samplingGrid,referencePatches,baseHash:crypto.createHash('sha256').update(JSON.stringify(referencePatches)).digest('hex')};
+  let random=12345;const rand=()=>((random=Math.imul(random,1664525)+1013904223>>>0)/4294967296);
+  const lines=[{start:[500017.4621418826,4870042.137615444],end:[500099.7803548956,4870043.802819616]},...Array.from({length:30},()=>({start:[500010+rand()*100,4870010+rand()*50],end:[500010+rand()*100,4870010+rand()*50]}))];
+  let collapsed=0;
+  for(const line of lines){
+    const cells=traceRasterCells(line,{ox:grid.bounds.minE,oy:grid.bounds.maxN,dx:.1,dy:-.1,width:grid.width,height:grid.height}),patches=frozenReferenceIntervals(line,referencePatches),length=Math.hypot(...line.end.map((v,i)=>v-line.start[i]));
+    const breaks=[...new Set([0,1,...cells.flatMap(c=>[c.startT,c.endT]),...patches.flatMap(p=>[p.startT,p.endT])])].sort((a,b)=>a-b);
+    const positive=[];for(let i=1;i<breaks.length;i++){const start=breaks[i-1]*length,end=breaks[i]*length;if(start===end)collapsed++;else positive.push([start,end]);}
+    const result=await calculatePointSurfaceTransect(path.join(f.root,'ept.json'),{...request,line},{sourceFiles:f.files});
+    // This test also runs inside the server-only production image. Assert its
+    // numerical contract independently; client validation/recovery is covered
+    // by measurement-server-profile without importing browser code here.
+    for(const segment of result.segments){
+      assert.ok(['sample','nodata','outside-surface','outside-selection'].includes(segment.status));
+      assert.ok(Number.isFinite(segment.startM)&&Number.isFinite(segment.endM)&&segment.endM>segment.startM);
+      for(const [key,station]of [['start',segment.startM],['end',segment.endM]])for(let axis=0;axis<2;axis++)assert.ok(Math.abs(segment[key][axis]-(line.start[axis]+(line.end[axis]-line.start[axis])*station/length))<=1e-6);
+      if(segment.status==='sample')assert.ok([segment.surfaceM,segment.baseStartM,segment.baseEndM].every(Number.isFinite));
+    }
+    assert.deepEqual(result.segments.map(s=>[s.startM,s.endM]),positive,'no positive station interval is merged or dropped');
+    assert.equal(result.segments[0].startM,0);assert.equal(result.segments.at(-1).endM,length);
+    for(let i=1;i<result.segments.length;i++)assert.equal(result.segments[i].startM,result.segments[i-1].endM);
+    assert.ok(result.segments.some(s=>s.status!=='sample'),'missing cells/outside intervals remain explicit');
+  }
+  assert.ok(collapsed>0,'regression actually exercises parameter breakpoints that collapse after metric conversion');
+});
 test('point surface reads every intersecting hierarchy level at full point count',async t=>{
   const f=fixture(t),result=await calculatePointSurface(path.join(f.root,'ept.json'),f.request,{sourceFiles:f.files});
   assert.equal(result.cutM3,10);assert.equal(result.coverage,1);assert.equal(result.source.pointsRead,4);assert.equal(result.source.nodesRead,2);assert.equal(result.source.allIntersectingHierarchyLevels,true);

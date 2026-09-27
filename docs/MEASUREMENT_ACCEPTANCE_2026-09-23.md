@@ -1,5 +1,12 @@
 # Measurement acceptance follow-up
 
+## Cross-section follow-up release
+
+Run 36291222027 succeeded for `2559595f22821b8b7bcf5242144d25902fad8534`.
+Attestation confirms promoted digest `sha256:eb8a5a8f09e14aa0d147476d4b86063ac765e84c61c197505d0974f1a69cb415`,
+schema 33 and all repository/exact-image runtime gates passed. This is release
+verification, not deployment or live acceptance of the declared-height profile fix.
+
 ## Post-update 6161d11 acceptance
 
 - Public health confirms revision `6161d1147af34f2081fc5ed606e0eac5aa2283fe` after the operator update.
@@ -8,6 +15,7 @@
 - Its staff-authorized cross-section progressed past the former inaccessible-parent error into reading original elevation data, then the browser rejected the returned administrator-declared provenance. This exposed a presentation validator that allowed only encoded vertical units. The follow-up accepts the explicit declared basis without relabelling it and requires exact agreement with the parent source; server permission gates are unchanged.
 - Follow-up validation: 52 focused tests, 2 runtime import guards, 9 native-profile browser tests and production build passed. Added regressions cover unchanged saved volume, profile-only creation, cached section reuse, honest CSV provenance and rejection of encoded/declared parent mismatches. Live success still requires deployment of this follow-up; the inspector was closed without a volume recalculation or measurement edit.
 - Both legacy map outlines still show missing DSM elevation-unit warnings; the new release does not retroactively supply absent boundary heights. Source evidence remains required.
+- A subsequent in-app point-cloud observation on 6161d11 is NOT a navigation/performance pass: requested budget stayed 10M, while reported 1 FPS caused adaptive active budget reductions to 5M then 2.5M. Diagnostics reported low CPU update/render times, but no GPU timing or reliable foreground-throttling evidence was available. No renderer change was justified by this observation. Diagnostics were disabled and the model view restored; do not substitute this reduced-budget observation for the historical full-budget checks.
 
 ## Latest release outcome
 
@@ -97,3 +105,24 @@ At 04:12:46 UTC the public production health response was HTTP 200 but still rep
 - Existing results lacking retained boundary elevations are NOT repaired by this patch. No live outlines or saved volumes were edited or recalculated. Uncalculated DSM outlines with unknown units still require verified source evidence or a separately validated display-height recovery path.
 - After pushing `8ea6bb5`, isolated close-zoom and native-profile browser suites passed 12/12 tests. Coverage includes sidebar drag/keyboard/mobile layout, vertex insert/move/delete, native section lifecycle, cancellation, NoData, CSV, actual PNG download and browser-backend PDF generation. These synthetic browser tests do not establish native host print UI or production deployment. Release run 36280901503 was still in progress at this check; live Hickory Grove retained the older report labels and its two unchanged saved records.
 - Release run 36280901503 subsequently failed two runtime-import guard assertions before image construction. A server-image test had imported the browser display module. Removed that duplicate browser assertion/import from the runtime entrypoint; server boundary assertions remain, and browser reuse remains covered by the display suite and real HTTP save/reload integration. Both runtime import guards now pass locally. No application behavior or packaging allowlist was weakened.
+
+## September 26: fresh-session reproduction after 2559595
+
+- Production health identified `2559595f22821b8b7bcf5242144d25902fad8534`. Opened a genuinely new Hickory Grove session from the idle workspace rather than relying on same-URL navigation of an existing document.
+- Both Used Feed Pile and Larger Feed Pile loaded automatically, but both 3D overlays remained blocked by absent raster elevation units. This contradicts complete cross-view acceptance, including for an outline without volume. Saved Larger Feed Pile net volume remained 174,886.944 ft³; no volume recalculation or geometry edit was requested.
+- In the fresh session, View volume passed point-source provenance validation but failed with `The section contains invalid or missing station intervals.` The old tab's earlier provenance error was stale-document evidence, not evidence that 2559595 failed that specific check.
+- A deterministic UTM section reproduces distinct parametric breakpoints that round to the same metric station, yielding a zero-length interval. Positive-length intervals and missing-data gaps must still be validated; fixing this must not recalculate the saved volume.
+- New isolated browser regression initially fails with no rendered map outline when raster metadata is unavailable. It exercises the shipped workspace and synthetic actual mesh/point geometry, not production data or the user's browser profile. Pending implementation and passing results are not yet release/deployment evidence.
+
+### Display recovery and section correction
+
+- Added ephemeral placement against currently displayed mesh geometry or resident cloud points when verified retained/native elevations are unavailable. Original E/N coordinates, saved zero-height map vertices, volume results, exports and calculation requests are unchanged. Approximate cloud placement is explicitly described as display-only; it does not establish raster units or survey accuracy.
+- The Potree adapter reconstructs node-local bounds before applying the scene transform. The supplied WebODM decoder subtracts node minima from point positions, while its scene node applies that minimum; transforming the loader's untranslated bounding box again would double the offset. A regression exercises the actual shared adapter, not a duplicate test transform.
+- Visible finer mesh descendants supersede overlapping coarse parents. Cloud lookup yields cooperatively, shares in-flight node builds, caches unchanged buffers/transforms, and skips remembered oversized indexes. The retained cache is limited to 262,144 cells; up to two workspace requests can have additional bounded in-flight builds. Point budget and rendering detail policy are untouched.
+- Eleven rendered-surface unit tests passed. Thirteen isolated browser tests passed, including the same map outline across all five view modes, unchanged saved heights, access loss, close-zoom clipping, editor actions, report/capture output and native profile interactions. Production build passed (538 modules), with existing dependency/chunk-size warnings.
+- New point sections omit only contacts whose two represented metric stations are identical. Existing cached sections receive a validated, cloned presentation result excluding those zero-extent contacts; stored sections and saved volumes are unchanged. Thirty-three focused numerical/API/profile tests passed, including an actual EPT UTM reproduction and cached recovery without a create request.
+- Full Windows `npm test` is not a passing gate: the catalog-import example fails in unchanged storage initialization at `C:\\proc\\self\\fdinfo\\3`, a Linux `/proc` dependency. Do not weaken that storage guard or treat this as a measurement success. Linux repository and exact-image CI gates remain required before declaring the release verified.
+- Live Hickory Grove overlay, saved-section reopening and loaded-cloud navigation still require post-deployment acceptance of these changes. Synthetic browser tests do not prove production performance.
+- Final combined focused suite passed 96/96 with zero skips; the final isolated browser rerun passed 13/13. Both production-image import guards passed after keeping the new server numerical regression independent of the browser presentation module. Two extracted-main test fixtures now explicitly wire the new lazy hooks and fail if ordinary picking/projection invokes them eagerly. Final build and whitespace checks passed.
+- Final lifecycle review added regressions for two signal-ignoring old requests releasing their slots on a view switch and for a stale surface-generation reply being rejected and retried. The last complete outline remains available while current surface coverage loads; neither case changes saved geometry or creates calculations.
+- The broad Windows run completed with 1,754 tests: 1,433 passed, 270 failed, 51 skipped. It includes Linux-only storage failures plus the four fixture/import-guard failures corrected and rerun above; it is not a release acceptance pass. The Linux CI result must be checked separately.

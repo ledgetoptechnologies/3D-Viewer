@@ -42,7 +42,7 @@ async function fixture(){
   const server=createServer(async(req,res)=>{try{
     const url=new URL(req.url,'http://fixture.invalid');
     if(url.pathname.startsWith('/api/')){requests.push({method:req.method,path:url.pathname});res.setHeader('Content-Type','application/json');if(req.method!=='GET'||req.headers.authorization!==`Bearer ${token}`){res.statusCode=403;return res.end('{}');}return res.end(JSON.stringify({measurements:url.searchParams.get('collection')==='spatial3d'?[record]:[],capabilities:{personalPersistence:true}}));}
-    if(url.pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(url.searchParams.has('sidebar')?sidebarPage():url.searchParams.has('editor')?editorPage():page());}
+    if(url.pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(url.searchParams.has('rendered')?renderedPage():url.searchParams.has('sidebar')?sidebarPage():url.searchParams.has('editor')?editorPage():page());}
     let file;if(/^\/[a-z0-9-]+\.(mjs|css)$/.test(url.pathname))file=path.join(root,url.pathname.slice(1));
     if(url.pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(url.pathname)){const base=path.join(root,'node_modules','three'),candidate=path.resolve(base,url.pathname.slice(8));if(candidate.startsWith(base+path.sep))file=candidate;}
     if(!file||!existsSync(file)){res.statusCode=404;return res.end();}
@@ -52,6 +52,46 @@ async function fixture(){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));return{server,requests,origin:`http://127.0.0.1:${server.address().port}/`};
 }
 const overlay=client=>client.evaluate(`(()=>{const svg=document.querySelector('#view .measurement-overlay');return{markup:svg?.innerHTML||'',lines:[...svg.querySelectorAll('line')].map(line=>['x1','y1','x2','y2'].map(a=>Number(line.getAttribute(a)))),circles:[...svg.querySelectorAll('circle')].map(c=>['cx','cy','r'].map(a=>Number(c.getAttribute(a)))),fills:[...svg.querySelectorAll('polygon')].map(p=>({stroke:p.getAttribute('stroke'),points:p.getAttribute('points')}))};})()`);
+function renderedPage(){return `<!doctype html><html><head><style>#view{position:relative;width:800px;height:600px}#panel{position:absolute;left:820px;top:0;width:300px}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><div id="view"></div><aside id="panel"></aside><script type="module">
+import * as THREE from 'three';
+import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
+import {resolveRenderedMeshBoundary,resolveRenderedPointBoundary} from '/measurement-rendered-surface.mjs';
+const view=document.querySelector('#view'),crs={crs:'EPSG:32616',verticalUnit:'m'},vertices=[[100,100,0],[300,100,0],[300,300,0],[100,300,0]];
+const mesh=new THREE.Mesh(new THREE.PlaneGeometry(400,400),new THREE.MeshBasicMaterial({side:THREE.DoubleSide}));mesh.rotation.x=-Math.PI/2;mesh.position.set(200,20,-200);mesh.updateMatrixWorld(true);
+const positions=new THREE.Float32BufferAttribute(vertices.flatMap(([e,n])=>[e,n,30]),3),matrixWorld=new THREE.Matrix4(),bounds=new THREE.Box3(new THREE.Vector3(100,100,30),new THREE.Vector3(300,300,30));
+let mode='model',permission=true;
+const context={get mode(){return mode;},element:view,host:view,pick:()=>null,project:p=>[p[0],p[1]-(mode==='model'||mode==='cloud'?p[2]:0)],viewSignature:()=>mode,getDisplaySurfaceRevision:()=>mode,
+resolveRenderedDisplayVertices:(record,{signal})=>mode==='cloud'?resolveRenderedPointBoundary({record,expectedCrs:crs.crs,nodes:[{positions,matrixWorld,spacing:1,bounds}],signal,surfaceRevision:mode}):resolveRenderedMeshBoundary({record,expectedCrs:crs.crs,roots:[mesh],worldBounds:new THREE.Box3().setFromObject(mesh),toWorld:(e,n,z)=>new THREE.Vector3(e,z,-n),fromWorld:p=>[p.x,-p.z,p.y],signal,surfaceRevision:mode})};
+const workspace=createMeasurementWorkspace({panel:document.querySelector('#panel'),context:()=>context,token:()=>null,permitted:()=>permission,toolChanged:()=>{},coordinateReference:()=>crs,toLonLat:p=>p,resolveDisplayVertices:async()=>{throw new Error('Raster height units are absent.');}});
+await workspace.store.save({id:'33333333-3333-4333-8333-333333333333',name:'Map outline without volume',collection:'map',kind:'polygon',vertices,coordinateReference:crs,source:{kind:'dsm'},visible:true});
+const tick=()=>{workspace.tick();requestAnimationFrame(tick);};tick();
+window.renderedFixture={saved:()=>JSON.stringify([...workspace.store.records.values()]),mode:value=>{workspace.modeChanged();mode=value;workspace.tick({force:true});},deny:()=>{permission=false;workspace.tick();}};document.body.dataset.ready='true';
+</script></body></html>`;}
+
+test('map outline renders on actual mesh and point geometry across all views without rewriting saved heights',{timeout:60000},async t=>{
+  const binary=browserPath();if(!binary){t.skip('Chromium-family browser required.');return;}
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
+  try{
+    const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-crossview-rendered-browser-'));
+    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
+    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:750,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`${f.origin}?rendered=1`});
+    await waitFor(client,"document.body?.dataset.ready==='true'&&document.querySelectorAll('#view .measurement-overlay circle').length===4");
+    const original=await client.evaluate('renderedFixture.saved()');assert.ok(JSON.parse(original)[0].vertices.every(p=>p[2]===0));
+    for(const [mode,y]of [['model',80],['cloud',70],['ortho',100],['dsm',100],['dtm',100],['model',80]]){
+      await client.evaluate(`renderedFixture.mode(${JSON.stringify(mode)})`);
+      try{await waitFor(client,`Math.abs(Number(document.querySelector('#view .measurement-overlay circle')?.getAttribute('cy'))-${y})<1e-6`);}catch(error){throw new Error(`${mode} placement: ${await client.evaluate('document.body.innerText')} ${JSON.stringify(await overlay(client))}`,{cause:error});}
+      const geometry=await overlay(client);assert.equal(geometry.fills.length,1);assert.equal(geometry.fills[0].points.trim().split(/\s+/).length,4);assert.equal(geometry.circles.length,4);assert.doesNotMatch(geometry.markup,/NaN|Infinity/);
+      assert.equal(await client.evaluate('renderedFixture.saved()'),original,`${mode} does not persist display heights`);
+    }
+    await client.evaluate('renderedFixture.deny()');assert.equal(await client.evaluate("document.querySelector('#view .measurement-overlay').innerHTML"),'');
+    assert.deepEqual(f.requests,[],'display placement creates no server jobs');assert.deepEqual(client.errors,[]);
+  }finally{
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-crossview-rendered-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated profile retained: ${absolute}`);}}
+  }
+});
 const assertFinite=geometry=>{assert.doesNotMatch(geometry.markup,/NaN|Infinity|undefined/);for(const line of geometry.lines){assert.ok(line.every(Number.isFinite));for(let i=0;i<4;i++)assert.ok(line[i]>=-.001&&line[i]<=(i%2?600:800)+.001,`clipped SVG coordinate ${line[i]} is bounded`);}for(const circle of geometry.circles)assert.ok(circle.every(Number.isFinite));};
 test('real measurement overlay preserves original visible edges across close zoom without a false closing edge',{timeout:60000},async t=>{
   const binary=browserPath();if(!binary){t.skip('Chromium-family browser required for isolated overlay regression.');return;}

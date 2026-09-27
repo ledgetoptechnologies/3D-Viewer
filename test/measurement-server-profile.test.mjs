@@ -83,3 +83,26 @@ test('profiles cannot exchange declared and encoded height provenance from their
     assert.equal(JSON.stringify(saved),before);
   }
 });
+
+function cachedContactFixture(){
+  const f=declaredPointFixture(),sample=f.profile.segments[0];
+  f.profile.segments=[{...sample,endM:.5,end:[.5,0]},{...sample,startM:.5,endM:.5,start:[.5,0],end:[.5,0]},{...sample,startM:.5,start:[.5,0]}];
+  return f;
+}
+
+test('cached point section zero-extent contacts normalize without new work or changing stored result',async()=>{
+  const {saved,parentJob,profile}=cachedContactFixture(),original=JSON.stringify(profile),before=JSON.stringify(saved);
+  const f=setup({parentJob,getRecord:()=>saved,existing:[job('complete',{result:profile})]}),out=await f.calculate(saved,{line});
+  assert.equal(out.segments.length,2);assert.deepEqual(out.segments.map(s=>[s.startM,s.endM]),[[0,.5],[.5,1]]);
+  assert.notEqual(out.segments[0],profile.segments[0]);assert.equal(JSON.stringify(profile),original);assert.equal(JSON.stringify(saved),before);
+  assert.equal(f.calls.some(([op])=>op==='create'),false);
+  const csv=exportNativeProfile(profile).split('\r\n');assert.equal(csv.length,3);assert.match(csv[1],/^"0","0.5"/);assert.match(csv[2],/^"0.5","1"/);
+  assert.equal(JSON.stringify(profile),original,'CSV canonicalization leaves retained job payload unchanged');
+});
+
+test('cached zero-contact normalization never bridges gaps or accepts malformed contact evidence',async()=>{
+  for(const change of [p=>p.segments[1].endM=.4,p=>p.segments[2].startM=.6,p=>p.segments[1].start=[.6,0],p=>p.segments[1].status='unknown',p=>p.segments[1].surfaceM=NaN,p=>p.source.verticalUnitBasis='ept-vertical-crs']){
+    const {saved,parentJob,profile}=cachedContactFixture();change(profile);
+    const f=setup({parentJob,getRecord:()=>saved,existing:[job('complete',{result:profile})]});await assert.rejects(f.calculate(saved,{line}));assert.equal(f.calls.some(([op])=>op==='create'),false);
+  }
+});

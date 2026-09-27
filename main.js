@@ -14,6 +14,7 @@ import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
 import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-vertical-units.mjs';
 import { resolveMeasurementDisplayElevations } from './measurement-display-elevations.mjs';
+import { resolveRenderedMeshBoundary, resolveRenderedPointBoundary, renderedPointNodeDescriptor } from './measurement-rendered-surface.mjs';
 import { preflightBrowserRasterHeader } from './measurement-raster-header.mjs';
 import { mountViewerProductDownloads } from './viewer-product-downloads.mjs';
 import 'leaflet/dist/leaflet.css';
@@ -2276,6 +2277,8 @@ function measurementViewContext() {
   // measurement. The overlay supplies one viewport snapshot per actual draw.
   return {
     mode:state.activeMode,element,host,
+    getDisplaySurfaceRevision:measurementDisplaySurfaceRevision,
+    resolveRenderedDisplayVertices:resolveRenderedMeasurementVertices,
     viewSignature(){return [...activeCamera.matrixWorldInverse.elements,...activeCamera.projectionMatrix.elements,element.width,element.height].join(':');},
     pick(event) {
       if(!cloud){const p=pickSurface(eventNdc(event));if(!p)return null;const u=worldToUtm(p);return [u.e,u.n,u.alt];}
@@ -2360,11 +2363,42 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   }finally{await tiff.close();}
 }
 
+const measurementSurfaceIds=new WeakMap();let measurementSurfaceNextId=0,measurementSurfaceSnapshot=null,measurementSurfaceSnapshotAt=0;
+function measurementSurfaceId(value){if(!value||typeof value!=='object')return 0;if(!measurementSurfaceIds.has(value))measurementSurfaceIds.set(value,++measurementSurfaceNextId);return measurementSurfaceIds.get(value);}
+function measurementRenderedSurface(force=false){
+  const now=performance.now(),mode=state.activeMode,key=`${PROJECT?.id}:${PROJECT?.activeVersion?.id}:${mode}:${state.cloudMode}`;
+  if(!force&&measurementSurfaceSnapshot?.key===key&&now-measurementSurfaceSnapshotAt<250)return measurementSurfaceSnapshot;
+  const roots=[],nodes=[],parts=[key];let worldBounds=null;
+  if(mode==='model'&&tilesParent?.visible&&tilesRenderer){
+    tilesParent.updateWorldMatrix(true,true);worldBounds=tilesetWorldBounds(tilesRenderer);parts.push(measurementSurfaceId(tilesRenderer));
+    for(const tile of tilesRenderer.visibleTiles||[]){const root=tile.engineData?.scene;if(root?.visible!==false&&root){roots.push({root,tile});parts.push(`${measurementSurfaceId(root)}:${root.matrixWorld.elements.join(',')}`);}}
+  }else if(mode==='cloud'&&state.cloudMode==='potree'){
+    const viewer=document.getElementById('pc-iframe')?.contentWindow?.viewer;
+    parts.push(measurementSurfaceId(viewer));
+    for(const cloud of viewer?.scene?.pointclouds||[]){if(cloud.visible===false)continue;cloud.updateMatrixWorld?.(true);
+      for(const node of cloud.visibleNodes||[]){const descriptor=renderedPointNodeDescriptor(node);if(!descriptor)continue;const {geometry,positions,matrixWorld,spacing}=descriptor;
+        nodes.push(descriptor);parts.push(`${measurementSurfaceId(geometry)}:${measurementSurfaceId(positions)}:${positions.version||0}:${positions.count}:${matrixWorld.elements.join(',')}:${spacing}`);
+      }
+    }
+  }else if(mode==='cloud'&&state.cloudMode==='direct'&&pointCloudParent?.visible&&pointCloudObject){
+    pointCloudObject.updateWorldMatrix(true,false);const geometry=pointCloudObject.geometry,positions=geometry?.attributes?.position;
+    if(positions&&geometry.boundingBox){const canonical=new THREE.Matrix4().set(1,0,0,C.x+RTC.e,0,0,-1,C.y+RTC.n,0,1,0,C.z+RTC.z,0,0,0,1),matrixWorld=canonical.multiply(pointCloudObject.matrixWorld),bounds=geometry.boundingBox.clone().applyMatrix4(matrixWorld),size=bounds.getSize(new THREE.Vector3()),spacing=Math.sqrt(Math.max(size.x*size.y,Number.EPSILON)/Math.max(1,positions.count));nodes.push({positions,matrixWorld,bounds,spacing});parts.push(`${measurementSurfaceId(geometry)}:${measurementSurfaceId(positions)}:${positions.version||0}:${positions.count}:${matrixWorld.elements.join(',')}`);}
+  }
+  measurementSurfaceSnapshot={key,roots,nodes,worldBounds,revision:parts.join('|')};measurementSurfaceSnapshotAt=now;return measurementSurfaceSnapshot;
+}
+function measurementDisplaySurfaceRevision(){return measurementRenderedSurface().revision;}
+async function resolveRenderedMeasurementVertices(record,{signal}={}){
+  const surface=measurementRenderedSurface(true),expectedCrs=measurementCoordinateReference().crs;
+  const result=state.activeMode==='model'?await resolveRenderedMeshBoundary({record,expectedCrs,roots:surface.roots,worldBounds:surface.worldBounds,toWorld:utmToWorld,fromWorld:worldToUtm,signal,surfaceRevision:surface.revision}):await resolveRenderedPointBoundary({record,expectedCrs,nodes:surface.nodes,signal,surfaceRevision:surface.revision});
+  if(surface.key!==`${PROJECT?.id}:${PROJECT?.activeVersion?.id}:${state.activeMode}:${state.cloudMode}`||signal?.aborted)throw new DOMException('Display view changed','AbortError');
+  return result;
+}
 async function resolveMeasurementDisplayVertices(record,{signal}={}){
   const preferred=record.source?.kind;
   const source=preferred==='dtm'&&DTM_URL?{type:'dtm',url:DTM_URL}:DSM_URL?{type:'dsm',url:DSM_URL}:DTM_URL?{type:'dtm',url:DTM_URL}:null;
   if(source)source.reviewedEvidence=PROJECT?.displayElevationEvidence?.[source.type];
-  return resolveMeasurementDisplayElevations(record,{modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,expectedCrs:measurementCoordinateReference().crs,source,signal,openTiff:openGeoTiff,preflight:preflightBrowserRasterHeader,pool:ensureGeoTiffPool()});
+  try{return await resolveMeasurementDisplayElevations(record,{modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,expectedCrs:measurementCoordinateReference().crs,source,signal,openTiff:openGeoTiff,preflight:preflightBrowserRasterHeader,pool:ensureGeoTiffPool()});}
+  catch(error){if(signal?.aborted||error.name==='AbortError')throw error;return resolveRenderedMeasurementVertices(record,{signal});}
 }
 
 function installMeasurementWorkspace() {

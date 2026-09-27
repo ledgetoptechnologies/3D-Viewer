@@ -11,6 +11,7 @@ import {retainedDisplayBoundary} from '../measurement-display-elevations.mjs';
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
+const codedError=(message,code)=>Object.assign(new Error(message),{code});
 
 // DOM/render seams execute the actual workspace event handlers. Assertions cover
 // collection identity and async lifetime, not browser pixels or native picking.
@@ -30,24 +31,30 @@ class Element {
   setPointerCapture(){} releasePointerCapture(){} focus(){} click(){}
 }
 
-function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),viewCrs='EPSG:32616',surfaceRequest,adminRequest}={}){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest}={}){
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
-  const projected=[],downloads=[],mutations=[],calculationCalls=[],resolverCalls=[],focused=[];
-  let mode='model',permission=true;
-  const context=()=>({mode,element:canvas,host,viewSignature:()=>mode,pick:event=>[event.clientX,event.clientY,0],project(point){projected.push({mode,point:Array.from(point)});return point.slice(0,2);},focus(vertices){focused.push({mode,vertices:structuredClone(vertices)});}});
+  const projected=[],downloads=[],mutations=[],calculationCalls=[],resolverCalls=[],renderedResolverCalls=[],focused=[];
+  let mode='model',permission=true,surfaceRevision=displaySurfaceRevision,surfaceRevisionReads=0,now=1000;
+  const context=()=>{
+    const view={mode,element:canvas,host,viewSignature:()=>mode,getDisplaySurfaceRevision:()=>{surfaceRevisionReads++;return surfaceRevision;},pick:event=>[event.clientX,event.clientY,0],project(point){projected.push({mode,point:Array.from(point)});return point.slice(0,2);},focus(vertices){focused.push({mode,vertices:structuredClone(vertices)});}};
+    if(resolveRenderedDisplayVertices)view.resolveRenderedDisplayVertices=(record,options)=>{renderedResolverCalls.push({record:structuredClone(record),options,mode});return resolveRenderedDisplayVertices(record,options);};
+    return view;
+  };
   const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,retainedDisplayBoundary,availableAdminSources:()=>[],document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
     URL:{createObjectURL(blob){downloads.push(blob);return'blob:fixture';},revokeObjectURL(){}},
-    setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>1000},
+    setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>now},
     openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,options});return resolveDisplayVertices(record,options);}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
-  return{workspace,controls,panel,projected,downloads,mutations,calculationCalls,resolverCalls,focused,action,
+  return{workspace,controls,panel,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
     svg:()=>host.children.find(node=>node.tagName==='svg'),list:()=>controls.querySelector('[data-m-list]').innerHTML,
     async switchTo(next){workspace.modeChanged();mode=next;workspace.tick();await flush();workspace.tick();},
+    setSurfaceRevision(next,{advance=0}={}){surfaceRevision=next;now+=advance;},advance(ms){now+=ms;},
+    surfaceRevisionReadCount:()=>surfaceRevisionReads,
     deny(){permission=false;workspace.tick();},
     exportCheck(id){return controls.fire('change',{target:{dataset:{m:'export-check'},checked:true,closest:()=>({dataset:{record:id}})}});},
     watchMutations(){for(const name of ['save','patch','remove','attachResults']){const original=workspace.store[name];workspace.store[name]=(...args)=>{mutations.push(name);return original(...args);};}},
@@ -76,6 +83,38 @@ test('unbound, wrong-source or untrusted point job replies never supply display 
     const {record,job}=attachedPoint();change(job);const f=fixture({surfaceRequest:async()=>({calculation:job})});t.after(()=>f.workspace.dispose());f.workspace.store.records.set(record.id,record);f.workspace.tick();await flush();f.workspace.tick();
     assert.equal(f.projected.length,0);assert.equal(f.resolverCalls.length,0);assert.match(f.list(),/3D overlay unavailable/);
   }
+});
+
+test('invalid saved point jobs may use only sanitized current rendered geometry for display',async t=>{
+  for(const change of [j=>j.id='other',j=>j.attachmentRevision=1,j=>j.result.source.modelVersionId='other']){
+    const {record,job}=attachedPoint();change(job);
+    const f=fixture({surfaceRequest:async()=>({calculation:job}),resolveRenderedDisplayVertices:async display=>({vertices:display.vertices.map(([e,n])=>[e,n,222]),basis:'Current visible surface',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-1'})});
+    t.after(()=>f.workspace.dispose());f.workspace.store.records.set(record.id,record);f.watchMutations();const before=JSON.stringify(record);
+    f.workspace.tick();await flush();f.workspace.tick({force:true});
+    assert.equal(f.resolverCalls.length,0,'an invalid attachment must not enter the generic saved-result fallback');
+    assert.equal(f.renderedResolverCalls.length,1);const display=f.renderedResolverCalls[0].record;
+    assert.equal(Object.hasOwn(display,'results'),false);assert.deepEqual(display.vertices,record.vertices.map(([e,n])=>[e,n,0]));assert.deepEqual(display.coordinateReference,record.coordinateReference);
+    assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===222));
+    assert.equal(JSON.stringify(record),before);assert.deepEqual(f.mutations,[]);assert.deepEqual(f.calculationCalls,[]);
+  }
+});
+
+test('unavailable saved point jobs strip attached results before independent native or rendered placement',async t=>{
+  const {record}=attachedPoint(),f=fixture({surfaceRequest:async()=>{throw new Error('Old job unavailable');},resolveDisplayVertices:async()=>{throw new Error('Raster metadata is unavailable');},resolveRenderedDisplayVertices:async display=>({vertices:display.vertices.map(([e,n])=>[e,n,223]),basis:'Current visible surface',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-1'})});
+  t.after(()=>f.workspace.dispose());f.workspace.store.records.set(record.id,record);f.watchMutations();const before=JSON.stringify(record);
+  f.workspace.tick();await flush();f.workspace.tick({force:true});
+  assert.equal(f.resolverCalls.length,1);assert.equal(Object.hasOwn(f.resolverCalls[0].record,'results'),false);
+  assert.equal(f.renderedResolverCalls.length,1);assert.equal(Object.hasOwn(f.renderedResolverCalls[0].record,'results'),false);
+  assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===223));
+  assert.equal(JSON.stringify(record),before);assert.deepEqual(f.mutations,[]);assert.deepEqual(f.calculationCalls,[]);
+});
+
+test('late independent rendered placement cannot restore an invalid attachment after access loss',async t=>{
+  const {record,job}=attachedPoint();job.id='other';const waiting=deferred();
+  const f=fixture({surfaceRequest:async()=>({calculation:job}),resolveRenderedDisplayVertices:(_record,{signal})=>{waiting.signal=signal;return waiting.promise;}});t.after(()=>f.workspace.dispose());
+  f.workspace.store.records.set(record.id,record);f.workspace.tick();await flush();assert.equal(f.renderedResolverCalls.length,1);
+  f.deny();assert.equal(waiting.signal.aborted,true);waiting.resolve({vertices:record.vertices.map(([e,n])=>[e,n,999]),basis:'Late surface',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-1'});await flush();f.workspace.tick({force:true});
+  assert.equal(f.projected.length,0);assert.equal(f.svg().innerHTML,'');assert.equal(f.workspace.store.records.size,0);
 });
 
 test('late attached job reads cannot restore overlays after access loss',async t=>{
@@ -143,6 +182,56 @@ test('pending map draping is bounded and never renders placeholder elevations; c
   assert.match(f.svg().innerHTML,/Pending boundary/);assert.ok(f.projected.every(p=>p.point[2]===145));assert.deepEqual(f.workspace.store.records.get(map.id).vertices,map.vertices);assert.deepEqual(f.mutations,[]);
 });
 
+test('application rendered-pending errors switch retries to the view adapter without reopening native placement',async t=>{
+  const f=fixture({resolveDisplayVertices:async()=>{throw codedError('Waiting for displayed surface detail.','measurement_display_surface_pending');},resolveRenderedDisplayVertices:async record=>({vertices:record.vertices.map(([e,n])=>[e,n,161]),basis:'Visible detail',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-2'})});
+  t.after(()=>f.workspace.dispose());const map=document('map','Waiting rendered boundary');await f.workspace.store.save(map);f.watchMutations();
+  f.workspace.tick();await flush();for(let i=0;i<20;i++)f.workspace.tick();
+  assert.equal(f.resolverCalls.length,1);assert.equal(f.renderedResolverCalls.length,0);assert.equal(f.projected.length,0);assert.match(f.list(),/Waiting for displayed surface detail/);
+  f.setSurfaceRevision('surface-2',{advance:500});f.workspace.tick();await flush();f.workspace.tick({force:true});
+  assert.equal(f.resolverCalls.length,1,'surface-generation retries must not repeat native raster work');assert.equal(f.renderedResolverCalls.length,1);
+  assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===161));assert.deepEqual(f.mutations,[]);assert.deepEqual(f.calculationCalls,[]);
+});
+
+test('rendered placement retains its last complete outline while throttled surface generations are pending',async t=>{
+  let renderedRefresh=0;
+  const f=fixture({resolveDisplayVertices:async record=>({vertices:record.vertices.map(([e,n])=>[e,n,151]),basis:'Initial visible detail',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-1'}),resolveRenderedDisplayVertices:async record=>{
+    renderedRefresh++;
+    if(renderedRefresh===1)throw codedError('New visible tiles do not cover every outline point yet.','measurement_display_surface_pending');
+    return{vertices:record.vertices.map(([e,n])=>[e,n,181]),basis:'Refined visible detail',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-3'};
+  }});
+  t.after(()=>f.workspace.dispose());const map=document('map','Stable rendered boundary');await f.workspace.store.save(map);f.watchMutations();
+  f.workspace.tick();await flush();f.projected.length=0;f.workspace.tick({force:true});assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===151));
+  f.setSurfaceRevision('surface-2',{advance:499});f.workspace.tick({force:true});assert.equal(f.renderedResolverCalls.length,0);assert.ok(f.projected.every(p=>p.point[2]===151));
+  f.advance(1);f.workspace.tick();await flush();assert.equal(f.renderedResolverCalls.length,1);assert.equal(f.resolverCalls.length,1);
+  f.projected.length=0;f.workspace.tick({force:true});assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===151),'pending refinement keeps the complete prior outline');assert.match(f.list(),/previous 3D overlay/i);
+  for(let i=0;i<20;i++)f.workspace.tick();await flush();assert.equal(f.renderedResolverCalls.length,1,'one surface generation is attempted once');
+  f.setSurfaceRevision('surface-3',{advance:499});f.workspace.tick();assert.equal(f.renderedResolverCalls.length,1,'rapid frontier churn is throttled');
+  f.advance(1);f.workspace.tick();await flush();f.projected.length=0;f.workspace.tick({force:true});
+  assert.equal(f.renderedResolverCalls.length,2);assert.equal(f.resolverCalls.length,1);assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===181));
+  assert.deepEqual(f.workspace.store.records.get(map.id).vertices,map.vertices);assert.deepEqual(f.mutations,[]);assert.deepEqual(f.calculationCalls,[]);
+});
+
+test('a stale rendered reply is not installed or mistaken for the requested surface generation',async t=>{
+  let refresh=0;
+  const f=fixture({resolveDisplayVertices:async record=>({vertices:record.vertices.map(([e,n])=>[e,n,151]),basis:'Initial visible detail',renderedSurface:true,displayOnly:true,surfaceRevision:'surface-1'}),resolveRenderedDisplayVertices:async record=>{
+    refresh++;const stale=refresh===1;
+    return{vertices:record.vertices.map(([e,n])=>[e,n,stale?999:181]),basis:stale?'Stale detail':'Current detail',renderedSurface:true,displayOnly:true,surfaceRevision:stale?'surface-1':'surface-2'};
+  }});
+  t.after(()=>f.workspace.dispose());const map=document('map','Revision-bound boundary');await f.workspace.store.save(map);f.workspace.tick();await flush();
+  f.setSurfaceRevision('surface-2',{advance:500});f.workspace.tick();await flush();f.projected.length=0;f.workspace.tick({force:true});
+  assert.equal(f.renderedResolverCalls.length,1);assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===151),'a stale reply must retain the prior complete outline');assert.match(f.list(),/previous 3D overlay/i);
+  f.advance(500);f.workspace.tick();await flush();f.projected.length=0;f.workspace.tick({force:true});
+  assert.equal(f.renderedResolverCalls.length,2);assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===181));assert.deepEqual(f.workspace.store.records.get(map.id).vertices,map.vertices);
+});
+
+test('native display placement remains cached across rendered-surface generation changes',async t=>{
+  const f=fixture();t.after(()=>f.workspace.dispose());const map=document('map','Native cached boundary');await f.workspace.store.save(map);
+  assert.equal(f.surfaceRevisionReadCount(),0,'an empty workspace does not inspect renderer generations');
+  f.workspace.tick();await flush();f.workspace.tick({force:true});assert.equal(f.resolverCalls.length,1);assert.ok(f.projected.every(p=>p.point[2]===145));const initialRevisionReads=f.surfaceRevisionReadCount();
+  for(const revision of ['surface-2','surface-3','surface-4']){f.setSurfaceRevision(revision,{advance:1000});f.workspace.tick();await flush();}
+  f.projected.length=0;f.workspace.tick({force:true});assert.equal(f.resolverCalls.length,1);assert.equal(f.renderedResolverCalls.length,0);assert.equal(f.surfaceRevisionReadCount(),initialRevisionReads,'native cached placements do not inspect rendered frontier generations');assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.point[2]===145));
+});
+
 test('missing map elevation keeps the record available but does not invent a zero-height 3D overlay',async t=>{
   const f=fixture({resolveDisplayVertices:async()=>{throw new Error('No verified elevation surface');}});t.after(()=>f.workspace.dispose());const map=document('map','No surface');await f.workspace.store.save(map);
   f.workspace.tick();await flush();for(let i=0;i<100;i++)f.workspace.tick();await flush();
@@ -184,6 +273,19 @@ test('mode changes abort pending placement and late source replies cannot replac
   requests[2].waiting.resolve({vertices:map.vertices.map(([e,n])=>[e,n,180]),basis:'Destination source'});await flush();f.workspace.tick();assert.match(f.svg().innerHTML,/Across views/);
   f.projected.length=0;requests[1].waiting.resolve({vertices:map.vertices.map(([e,n])=>[e,n,888]),basis:'Obsolete second source'});await flush();f.workspace.tick({force:true});
   assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.mode==='cloud'&&p.point[2]===180));assert.deepEqual(f.workspace.store.records.get(map.id).vertices,map.vertices);
+});
+
+test('two signal-ignoring placement promises release their slots when the view changes',async t=>{
+  const requests=[],f=fixture({resolveDisplayVertices:(record,{signal})=>{
+    const request={record,signal,waiting:deferred()};requests.push(request);
+    if(requests.length<=2)return request.waiting.promise;
+    return{vertices:record.vertices.map(([e,n])=>[e,n,177]),basis:'Destination surface'};
+  }});t.after(()=>f.workspace.dispose());
+  for(let i=0;i<2;i++)await f.workspace.store.save(document('map',`Ignoring boundary ${i}`));
+  f.workspace.tick();await flush();assert.equal(requests.length,2);
+  await f.switchTo('ortho');assert.ok(requests.slice(0,2).every(request=>request.signal.aborted));
+  await f.switchTo('model');assert.equal(requests.length,4,'aborted promises that ignore their signals cannot starve the new view');
+  f.projected.length=0;f.workspace.tick({force:true});assert.ok(f.projected.length>0);assert.ok(f.projected.every(p=>p.mode==='model'&&p.point[2]===177));
 });
 
 test('malformed or horizontally shifted elevation results are rejected instead of projecting false geometry',async t=>{

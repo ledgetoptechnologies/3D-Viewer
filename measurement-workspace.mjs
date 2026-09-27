@@ -14,6 +14,7 @@ const field = event => event.target?.closest?.('input,textarea,select,[contented
 const interactive = event => event.target?.closest?.('input,textarea,select,button,a,[contenteditable=true],.leaflet-control,[role=button]');
 const savedUnits = {imperial:'imperial',feet:'ft',yards:'yd',metric:'m',centimeters:'cm'};
 const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yards',metric:'metric',m:'metric',cm:'centimeters'};
+const DISPLAY_SURFACE_RETRY_MS=500;
 
 export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
@@ -65,6 +66,47 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const entry=displayCache.get(record.id);
     return entry?.record===record?(entry.error||entry.basis||'Placing map measurement on the elevation surface…'):'Map measurement: 3D placement requires an elevation surface.';
   }
+  function surfaceRevision(){
+    const value=context()?.getDisplaySurfaceRevision?.();
+    return typeof value==='string'&&value?value:Number.isFinite(value)?String(value):null;
+  }
+  function renderedDisplayRecord(record){
+    return {
+      id:record.id,revision:record.revision,modelVersionId:record.modelVersionId,
+      collection:record.collection,kind:record.kind,
+      vertices:record.vertices.map(point=>[point[0],point[1],0]),
+      coordinateReference:record.coordinateReference?structuredClone(record.coordinateReference):undefined,
+    };
+  }
+  function cancellableDisplayRequest(value,signal){
+    if(signal.aborted)return Promise.reject(new DOMException('Display placement cancelled','AbortError'));
+    return new Promise((resolve,reject)=>{
+      let settled=false;
+      const finish=(callback,result)=>{if(settled)return;settled=true;signal.removeEventListener('abort',abort);callback(result);};
+      const abort=()=>finish(reject,new DOMException('Display placement cancelled','AbortError'));
+      signal.addEventListener('abort',abort,{once:true});
+      Promise.resolve(value).then(result=>finish(resolve,result),error=>finish(reject,error));
+    });
+  }
+  function queueDisplayRequest(entry,revision=surfaceRevision()){
+    if(entry.state==='queued'||entry.state==='pending')return false;
+    entry.controller.abort();entry.controller=new AbortController();entry.generation=viewGeneration;
+    entry.state='queued';entry.error='';entry.waitingSurface=false;entry.requestSurfaceRevision=revision;lastOverlayFrame=null;pumpDisplayRequests();return true;
+  }
+  function observeDisplaySurface(){
+    let watched=false;for(const entry of displayCache.values())if(entry.placement==='rendered'||entry.waitingSurface){watched=true;break;}
+    if(!watched)return;
+    const revision=surfaceRevision();
+    if(!revision)return;
+    const now=performance.now();
+    for(const entry of displayCache.values()){
+      if(entry.placement!=='rendered'&&!entry.waitingSurface)continue;
+      if(entry.surfaceRevision===revision&&!entry.waitingSurface)continue;
+      if(entry.attemptedSurfaceRevision===revision||entry.state==='queued'||entry.state==='pending')continue;
+      if(now<(entry.nextSurfaceRetryAt||0))continue;
+      queueDisplayRequest(entry,revision);
+    }
+  }
   function clearDisplayRequests({all=false}={}){
     for(const [id,entry]of displayCache)if(all||entry.state==='pending'||entry.state==='queued'){entry.controller.abort();displayCache.delete(id);}
     lastOverlayFrame=null;
@@ -74,32 +116,66 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     for(const entry of displayCache.values()){
       if(displayRequests>=2)break;
       if(entry.state!=='queued')continue;
-      entry.state='pending';displayRequests++;
-      const current=()=>!disposed&&allowed()&&(!entry.staffAuthority||adminAllowed)&&!entry.controller.signal.aborted&&entry.generation===viewGeneration&&displayCache.get(entry.record.id)===entry&&store.records.get(entry.record.id)===entry.record;
+      entry.state='pending';displayRequests++;entry.lastSurfaceAttemptAt=performance.now();entry.nextSurfaceRetryAt=entry.lastSurfaceAttemptAt+DISPLAY_SURFACE_RETRY_MS;entry.attemptedSurfaceRevision=entry.requestSurfaceRevision||surfaceRevision();
+      const controller=entry.controller,generation=entry.generation;
+      const current=()=>!disposed&&allowed()&&(!entry.staffAuthority||adminAllowed)&&!controller.signal.aborted&&generation===viewGeneration&&displayCache.get(entry.record.id)===entry&&store.records.get(entry.record.id)===entry.record;
       Promise.resolve().then(async()=>{
         if(!current())throw new Error('View or measurement access changed.');
-        const fallback=()=>{
+        const renderedFallback=async originalError=>{
+          const view=context(),resolver=view?.resolveRenderedDisplayVertices;
+          if(typeof resolver!=='function')throw originalError||new Error('No verified elevation surface is available.');
+          // This resolver is authorized by the current visible view, not by an
+          // old calculation attachment. Never keep a staff-job requirement on
+          // the independent display-only request.
+          entry.renderedOnly=true;entry.staffAuthority=false;entry.awaitingStaff=false;
           if(!current())throw new Error('View or measurement access changed.');
-          if(typeof resolveDisplayVertices!=='function')throw new Error('No verified elevation surface is available.');
-          return resolveDisplayVertices(structuredClone(entry.record),{signal:entry.controller.signal});
+          try{
+            const result=await cancellableDisplayRequest(resolver.call(view,renderedDisplayRecord(entry.record),{signal:controller.signal}),controller.signal);
+            if(result?.renderedSurface!==true||result?.displayOnly!==true)throw new Error('The rendered surface did not return an explicit display-only placement.');
+            return result;
+          }catch(error){
+            if(controller.signal.aborted||error?.name==='AbortError')throw error;
+            if(error?.code==='measurement_display_surface_pending'){entry.waitingSurface=true;throw error;}
+            if(error?.code==='measurement_display_reference_mismatch')throw error;
+            if(originalError)throw originalError;
+            throw error;
+          }
         };
+        const fallback=async(originalError,{discardResults=false}={})=>{
+          if(!current())throw new Error('View or measurement access changed.');
+          if(typeof resolveDisplayVertices!=='function')return renderedFallback(originalError);
+          const displayRecord=structuredClone(entry.record);if(discardResults)delete displayRecord.results;
+          try{return await cancellableDisplayRequest(resolveDisplayVertices(displayRecord,{signal:controller.signal}),controller.signal);}
+          catch(error){
+            if(controller.signal.aborted||error?.name==='AbortError')throw error;
+            if(error?.code==='measurement_display_surface_pending'){
+              // The application-level resolver already reached its rendered
+              // fallback. Retry only that bounded display adapter when a new
+              // visible-surface generation becomes available.
+              entry.renderedOnly=true;entry.staffAuthority=false;entry.awaitingStaff=false;entry.waitingSurface=true;throw error;
+            }
+            if(error?.code==='measurement_display_reference_mismatch')throw error;
+            return renderedFallback(originalError||error);
+          }
+        };
+        if(entry.renderedOnly||entry.placement==='rendered')return renderedFallback();
         const saved=entry.record.results;
         if(saved?.method==='point-surface-cut-fill'&&saved.calculationJobId){
           const declared=saved.source?.verticalUnitBasis==='administrator-declared';
-          if(declared&&(!adminAllowed||typeof adminRequest!=='function')){entry.awaitingStaff=true;return fallback();}
+          if(declared&&(!adminAllowed||typeof adminRequest!=='function')){entry.awaitingStaff=true;return fallback(undefined,{discardResults:true});}
           entry.staffAuthority=declared;
           const request=declared?adminRequest:surfaceRequest;
-          if(typeof request!=='function')return fallback();
+          if(typeof request!=='function')return fallback(undefined,{discardResults:true});
           let job;
-          try{job=(await request('status',{measurementId:entry.record.id,jobId:saved.calculationJobId},entry.record))?.calculation;}
-          catch{return fallback();}
+          try{job=(await cancellableDisplayRequest(request('status',{measurementId:entry.record.id,jobId:saved.calculationJobId},entry.record),controller.signal))?.calculation;}
+          catch(error){if(controller.signal.aborted||error?.name==='AbortError')throw error;return fallback(undefined,{discardResults:true});}
           if(!current())throw new Error('View or measurement access changed.');
-          if(job?.id!==saved.calculationJobId||job.measurementId!==entry.record.id||job.status!=='complete'||job.method!=='point-surface-cut-fill'||job.attachmentRevision!==entry.record.revision)throw new Error('The saved point-surface calculation does not match this measurement revision.');
-          if(!job.result?.boundaryVertices)return fallback(); // Legacy/custom bases may have no retained boundary.
+          if(job?.id!==saved.calculationJobId||job.measurementId!==entry.record.id||job.status!=='complete'||job.method!=='point-surface-cut-fill'||job.attachmentRevision!==entry.record.revision)return renderedFallback(new Error('The saved point-surface calculation does not match this measurement revision.'));
+          if(!job.result?.boundaryVertices)return fallback(undefined,{discardResults:true}); // Legacy/custom bases may have no retained boundary.
           // The saved document remains untrusted and unchanged. Only the
           // authorized, bound server result can supply display-only heights.
           const retained=retainedDisplayBoundary({...structuredClone(entry.record),results:structuredClone(job.result)},entry.record.modelVersionId);
-          if(!retained)throw new Error('The saved point-surface calculation has no matching retained boundary elevations.');
+          if(!retained)return renderedFallback(new Error('The saved point-surface calculation has no matching retained boundary elevations.'));
           return retained;
         }
         return fallback();
@@ -107,8 +183,20 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
         if(!current())return;
         const vertices=result?.vertices;
         if(!Array.isArray(vertices)||vertices.length!==entry.record.vertices.length||!vertices.every((p,i)=>Array.isArray(p)&&p.length===3&&p.every(v=>typeof v==='number'&&Number.isFinite(v)&&Math.abs(v)<=1e9)&&p[0]===entry.record.vertices[i][0]&&p[1]===entry.record.vertices[i][1]))throw new Error('The elevation source did not return matching, finite measurement vertices.');
-        entry.vertices=vertices.map(p=>p.slice());entry.basis=String(result.basis||'Elevation surface placement; display only');entry.state='ready';
-      }).catch(error=>{if(current()){entry.state='error';entry.error=`3D overlay unavailable: ${error.message||'Elevation sampling failed.'}`;}}).finally(()=>{
+        const rendered=result?.renderedSurface===true;
+        const revision=rendered?String(result.surfaceRevision||entry.attemptedSurfaceRevision||''):null;
+        if(rendered&&result?.displayOnly!==true)throw new Error('The rendered surface placement was not marked display-only.');
+        if(rendered&&!revision)throw new Error('The rendered surface placement did not identify its surface generation.');
+        const latestRevision=rendered?surfaceRevision():null;
+        if(rendered&&latestRevision&&revision!==latestRevision){entry.attemptedSurfaceRevision=revision;entry.waitingSurface=true;throw Object.assign(new Error('The displayed surface changed while the outline was being placed.'),{code:'measurement_display_surface_pending'});}
+        entry.vertices=vertices.map(p=>p.slice());entry.basis=String(result.basis||'Elevation surface placement; display only');entry.state='ready';entry.error='';entry.placement=rendered?'rendered':'native';entry.renderedOnly=rendered;entry.surfaceRevision=revision;entry.attemptedSurfaceRevision=revision;entry.waitingSurface=false;entry.awaitingStaff=false;if(rendered)entry.staffAuthority=false;
+      }).catch(error=>{if(current()){
+        const waiting=entry.waitingSurface||error?.code==='measurement_display_surface_pending';
+        const terminal=error?.code==='measurement_display_reference_mismatch';
+        entry.state='error';entry.waitingSurface=waiting&&!terminal;
+        if(terminal||(!waiting&&entry.placement==='rendered')){entry.vertices=null;entry.placement=null;entry.surfaceRevision=null;}
+        entry.error=entry.vertices&&waiting?`Using the previous 3D overlay while the current rendered surface loads: ${error.message||'Surface coverage is pending.'}`:`3D overlay unavailable: ${error.message||'Elevation sampling failed.'}`;
+      }}).finally(()=>{
         displayRequests--;if(current()){lastOverlayFrame=null;renderPanel();}pumpDisplayRequests();
       });
     }
@@ -117,8 +205,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(!matchingReference(record))return null;
     if(record.collection!=='map'||measurementCollection(context()?.mode)==='map')return record.vertices;
     let entry=displayCache.get(record.id);
-    if(entry?.record!==record){entry?.controller.abort();entry={record,state:'queued',controller:new AbortController(),generation:viewGeneration};displayCache.set(record.id,entry);pumpDisplayRequests();}
-    return entry.state==='ready'?entry.vertices:null;
+    if(entry?.record!==record){entry?.controller.abort();entry={record,state:'queued',controller:new AbortController(),generation:viewGeneration,requestSurfaceRevision:surfaceRevision()};displayCache.set(record.id,entry);pumpDisplayRequests();}
+    return entry.vertices||null;
   }
   function calculationSummary(record){
     const r=record.results;if(!r||r.status==='geometry-only')return 'Vertex geometry only; no surface or object volume calculated.';
@@ -291,6 +379,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(collection!==lastCollection){lastCollection=collection;renderPanel();}
     if(!permitted()){invalidate('Personal measurements are hidden until access is restored.');return;}
     if(!bound||!allowed()){if(!allowed()&&draft)disarm();if(lastSvg!=='')svg.innerHTML='';lastSvg='';lastOverlayFrame=null;return;}
+    observeDisplaySurface();
     if(pendingPick&&draft&&!shift&&performance.now()-lastPickAt>=66){const event=pendingPick;pendingPick=null;lastPickAt=performance.now();const point=bound.pick(event);if(point){if(gesture?.index>=0)draft.vertices[gesture.index]=point;else if(!editing)cursor=point;}}
     const all=records().filter(r=>r.visible!==false&&r.id!==draft?.id).sort((a,b)=>Number(b.id===selected)-Number(a.id===selected));if(draft)all.unshift(draft);
     // Empty collections still check access above, but must not force layout,
@@ -415,5 +504,5 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   store.load().then(notice=>{ready=true;loadFailed=false;renderPanel();if(notice)tell(notice);}).catch(error=>{loadFailed=true;renderPanel();tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});
   if(adminRequest)void adminRequest('capabilities',{}).then(result=>{if(!disposed&&allowed()){const newlyAllowed=!adminAllowed&&result.capabilities?.serverCalculations===true;adminAllowed=result.capabilities?.serverCalculations===true;if(newlyAllowed){for(const [id,entry]of displayCache)if(entry.awaitingStaff){entry.controller.abort();displayCache.delete(id);}lastOverlayFrame=null;}specialistAllowed=adminAllowed&&availableAdminSources(result).some(source=>source.methods.some(method=>method!=='surface-cut-fill'));renderPanel();}}).catch(()=>{adminAllowed=false;specialistAllowed=false;});
   renderPanel();
-  return {setTool,store,tick:draw,invalidate,captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){viewGeneration++;clearDisplayRequests();void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
+  return {setTool,store,tick:draw,invalidate,captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
 }

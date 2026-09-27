@@ -136,8 +136,12 @@ test('3D adapter maps model picks to canonical E/N/Z and cloud picks remain cano
   const camera=new THREE.PerspectiveCamera(60,4/3,.1,1000);camera.position.set(0,0,10);camera.updateMatrixWorld();
   const material={},point=new THREE.Vector3(500101,4800203,107),points={material,visibleNodes:[{}],pick:()=>({position:point})};
   const renderer={domElement:canvas,setRenderTarget(){},state:{reset(){}},setScissorTest(){}},viewer={scene:{getActiveCamera:()=>camera,pointclouds:[points]},renderer};
+  const measurementDisplaySurfaceRevision=()=>{throw new Error('Picking must not sample the display surface');},resolveRenderedMeasurementVertices=()=>{throw new Error('Picking must not resolve display geometry');};
   const scope=vm.createContext({THREE,state:{activeMode:'model',cloudMode:'potree'},isMapMode:()=>false,camera,renderer,dom:{cloudContainer:{},threeContainer:{}},document:{getElementById:()=>({contentWindow:{THREE,viewer}})},pickSurface:()=>new THREE.Vector3(1,2,-3),eventNdc:()=>new THREE.Vector2(),worldToUtm:p=>({e:p.x+500100,n:-p.z+4800200,alt:p.y+105}),utmToWorld:(e,n,z)=>new THREE.Vector3(e-500100,z-105,-(n-4800200))});
+  Object.assign(scope,{measurementDisplaySurfaceRevision,resolveRenderedMeasurementVertices});
   const start=main.indexOf('function measurementViewContext()'),end=main.indexOf('async function calculateSavedMeasurementSurface',start);vm.runInContext(main.slice(start,end),scope);
+  assert.equal(scope.measurementViewContext().getDisplaySurfaceRevision,measurementDisplaySurfaceRevision);
+  assert.equal(scope.measurementViewContext().resolveRenderedDisplayVertices,resolveRenderedMeasurementVertices);
   assert.deepEqual(Array.from(scope.measurementViewContext().pick(event(20,20))),[500101,4800203,107]);
   scope.state.activeMode='cloud';assert.deepEqual(Array.from(scope.measurementViewContext().pick(event(20,20))),[500101,4800203,107]);assert.equal(points.material,material);
 });

@@ -26,9 +26,14 @@ export async function calculatePointSurfaceTransect(absolutePath,request,options
   for(let i=0;i<breaks.length-1;i++){
     if(options.signal?.aborted)fail('measurement_cancelled');
     const startT=breaks[i],endT=breaks[i+1],mid=(startT+endT)/2;
+    const startM=startT*lengthM,endM=endT*lengthM;
+    // Adjacent grid/triangle boundaries can differ by one parameter ULP yet
+    // round to the same metric station. Such contacts have zero extent, not a
+    // missing sample. Preserve every positive interval, including NoData gaps.
+    if(endM===startM)continue;
     while(cellIndex<cells.length-1&&mid>=cells[cellIndex].endT)cellIndex++;
     const cell=cells[cellIndex],patch=patches.find(p=>mid>=p.startT&&mid<=p.endT),start=at(line,startT),end=at(line,endT);
-    const segment={startM:startT*lengthM,endM:endT*lengthM,start,end,status:'outside-selection'};
+    const segment={startM,endM,start,end,status:'outside-selection'};
     if(cell.col!==null)segment.cell=[cell.col,cell.row];
     if(patch){
       segment.baseStartM=patch.sample(start);segment.baseEndM=patch.sample(end);
