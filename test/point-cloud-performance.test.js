@@ -2,6 +2,65 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createFrameDiagnostics, createAdaptivePointBudget } = require('../public/pointcloud-performance.js');
 
+test('adaptive diagnostics are opt-in, detached, bounded and preserve budget/FPS trajectories', () => {
+  const plain = createAdaptivePointBudget(), observed = createAdaptivePointBudget();
+  observed.setDiagnosticsEnabled(true);
+  let time = 0;
+  for (let i = 0; i < 4000; i++) {
+    const dt = i < 200 ? 100 : i % 99 === 0 ? 120 : i % 800 > 700 ? 55 : 1000 / 33;
+    const options = { minimum: 275000, demand: { pending: i % 91 === 0,
+      drawnPoints: plain.state.live * 0.93, requiredPoints: Math.min(10000000, plain.state.live + 20000) } };
+    time += dt;
+    assert.equal(observed.sample(time, options), plain.sample(time, options));
+    assert.equal(observed.fps(), plain.fps());
+  }
+  const snapshot = observed.snapshot();
+  assert.ok(snapshot.lastDecision); assert.ok(snapshot.lastChange);
+  assert.equal(Object.values(snapshot.lastDecision).some(Array.isArray), false);
+  snapshot.lastDecision.reason = 'mutated'; snapshot.lastChange.after = -1; snapshot.live = -1;
+  assert.notEqual(observed.snapshot().lastDecision.reason, 'mutated');
+  assert.notEqual(observed.snapshot().lastChange.after, -1);
+  assert.ok(observed.state.live > 0);
+  assert.equal(plain.snapshot().lastDecision, null); assert.equal(plain.snapshot().lastChange, null);
+  observed.setDiagnosticsEnabled(false);
+  for (let i = 0; i < 100; i++) observed.sample(time += 40);
+  assert.equal(observed.snapshot().lastDecision, null); assert.equal(observed.snapshot().lastChange, null);
+});
+
+test('adaptive diagnostics retain overload evidence while healthy dwell recovers', () => {
+  const c = createAdaptivePointBudget(); c.setDiagnosticsEnabled(true);
+  let time = 0;
+  const step = dt => c.sample(time += dt, { minimum: 250000,
+    demand: { pending: false, drawnPoints: c.state.live, requiredPoints: Math.min(10000000, c.state.live + 10000) } });
+  for (let i = 0; i < 101; i++) step(100);
+  assert.match(c.snapshot().lastDecision.reason, /overload/);
+  for (let i = 0; i < 27; i++) step(40);
+  const snapshot = c.snapshot();
+  assert.equal(snapshot.lastDecision.reason, 'waiting for healthy frames');
+  assert.ok(snapshot.lastDecision.capacityFrameMs <= 44);
+  assert.ok(snapshot.lastDecision.healthyRemainingMs > 0);
+  assert.ok(snapshot.lastChange.capacityFrameMs > 45);
+  assert.equal(snapshot.lastChange.reason, 'overload reduction');
+  assert.ok(snapshot.lastDecision.floor > 0);
+  assert.equal(snapshot.lastDecision.canGrow, true);
+});
+
+test('rollback diagnostics immediately report the doubled healthy retry dwell', () => {
+  const c = createAdaptivePointBudget(); c.setDiagnosticsEnabled(true);
+  let time = 0;
+  const step = dt => c.sample(time += dt, { minimum: 250000,
+    demand: { pending: false, drawnPoints: c.state.live, requiredPoints: c.state.live + 10000 } });
+  for (let i = 0; i < 201; i++) step(100);
+  for (let i = 0; i < 200 && c.state.live === 250000; i++) step(40);
+  assert.ok(c.state.live > 250000);
+  for (let i = 0; i < 20 && c.state.live > 250000; i++) step(100);
+  const decision = c.snapshot().lastDecision;
+  assert.equal(decision.reason, 'probe rollback');
+  assert.equal(decision.recoveryDelayMs, 8000);
+  assert.equal(decision.recoveryWaitMs, 8000);
+  assert.equal(decision.healthyRemainingMs, 8000);
+});
+
 test('refinement diagnostics distinguish known levels, pending work and a blocked budget without inferring source exhaustion', () => {
   const { refinementDiagnostics } = require('../public/pointcloud-performance.js');
   assert.deepEqual(refinementDiagnostics({}), { levels: 'unknown', childBranches: 0, nodePixelThreshold: null, pending: null, requiredPoints: null });

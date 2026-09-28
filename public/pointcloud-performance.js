@@ -178,13 +178,26 @@
     const state = { target: initialTarget, live: initialTarget, auto: false, points: 0 };
     let frameMs = 1000 / 60, lastFrame = null, samples = 0, elapsed = 0, healthyMs = 0, longFrames = 0;
     let probeBase = null, probeAgeMs = 0, recoveryDelayMs = 4000;
+    // Two bounded records, updated at capacity decisions (not a frame history).
+    // Snapshot consumers cannot mutate the controller or retained records.
+    let lastDecision = null, lastChange = null, diagnosticsEnabled = false;
     function resetTiming() { lastFrame = null; samples = 0; elapsed = 0; healthyMs = 0; }
     return {
       state,
       fps: () => 1000 / frameMs,
+      setDiagnosticsEnabled(value) {
+        diagnosticsEnabled = !!value;
+        if (!diagnosticsEnabled) { lastDecision = null; lastChange = null; }
+      },
+      snapshot: () => ({ target: state.target, live: state.live,
+        lastDecision: lastDecision ? { ...lastDecision } : null,
+        lastChange: lastChange ? { ...lastChange } : null }),
       setTarget(value) {
         if (!Number.isFinite(value) || value <= 0) return state.live;
+        const before = state.live;
         state.target = state.live = Math.round(value);
+        lastDecision = null;
+        if (diagnosticsEnabled) lastChange = { reason: 'requested target', before, after: state.live, time: null };
         state.auto = false;
         probeBase = null; probeAgeMs = 0; recoveryDelayMs = 4000;
         resetTiming();
@@ -195,7 +208,10 @@
         const floor = Math.min(state.target, Math.max(250_000, Number.isFinite(minimum) ? minimum : 250_000));
         // Hierarchy metadata may arrive after the budget has already adapted.
         // Keep the root drawable, without overriding the user's requested ceiling.
-        if (state.live < floor) state.live = floor;
+        if (state.live < floor) {
+          if (diagnosticsEnabled) lastChange = { reason: 'root floor', before: state.live, after: floor, time };
+          state.live = floor;
+        }
         state.auto = state.live < state.target;
         if (lastFrame === null) { lastFrame = time; return state.live; }
         let dt = time - lastFrame;
@@ -230,6 +246,8 @@
         // Failed probes still honor the existing exponential retry backoff.
         const fastRecovery = capacityFrameMs <= 30 && settledDemand && demand.drawnPoints >= state.live * 0.7;
         const recoveryWait = fastRecovery && recoveryDelayMs === 4000 ? 2000 : recoveryDelayMs;
+        const before = state.live;
+        let reason = 'waiting for healthy frames';
         if (probeBase !== null) {
           probeAgeMs += windowMs;
           if (probeAgeMs >= 2000 && capacityFrameMs <= 45 && probeSettled) {
@@ -243,15 +261,38 @@
             state.live = Math.max(floor, probeBase);
             recoveryDelayMs = Math.min(60000, recoveryDelayMs * 2);
             probeBase = null;
+            reason = 'probe rollback';
           } else {
             state.live = Math.max(floor, Math.floor(state.live * (capacityFrameMs > 90 ? 0.5 : 0.75)));
+            reason = 'overload reduction';
           }
           elapsed = 0; samples = 0; healthyMs = 0;
         } else if (probeBase === null && healthyMs >= recoveryWait && canGrow && state.live < state.target) {
           // Do not mistake an almost-empty/loading scene for capacity to draw more.
           probeBase = state.live; probeAgeMs = 0;
           state.live = Math.min(state.target, Math.ceil(state.live * (fastRecovery ? 1.5 : 1.15)));
+          reason = fastRecovery ? 'fast recovery probe' : 'recovery probe';
           elapsed = 0; samples = 0; healthyMs = 0;
+        } else if (capacityFrameMs > 45) {
+          reason = 'overload at floor';
+        } else if (state.live >= state.target) {
+          reason = 'requested ceiling';
+        } else if (probeBase !== null) {
+          reason = 'observing probe';
+        } else if (!canGrow) {
+          reason = demand?.pending ? 'selected detail pending' : !probeSettled ? 'no settled drawn detail' : 'no eligible frontier';
+        } else if (recoveryDelayMs > 4000) {
+          reason = 'probe backoff';
+        }
+        if (diagnosticsEnabled) {
+          const diagnosticWait = fastRecovery && recoveryDelayMs === 4000 ? 2000 : recoveryDelayMs;
+          lastDecision = { time, capacityFrameMs, windowMs, reason, before, after: state.live, floor,
+          requiredPoints: Number.isFinite(demand?.requiredPoints) ? demand.requiredPoints : null,
+          drawnPoints: Number.isFinite(demand?.drawnPoints) ? demand.drawnPoints : visiblePoints,
+          pending: demand ? demand.pending === true : null, canGrow: !!canGrow,
+          healthyMs, recoveryDelayMs, recoveryWaitMs: diagnosticWait,
+          healthyRemainingMs: Math.max(0, diagnosticWait - healthyMs), probeBase, probeAgeMs };
+          if (before !== state.live) lastChange = { ...lastDecision };
         }
         state.auto = state.live < state.target;
         return state.live;

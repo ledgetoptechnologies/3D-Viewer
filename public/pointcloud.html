@@ -30,7 +30,7 @@
     #pc-diagnostics button { float: right; color: #ddd; background: rgba(10,10,12,.88); border: 1px solid #555; border-radius: 6px; padding: 5px 9px; cursor: pointer; }
     #pc-diagnostics button[aria-pressed="true"] { border-color: var(--brand-orange); }
     #pc-diagnostics button:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 2px; }
-    #pc-diagnostics-output { clear: both; margin: 4px 0 0; padding: 8px; border-radius: 6px; background: rgba(10,10,12,.9); color: #ddd; font: 11px/1.5 monospace; white-space: pre-wrap; pointer-events: none; }
+    #pc-diagnostics-output { clear: both; margin: 4px 0 0; padding: 8px; border-radius: 6px; background: rgba(10,10,12,.9); color: #ddd; font: 11px/1.5 monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow-y: auto; pointer-events: auto; }
     #pc-loading {
       position: absolute; inset: 0; z-index: 100; display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 14px;
@@ -216,6 +216,14 @@
       onSample(sample) {
         const ms = value => value.toFixed(1) + ' ms';
         const detail = window.LtdsPointCloudPerformance.refinementDiagnostics(viewer);
+        const adaptation = adaptiveBudget.snapshot(), decision = adaptation.lastDecision, change = adaptation.lastChange;
+        const count = value => value === null ? 'unknown' : Math.round(value).toLocaleString('en-US');
+        const capacity = decision ?
+          'Capacity window: ' + ms(decision.capacityFrameMs) + ' · ' + decision.reason + '\n' +
+          'Cap: ' + count(decision.after) + ' · floor: ' + count(decision.floor) + '\n' +
+          'Decision frontier: ' + count(decision.requiredPoints) + ' · grow: ' + decision.canGrow + '\n' +
+          'Healthy dwell left: ' + (decision.healthyRemainingMs / 1000).toFixed(1) + ' s (not wall time)\n' +
+          'Retry dwell: ' + (decision.recoveryDelayMs / 1000).toFixed(0) + ' s · probe: ' + (decision.probeBase === null ? 'none' : count(decision.probeBase) + ' / ' + (decision.probeAgeMs / 1000).toFixed(1) + ' s') + '\n' : 'Capacity window: collecting…\n';
         diagnosticsOutput.textContent =
           'CPU timings — not GPU timings\n' +
           'Frame ' + ms(sample.frameMs) + ' · max ' + ms(sample.maxFrameMs) + '\n' +
@@ -227,12 +235,15 @@
           'Visible LOD levels: ' + detail.levels + ' · known child branches: ' + detail.childBranches + '\n' +
           'Node threshold: ' + (detail.nodePixelThreshold ?? 'unknown') + ' px · selected detail pending: ' + (detail.pending ?? 'unknown') + '\n' +
           'Next budget frontier: ' + (detail.requiredPoints === null ? 'none reported' : detail.requiredPoints.toLocaleString('en-US') + ' points') + '\n' +
+          capacity +
+          (change ? 'Last cap change: ' + change.reason + ' ' + count(change.before) + ' → ' + count(change.after) + (Number.isFinite(change.capacityFrameMs) ? ' at ' + ms(change.capacityFrameMs) : '') + '\n' : '') +
           'These values do not prove source resolution is exhausted.';
       },
     });
     diagnosticsToggle.addEventListener('click', () => {
       const enabled = !frameDiagnostics.enabled();
       frameDiagnostics.setEnabled(enabled);
+      adaptiveBudget.setDiagnosticsEnabled(enabled);
       diagnosticsToggle.setAttribute('aria-pressed', String(enabled));
       diagnosticsOutput.hidden = !enabled;
       diagnosticsOutput.textContent = enabled ? 'Sampling CPU frame costs…' : '';
