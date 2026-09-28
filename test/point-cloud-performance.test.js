@@ -299,3 +299,24 @@ test('fast density recovery rolls back and backs off if the extra detail actuall
   assert.ok(probes.length>=4&&probes.length<=7);
   assert.ok(probes.at(-1)-probes.at(-2)>=60000,'fast path must not bypass failed-probe backoff');
 });
+
+test('33-FPS recovery is not starved by one 120ms frame every three seconds', () => {
+  const c=createAdaptivePointBudget(); frames(c,100,200); let time=20000;
+  for(let i=1;i<=33*120;i++) {
+    const live=c.state.live;
+    c.sample(time+=i%99===0?120:1000/33,{minimum:375000,visiblePoints:live*0.93,demand:{pending:false,drawnPoints:live*0.93,requiredPoints:Math.min(10000000,live+20000)}});
+    if(i===33*20)assert.ok(c.state.live>375000,'periodic moderate stalls must not trap a healthy view at its sparse floor');
+    assert.ok(c.state.live<=10000000);
+  }
+  assert.equal(c.state.live,10000000);
+  assert.equal(c.state.target,10000000);
+});
+
+test('bounded windows still reduce sustained slow frames and repeated stall-heavy frames', () => {
+  for(const cadence of [[50],[100],[30,30,120],[30,30,30,250]]) {
+    const c=createAdaptivePointBudget(); let time=0;
+    for(let i=0;i<900;i++)c.sample(time+=cadence[i%cadence.length],{minimum:375000,visiblePoints:c.state.live,demand:{pending:false,drawnPoints:c.state.live,requiredPoints:Math.min(10000000,c.state.live+20000)}});
+    assert.equal(c.state.live,375000,`overload cadence ${cadence} must retain the safe root floor`);
+    assert.equal(c.state.target,10000000);
+  }
+});

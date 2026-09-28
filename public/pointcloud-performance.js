@@ -208,10 +208,15 @@
         dt = Math.min(1000, dt);
         frameMs += (dt - frameMs) * (1 - Math.exp(-dt / 350));
         samples++; elapsed += dt;
-        // A stable 23–30 FPS browser may have ample point capacity despite
-        // never reaching 45 FPS. Probe density after sustained <=44ms frames;
-        // keep a dead band below the existing >45ms overload threshold.
-        healthyMs = frameMs <= 44 ? healthyMs + dt : 0;
+        // Keep the responsive EMA for the displayed FPS, but make capacity
+        // decisions from bounded frame windows. A single 120ms decode/GC frame
+        // every three seconds must not erase otherwise healthy 33-FPS recovery
+        // forever. Every frame still contributes: sustained or frequent stalls
+        // raise the window average and retain the overload safeguards below.
+        if (samples < 8 || elapsed < 1000) return state.live;
+        const windowMs = elapsed, capacityFrameMs = elapsed / samples;
+        elapsed = 0; samples = 0;
+        healthyMs = capacityFrameMs <= 44 ? healthyMs + windowMs : 0;
         // Whole additive nodes may not fit the remaining budget even when the
         // scene occupies less than 70% of it. Probe only confirmed eligible
         // demand with settled drawn ancestors, never an empty/loading scene.
@@ -223,16 +228,15 @@
         // request. Recover faster only with measured headroom, settled drawn
         // detail filling the live cap, and an eligible blocked frontier.
         // Failed probes still honor the existing exponential retry backoff.
-        const fastRecovery = frameMs <= 30 && settledDemand && demand.drawnPoints >= state.live * 0.7;
+        const fastRecovery = capacityFrameMs <= 30 && settledDemand && demand.drawnPoints >= state.live * 0.7;
         const recoveryWait = fastRecovery && recoveryDelayMs === 4000 ? 2000 : recoveryDelayMs;
         if (probeBase !== null) {
-          probeAgeMs += dt;
-          if (probeAgeMs >= 2000 && frameMs <= 45 && probeSettled) {
+          probeAgeMs += windowMs;
+          if (probeAgeMs >= 2000 && capacityFrameMs <= 45 && probeSettled) {
             probeBase = null; recoveryDelayMs = 4000;
           }
         }
-        if (samples < 8 || elapsed < 1000) return state.live;
-        if (frameMs > 45 && state.live > floor) {
+        if (capacityFrameMs > 45 && state.live > floor) {
           if (probeBase !== null) {
             // An unsuccessful probe rolls back exactly once, then backs off
             // 8/16/32/60s. Do not oscillate continuously on an overloaded GPU.
@@ -240,7 +244,7 @@
             recoveryDelayMs = Math.min(60000, recoveryDelayMs * 2);
             probeBase = null;
           } else {
-            state.live = Math.max(floor, Math.floor(state.live * (frameMs > 90 ? 0.5 : 0.75)));
+            state.live = Math.max(floor, Math.floor(state.live * (capacityFrameMs > 90 ? 0.5 : 0.75)));
           }
           elapsed = 0; samples = 0; healthyMs = 0;
         } else if (probeBase === null && healthyMs >= recoveryWait && canGrow && state.live < state.target) {
