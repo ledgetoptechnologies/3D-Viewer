@@ -53,7 +53,15 @@ Implementation and verification in progress. This checklist is not a claim of de
 - Final consolidated Linux build/check: **1,712 passed, zero failed, 42 explicit environment-dependent skips** (1,754 total). Complete local log: `output/linux-workflow-final.log` (not committed). This includes the final store/draft recovery changes. Separate Windows real-browser suites cover the browser paths skipped in the isolated Linux test image; bundled Potree/native-tool checks remain release-image gates.
 - Point-budget recovery timing depends on node size and loading. The filled-frontier fixture timing is not a guarantee: an artificial indivisible 6M-point child still waits longer under bounded probing. Diagnostics must distinguish pending detail from budget-limited selection during the live check.
 
-### Required deployment checks
+### September 28 sharing follow-up
+
+- Public health response confirms deployment of `32fe6f8a4d2160ee9d9639cac17da0040a0eed31`. Its release-image checks passed; this does not establish live workflow acceptance.
+- The user reports no way to generate a public link. The exact missing-control location is not yet confirmed. The model viewer has no Share control; the existing creation path is Workspace → project/task → Share. No live permission or link changes were made during this investigation.
+- Fixed a confirmed independent issue: optional Operations client-access lookup no longer blocks public-link preflight/form rendering. Its late completion updates only its own panel, preserving entered public-link fields. Context, token and identity checks reject stale responses. Existing creation/publication permissions remain unchanged.
+- Follow-up verification: 71/71 focused unit/API/layout tests; 21/21 real-browser sharing/workspace tests including desktop, 390px and 320px layouts; production build passed. Browser tests explicitly hold the optional lookup pending, verify the Create public link button is hittable, then verify late completion preserves the same form and entered label/password.
+- Full isolated Linux build/check: 1,727 passed, zero failed, 42 environment-dependent skips (1,769 total); log `output/linux-public-share-independent-check.log` (not committed). Production browser automation remains unavailable. The missing-button report and live checklist remain open.
+
+### Remaining live checks
 
 1. Verify deployed revision matches the released commit.
 2. At Hickory Grove, keep the requested point budget unchanged; compare medium/close detail after settling and during continuous movement, recording active budget, visible points, pending work and LOD levels.

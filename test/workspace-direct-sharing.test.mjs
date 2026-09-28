@@ -11,7 +11,7 @@ function declaration(name){
   return next?rest.slice(0,next.index):rest;
 }
 const names=['canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
-  'exactClientAssociations','clientGrantBody','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
+  'exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
   'createOutputShare','bindShareModal','bindProjectShareCard'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
   const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false};
@@ -21,8 +21,8 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   let sequence=0,respond=async(path,options)=>options.method==='POST'
     ?{share:{id:'share',permissions:{view:true,download:false}},viewUrl:'https://viewer.test/view/capability'}
     :path.endsWith('/client-grants')?state.clientAccess:{shares:[],publicationRequired:true,existingAccessUpdateRequired:false,eligibleAssetKinds:['glb']};
-  const modal={open:true,close(){this.open=false}},modalContent={
-    querySelector:selector=>selector==='.share-columns'?{dataset:{shareContext:state.shareContext?.id}}:null,
+  const clientPanel={innerHTML:''},modal={open:true,close(){this.open=false}},modalContent={
+    querySelector:selector=>selector==='.share-columns'?{dataset:{shareContext:state.shareContext?.id}}:selector==='[data-client-share-panel]'?clientPanel:null,
     querySelectorAll:selector=>selector==='[data-action="copy-share"]'?copyButtons:[],
   };
   const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
@@ -39,7 +39,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   vm.runInContext(names.map(declaration).join('\n'),context);
   const form={dataset:{outputId:'output'},isConnected:true,elements:{label:{value:''},password:{value:''},expiresAt:{value:''},
     measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button}};
-  return {context,state,output,calls,notices,rendered,decisions,modal,modalContent,form,copyButtons,
+  return {context,state,output,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
     respond(fn){respond=fn},html:()=>rendered.at(-1)?.html||''};
 }
 
@@ -50,6 +50,18 @@ test('ready share preflight and cancel execute only reads and never reopen a clo
   assert.match(f.html(),/Checking share eligibility/);assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
   f.modal.close();resolve({shares:[],publicationRequired:true,existingAccessUpdateRequired:false,eligibleAssetKinds:['glb']});
   await opening;assert.equal(f.modal.open,false);assert.equal(f.rendered.length,1);assert.equal(f.output.activePublished,false);
+  assert.equal(f.state.sharePreflight.output,undefined);assert.equal(f.state.shares.output,undefined);
+});
+
+for(const outcome of ['success','error'])for(const changed of ['context','token','subject'])test(`late public ${outcome} cannot overwrite state after ${changed} changes`,async()=>{
+  const f=fixture(['viewer.shares.read','viewer.shares.create']);let settleOutput,settleProject;
+  f.output.status='published';f.output.activePublished=true;
+  f.respond(path=>new Promise((yes,no)=>{const settle=()=>outcome==='success'?yes({shares:[{id:'late'}]}):no(new Error('late failure'));if(path.endsWith('/public-shares'))settleProject=settle;else settleOutput=settle;}));
+  const opening=f.context.openShareModal('project');
+  if(changed==='context')f.state.shareContext={id:'replacement'};if(changed==='token')f.state.token='replacement';if(changed==='subject')f.state.adminSession={subject:'replacement'};
+  settleOutput();settleProject();await opening;
+  assert.equal(f.state.sharePreflight.output,undefined);assert.equal(f.state.shares.output,undefined);assert.equal(f.state.projectShares.project,undefined);
+  assert.equal(f.rendered.length,1);
 });
 
 test('dedicated ready sharing offers explicit link creation without publish UX or whole-project form',async()=>{
@@ -63,6 +75,50 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.ok(f.html().indexOf('Create public link')<f.html().indexOf('Share with an Operations client instead'));
   assert.match(f.html(),/<details class="authenticated-share-options"><summary>/);
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
+});
+
+test('public preflight settles while optional Operations client lookup remains pending',async()=>{
+  const f=fixture();f.respond(path=>path.endsWith('/client-grants')?new Promise(()=>{}):Promise.resolve({shares:[],publicationRequired:true}));
+  await f.context.openShareModal('project','output');
+  assert.match(f.html(),/Create public link/);assert.doesNotMatch(f.html(),/Checking share eligibility/);
+  assert.match(f.html(),/Checking Operations client access/);assert.equal(f.state.shareContext.clientLoading,true);
+  assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
+});
+
+test('late optional client result updates only its panel without recreating a typed public form',async()=>{
+  const f=fixture();let settle;
+  f.respond(path=>path.endsWith('/client-grants')?new Promise(resolve=>{settle=resolve;}):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project','output');const renders=f.rendered.length;
+  f.form.elements.label.value='Keep my label';f.form.elements.password.value='Keep my password';
+  settle({projects:[],associations:[],grants:[]});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.rendered.length,renders,'must not replace the modal or public form');
+  assert.match(f.clientPanel.innerHTML,/Direct Operations client sharing is not available/);
+  assert.equal(f.form.elements.label.value,'Keep my label');assert.equal(f.form.elements.password.value,'Keep my password');
+});
+
+test('optional client errors are honest and cannot hide the available public-link form',async()=>{
+  const f=fixture();let reject;
+  f.respond(path=>path.endsWith('/client-grants')?new Promise((_resolve,no)=>{reject=no;}):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project','output');reject(new Error('Unavailable'));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.clientPanel.innerHTML,/could not be loaded.*Public links are unaffected/);
+  assert.match(f.html(),/Create public link/);assert.equal(f.state.clientAccess,null);
+});
+
+for(const change of ['closed','context','token','subject','permission'])test(`late client result is ignored after ${change} changes`,async()=>{
+  const permissions=['viewer.shares.read','viewer.shares.create','viewer.processing.publish','viewer.client_grants.manage'],f=fixture(permissions);let settle;
+  f.respond(path=>path.endsWith('/client-grants')?new Promise(resolve=>{settle=resolve;}):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project','output');const access=f.state.clientAccess;
+  if(change==='closed')f.modal.close();if(change==='context')f.state.shareContext={id:'other'};
+  if(change==='token')f.state.token='other';if(change==='subject')f.state.adminSession={subject:'other'};
+  if(change==='permission')permissions.splice(permissions.indexOf('viewer.client_grants.manage'),1);
+  settle({projects:[{id:'late'}]});await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.state.clientAccess,access);assert.equal(f.clientPanel.innerHTML,'');
+});
+
+test('legacy active published output needs no processing attempt or publication grant for public sharing',async()=>{
+  const f=fixture(['viewer.shares.create','viewer.shares.read']);delete f.output.attemptId;f.output.status='published';f.output.activePublished=true;
+  assert.equal(f.context.canShareOutput(f.output),true);await f.context.openShareModal('project','output');
+  assert.match(f.html(),/Create public link/);assert.equal(f.calls.some(call=>call.path.endsWith('/client-grants')),false);
 });
 
 test('ready create form requires share-create and publish; published share needs only share-create',()=>{

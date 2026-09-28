@@ -58,7 +58,10 @@ function canShareOutput(output) {
     &&['viewer.shares.create','viewer.shares.read','viewer.client_grants.manage'].some(can);
 }
 async function openShareModal(projectId,onlyOutputId=null){
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),loading:true};
+  const context={projectId,onlyOutputId,id:crypto.randomUUID(),loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  const token=state.token,subject=state.adminSession?.subject;
+  const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
+    &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
   state.shareContext=context;
   const taskIds=new Set(state.tasks.filter(task=>task.projectId===projectId).map(task=>task.id));
   const outputs=state.outputs.filter(output=>taskIds.has(output.taskId)&&(!onlyOutputId||output.id===onlyOutputId)
@@ -67,21 +70,27 @@ async function openShareModal(projectId,onlyOutputId=null){
   const reads=[];
   if(can('viewer.shares.read'))for(const output of outputs)reads.push((async()=>{
     try{const result=await api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`);
-      state.sharePreflight[output.id]={...result,error:null};state.shares[output.id]=result.shares||[];
-    }catch(error){state.sharePreflight[output.id]={error:error.message};}
+      if(current()){state.sharePreflight[output.id]={...result,error:null};state.shares[output.id]=result.shares||[];}
+    }catch(error){if(current())state.sharePreflight[output.id]={error:error.message};}
   })());
   if(!onlyOutputId&&(can('viewer.shares.read')||can('viewer.shares.revoke')))reads.push((async()=>{
-    try{state.projectShares[projectId]=(await api(`/api/v1/projects/${encodeURIComponent(projectId)}/public-shares`)).shares||[]}
-    catch{state.projectShares[projectId]=[]}
+    try{const result=await api(`/api/v1/projects/${encodeURIComponent(projectId)}/public-shares`);if(current())state.projectShares[projectId]=result.shares||[];}
+    catch{if(current())state.projectShares[projectId]=[];}
   })());
-  if(can('viewer.client_grants.manage'))reads.push((async()=>{
-    try{state.clientAccess=await api('/api/v1/workspace/client-grants')}
-    catch{state.clientAccess=null}
-  })());
+  // Optional Operations lookup must not hold the independent public-link form.
+  // A late result updates only its own panel, preserving typed public-link fields.
+  if(context.clientLoading)void(async()=>{
+    let access=null,failed=false;
+    try{access=await api('/api/v1/workspace/client-grants')}catch{failed=true;}
+    if(!current()||!can('viewer.client_grants.manage'))return;
+    state.clientAccess=access;context.clientLoading=false;context.clientError=failed?'unavailable':null;
+    if(context.loading)return;
+    const panel=modalContent.querySelector('[data-client-share-panel]');
+    if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
+  })();
   await Promise.all(reads);
   context.loading=false;
-  if(state.shareContext!==context||!modal.open||!state.token
-    ||modalContent.querySelector('.share-columns')?.dataset.shareContext!==context.id)return;
+  if(!token||!current())return;
   shareModal(projectId,onlyOutputId);
   if(!onlyOutputId)injectProjectShareCard(projectId);
 }
@@ -530,6 +539,11 @@ function clientGrantBody(form,onlyOutputId){
     expiresAt:form.elements.expiresAt.value?new Date(form.elements.expiresAt.value).toISOString():null,
     permissions:{measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}}};
 }
+function clientSharePanel(output,onlyOutputId){
+  if(can('viewer.client_grants.manage')&&state.shareContext?.clientLoading)return card('Authenticated client access',empty('Checking Operations client access… Public links can be created separately.'));
+  if(can('viewer.client_grants.manage')&&state.shareContext?.clientError)return card('Authenticated client access',empty('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.'));
+  return clientShareCard(output,onlyOutputId);
+}
 function clientShareCard(output,onlyOutputId){
   if(!can('viewer.client_grants.manage'))return card('Authenticated client access',empty('Client-access management requires an additional permission.'));
   const access=state.clientAccess;
@@ -591,7 +605,7 @@ function shareModal(projectId,onlyOutputId=null){
     const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${share.hasPassword?'Password protected':'No password'}</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
     return card(output.displayName||'Model',form+list);
   }).join('')||card('Models',empty('No ready model is available to share.'));
-  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`<p class="form-note">Send a public link to anyone. No Operations account or client workspace is required. You control its password, expiry and permissions, and can revoke it at any time.</p><div class="share-columns public-share-first" data-share-context="${esc(state.shareContext?.id||'')}"><div>${result}${publicCards}</div><div><details class="authenticated-share-options"><summary>Share with an Operations client instead</summary>${checking?card('Authenticated client access',empty('Checking client access…')):clientShareCard(selected,onlyOutputId)}</details></div></div>`,'wide-modal');
+  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`<p class="form-note">Send a public link to anyone. No Operations account or client workspace is required. You control its password, expiry and permissions, and can revoke it at any time.</p><div class="share-columns public-share-first" data-share-context="${esc(state.shareContext?.id||'')}"><div>${result}${publicCards}</div><div><details class="authenticated-share-options"><summary>Share with an Operations client instead</summary><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></details></div></div>`,'wide-modal');
   bindShareModal(projectId,onlyOutputId);
 }
 async function confirmSharedVersionUpdate(){

@@ -93,7 +93,7 @@ function fixtureApi(url, request, body, runtime) {
       id: 'project-share-browser-session', subject: 'ops:project-share-browser', displayUnits: 'imperial',
       permissions: request.headers.authorization === `Bearer ${revokeOnlyToken}`
         ? ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read', 'viewer.shares.revoke']
-        : ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read', 'viewer.shares.read', 'viewer.shares.create', 'viewer.shares.revoke'],
+        : ['viewer.projects.read', 'viewer.datasets.read', 'viewer.processing.read', 'viewer.providers.read', 'viewer.shares.read', 'viewer.shares.create', 'viewer.shares.revoke', 'viewer.client_grants.manage'],
       expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     },
   });
@@ -142,7 +142,7 @@ function fixtureApi(url, request, body, runtime) {
 }
 
 async function startFixtureServer() {
-  const runtime = { requests: [], projectShares: [], origin: '' };
+  const runtime = { requests: [], projectShares: [], origin: '', holdClientRead: false, releaseClientRead: null };
   const builtRoot = path.join(root, 'dist');
   const server = createServer(async (request, reply) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
@@ -153,6 +153,9 @@ async function startFixtureServer() {
       const raw = Buffer.concat(chunks).toString();
       if (raw) try { body = JSON.parse(raw); } catch {}
       runtime.requests.push({ method: request.method, path: url.pathname, body, idempotencyKey: request.headers['idempotency-key'] });
+      if (url.pathname === '/api/v1/workspace/client-grants' && runtime.holdClientRead) {
+        await new Promise(resolve => { runtime.releaseClientRead = resolve; });
+      }
       const result = fixtureApi(url, request, body, runtime);
       reply.writeHead(result.status, { 'Cache-Control': 'no-store', ...result.headers });
       reply.end(result.body);
@@ -303,8 +306,23 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, `${viewport.name}: workspace did not load`);
     await client.evaluate(`document.querySelector('[data-action="open-project"]').click()`);
     await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, `${viewport.name}: project did not open`);
+    runtime.holdClientRead = true;
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
     await waitFor(client, `document.querySelector('.project-share-form') !== null`, `${viewport.name}: whole-project share form did not open`);
+    assert.equal(typeof runtime.releaseClientRead, 'function', 'Only the optional Share lookup should now be held pending');
+    assert.match(await client.evaluate(`document.querySelector('[data-client-share-panel]').textContent`), /Checking Operations/);
+    assert.equal(await client.evaluate(`(() => {
+      const form=document.querySelector('.share-form'),button=form.querySelector('button');
+      window.__retainedPublicForm=form;form.elements.label.value='Keep this public label';form.elements.password.value='Keep this password';
+      button.scrollIntoView({block:'center'});const box=button.getBoundingClientRect();
+      return !button.disabled && /Create public link/.test(button.textContent) && box.width>0 && box.height>0
+        && button.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2));
+    })()`), true, 'Public creation must be visible and hittable before Operations responds');
+    runtime.holdClientRead = false;
+    runtime.releaseClientRead();runtime.releaseClientRead = null;
+    await waitFor(client, `!document.querySelector('[data-client-share-panel]').textContent.includes('Checking Operations')`, `${viewport.name}: optional client panel did not settle`);
+    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('.share-form');return {same:form===window.__retainedPublicForm,label:form.elements.label.value,password:form.elements.password.value}})()`),
+      {same:true,label:'Keep this public label',password:'Keep this password'}, 'Late client response must not rebuild or reset the public form');
     assert.match(await client.evaluate(`document.querySelector('.project-share-form .form-note').textContent`), /tasks published later/);
     assert.equal(await client.evaluate(`document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`), true);
     assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Opening Share must remain read-only');
@@ -341,6 +359,8 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     assert.ok(recent.some((item) => item.method === 'DELETE' && item.path === '/api/v1/project-shares/share-created'));
     assert.deepEqual(client.events.filter((event) => event.method === 'Runtime.exceptionThrown'), []);
   } finally {
+    runtime.holdClientRead = false;
+    runtime.releaseClientRead?.();runtime.releaseClientRead = null;
     await client.command('Page.close', {}, 2_000).catch(() => {});
     client.close();
   }
