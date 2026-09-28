@@ -66,6 +66,11 @@ test('401 and 403 responses clear private data and require explicit reload',asyn
     assert.equal(store.records.size,0);assert.equal(store.statuses.size,0);assert.equal(store.isInvalidated(),true);
   }
 });
+test('only current 401 can checkpoint before clearing; 403 and obsolete access never checkpoint',async()=>{
+  for(const [status,obsolete]of [[401,false],[403,false],[401,true]]){
+    let denied=false,access=0,calls=0,checkpointSize=0;const store=createMeasurementStore({token:()=> 'token',accessGeneration:()=>access,beforeUnauthorized:()=>{calls++;checkpointSize=store.records.size;assert.equal(store.isInvalidated(),false);},fetcher:async()=>{if(!denied)return response({...record,revision:1});if(obsolete)access++;return{ok:false,status};}});await store.save(record);denied=true;await assert.rejects(store.patch(store.records.get(record.id),{name:'Other'}));assert.equal(calls,status===401&&!obsolete?1:0);if(calls)assert.equal(checkpointSize,1);assert.equal(store.isInvalidated(),!obsolete);
+  }
+});
 test('lost signed-in token cannot turn persisted records into public temporary records',async()=>{
   let credential='token';const store=createMeasurementStore({token:()=>credential,fetcher:async()=>response({...record,revision:1})});
   await store.save(record);credential=null;

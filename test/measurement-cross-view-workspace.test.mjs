@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import crypto from 'node:crypto';
+import {createRequire} from 'node:module';
 import {readFileSync} from 'node:fs';
 import * as geometry from '../measurement-document.mjs';
 import {createMeasurementStore} from '../measurement-store.mjs';
@@ -9,6 +10,7 @@ import {createMeasurementListLayout} from '../measurement-list-layout.mjs';
 import {retainedDisplayBoundary} from '../measurement-display-elevations.mjs';
 
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
+const {validateMeasurement}=createRequire(import.meta.url)('../server/measurementRepository.js');
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
 const codedError=(message,code)=>Object.assign(new Error(message),{code});
@@ -31,7 +33,7 @@ class Element {
   setPointerCapture(){} releasePointerCapture(){} focus(){} click(){}
 }
 
-function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2)}={}){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2),onBeforeAccessLost=()=>{},storeFactory=createMeasurementStore}={}){
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
@@ -42,12 +44,12 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
     if(resolveRenderedDisplayVertices)view.resolveRenderedDisplayVertices=(record,options)=>{renderedResolverCalls.push({record:structuredClone(record),options,mode});return resolveRenderedDisplayVertices(record,options);};
     return view;
   };
-  const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,retainedDisplayBoundary,availableAdminSources:()=>[],document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
+  const scope=vm.createContext({...geometry,createMeasurementStore:storeFactory,createMeasurementListLayout,retainedDisplayBoundary,availableAdminSources:()=>[],document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
     URL:{createObjectURL(blob){downloads.push(blob);return'blob:fixture';},revokeObjectURL(){}},
     setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>now},
     openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},onBeforeAccessLost,coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
   return{workspace,controls,panel,canvas,window,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
@@ -55,7 +57,7 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
     async switchTo(next){workspace.modeChanged();mode=next;workspace.tick();await flush();workspace.tick();},
     setSurfaceRevision(next,{advance=0}={}){surfaceRevision=next;now+=advance;},advance(ms){now+=ms;},
     surfaceRevisionReadCount:()=>surfaceRevisionReads,
-    deny(){permission=false;workspace.tick();},
+    expireBeforeTick(){permission=false;},deny(){permission=false;workspace.tick();},
     exportCheck(id){return controls.fire('change',{target:{dataset:{m:'export-check'},checked:true,closest:()=>({dataset:{record:id}})}});},
     watchMutations(){for(const name of ['save','patch','remove','attachResults']){const original=workspace.store[name];workspace.store[name]=(...args)=>{mutations.push(name);return original(...args);};}},
     async exportJson(){controls.querySelector('[data-m="format"]').value='json';await action('export');return JSON.parse(await downloads.at(-1).text());}
@@ -175,6 +177,41 @@ test('spatial editing in maps remains refused and never substitutes placeholder 
 });
 
 const pointer=(x,y,extra={})=>({clientX:x,clientY:y,button:0,buttons:0,pointerId:1,target:{closest:()=>null},preventDefault(){},stopImmediatePropagation(){},...extra});
+test('editing passes ordinary navigation through in all five modes and changes cursor only over handles',async t=>{
+  for(const mode of ['model','cloud','ortho','dsm','dtm']){
+    const f=fixture();t.after(()=>f.workspace.dispose());await f.switchTo(mode);const record={...document('map','Navigation'),kind:'polygon',vertices:[[100,100,0],[300,100,0],[300,300,0],[100,300,0]]};await f.workspace.store.save(record);f.workspace.tick();await flush();await f.action('edit-record',record.id);f.workspace.tick();
+    const before=JSON.stringify(f.workspace.getDraft());let stopped=0;const event=(x,y,extra={})=>pointer(x,y,{stopImmediatePropagation(){stopped++;},...extra});
+    assert.equal(f.canvas.style.cursor||'','');await f.canvas.fire('pointermove',event(100,100));assert.equal(f.canvas.style.cursor,'move');await f.canvas.fire('pointermove',event(650,450));assert.equal(f.canvas.style.cursor,'');
+    for(const button of [0,1,2]){await f.canvas.fire('pointerdown',event(650,450,{button}));await f.canvas.fire('pointermove',event(660,460,{button,buttons:button===2?2:1}));await f.canvas.fire('pointerup',event(660,460,{button}));}
+    await f.canvas.fire('contextmenu',event(650,450,{button:2}));await f.canvas.fire('dblclick',event(650,450));assert.equal(stopped,0);assert.equal(JSON.stringify(f.workspace.getDraft()),before);assert.match(f.panel.children[1].textContent,/Enter, Esc or Finish/);
+    await f.canvas.fire('pointerdown',event(100,100));assert.equal(stopped,1,'handle gesture stays exclusive');await f.canvas.fire('pointerup',event(100,100));await f.window.fire('keydown',event(0,0,{key:'Enter'}));await flush();assert.equal(f.workspace.getDraft(),null);
+  }
+});
+test('changed geometry retains bounded historical values without current totals, trust or export confusion',async t=>{
+  const f=fixture();t.after(()=>f.workspace.dispose());const {map}=await seed(f);map.revision=4;map.updatedAt='2026-09-27T12:00:00Z';map.results.calculationJobId='old-job';f.workspace.store.records.set(map.id,map);await f.switchTo('ortho');await f.action('edit-record',map.id);
+  await f.canvas.fire('pointerdown',pointer(250,200));await f.canvas.fire('pointerup',pointer(240,200));await f.action('finish');const saved=f.workspace.store.records.get(map.id),history=saved.results.previousVolume;
+  assert.equal(history.netM3,map.results.netM3);assert.equal(history.unit,'m3');assert.equal(history.status,'historical');assert.equal(history.revision,4);assert.equal(history.recordedAt,map.updatedAt);assert.equal(history.calculationJobId,undefined);assert.equal(history.source,undefined);assert.equal(history.boundaryVertices,undefined);assert.equal(saved.results.netM3,undefined);assert.equal(saved.results.calculationJobId,undefined);
+  const body=Object.fromEntries(['id','name','collection','kind','vertices','coordinateReference','visible','source','results','displayPreferences','revision'].filter(key=>saved[key]!==undefined).map(key=>[key,saved[key]]));const validated=validateMeasurement(body,{update:true});assert.equal(validated.results.previousVolume.netM3,history.netM3);assert.equal(validated.results.verified,false);
+  const csv=geometry.exportMeasurements([saved],'csv');assert.doesNotMatch(csv,/1232\.444433334/);const json=JSON.parse(geometry.exportMeasurements([saved],'json'));assert.equal(json.measurements[0].results.previousVolume.status,'historical');assert.equal(json.measurements[0].results.netM3,undefined);
+  await f.action('edit-record',map.id);await f.canvas.fire('pointerdown',pointer(240,200));await f.canvas.fire('pointerup',pointer(230,200));await f.action('finish');assert.deepEqual(f.workspace.store.records.get(map.id).results.previousVolume,history,'repeat edits retain a single bounded prior summary');
+});
+test('ephemeral draft recovery restores only matching mode CRS and unchanged saved revision',async t=>{
+  const f=fixture();t.after(()=>f.workspace.dispose());const {map}=await seed(f);await f.switchTo('ortho');await f.action('edit-record',map.id);await f.canvas.fire('pointerdown',pointer(250,200));await f.canvas.fire('pointerup',pointer(240,200));const snapshot=f.workspace.exportDraft();
+  const next=fixture();t.after(()=>next.workspace.dispose());await next.switchTo('ortho');next.workspace.store.records.set(map.id,structuredClone(map));next.watchMutations();assert.equal(await next.workspace.restoreDraft(snapshot),true);assert.equal(next.workspace.getDraft().vertices[0][0],240);assert.deepEqual(next.mutations,[]);
+  for(const change of ['revision','geometry','mode','denied']){const other=fixture();t.after(()=>other.workspace.dispose());await other.switchTo(change==='mode'?'dsm':'ortho');const stored=structuredClone(map);if(change==='revision')stored.revision=88;if(change==='geometry')stored.vertices[0][0]++;other.workspace.store.records.set(map.id,stored);if(change==='denied')other.deny();assert.equal(await other.workspace.restoreDraft(snapshot),false);assert.equal(other.workspace.getDraft(),null);}
+});
+test('known-expiry checkpoint remains memory-only after permit expiry but never after invalidation',async t=>{
+  const f=fixture();t.after(()=>f.workspace.dispose());await f.switchTo('ortho');f.workspace.setTool('area');await f.canvas.fire('pointerdown',pointer(100,100));await f.canvas.fire('pointerup',pointer(100,100));const active=f.workspace.exportDraft();assert.equal(active.draft.vertices.length,1);f.watchMutations();f.expireBeforeTick();assert.equal(f.workspace.exportDraft(),null);const expired=f.workspace.exportDraft({recoverExpiredSession:true});assert.deepEqual(expired,active);assert.deepEqual(f.mutations,[]);f.workspace.invalidate();assert.equal(f.workspace.exportDraft({recoverExpiredSession:true}),null);
+  const next=fixture();t.after(()=>next.workspace.dispose());await next.switchTo('ortho');next.watchMutations();assert.equal(await next.workspace.restoreDraft(expired),true);assert.equal(next.workspace.getDraft().vertices.length,1);assert.deepEqual(next.mutations,[]);
+});
+test('draft restoration distinguishes retryable saved-load failure from explicit conflict and retries read-only',async t=>{
+  const original=fixture();t.after(()=>original.workspace.dispose());await original.switchTo('ortho');original.workspace.setTool('area');const snapshot=original.workspace.exportDraft();let failing=true,loads=0;
+  const f=fixture({storeFactory:options=>{const store=createMeasurementStore(options),load=store.load;store.load=()=>{loads++;return failing?Promise.reject(new Error('temporary network failure')):load();};return store;}});t.after(()=>f.workspace.dispose());await f.switchTo('ortho');f.watchMutations();await assert.rejects(f.workspace.restoreDraft(snapshot),error=>error.code==='measurement_draft_restore_retry');f.workspace.showRecoveryNotice(true);assert.match(f.panel.children[1].textContent,/kept in this tab.*retry.*nothing has been saved/);assert.equal(f.workspace.getDraft(),null);failing=false;assert.equal(await f.workspace.restoreDraft(snapshot),true);assert.ok(loads>=3);assert.deepEqual(f.mutations,[]);
+});
+test('render-loop expiry checkpoints before retiring draft but explicit denial never invokes checkpoint hook',async t=>{
+  let checkpoint=null,calls=0;const f=fixture({onBeforeAccessLost:()=>{calls++;checkpoint=f.workspace.exportDraft({recoverExpiredSession:true});}});t.after(()=>f.workspace.dispose());await f.switchTo('ortho');f.workspace.setTool('area');await f.canvas.fire('pointerdown',pointer(100,100));await f.canvas.fire('pointerup',pointer(100,100));f.expireBeforeTick();f.workspace.tick();assert.equal(calls,1);assert.equal(checkpoint.draft.vertices.length,1);assert.equal(f.workspace.getDraft(),null);f.workspace.tick();assert.equal(calls,1);
+  const denied=fixture({onBeforeAccessLost:()=>{throw Error('Explicit denial must never checkpoint');}});t.after(()=>denied.workspace.dispose());denied.workspace.invalidate();assert.equal(denied.workspace.exportDraft({recoverExpiredSession:true}),null);
+});
 test('map outlines edit on model/cloud display heights but persist only XY and never calculate automatically',async t=>{
   for(const mode of ['model','cloud']){
     const f=fixture({project:p=>[p[0],p[1]-p[2]],pick:e=>[e.clientX,e.clientY+160,160]});t.after(()=>f.workspace.dispose());

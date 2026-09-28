@@ -247,6 +247,13 @@ test('real editor inserts midpoint, moves/deletes selected vertices and retains 
         await button('dialog.measurement-report [data-close]');await waitFor(client,"!document.querySelector('dialog.measurement-report')");t.diagnostic(`captureView downloaded actual ${bytes.length}-byte 800x600 PNG; openReport rendered measurement table and a freshly captured current frame.`);
       }
       await button('[data-m=edit-record]');await waitFor(client,"document.querySelectorAll('[data-measurement-insert]').length===4");
+      // Capture must leave ordinary viewer gestures untouched away from handles.
+      await client.evaluate("window.navigationEvents=[];for(const name of ['pointerdown','pointermove','pointerup','contextmenu'])document.querySelector('#view').addEventListener(name,e=>navigationEvents.push(name));");
+      const geometryBeforeNavigation=await client.evaluate('JSON.stringify(editorFixture.draft().vertices)');
+      await mouse('mouseMoved',600,450,{button:'none',buttons:0});assert.notEqual(await client.evaluate("getComputedStyle(document.querySelector('#view')).cursor"),'move');
+      await mouse('mousePressed',600,450);await mouse('mouseMoved',650,460,{buttons:1});await mouse('mouseReleased',650,460);
+      assert.ok((await client.evaluate('navigationEvents')).includes('pointerdown'));assert.ok((await client.evaluate('navigationEvents')).includes('pointerup'));assert.equal(await client.evaluate('JSON.stringify(editorFixture.draft().vertices)'),geometryBeforeNavigation);
+      await mouse('mouseMoved',100,100,{button:'none',buttons:0});assert.equal(await client.evaluate("getComputedStyle(document.querySelector('#view')).cursor"),'move',await client.evaluate("JSON.stringify({view:document.querySelector('#view').getBoundingClientRect(),target:document.elementFromPoint(100,100)?.tagName,classes:document.querySelector('#view').className})"));
       await click(200,100);await waitFor(client,'editorFixture.draft().vertices.length===5');
       // Selected midpoint can move; original source is unchanged until Finish.
       await mouse('mousePressed',200,100);await mouse('mouseMoved',200,70,{buttons:1});await mouse('mouseReleased',200,70);await waitFor(client,'editorFixture.draft().vertices[1][1]===70');

@@ -12,7 +12,7 @@ export function defaultTaskName(project,date=new Date()){
 // A browser-owned controller. In background mode, closing hides the dialog
 // while submission continues; explicit disposal still aborts local work.
 // Accepted durable copy/finalization operations are never silently cancelled.
-export function mountNewTask({container,dialog,project,providers=[],presets=[],datasets=[],api,token,onComplete=()=>{},onDispose=()=>{},canUpload=true,canImport=true,canManagePresets=false,allowBackground=false}){
+export function mountNewTask({container,dialog,project,providers=[],presets=[],datasets=[],api,token,fetcher=fetch,onComplete=()=>{},onDispose=()=>{},canUpload=true,canImport=true,canManagePresets=false,allowBackground=false}){
   const controller=new AbortController(),{signal}=controller;
   dialog.classList.add('new-task-modal');
   let source='pc',files=[],selectedPaths=new Set(),busy=false,datasetId='',currentProviders=providers,submissionId=crypto.randomUUID(),copyKey=crypto.randomUUID();
@@ -109,7 +109,7 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
     const presetId=form.elements.presetId.value,capabilityFingerprint=currentProviders.find(item=>item.id===providerId)?.capabilityFingerprint;setBusy(true);try{currentProviders=(await api('/api/v1/processing/providers?limit=100',{signal})).providers||[];const provider=currentProviders.find(item=>item.id===providerId);if(!provider||!providerSubmissionState(provider).eligible)throw new Error('The selected node is not currently available. Refresh or choose another node.');if(provider.capabilityFingerprint!==capabilityFingerprint)throw new Error('The node options changed. Review the refreshed settings before starting.');if(presetId&&!presets.some(p=>p.id===presetId&&compatiblePreset(p,provider)))throw new Error('The selected preset no longer matches this node. Choose another preset.');
       if(source==='existing')datasetId=form.elements.existingDataset.value;
       else if(source==='pc'){const existing=datasetId?(await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`,{signal})).dataset:null;if(existing?.status!=='finalized'){if(sourceOperation)await waitOperation(sourceOperation);else{prepared??=await prepareTaskPhotos(files,{signal,onProgress:showProgress});if(!datasetId)datasetId=(await api('/api/v1/datasets',{method:'POST',headers:{'Idempotency-Key':datasetKey},body:{projectId:project.id,displayName:name},signal})).dataset.id;
-        const result=await uploadTaskPhotos({datasetId,prepared,api,token,signal,onProgress:showProgress});sourceOperation=result.operation;await waitOperation(sourceOperation);}}
+        const result=await uploadTaskPhotos({datasetId,prepared,api,token,fetcher,signal,onProgress:showProgress});sourceOperation=result.operation;await waitOperation(sourceOperation);}}
       }else {if(!datasetId){const result=await api('/api/v1/dataset-imports/copy',{method:'POST',headers:{'Idempotency-Key':copyKey},body:{projectId:project.id,displayName:name,paths:[...selectedPaths]},signal});datasetId=result.dataset.id;sourceOperation=result.operation;}const existing=(await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`,{signal})).dataset;if(existing?.status!=='finalized')await waitOperation(sourceOperation);}
       const dataset=(await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`,{signal})).dataset;if(dataset?.status!=='finalized')throw new Error('Source is still preparing. Check Background work, then use this saved source when ready.');
       if(signal.aborted)return;

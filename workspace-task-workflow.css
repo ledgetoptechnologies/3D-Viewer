@@ -8,3 +8,15 @@
 .new-task-form [data-preset-status]{margin:0;font-size:13px}
 .new-task-form [data-progress]{height:10px;border-radius:8px}
 .new-task-form [data-status]{font-variant-numeric:tabular-nums;line-height:1.5}
+.task-panel:has(.task-more-actions[open]){overflow:visible;position:relative;z-index:3}
+.project-row.selected:has(.task-more-actions[open]){overflow:visible;position:relative;z-index:3}
+.task-more-actions .project-more-menu{min-width:220px;max-width:calc(100vw - 48px)}
+.task-more-actions .project-more-menu button{min-height:44px;white-space:normal}
+.task-page-navigation{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.public-share-first{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr)}
+.authenticated-share-options{border:1px solid var(--border);border-radius:10px;padding:14px}
+.authenticated-share-options>summary{cursor:pointer;color:var(--muted);line-height:1.5}
+.authenticated-share-options>summary:focus-visible{outline:2px solid var(--orange);outline-offset:4px}
+.authenticated-share-options>.content-card{margin-top:14px}
+@media(max-width:1000px){.public-share-first{grid-template-columns:1fr}}
+@media(max-width:720px){.task-quick-actions{display:flex;flex-wrap:wrap}.task-quick-actions>button{flex:1 1 auto;width:auto}.task-quick-actions>.task-more-actions{margin-left:auto}.task-more-actions>summary{height:44px}}

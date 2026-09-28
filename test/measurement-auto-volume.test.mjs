@@ -11,7 +11,7 @@ function fixture({kind='polygon',saveWait=Promise.resolve(),attachmentWait=Promi
   const record={id:'auto-volume-fixture',name:'Test boundary',kind,collection:'spatial3d',vertices:kind==='polygon'?[[0,0,0],[10,0,0],[10,10,0],[0,10,0]]:[[0,0,0],[10,0,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}};
   const opened=[],messages=[],records=new Map(),attachments=[],serverCalls=[],specialistOpened=[];
   const scope=vm.createContext({draft:record,editing:false,editBaseline:null,selected:null,units:'metric',savedUnits:{metric:'m'},viewGeneration:0,dialogGeneration:0,disposed:false,permitted:true,mode:'model',activeDialog:null,structuredClone,
-    measurementMetrics,validateMeasurementGeometry,createServerProfileCalculator,
+    measurementMetrics,validateMeasurementGeometry,createServerProfileCalculator,capabilitiesReady:Promise.resolve(),
     adminAllowed,specialistAllowed,surfaceRequest:undefined,preferServerSurface:()=>preferServer,adminRequest:async()=>({}),createServerSurfaceCalculator:options=>async(...args)=>{serverCalls.push({options,args,snapshot:options.getRecord()});if(serverError)throw serverError;return{cutM3:20,fillM3:0,calculationJobId:'server-job'};},
     openAdminCalculationDialog:async options=>{if(!options.isCurrent())throw new Error('Measurement access changed.');specialistOpened.push(options);return{close(){}};},
     store:{records,persistent:()=>false,async save(r){await saveWait;if(saveError)throw saveError;records.set(r.id,{...structuredClone(r),revision:1});},async attachResults(r,results){attachments.push({r,results});await attachmentWait;records.set(r.id,{...structuredClone(r),results,revision:r.revision+1});}},
@@ -94,6 +94,16 @@ test('ordinary profile failures are never retried through staff transport',async
   await inspector.save({...inspector.record,results:{method:'point-surface-cut-fill',calculationJobId:'saved-parent',source:{verticalUnitBasis:'ept-vertical-crs'}}});
   await assert.rejects(inspector.calculateProfile(inspector.record,{}),/could not be accessed/);
   assert.equal(ordinaryCalls,1);assert.equal(staffCalls,0);
+});
+test('saved declared point profile waits for verified capability before choosing transport',async()=>{
+  const f=fixture({preferServer:true});let release,chosen,calls=0;f.scope.capabilitiesReady=new Promise(resolve=>{release=resolve;});const staff=async()=>({}),ordinary=async()=>({});f.scope.adminRequest=staff;f.scope.surfaceRequest=ordinary;f.scope.createServerProfileCalculator=options=>{chosen=options.request;calls++;return async()=>({});};await f.finish();const inspector=f.opened[0];await inspector.save({...inspector.record,results:{method:'point-surface-cut-fill',calculationJobId:'saved-parent',source:{verticalUnitBasis:'administrator-declared'}}});const pending=inspector.calculateProfile(inspector.record,{});await Promise.resolve();assert.equal(calls,0);f.scope.adminAllowed=true;release();await pending;assert.equal(chosen,staff);assert.equal(calls,1);
+});
+test('historical recovery accepts only same-measurement version-bound complete old volume jobs',async()=>{
+  const f=fixture({preferServer:true});await f.finish();const inspector=f.opened[0];inspector.getRecord().modelVersionId='version';inspector.getRecord().revision=5;const id=inspector.record.id;
+  const valid={id:'old',measurementId:id,revision:2,status:'complete',method:'surface-cut-fill',result:{method:'surface-cut-fill',netM3:42,source:{modelVersionId:'version'}}};
+  f.scope.surfaceRequest=async()=>({calculations:[{...valid,measurementId:'other',revision:4},{...valid,revision:99},{...valid,result:{...valid.result,source:{modelVersionId:'other'}}},valid]});
+  const history=await inspector.loadPreviousVolume();assert.equal(history.netM3,42);assert.equal(history.status,'historical');assert.equal(history.calculationJobId,undefined);assert.equal(f.attachments.length,0);assert.equal(f.serverCalls.length,0);
+  f.scope.viewGeneration++;await assert.rejects(inspector.loadPreviousVolume(),/access or view changed/);
 });
 
 test('isolated fixture may inject browser calculation, but a selected server never falls back',async()=>{

@@ -58,6 +58,23 @@ function pointer(button, x = 500, y = 500) {
   return { pointerId: 1, pointerType: 'mouse', button, clientX: x, clientY: y, preventDefault() {} };
 }
 
+test('cloud orbit cannot cross top-down with large steps and off-centre pivots', () => {
+  for (const pivot of [new THREE.Vector3(), new THREE.Vector3(40, 100, 0)]) {
+    const { controls, view } = fixture(new THREE.Vector3(0, -5, 100));
+    for (let i = 0; i < 10; i++) {
+      controls._applyOrbit(pivot, 0, -0.4);
+      const forward = view.getPivot().sub(view.position).normalize();
+      assert.ok(forward.y > 0, 'cloud view must retain its forward hemisphere');
+      assert.ok(Math.asin(-forward.z) <= Math.PI / 2 - 0.03 + 1e-9);
+    }
+    const before = view.getPivot().sub(view.position).normalize();
+    controls._applyOrbit(pivot, 0, -Math.PI * 4);
+    assert.ok(view.getPivot().sub(view.position).normalize().distanceTo(before) < 1e-8);
+    controls._applyOrbit(pivot, 0, 0.1);
+    assert.ok(view.getPivot().sub(view.position).normalize().angleTo(before) > 0.09);
+  }
+});
+
 test('zoom-out preserves the world focal plane and overview orbit with no decoded point hit', () => {
   const { controls, view } = fixture();
   const originalPivot = view.getPivot();

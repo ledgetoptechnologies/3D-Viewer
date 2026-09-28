@@ -25,6 +25,17 @@ export function availableAdminSources(envelope) {
     return methods.length ? [{...source,methods}] : [];
   });
 }
+export function priorMeterDeclaration(record,source,jobs){
+  if(!record?.modelVersionId||source?.modelVersionId!==record.modelVersionId||!/^[a-f0-9]{64}$/i.test(source.sha256||''))return false;
+  return (jobs||[]).some(job=>{
+    const result=job?.result,evidence=result?.source;
+    return job.measurementId===record.id&&job.status==='complete'&&['surface-cut-fill','point-surface-cut-fill'].includes(job.method)
+      &&job.parameters?.sourceAssetId===source.assetId&&job.parameters.sourceVerticalUnit==='m'
+      &&evidence?.assetId===source.assetId&&evidence.modelVersionId===source.modelVersionId&&evidence.sha256===source.sha256
+      &&evidence.kind===source.kind&&evidence.verticalUnit==='m'&&evidence.verticalUnitBasis==='administrator-declared'
+      &&(source.kind!=='ept'||(/^[a-f0-9]{64}$/i.test(source.manifestSha256||'')&&evidence.manifestSha256===source.manifestSha256));
+  });
+}
 export function adminCalculationRequest(record, fields, sources) {
   if (record?.kind !== 'polygon' || !Number.isSafeInteger(record.revision) || record.revision < 1) throw new Error('Save this polygon before starting a server calculation.');
   const source = sources.find(value => value.assetId === fields.sourceAssetId);
@@ -38,7 +49,8 @@ export function adminCalculationRequest(record, fields, sources) {
     body.reference={type:fields.reference,offsetM,...(fields.reference==='custom'?{elevationM}:{})};
     if (fields.confirmMeters) body.sourceVerticalUnit='m';
     if(fields.method==='point-surface-cut-fill'){
-      if(!fields.confirmMeters)throw new Error('Confirm that source elevations are meters before constructing a point-cloud surface.');
+      // Without a staff declaration the server must verify encoded height units.
+      // A provider name alone is not a unit declaration.
       const cellSizeM=toMetres(fields.cellSizeM);
       if(!Number.isFinite(cellSizeM)||cellSizeM<0.001||cellSizeM>100||!['all','ground'].includes(fields.classFilter))throw new Error('Choose a point-surface cell size equivalent to 0.001–100 meters and a supported classification filter.');
       body.cellSizeM=cellSizeM;body.classFilter=fields.classFilter;
@@ -85,7 +97,7 @@ export async function openAdminCalculationDialog({record,request,units='imperial
     <fieldset data-surface><legend>Surface reference</legend><label>Reference base <select name="reference">${Object.entries(REFERENCES).map(([value,label])=>`<option value="${value}">${label}</option>`).join('')}</select></label>
     <label data-custom hidden>Custom elevation (${unit})<input name="elevation" type="number" step="any" value="0"></label>
     <label>Base offset (${unit})<input name="offset" type="number" step="any" value="0"></label>
-    <label><input name="meters" type="checkbox">If source vertical units are missing, I confirm the elevations are meters.</label>
+    <label><input name="meters" type="checkbox">Only if source height units are missing: I have verified the elevations are meters.</label><p data-unit-note>Encoded height units are checked automatically. Do not select this merely because the files came from WebODM or NodeODX.</p>
     <p>This measures space above/below a reference surface. It does not infer solid material inside a vehicle, building, or hollow object.</p></fieldset>
     <fieldset data-point hidden><legend>Point-surface construction</legend><label>Grid cell size (${unit})<input name="cellSize" type="number" min="${0.001/lengthUnit.metresPerUnit}" max="${100/lengthUnit.metresPerUnit}" step="any" value="${0.1/lengthUnit.metresPerUnit}"></label><label>Points <select name="classFilter"><option value="all">All classes</option><option value="ground">Ground only</option></select></label><p>This deliberately derives a sampled surface. Grid size and source coverage are retained with the result.</p></fieldset>
     <fieldset data-object hidden><legend>Object selection</legend><p data-observed>Use a seed inside the desired object and vertical limits that contain it. Only observed closed geometry qualifies; open/clipped objects are rejected, never automatically sealed.</p><label data-frame>Source coordinates <select name="coordinateFrame"><option value="">Choose source coordinate frame</option><option value="projected">Projected coordinates (E/N/Z meters)</option><option value="local-enu">Local ENU with registered origin</option></select></label>
@@ -103,6 +115,9 @@ export async function openAdminCalculationDialog({record,request,units='imperial
   const regionPreview=createAdminPreviewController(dialog.querySelector('[data-region]'),{units});
   let closed=false,busy=false,poll=null,selectedId=null,submittedId=null,calculations=[],attachmentPending=0,attachmentConflict=false;const delivered=new Set();
   const field=name=>dialog.querySelector(`[name="${name}"]`);
+  let unitChoiceTouched=false;
+  function restoreUnitChoice(){if(unitChoiceTouched)return;const reused=priorMeterDeclaration(record,sources.find(source=>source.assetId===field('source').value),calculations);field('meters').checked=reused;const note=dialog.querySelector('[data-unit-note]');if(note)note.textContent=reused?'Reusing the earlier staff meter declaration for this exact source. This is not an independent accuracy verification.':'Encoded height units are checked automatically. A WebODM or NodeODX label alone does not establish height units.';}
+  field('meters').onchange=()=>{unitChoiceTouched=true;};
   function cleanup(){if(closed)return;closed=true;clearTimeout(poll);regionPreview.dispose();dialog.remove();onClose();}
   function current(){if(closed)return false;if(isCurrent())return true;try{if(dialog.open)dialog.close();}finally{cleanup();}return false;}
   function announce(message){if(current())status.textContent=message;}
@@ -110,8 +125,8 @@ export async function openAdminCalculationDialog({record,request,units='imperial
   function display(job,{attach=!host}={}){if(!current())return;selectedId=job?.id||null;result.textContent=(host&&job?`${METHODS[job.method||job.result?.method]||'Specialist result'}\n`:'')+adminResultSummary(job,units)+(job&&job.revision!==record.revision?' This result belongs to an earlier polygon revision.':'');regionPreview.show(job);if(attach&&job?.status==='complete'&&job.result&&job.revision===record.revision&&!delivered.has(job.id)){delivered.add(job.id);attachmentPending++;updateButtons();const snapshot=structuredClone(record);void Promise.resolve().then(()=>{if(!current())throw accessChanged();return onResult({calculation:job,measurementId:snapshot.id,revision:job.revision});}).then(updated=>{if(!current())return;try{record=acceptAdminAttachmentRecord(snapshot,updated);}catch(error){attachmentConflict=true;throw error;}}).catch(error=>{delivered.delete(job.id);announce(`Result could not be added to this measurement: ${error?.message||'Save failed.'}`);}).finally(()=>{attachmentPending--;if(current())updateButtons();});}}
   function renderJobs(){history.replaceChildren();for(const job of calculations){const row=documentRef.createElement('div');row.className='measurement-actions';const open=documentRef.createElement('button');open.textContent=`${job.status} · revision ${job.revision} · ${new Date(job.createdAt).toLocaleString()}`;open.onclick=()=>{submittedId=job.id;display(job,{attach:true});};row.append(open);if(['queued','running'].includes(job.status)){const cancel=documentRef.createElement('button');cancel.textContent='Cancel job';cancel.onclick=async()=>{if(!current())return;cancel.disabled=true;try{await request('cancel',{measurementId:record.id,jobId:job.id});if(!current())return;await refresh();}catch(error){announce(error.message);if(current())cancel.disabled=false;}};row.append(cancel);}history.append(row);}const selected=calculations.find(job=>job.id===selectedId)||calculations[0];if(selected)display(selected,{attach:!host||selected.id===submittedId});}
   function schedule(){clearTimeout(poll);if(!closed&&calculations.some(job=>['queued','running'].includes(job.status)))poll=setTimeout(()=>{void refresh();},3000);}
-  async function refresh(){if(!current()||busy)return;busy=true;let success=false;updateButtons();try{const response=await request('list',{measurementId:record.id});if(!current())return;calculations=Array.isArray(response.calculations)?response.calculations.filter(job=>!host||methods.includes(job.method||job.result?.method)):[];renderJobs();announce(calculations.length?`${calculations.length} recent calculation(s).`:'No calculations saved for this polygon.');success=true;}catch(error){announce(error.message);}finally{busy=false;if(current()){updateButtons();if(success)schedule();}}}
-  function sourceChanged(){const reconstructed=field('method').value==='reconstructed-estimate',pointSource=reconstructed&&sources.find(s=>s.assetId===field('source').value)?.kind==='ept';dialog.querySelector('[data-frame]').hidden=pointSource;dialog.querySelector('[data-reconstruction-point]').hidden=!pointSource;field('acknowledgeInferred').checked=false;field('confirmObject').checked=false;}
+  async function refresh(){if(!current()||busy)return;busy=true;let success=false;updateButtons();try{const response=await request('list',{measurementId:record.id});if(!current())return;calculations=Array.isArray(response.calculations)?response.calculations.filter(job=>!host||methods.includes(job.method||job.result?.method)):[];restoreUnitChoice();renderJobs();announce(calculations.length?`${calculations.length} recent calculation(s).`:'No calculations saved for this polygon.');success=true;}catch(error){announce(error.message);}finally{busy=false;if(current()){updateButtons();if(success)schedule();}}}
+  function sourceChanged(){const reconstructed=field('method').value==='reconstructed-estimate',pointSource=reconstructed&&sources.find(s=>s.assetId===field('source').value)?.kind==='ept';dialog.querySelector('[data-frame]').hidden=pointSource;dialog.querySelector('[data-reconstruction-point]').hidden=!pointSource;field('acknowledgeInferred').checked=false;field('confirmObject').checked=false;unitChoiceTouched=false;restoreUnitChoice();}
   function methodChanged(){const method=field('method').value,compatible=sources.filter(source=>source.methods.includes(method)),object=['closed-mesh','reconstructed-estimate'].includes(method);field('source').innerHTML=compatible.map(source=>`<option value="${escape(source.assetId)}">${escape(String(source.kind).toUpperCase())} · ${escape(source.format || 'native source')}</option>`).join('');dialog.querySelector('[data-surface]').hidden=object;dialog.querySelector('[data-point]').hidden=method!=='point-surface-cut-fill';dialog.querySelector('[data-object]').hidden=!object;dialog.querySelector('[data-reconstruction]').hidden=method!=='reconstructed-estimate';dialog.querySelector('[data-observed]').hidden=method==='reconstructed-estimate';sourceChanged();}
   field('source').onchange=sourceChanged;
   field('method').onchange=methodChanged;methodChanged();

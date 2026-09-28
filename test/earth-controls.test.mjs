@@ -8,6 +8,30 @@ function polar(offset) {
   return Math.acos(THREE.MathUtils.clamp(offset.clone().normalize().dot(new THREE.Vector3(0, 1, 0)), -1, 1));
 }
 
+test('orbit clamps the signed view ray at top-down for large and off-centre drags', () => {
+  for (const pivot of [new THREE.Vector3(), new THREE.Vector3(40, 0, -100)]) {
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 100, 5);
+    camera.lookAt(0, 0, 0);
+    const controls = Object.create(EarthLikeControls.prototype);
+    Object.assign(controls, { camera, minPolar: 0.04, maxPolar: Math.PI - 0.03 });
+    for (let i = 0; i < 10; i++) {
+      controls._applyOrbit(pivot, 0, -0.4);
+      const forward = camera.getWorldDirection(new THREE.Vector3());
+      assert.ok(forward.z < 0, 'camera must not flip across the top pole');
+      assert.ok(Math.asin(-forward.y) <= Math.PI / 2 - controls.minPolar + 1e-9);
+      assert.ok(camera.position.toArray().every(Number.isFinite));
+    }
+    const clamped = camera.quaternion.clone();
+    const clampedPosition = camera.position.clone();
+    controls._applyOrbit(pivot, 0, -Math.PI * 4);
+    assert.ok(camera.quaternion.angleTo(clamped) < 1e-7, 'huge input cannot wrap around the pole');
+    assert.ok(camera.position.distanceTo(clampedPosition) < 1e-8, 'blocked pitch cannot move an off-centre pivot');
+    controls._applyOrbit(pivot, 0, 0.1);
+    assert.ok(camera.quaternion.angleTo(clamped) > 0.09, 'reverse drag leaves the clamp immediately');
+  }
+});
+
 test('polar clamp keeps exact top views on a stable finite azimuth just below the singularity', () => {
   const min = 0.04;
   const original = new THREE.Vector3(0, 500, 0);

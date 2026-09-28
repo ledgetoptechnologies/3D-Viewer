@@ -5,6 +5,7 @@ import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
+import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
@@ -1381,12 +1382,20 @@ function sessionAccessLabel(prefix = 'LOD') {
   return `${prefix}: access unavailable — reopen this model from the Viewer workspace`;
 }
 
+const measurementDraftRecovery=createMeasurementDraftRecovery();
 function setSessionAccessState(next, reason = null) {
   const previous = sessionAccessState;
+  if(next==='unavailable')measurementDraftRecovery.capture(reason,activeViewerSession,measurementWorkspace);
   sessionAccessState = next;
   sessionAccessReason = reason;
   if(next==='unavailable')measurementWorkspace?.invalidate?.('Personal measurements are hidden until access is restored.',{notify:false});
-  else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.()))installMeasurementWorkspace();
+  else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.())){
+    installMeasurementWorkspace();
+  }
+  if(next==='active'&&measurementWorkspace&&measurementDraftRecovery.hasPending()){
+    const workspace=measurementWorkspace;
+    void measurementDraftRecovery.restore(activeViewerSession,workspace).then(restored=>{if(!restored&&workspace===measurementWorkspace&&sessionAccessState==='active')workspace.showRecoveryNotice?.(measurementDraftRecovery.hasPending());});
+  }
   const label = sessionAccessLabel();
   if (label && tilesRenderer) dom.lodStatus.textContent = label;
   if (label && state.activeMode === 'cloud') dom.cloudStatus.textContent = sessionAccessLabel('Cloud');
@@ -2409,6 +2418,7 @@ function installMeasurementWorkspace() {
     captureReportOrtho:async({records,signal})=>{if(!ORTHO_URL)return null;const dataset=await getDataset(ORTHO_URL,false,{signal});return captureMeasurementReportOrtho({dataset,records,signal,pool:geoPool,expectedCrs:measurementCoordinateReference().crs});},
     token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
     accessGeneration:()=>sessionAccessGeneration,
+    onBeforeAccessLost:()=>{if(VIEW_MODE==='session'&&activeViewerSession&&Date.parse(activeViewerSession.expiresAt)<=Date.now())measurementDraftRecovery.capture('session-expired',activeViewerSession,measurementWorkspace);},
     permitted:()=>SHARE_PERMISSIONS.measure!==false&&sessionAccessState!=='unavailable'&&(VIEW_MODE!=='session'||!activeViewerSession||Date.parse(activeViewerSession.expiresAt)>Date.now()),coordinateReference:measurementCoordinateReference,
     toLonLat:p=>{if(!measurementCoordinateReference().crs.startsWith('EPSG:'))throw new Error('GeoJSON needs verified geographic alignment. Use JSON or DXF with the local coordinate warning.');const [lat,lon]=utmToLatLon(p[0],p[1]);return [lon,lat];},
     toolChanged:tool=>{state.activeTool=tool;document.querySelectorAll('#panel-measure .tool-btn[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));},

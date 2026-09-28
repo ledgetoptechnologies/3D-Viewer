@@ -2,6 +2,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createFrameDiagnostics, createAdaptivePointBudget } = require('../public/pointcloud-performance.js');
 
+test('refinement diagnostics distinguish known levels, pending work and a blocked budget without inferring source exhaustion', () => {
+  const { refinementDiagnostics } = require('../public/pointcloud-performance.js');
+  assert.deepEqual(refinementDiagnostics({}), { levels: 'unknown', childBranches: 0, nodePixelThreshold: null, pending: null, requiredPoints: null });
+  const demand = Object.freeze({ pending: true, requiredPoints: 1234567 });
+  const viewer = { minNodeSize: 30, scene: { pointclouds: [{ ltdsBudgetDemand: demand, visibleNodes: [
+    { getLevel: () => 1, getChildren: () => [{}] },
+    { getLevel: () => 7, getChildren: () => [] },
+  ] }] } };
+  assert.deepEqual(refinementDiagnostics(viewer), { levels: '1–7', childBranches: 1, nodePixelThreshold: 30, pending: true, requiredPoints: 1234567 });
+  assert.equal(viewer.scene.pointclouds[0].ltdsBudgetDemand, demand);
+});
+
 test('opt-in CPU diagnostics have no off-path work and restore inherited and own methods', () => {
   let time = 0, reads = 0;
   const viewer = Object.create({ update(value) { assert.equal(this, viewer); time += value; return 'update'; } });
@@ -259,4 +271,31 @@ test('underfilled demand probe retains overload rollback and bounded retry backo
   }
   assert.equal(c.state.live,250000);assert.ok(probes.length>=4&&probes.length<=7);
   assert.ok(probes.at(-1)-probes.at(-2)>=60000);
+});
+
+test('a settled 43-FPS 375k frontier recovers useful zoom detail promptly without changing the 10M request', () => {
+  const c=createAdaptivePointBudget(); frames(c,100,200); let time=20000;
+  for(let i=0;i<43*25;i++) {
+    const live=c.state.live;
+    c.sample(time+=1000/43,{minimum:375000,visiblePoints:live*0.94,demand:{pending:false,drawnPoints:live*0.94,requiredPoints:Math.min(10000000,live+100000)}});
+    assert.ok(c.state.live<=10000000);
+    if(i===43*12) assert.ok(c.state.live>=2000000,'close-view detail must not spend a minute near the sparse floor');
+  }
+  assert.equal(c.state.live,10000000);
+  assert.equal(c.state.target,10000000);
+});
+
+test('fast density recovery rolls back and backs off if the extra detail actually overloads rendering', () => {
+  const c=createAdaptivePointBudget(); frames(c,100,200); let time=20000,previous=375000;
+  const probes=[]; let maximum=0;
+  while(time<200000) {
+    const live=c.state.live;
+    c.sample(time+=live>375000?100:1000/43,{minimum:375000,visiblePoints:live,demand:{pending:false,drawnPoints:live,requiredPoints:live+100000}});
+    if(c.state.live>previous) probes.push(time);
+    maximum=Math.max(maximum,c.state.live); previous=c.state.live;
+  }
+  assert.equal(c.state.live,375000);
+  assert.equal(maximum,562500,'fast recovery remains a bounded 50% trial, not a jump to 10M');
+  assert.ok(probes.length>=4&&probes.length<=7);
+  assert.ok(probes.at(-1)-probes.at(-2)>=60000,'fast path must not bypass failed-probe backoff');
 });

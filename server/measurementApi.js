@@ -62,7 +62,7 @@ function createMeasurementApi(repository, { preflightRaster, preflightPoint } = 
     const calculationSources = (version?.assets || []).filter(asset => asset.sha256).flatMap(asset => {
       const methods = ['dsm','dtm'].includes(asset.kind) && /^(tif|tiff|geotiff)$/i.test(asset.format || '') ? ['surface-cut-fill','surface-transect'] : authorized && asset.kind === 'obj' && asset.format === 'obj' && hasMeshCrs ? ['closed-mesh'] : asset.kind === 'ept' && asset.format === 'ept' && asset.manifestSha256 ? ['point-surface-cut-fill','surface-transect'] : [];
       if(authorized&&methods.length&&hasMeshCrs&&['obj','ept'].includes(asset.kind)&&reconstructionAvailable(config))methods.push('reconstructed-estimate');
-      return methods.length ? [{ assetId: asset.id, kind: asset.kind, format: asset.format, byteSize: asset.byteSize ?? null, methods }] : [];
+      return methods.length ? [{ assetId: asset.id, kind: asset.kind, format: asset.format, byteSize: asset.byteSize ?? null, modelVersionId: version.id, sha256: asset.sha256, ...(asset.manifestSha256?{manifestSha256:asset.manifestSha256}:{}), methods }] : [];
     });
     res.json({ capabilities: { personalPersistence: true, rasterCalculations: rasterAuthorized, pointSurfaceCalculations:rasterAuthorized, transectCalculations:rasterAuthorized, serverCalculations: authorized }, calculationSources, calculationMethods: [...new Set(calculationSources.flatMap(source => source.methods))] });
   }));

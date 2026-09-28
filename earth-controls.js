@@ -333,12 +333,9 @@ export class EarthLikeControls {
 
   _applyOrbit(pivot, yawDelta, pitchDelta) {
     const cam = this.camera;
-    const offset = clampPolarOffset(
-      new THREE.Vector3().subVectors(cam.position, pivot),
-      this.minPolar,
-      this.maxPolar,
-      new THREE.Vector3(0, 0, 1),
-    );
+    // The picked pivot may be off-centre; never snap its offset to the camera
+    // inclination limits. Clamp the view ray below, preserving the picked orbit.
+    const offset = new THREE.Vector3().subVectors(cam.position, pivot);
     const r = offset.length();
     if (r < 1e-6) return;
 
@@ -351,18 +348,15 @@ export class EarthLikeControls {
     }
     side.normalize();
 
-    // clamp pitch so polar angle stays inside [minPolar, maxPolar]
-    let pd = pitchDelta;
-    if (pd !== 0) {
-      const polar = Math.acos(THREE.MathUtils.clamp(offset.clone().normalize().dot(UP), -1, 1));
-      const test = offset.clone().applyQuaternion(new THREE.Quaternion().setFromAxisAngle(side, pd));
-      const polarNew = Math.acos(THREE.MathUtils.clamp(test.normalize().dot(UP), -1, 1));
-      if (polarNew < this.minPolar || polarNew > this.maxPolar) {
-        const target = THREE.MathUtils.clamp(polarNew, this.minPolar, this.maxPolar);
-        const denom = polarNew - polar;
-        pd = Math.abs(denom) > 1e-9 ? pd * (target - polar) / denom : 0;
-      }
-    }
+    // Clamp the signed camera inclination BEFORE rotating. acos of the final
+    // pivot offset folds across the pole, so a large drag could skip the entire
+    // forbidden interval. An off-centre pivot also differs from the view ray.
+    const beforeForward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+    const horizontalForward = new THREE.Vector3().crossVectors(UP, side);
+    const inclination = Math.atan2(-beforeForward.dot(UP), beforeForward.dot(horizontalForward));
+    const nextInclination = THREE.MathUtils.clamp(inclination - pitchDelta,
+      Math.PI / 2 - this.maxPolar, Math.PI / 2 - this.minPolar);
+    const pd = inclination - nextInclination;
 
     const qPitch = new THREE.Quaternion().setFromAxisAngle(side, pd);
     const qYaw = new THREE.Quaternion().setFromAxisAngle(UP, yawDelta);

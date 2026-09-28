@@ -20,6 +20,7 @@ class Cdp {
 async function until(fn){const end=Date.now()+10000;while(Date.now()<end){if(await fn())return;await delay(30);}throw new Error('Fixture timeout');}
 const html=`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/workspace.css"><link rel="stylesheet" href="/workspace-management.css"><dialog class="workspace-modal" open><header class="modal-heading"><h2>New task</h2></header><div id="host"></div></dialog><script type="module">
 import {mountNewTask} from '/workspace-new-task.mjs';
+import {createWorkspaceRecovery} from '/workspace-recovery.mjs';
 const calls=[];let mode='pc',datasetStatus='draft',submitCount=0,complete=null,handle,releaseRead;
 function jpeg(){const data=new Uint8Array(174),v=new DataView(data.buffer),base=12;data.set([255,216,255,225,0,168,69,120,105,102,0,0]);data.set([73,73],base);const u16=(o,n)=>v.setUint16(base+o,n,true),u32=(o,n)=>v.setUint32(base+o,n,true);u16(2,42);u32(4,8);u16(8,1);u16(10,0x8825);u16(12,4);u32(14,1);u32(18,26);u16(26,6);[[1,2,2,'N'],[2,5,3,104],[3,2,2,'W'],[4,5,3,128],[16,2,2,'T'],[17,5,1,152]].forEach(([tag,type,count,value],i)=>{const at=28+i*12;u16(at,tag);u16(at+2,type);u32(at+4,count);if(type===2)data[base+at+8]=value.charCodeAt(0);else u32(at+8,value);});[45,30,0,90,15,0,123].forEach((value,i)=>{u32(104+i*8,value);u32(108+i*8,1);});data.set([255,217],172);return data;}
 const provider={id:'node',displayName:'Test node',type:'nodeodm',enabled:true,capabilityFingerprint:'fp',lastHealth:'healthy',lastHealthAt:new Date().toISOString(),capabilities:{options:[...['pc-ept','gltf','3d-tiles'].map(name=>({name,type:'bool',value:true})),{name:'auto-boundary',type:'bool',value:true},{name:'crop',type:'float',value:3}]}};
@@ -39,6 +40,17 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
 };
 window.fetch=async(url,options)=>{calls.push({url,chunk:true,bytes:options.body.byteLength});return new Response('{}',{status:201});};
 window.fixture={calls,mount(next='pc',settings={}){mode=next;datasetStatus='draft';submitCount=0;complete=null;calls.length=0;handle?.dispose();document.querySelector('dialog')?.remove();const dialog=document.createElement('dialog');dialog.className='workspace-modal';dialog.innerHTML='<header class="modal-heading"><h2>New task</h2></header><div id="host"></div>';document.body.append(dialog);dialog.showModal();handle=mountNewTask({container:document.querySelector('#host'),dialog,project:{id:'project',displayName:'Farm'},providers:[],presets:[{id:'preset',displayName:'Good preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'fp',options:{crop:2}},{id:'wrong',displayName:'Wrong preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'other'}],api,token:()=> 'staff',onComplete:r=>complete=r,...settings});},select(gps=false,slow=false){const dt=new DataTransfer(),file=new File([gps?jpeg():'abcdef'],'photo.jpg',{type:'image/jpeg'});if(slow)file.slice=()=>({arrayBuffer:()=>new Promise(resolve=>releaseRead=()=>resolve(jpeg().buffer))});dt.items.add(file);const input=document.querySelector('[data-files]');input.files=dt.files;input.dispatchEvent(new Event('change'));},release(){releaseRead?.();},reading:()=>!!releaseRead,submit(){document.querySelector('form').requestSubmit();},done:()=>complete,active:()=>handle.active,leaveBlocked(){const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;},close(){document.querySelector('dialog').close();}};
+fixture.startRecoveryUpload=()=>{
+ const originalOpen=window.open;window.open=()=>({closed:false,focus(){},postMessage(){}});
+ const previous={accessToken:'t'.repeat(40),controllerOrigin:'https://ops.example',session:{id:'retained-session',subject:'ops:one',expiresAt:new Date(Date.now()-1000).toISOString()}};
+ let first=true,resumed=false,installed=false,relay;
+ const recovery=createWorkspaceRecovery({getSession:()=>previous,install:value=>{installed=value.session.id==='retained-session';},onFatal:()=>{throw new Error('Unexpected fatal recovery');},onResumed:()=>{resumed=true;},fetchImpl:async()=>new Response(JSON.stringify({...previous,session:{...previous.session,expiresAt:new Date(Date.now()+3600000).toISOString()}}),{status:200,headers:{'Content-Type':'application/json'}})});
+ fixture.mount('recovery',{allowBackground:true,fetcher:async(url,init)=>{if(first){first=false;void recovery.pause();}await recovery.wait(init.signal);return window.fetch(url,init);}});
+ fixture.select();const selected=document.querySelector('[data-files]').files[0],url=location.href;
+ fixture.recovery={sameFile:()=>document.querySelector('[data-files]').files[0]===selected,unchangedUrl:()=>location.href===url,resumed:()=>resumed&&installed,
+ restore(){document.querySelector('.workspace-recovery button').click();const {nonce}=JSON.parse(sessionStorage.getItem('ltds-viewer-reauthorization-state'));relay=new BroadcastChannel('ltds-workspace-recovery:'+nonce);relay.postMessage({version:1,type:'ltds-viewer:workspace-recovery-grant',nonce,grant:'g'.repeat(40)});},
+ dispose(){relay?.close();recovery.dispose();window.open=originalOpen;}};
+};
 fixture.mount();document.body.dataset.ready='true';
 </script>`;
 
@@ -140,6 +152,23 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
     await t.test('discarding active background work cancels observation and prevents late submission',async()=>{
       await client.eval("fixture.mount('server',{allowBackground:true});fixture.holdOperation=true;document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval('!!fixture.releaseOperation'));await client.eval("fixture.close();document.querySelector('[data-discard-upload]').click();fixture.holdOperation=false;fixture.releaseOperation()");await delay(80);
       assert.equal(await client.eval('fixture.operationSignal.aborted'),true);assert.equal(await client.eval('fixture.leaveBlocked()'),false);assert.equal(await client.eval('fixture.active()'),false);assert.equal(await client.eval("fixture.calls.some(x=>x.url==='/api/v1/task-submissions')"),false);await client.eval('fixture.releaseOperation=null');
+    });
+    await t.test('expired access stacks recovery over New task and resumes the same selected photo without navigating',async sub=>{
+      sub.after(()=>client.eval('fixture.recovery?.dispose()'));
+      await delay(80);await client.eval('fixture.startRecoveryUpload()');
+      await until(()=>client.eval("document.querySelector('[name=providerId]').value==='node'"));await client.eval('fixture.submit()');
+      await until(()=>client.eval("!!document.querySelector('.workspace-recovery[open]')"));
+      assert.equal(await client.eval("document.querySelectorAll('dialog[open]').length"),2,'recovery must not close the working New task dialog');
+      assert.equal(await client.eval('fixture.recovery.sameFile()&&fixture.recovery.unchangedUrl()'),true);
+      assert.equal(await client.eval('fixture.leaveBlocked()'),true,'active paused upload still warns against closing tab');
+      assert.equal(await client.eval('fixture.calls.filter(x=>x.chunk).length'),0,'no upload while access is paused');
+      await client.eval('fixture.recovery.restore()');await until(()=>client.eval('fixture.recovery.resumed()&&!!fixture.done()'));
+      assert.equal(await client.eval('fixture.recovery.sameFile()&&fixture.recovery.unchangedUrl()'),true);
+      assert.equal(await client.eval("document.querySelector('.workspace-recovery')===null"),true);
+      assert.equal(await client.eval('fixture.calls.filter(x=>x.chunk).length'),3);
+      assert.equal(await client.eval("fixture.calls.filter(x=>x.url.endsWith('/uploads')).length"),1,'reuse the original upload');
+      assert.equal(await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/task-submissions').length"),1);
+      assert.equal(await client.eval('fixture.leaveBlocked()'),false);await client.eval('fixture.recovery.dispose()');
     });
     await t.test('More project actions escape the selected card clip and remain hittable',async()=>{
       await client.command('Emulation.setDeviceMetricsOverride',{width:1200,height:800,deviceScaleFactor:1,mobile:false});await client.eval("document.querySelector('dialog').open=false;const card=document.createElement('div');card.className='project-row selected';card.style.cssText='position:absolute;top:20px;left:20px;width:500px;height:70px;padding:10px';card.innerHTML='<details class=project-more-actions open style=width:44px;margin-left:auto><summary>…</summary><div class=project-more-menu><button>Import</button><button>Rename</button><button>Delete project</button></div></details>';document.body.append(card)");assert.equal(await client.eval("getComputedStyle(document.querySelector('.project-row')).overflow"),'visible');assert.equal(await client.eval("(()=>{const b=document.querySelector('.project-more-menu button:last-child'),r=b.getBoundingClientRect();return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===b;})()"),true);

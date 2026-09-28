@@ -53,22 +53,32 @@ test('explicit missing image bundle fails rather than falling back to an availab
 });
 function makeNode(id,points,{inside=true,level=3,children=[],priority=1}={}){
   const vector={clone:()=>({sub:()=>({length:()=>priority})})};
-  return {id,spacing:1,geometryNode:{},sceneNode:{visible:false},_transformVersion:0,getBoundingBox:()=>({inside,max:vector,min:vector}),getBoundingSphere:()=>({center:{distanceTo:()=>10}}),getLevel:()=>level,getNumPoints:()=>points,isGeometryNode:()=>false,isTreeNode:()=>true,getChildren:()=>children};
+  return {id,spacing:1,geometryNode:{},sceneNode:{visible:false},_transformVersion:0,getBoundingBox:()=>({inside,max:vector,min:vector}),getBoundingSphere:()=>({radius:1,center:{x:0,y:0,z:0,distanceTo:()=>10}}),getLevel:()=>level,getNumPoints:()=>points,isGeometryNode:()=>false,isTreeNode:()=>true,getChildren:()=>children};
 }
-function select(source,nodes,{budget=100000,cloudBudget=Infinity,maxLevel=Infinity}={}){
+function select(source,nodes,{budget=100000,cloudBudget=Infinity,maxLevel=Infinity,perspectiveDistance=null}={}){
   const start=source.indexOf('function updateVisibility(pointclouds, camera, renderer){'),end=source.indexOf('\n\tclass PointCloudArena4DNode',start);
   assert.ok(start>=0&&end>start);
   const visited=[];
-  const pc={visible:true,visibleNodes:[],updateMatrixWorld(){},matrixWorld:{},material:{clipBoxes:[]},pointBudget:cloudBudget,maxLevel,numVisibleNodes:0,numVisiblePoints:0};
+  const pc={visible:true,visibleNodes:[],updateMatrixWorld(){},matrixWorld:{},material:{clipBoxes:[]},pointBudget:cloudBudget,maxLevel,minimumNodePixelSize:30,numVisibleNodes:0,numVisiblePoints:0};
   const Potree={pointBudget:budget,maxNodesLoading:0,_pointcloudTransformVersion:new Map([[pc,{number:0,transform:{equals:()=>true}}]])};
   const queued=nodes.map(node=>({node,pointcloud:0,weight:100}));
   const queue={size:()=>queued.length,pop:()=>{queued.sort((a,b)=>b.weight-a.weight);const item=queued.shift();visited.push(item.node.id);return item;},push:item=>queued.push(item)};
-  const structures=()=>({frustums:[{intersectsBox:box=>box.inside}],camObjPositions:[{}],priorityQueue:queue});
+  const structures=()=>({frustums:[{intersectsBox:box=>box.inside}],camObjPositions:[{x:0,y:0,z:perspectiveDistance}],priorityQueue:queue});
   const run=new Function('Potree','updateVisibilityStructures','exports',source.slice(start,end)+';return updateVisibility;')(Potree,structures,{lru:{touch(){}}});
-  const result=run([pc],{}, {domElement:{clientWidth:800,clientHeight:600}});
+  const result=run([pc],perspectiveDistance===null?{}:{isPerspectiveCamera:true,fov:60}, {domElement:{clientWidth:800,clientHeight:600}});
   return {points:result.numVisiblePoints,visited,drawn:result.visibleNodes.map(node=>node.id),demand:pc.ltdsBudgetDemand};
 }
 const installedOptions={skip:bundle?false:'Installed pinned Potree required; image QA supplies POTREE_BUNDLE.'};
+
+test('installed perspective selector refines on approach and releases detail on retreat at the same point budget',installedOptions,()=>{
+  const source=assertInstalledPotreeVisibility(bundle);
+  const root=makeNode('root',30000,{level:0,children:[makeNode('local-detail',40000,{level:1})]});
+  assert.deepEqual(select(source,[root],{perspectiveDistance:100}).drawn,['root']);
+  const close=select(source,[root],{perspectiveDistance:10});
+  assert.deepEqual(close.drawn,['root','local-detail']);
+  assert.equal(close.points,70000);
+  assert.deepEqual(select(source,[root],{perspectiveDistance:100}).drawn,['root']);
+});
 
 test('installed selector is already patched in the actual image, not repaired by the test',installedOptions,()=>{
   assert.equal(assertInstalledPotreeVisibility(bundle),bundle);

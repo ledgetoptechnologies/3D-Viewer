@@ -31,7 +31,10 @@ test('workspace route preserves the section project and expanded task across his
   for(const parameter of ["params.set('project'","params.set('task'"])assert.ok(source.includes(parameter),parameter);
   assert.match(source,/history\[mode==='push'\?'pushState':'replaceState'\]/);
   assert.match(source,/addEventListener\('popstate'/);
-  assert.match(source,/view:workspaceView\(\)/);
+  assert.match(source,/void workspaceRecovery\.pause\(\)/);
+  const recovery=fs.readFileSync(path.join(root,'workspace-recovery.mjs'),'utf8');
+  assert.doesNotMatch(recovery,/location\.(?:assign|replace)\(/);
+  assert.match(recovery,/windowRef\.open\(/);
   assert.match(source,/if\(valid&&pending\?\.view\)applyWorkspaceView\(pending\.view\)/);
   assert.match(source,/validateWorkspaceView\(\);syncWorkspaceView\('replace'\)/);
 });
@@ -83,7 +86,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(source,/activePublished&&item\.status==='published'\)\|\|outputs\.find\(item=>item\.status==='ready'&&item\.attemptId\)/);
   assert.match(source,/output\.status==='ready'&&output\.attemptId&&can\('viewer\.processing\.publish'\)/);
   assert.match(source,/button\('open-review',output\.attemptId,'View',true\)/);
-  assert.match(source,/if\(canShareOutput\(output\)\)/);
+  assert.match(source,/if\(!readOnly&&canShareOutput\(output\)\)/);
   for(const label of ["'View'","'Download'","'Model report'","'Share'"])assert.ok(source.includes(label),label);
   assert.match(source,/class="task-quick-actions row-actions"/);
   assert.match(source,/class="task-summary-toggle"/);

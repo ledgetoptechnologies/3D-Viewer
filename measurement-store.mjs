@@ -1,4 +1,4 @@
-export function createMeasurementStore({ token, accessGeneration = () => 0, fetcher = fetch, changed = () => {} }) {
+export function createMeasurementStore({ token, accessGeneration = () => 0, fetcher = fetch, changed = () => {}, beforeUnauthorized = () => {} }) {
   const records = new Map(), statuses = new Map(), tombstones = new Set();
   let queue = Promise.resolve(), enabled = false, persistenceAllowed = null, generation = 0, invalidated = false, authenticated = !!token();
   const pending = new Set();
@@ -31,6 +31,10 @@ export function createMeasurementStore({ token, accessGeneration = () => 0, fetc
         // A successful same-person renewal may retain the bearer string. An
         // earlier request's denial must not revoke that newly verified access.
         if(requestedAccessGeneration!==accessGeneration())throw Object.assign(new Error('Access was renewed while this request was pending. Retry this measurement action.'),{status:response.status,code:'measurement_obsolete_access'});
+        // Checkpoint before clearing only for an unauthenticated response. The
+        // session controller additionally requires a locally expired session;
+        // 403/revocation never uses this recovery path. Denial still fails closed.
+        if(response.status===401)try{beforeUnauthorized();}catch{}
         invalidate();throw unavailable();
       }
       const result = response.status === 204 ? {} : await response.json();

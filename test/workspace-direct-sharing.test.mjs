@@ -57,7 +57,11 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.match(f.html(),/Create public link/);assert.match(f.html(),/This model is private/);
   assert.doesNotMatch(f.html(),/Review & publish|publish-attempt|project-share-form|name="wholeProject"/);
   assert.doesNotMatch(f.html(),/name="download" checked/);assert.match(f.html(),/Optional password/);
+  assert.match(f.html(),/Downloads, including model report/);
   assert.match(f.html(),/Direct Operations client sharing is not available/);
+  assert.match(f.html(),/No Operations account or client workspace is required/);
+  assert.ok(f.html().indexOf('Create public link')<f.html().indexOf('Share with an Operations client instead'));
+  assert.match(f.html(),/<details class="authenticated-share-options"><summary>/);
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
 });
 

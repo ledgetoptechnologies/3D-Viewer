@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { createMeasurementDraftRecovery } = require('../measurement-draft-recovery.mjs');
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-workspace.mjs'), 'utf8');
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
@@ -16,6 +17,7 @@ function fixture({ controller = true } = {}) {
   const session = { sessionId: 'session-id', sessionMode: 'published', accessToken: 'private-token',subject:'person-one',audience:'ops',permissions:{view:true,measure:true},
     model: { id: 'model-one',activeVersion:{id:'version-one'} }, expiresAt: new Date(Date.now() + 60_000).toISOString() };
   const context = vm.createContext({
+    createMeasurementDraftRecovery,
     window, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
     activeViewerSession: session, sessionAccessGeneration: 0, PROJECT: session.model, TILES_URL: '/stable/tileset.json', EPT_URL: '/stable/ept.json',

@@ -8,17 +8,26 @@ import {createServerSurfaceCalculator} from '../measurement-server-surface.mjs';
 
 const source=readFileSync(new URL('../measurement-volume-dialog.mjs',import.meta.url),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
-function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record}={}){
+function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record,loadPreviousVolume=null}={}){
   const nodes=new Map(),notices=[];let disposed=0,saved=0;
   const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},append(){},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
   const dialog={...element(),querySelector(s){if(!nodes.has(s)){const node=element();if(s==='[name=sectionWidth]')node.value='10';nodes.set(s,node);}return nodes.get(s);},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},remove(){this.removed=true;}};
   const scope=vm.createContext({document:{createElement:tag=>tag==='dialog'?dialog:{...element(),remove(){this.removed=true;}},body:{append(node){if(node.className==='measurement-job-notice')notices.push(node);}}},setTimeout,clearTimeout,AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
-  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord});
+  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord,loadPreviousVolume});
   if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';if(execution!=='server')dialog.querySelector('[name=source]').value='dsm';}
   return{dialog,handle,notices,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
 const result={status:'calculated',cutM3:12345.678912,fillM3:0,netM3:12345.678912,coverage:1,preview:{samples:[[0,0,2,0],[1,1,2,0]]}};
+test('changed outline displays prior volume separately without current totals or automatic calculation',()=>{
+  let calls=0;const previousVolume={status:'historical',unit:'m3',netM3:1234.5,cutM3:1300,fillM3:65.5,revision:3,recordedAt:'2026-09-27T12:00:00Z'},f=fixture(()=>{calls++;return result;},{record:{name:'Edited pile',results:{status:'geometry-only',volumeInvalidated:true,previousVolume}}});
+  assert.equal(calls,0);assert.equal(f.saved(),0);assert.equal(f.dialog.querySelector('[data-previous-volume]').hidden,false);assert.match(f.dialog.querySelector('[data-previous-values]').textContent,/Net volume: 1,234\.500 m³.*Saved revision 3/);assert.match(f.dialog.innerHTML,/Previous outline — not current/);assert.equal(f.dialog.querySelector('[data-calculate]').hidden,false);assert.equal(f.dialog.querySelector('[data-result=net]').textContent,'');f.handle.close();
+});
+test('legacy historical recovery is read-only and late replies cannot replace newer calculation or closed inspector',async()=>{
+  for(const action of ['show','close','calculate']){const waiting=deferred();let reads=0,calls=0;const f=fixture(()=>{calls++;return result;},{record:{name:'Edited pile',results:{status:'geometry-only',volumeInvalidated:true}},loadPreviousVolume:()=>{reads++;return waiting.promise;}});await Promise.resolve();assert.equal(reads,1);
+    if(action==='close')f.handle.close();if(action==='calculate')await f.calculate();waiting.resolve({status:'historical',unit:'m3',netM3:999});for(let i=0;i<5;i++)await Promise.resolve();assert.equal(f.dialog.querySelector('[data-previous-volume]').hidden,action!=='show');assert.equal(calls,action==='calculate'?1:0);if(action!=='close')f.handle.close();
+  }
+});
 
 test('client inspector has no specialist controls and keeps one native calculation action',()=>{
   const f=fixture(()=>result);

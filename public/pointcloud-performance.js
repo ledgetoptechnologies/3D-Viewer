@@ -218,6 +218,13 @@
         const settledDemand = demand && demand.pending === false && Number.isFinite(demand.drawnPoints) && demand.drawnPoints > 0;
         const canGrow = demand ? settledDemand && Number.isFinite(demand.requiredPoints) && demand.requiredPoints > state.live && demand.requiredPoints <= state.target : visiblePoints >= state.live * 0.7;
         const probeSettled = demand ? settledDemand : visiblePoints >= state.live * 0.7;
+        // After a transient upload/decoder stall, +15% every four seconds can
+        // leave a healthy 43-FPS view at ~0.4M for over a minute despite a 10M
+        // request. Recover faster only with measured headroom, settled drawn
+        // detail filling the live cap, and an eligible blocked frontier.
+        // Failed probes still honor the existing exponential retry backoff.
+        const fastRecovery = frameMs <= 30 && settledDemand && demand.drawnPoints >= state.live * 0.7;
+        const recoveryWait = fastRecovery && recoveryDelayMs === 4000 ? 2000 : recoveryDelayMs;
         if (probeBase !== null) {
           probeAgeMs += dt;
           if (probeAgeMs >= 2000 && frameMs <= 45 && probeSettled) {
@@ -236,10 +243,10 @@
             state.live = Math.max(floor, Math.floor(state.live * (frameMs > 90 ? 0.5 : 0.75)));
           }
           elapsed = 0; samples = 0; healthyMs = 0;
-        } else if (probeBase === null && healthyMs >= recoveryDelayMs && canGrow && state.live < state.target) {
+        } else if (probeBase === null && healthyMs >= recoveryWait && canGrow && state.live < state.target) {
           // Do not mistake an almost-empty/loading scene for capacity to draw more.
           probeBase = state.live; probeAgeMs = 0;
-          state.live = Math.min(state.target, Math.ceil(state.live * 1.15));
+          state.live = Math.min(state.target, Math.ceil(state.live * (fastRecovery ? 1.5 : 1.15)));
           elapsed = 0; samples = 0; healthyMs = 0;
         }
         state.auto = state.live < state.target;
@@ -247,5 +254,25 @@
       },
     };
   }
-  return { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createFrameDiagnostics, createAdaptivePointBudget };
+  // Read only, requested once per opt-in diagnostic sample. No GPU readback,
+  // hierarchy loads, point-budget changes or claims that unknown leaves are
+  // the source's full resolution.
+  function refinementDiagnostics(viewer) {
+    const cloud = viewer?.scene?.pointclouds?.[0];
+    let minLevel = Infinity, maxLevel = -Infinity, childBranches = 0;
+    for (const node of cloud?.visibleNodes || []) {
+      const level = node.getLevel?.();
+      if (Number.isFinite(level)) { minLevel = Math.min(minLevel, level); maxLevel = Math.max(maxLevel, level); }
+      if (node.getChildren?.().length) childBranches++;
+    }
+    const demand = cloud?.ltdsBudgetDemand;
+    return {
+      levels: Number.isFinite(minLevel) ? `${minLevel}–${maxLevel}` : 'unknown',
+      childBranches,
+      nodePixelThreshold: Number.isFinite(viewer?.minNodeSize) ? viewer.minNodeSize : null,
+      pending: demand ? demand.pending === true : null,
+      requiredPoints: Number.isFinite(demand?.requiredPoints) && demand.requiredPoints > 0 ? demand.requiredPoints : null,
+    };
+  }
+  return { guardRendererResize, installViewerActivityGate, withPointPickCleanup, createFrameDiagnostics, createAdaptivePointBudget, refinementDiagnostics };
 }));

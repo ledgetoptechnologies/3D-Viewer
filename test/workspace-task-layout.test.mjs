@@ -19,12 +19,14 @@ const context=vm.createContext({state,URL,URLSearchParams,location,history:{push
   return {context,state,task,dataset,events,listeners,content,title,location};
 }
 
-test('expanded task has compact facts/tools but no nested summaries or inline GCP/settings/files',()=>{
+test('expanded task has compact facts and one task menu, without duplicate tools or inline specialist pages',()=>{
   const f=fixture(),html=f.context.taskPanel(f.task);
   assert.match(html,/compact-task-detail/);assert.match(html,/class="task-facts"/);
   assert.match(html,/orthophoto-preview/);assert.match(html,/Church &lt;test&gt;/);
   for(const action of ['task-gcp','task-settings','task-files','task-history'])assert.match(html,new RegExp(`data-action="${action}"`));
-  assert.doesNotMatch(html,/<details|<summary|gcp-import-form|task-options|Outputs and review/);
+  assert.match(html,/class="project-more-actions task-more-actions"/);
+  assert.doesNotMatch(html,/class="row-actions task-tools"|gcp-import-form|task-options|Outputs and review/);
+  assert.equal((html.match(/data-action="task-settings"/g)||[]).length,1);
   assert.equal((html.match(/data-action="toggle-task"/g)||[]).length,1);
 });
 
@@ -34,7 +36,8 @@ test('collapsed task retains one summary and quick actions without nested conten
   const html=f.context.taskPanel(f.task);
   assert.match(html,/aria-expanded="false"/);assert.match(html,/ inert/);
   assert.match(html,/data-action="view-output"/);assert.match(html,/data-action="download-output"/);
-  assert.doesNotMatch(html,/compact-task-detail|task-gcp|<summary/);
+  assert.doesNotMatch(html,/compact-task-detail/);
+  assert.match(html,/More task actions/);
 });
 
 test('active expanded task exposes live output without forcing a settings detour',()=>{
@@ -45,9 +48,10 @@ test('active expanded task exposes live output without forcing a settings detour
   f.state.taskPage='settings';assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/Task output/);
 });
 
-test('daily task overview has no destructive duplicate and Settings owns explicit lifecycle actions',()=>{
+test('daily task menu exposes rename but leaves destructive lifecycle actions in Details',()=>{
   const f=fixture(),overview=f.context.taskPanel(f.task);
-  assert.doesNotMatch(overview,/data-action="(?:trash-task|edit-task|trash-dataset)"/);
+  assert.doesNotMatch(overview,/data-action="(?:trash-task|trash-dataset)"/);
+  assert.equal((overview.match(/data-action="edit-task"/g)||[]).length,1);
   f.state.taskPage='settings';const settings=f.context.taskWorkspaceBody(f.task,f.dataset);
   assert.equal((settings.match(/data-action="trash-task"/g)||[]).length,1);
   assert.equal((settings.match(/data-action="edit-task"/g)||[]).length,1);
@@ -61,6 +65,21 @@ test('quick actions exclude tile generation status; unknown image count is expli
   assert.doesNotMatch(f.context.taskQuickActions(f.task),/3D tiles|derivative-status/);
   f.task.metrics={};assert.match(f.context.taskPanel(f.task),/Not recorded/);
   f.task.metrics={sourceImageCount:0};assert.match(f.context.taskPanel(f.task),/<strong>0<\/strong><small>images/);
+});
+
+test('task toolbar keeps View, Model report and Share primary with every secondary action in More',()=>{
+  const f=fixture();f.state.outputs=[{id:'output',taskId:'task',status:'published',activePublished:true,viewSessionUrl:'/view',downloadUrl:'/download',reportUrl:'/report',assetKinds:['tiles','report']}];
+  const html=f.context.taskQuickActions(f.task),[primary,menu]=html.split('<details');
+  assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
+  for(const action of ['edit-task','download-output','task-settings','task-files','task-history','task-gcp'])assert.match(menu,new RegExp(`data-action="${action}"`));
+  f.state.outputs=[];assert.match(f.context.taskQuickActions(f.task),/More task actions/,'unfinished tasks retain navigation');
+  f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp/);
+});
+
+test('specialist task sections retain context and direct navigation rather than dead-end pages',()=>{
+  const f=fixture();f.state.taskPage='files';const html=f.context.taskWorkspacePage();
+  assert.match(html,/Back to project/);assert.match(html,/aria-label="Task sections"/);
+  assert.match(html,/Details &amp; processing/);assert.match(html,/Files &amp; versions/);assert.match(html,/Church &lt;test&gt;/);
 });
 
 test('original processing PDF is consistently labeled Model report in quick actions and files',()=>{

@@ -215,6 +215,7 @@
     const frameDiagnostics = window.LtdsPointCloudPerformance.createFrameDiagnostics(viewer, {
       onSample(sample) {
         const ms = value => value.toFixed(1) + ' ms';
+        const detail = window.LtdsPointCloudPerformance.refinementDiagnostics(viewer);
         diagnosticsOutput.textContent =
           'CPU timings — not GPU timings\n' +
           'Frame ' + ms(sample.frameMs) + ' · max ' + ms(sample.maxFrameMs) + '\n' +
@@ -222,7 +223,11 @@
           'Point submission ' + ms(sample.pointRenderMs) + ' (part of render)\n' +
           'Submitted/frame: ' + Math.round(sample.submittedNodes) + ' nodes · ' + Math.round(sample.submittedPoints).toLocaleString('en-US') + ' points\n' +
           'Uploads/window: ' + sample.uploads + ' · ' + (sample.uploadBytes / 1048576).toFixed(2) + ' MiB\n' +
-          'Framebuffer: ' + sample.width + ' × ' + sample.height;
+          'Framebuffer: ' + sample.width + ' × ' + sample.height + '\n' +
+          'Visible LOD levels: ' + detail.levels + ' · known child branches: ' + detail.childBranches + '\n' +
+          'Node threshold: ' + (detail.nodePixelThreshold ?? 'unknown') + ' px · selected detail pending: ' + (detail.pending ?? 'unknown') + '\n' +
+          'Next budget frontier: ' + (detail.requiredPoints === null ? 'none reported' : detail.requiredPoints.toLocaleString('en-US') + ' points') + '\n' +
+          'These values do not prove source resolution is exhausted.';
       },
     });
     diagnosticsToggle.addEventListener('click', () => {
@@ -860,17 +865,14 @@
 
         const minPolar = 0.03;
         const maxPolar = Math.PI - 0.03;
-        let pd = pitchDelta;
-        if (pd !== 0) {
-          const polar = Math.acos(THREE.MathUtils.clamp(offset.clone().normalize().dot(UP), -1, 1));
-          const test = offset.clone().applyQuaternion(new THREE.Quaternion().setFromAxisAngle(side, pd));
-          const polarNew = Math.acos(THREE.MathUtils.clamp(test.normalize().dot(UP), -1, 1));
-          if (polarNew < minPolar || polarNew > maxPolar) {
-            const target = THREE.MathUtils.clamp(polarNew, minPolar, maxPolar);
-            const denominator = polarNew - polar;
-            pd = Math.abs(denominator) > 1e-9 ? pd * (target - polar) / denominator : 0;
-          }
-        }
+        // Signed view inclination cannot fold over the top pole, even for a
+        // large drag/inertia step or a surface pivot away from the centre ray.
+        const beforeForward = view.getPivot().sub(view.position).normalize();
+        const horizontalForward = new THREE.Vector3().crossVectors(UP, side);
+        const inclination = Math.atan2(-beforeForward.dot(UP), beforeForward.dot(horizontalForward));
+        const nextInclination = THREE.MathUtils.clamp(inclination - pitchDelta,
+          Math.PI / 2 - maxPolar, Math.PI / 2 - minPolar);
+        const pd = inclination - nextInclination;
 
         const qPitch = new THREE.Quaternion().setFromAxisAngle(side, pd);
         const qYaw = new THREE.Quaternion().setFromAxisAngle(UP, yawDelta);
