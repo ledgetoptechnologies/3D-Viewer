@@ -18,8 +18,9 @@
 
 ## Verification at this checkpoint
 
-- Linux server suite: 887 tests, 886 passed, one skipped, zero failures.
-- Non-browser frontend suite: 984 tests, 974 passed, ten skipped, zero failures.
+- Schema-38 checkpoint (`6646032`): Linux server suite, 936 tests,
+  935 passed, one skipped, zero failures.
+- Non-browser frontend suite: 998 tests, 988 passed, ten skipped, zero failures.
 - Production build passes (existing LAZ module/chunk-size warnings remain).
 - Synthetic desktop browser QA covered direct preset editing and link creation,
   re-copy after reload, password changes, permissions, per-view restrictions and
@@ -41,7 +42,15 @@ Operations renewal requires its own endpoint release/feature flag and Access/COR
 configuration. No Operations code is changed in this checkpoint. Verify live expiry
 with uploads/drafts/camera/edit state and genuine signed-out recovery after deploy.
 
-Remaining goal work: audited ODX worker versions/provenance; native LAZ-to-derived
-EPT proof chain; historical untagged import policy; mobile UI QA; live point-cloud
+The native LAZ-to-derived EPT proof chain is implemented with immutable conversion
+receipts and synthetic worker recovery tests. Verification against the installed
+real converter remains outstanding; synthetic tests do not establish that result.
+
+Remaining goal work: audited ODX worker versions/provenance; historical untagged
+import policy; mobile UI QA; live point-cloud
 zoom density and real profile/session performance. Do not treat these gaps as done
 because the local test suite is green. No live client data or jobs were changed.
+
+Draft PR: https://github.com/ledgetoptechnologies/3D-Viewer/pull/4.
+The PR runs the candidate image checks without merging, publishing release tags,
+or deploying. Its checks must be inspected separately from these local results.
