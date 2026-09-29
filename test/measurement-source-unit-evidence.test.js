@@ -40,3 +40,26 @@ test('explicit metadata retains original units, exact binding, first evidence an
     }finally{db.close();}
   }
 });
+
+test('native point explicit evidence requires exact registration and does not enable reviewed or ODM evidence',()=>{
+  const db=new DatabaseSync(':memory:');try{
+    applyMigrations(db);const store=new MeasurementSourceUnitEvidence(db);
+    const native={...request,source:{...request.source,kind:'pointCloud',manifestSha256:''}};
+    const inspection={crs:native.coordinateReference.crs,...native.source,originalUnit:'us-ft',verticalFactor:1200/3937};
+    assert.equal(store.recordExplicitMetadata(native,inspection),null);
+    db.exec(`INSERT INTO models(id,provider,provider_model_id,display_name,status,created_at,updated_at) VALUES('m','test','m','Test','ready','now','now');
+      INSERT INTO model_versions(id,model_id,provider_version_id,source_locator_json,status,created_at,updated_at) VALUES('v','m','v','{}','ready','now','now');`);
+    db.prepare("INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,byte_size,sha256,created_at) VALUES('a','v','pointCloud','test','cloud.las',?,?,'now')").run(native.source.byteSize,native.source.sha256);
+    for(const mutation of [{originalUnit:null,verticalFactor:null},{originalUnit:'m',verticalFactor:null},{sha256:'c'.repeat(64)},{byteSize:124},{manifestSha256:'b'.repeat(64)},{crs:'EPSG:32617'},{verticalFactor:1}])assert.equal(store.recordExplicitMetadata(native,{...inspection,...mutation}),null);
+    for(const mutation of [{modelId:'different'},{modelVersionId:'different'},{source:{...native.source,id:'different'}},{source:{...native.source,kind:'dsm'}}])assert.equal(store.recordExplicitMetadata({...native,...mutation},inspection),null);
+    const evidence=store.recordExplicitMetadata(native,inspection);
+    assert.equal(evidence.verticalUnit,'us-ft');assert.equal(evidence.verticalFactor,1200/3937);
+    assert.equal(store.recordExplicitMetadata(native,inspection).id,evidence.id);
+    assert.equal(store.summary('m','v',native.source).verticalFactor,1200/3937);
+    assert.throws(()=>store.recordStaffReview(native,'staff'),/invalid source unit review/);
+    assert.equal(store.recordVerifiedOdm(native,{}),null);
+    for(const basis of ['administrator-reviewed-source','verified-odm-source'])assert.equal(matchedSourceUnitEvidence(native,{...evidence,basis,verticalUnit:'m'}),null);
+    assert.equal(store.get({...native,source:{...native.source,sha256:'d'.repeat(64)}}),null);
+    assert.equal(matchedSourceUnitEvidence({...native,source:{...native.source,id:'derived-ept',kind:'ept',manifestSha256:'b'.repeat(64)}},evidence),null,'native evidence never inherits to EPT');
+  }finally{db.close();}
+});

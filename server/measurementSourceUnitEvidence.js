@@ -6,15 +6,15 @@ const explicitBasis='server-inspected-explicit-metadata';
 const explicitFactors=Object.freeze({'m':1,'ft':0.3048,'us-ft':1200/3937,'cm':.01,'mm':.001,'km':1000});
 function sourceBinding(request){
   const source=request?.source,crs=request?.coordinateReference?.crs;
-  if(!request?.modelId||!request.modelVersionId||!source?.id||!['dsm','dtm','ept','obj'].includes(source.kind)||!hash(source.sha256)||!Number.isSafeInteger(source.byteSize)||source.byteSize<1||!/^EPSG:\d{4,6}$/i.test(crs||'')||(source.kind==='ept'&&!hash(source.manifestSha256)))return null;
+  if(!request?.modelId||!request.modelVersionId||!source?.id||!['dsm','dtm','ept','obj','pointCloud'].includes(source.kind)||!hash(source.sha256)||!Number.isSafeInteger(source.byteSize)||source.byteSize<1||!/^EPSG:\d{4,6}$/i.test(crs||'')||(source.kind==='ept'&&!hash(source.manifestSha256)))return null;
   return {modelId:request.modelId,modelVersionId:request.modelVersionId,assetId:source.id,kind:source.kind,sha256:source.sha256,manifestSha256:source.manifestSha256||'',byteSize:source.byteSize,crs};
 }
 function matchedSourceUnitEvidence(request,evidence=request?.sourceUnitEvidence){
   const binding=sourceBinding(request);
   if(!binding||!evidence||evidence.schemaVersion!==1||evidence.verticalDatum!=='unknown')return null;
   if(evidence.basis===explicitBasis){
-    if(!['dsm','dtm','ept'].includes(binding.kind)||!Object.hasOwn(explicitFactors,evidence.verticalUnit)||evidence.verticalFactor!==explicitFactors[evidence.verticalUnit])return null;
-  }else if(evidence.verticalUnit!=='m'||!['administrator-reviewed-source','verified-odm-source'].includes(evidence.basis))return null;
+    if(!['dsm','dtm','ept','pointCloud'].includes(binding.kind)||!Object.hasOwn(explicitFactors,evidence.verticalUnit)||evidence.verticalFactor!==explicitFactors[evidence.verticalUnit])return null;
+  }else if(binding.kind==='pointCloud'||evidence.verticalUnit!=='m'||!['administrator-reviewed-source','verified-odm-source'].includes(evidence.basis))return null;
   if(Object.entries(binding).some(([key,value])=>evidence[key]!==value))return null;
   return evidence;
 }
@@ -47,7 +47,7 @@ class MeasurementSourceUnitEvidence {
   // inspection bindings are independently checked before persisting evidence.
   recordExplicitMetadata(request,inspection){
     const binding=sourceBinding(request);
-    if(!binding||!['dsm','dtm','ept'].includes(binding.kind)||!inspection||
+    if(!binding||!['dsm','dtm','ept','pointCloud'].includes(binding.kind)||!inspection||
       inspection.crs!==binding.crs||inspection.sha256!==binding.sha256||inspection.byteSize!==binding.byteSize||
       (inspection.manifestSha256||'')!==binding.manifestSha256||
       !Object.hasOwn(explicitFactors,inspection.originalUnit)||inspection.verticalFactor!==explicitFactors[inspection.originalUnit])return null;
@@ -90,7 +90,7 @@ class MeasurementSourceUnitEvidence {
   // A measurement body or imported folder name must never call this directly.
   recordStaffReview(request,actorId){
     const binding=sourceBinding(request);
-    if(!binding||typeof actorId!=='string'||!actorId.trim()||request.sourceVerticalUnit!=='m')throw new Error('invalid source unit review');
+    if(!binding||!['dsm','dtm','ept','obj'].includes(binding.kind)||typeof actorId!=='string'||!actorId.trim()||request.sourceVerticalUnit!=='m')throw new Error('invalid source unit review');
     const evidence={schemaVersion:1,id:crypto.randomUUID(),...binding,verticalUnit:'m',verticalDatum:'unknown',basis:'administrator-reviewed-source',reviewedBy:actorId,reviewedAt:new Date().toISOString()};
     this.database.prepare(`INSERT INTO measurement_source_unit_evidence(id,model_id,model_version_id,asset_id,source_sha256,manifest_sha256,byte_size,evidence_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(model_id,model_version_id,asset_id,source_sha256,manifest_sha256) DO NOTHING`).run(evidence.id,binding.modelId,binding.modelVersionId,binding.assetId,binding.sha256,binding.manifestSha256,binding.byteSize,JSON.stringify(evidence),actorId,evidence.reviewedAt);
     return this.get(request);

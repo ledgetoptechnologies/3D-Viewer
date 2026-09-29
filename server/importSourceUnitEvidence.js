@@ -12,20 +12,28 @@ const unresolvedMetadata = new Set([
   'measurement_source_value_transform_unsupported',
   'measurement_source_crs_mismatch',
   'measurement_raster_metadata_limit',
+  'native_point_metadata_invalid',
+  'native_point_metadata_unsupported',
+  'native_point_metadata_conflict',
+  'native_point_metadata_limit',
 ]);
 
 async function inspectRegisteredSourceUnits({ repository, storage, modelId, modelVersionId, signal = null }) {
   const { inspectExplicitSourceUnits } = await import('./explicitSourceUnitInspection.mjs');
+  const { inspectNativePointUnits } = await import('./nativePointUnitInspection.mjs');
   const model = repository.getModelVersion(modelId, modelVersionId);
   const pending = [];
   for (const source of model?.activeVersion?.assets || []) {
-    if (!['dsm', 'dtm', 'ept'].includes(source.kind)) continue;
+    if (!['dsm', 'dtm', 'ept', 'pointCloud'].includes(source.kind)) continue;
     signal?.throwIfAborted();
     const absolutePath = storage.resolve(source.rootKey, source.relativePath, { mustExist: true });
     let inspection;
-    try { inspection = await inspectExplicitSourceUnits(absolutePath, source, { signal: signal || undefined }); }
+    try {
+      const inspect = source.kind === 'pointCloud' ? inspectNativePointUnits : inspectExplicitSourceUnits;
+      inspection = await inspect(absolutePath, source, { signal: signal || undefined });
+    }
     catch (error) { if (unresolvedMetadata.has(error.code) || (source.kind === 'ept' && error instanceof SyntaxError)) continue; throw error; }
-    if (inspection) pending.push({ request: { modelId, modelVersionId, source, coordinateReference: { crs: inspection.crs } }, inspection });
+    if (inspection?.originalUnit != null && inspection.verticalFactor != null) pending.push({ request: { modelId, modelVersionId, source, coordinateReference: { crs: inspection.crs } }, inspection });
   }
   return pending;
 }

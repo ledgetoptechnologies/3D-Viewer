@@ -105,10 +105,22 @@ async function discoverPointDerivativeInput(storage, point, { signal = null } = 
   return canonicalDerivativeInput('ept', [{ role: 'point_cloud_source', rootKey: point.root_key, relativePath: point.relative_path, byteSize: stat.size, sha256 }]);
 }
 
+function registeredPointDerivativeInput(snapshot, assets) {
+  const canonical = canonicalDerivativeInput('ept', snapshot?.files);
+  if (snapshot?.manifestSha256 !== canonical.manifestSha256) fail('derivative_input_changed', 'point-cloud input snapshot digest changed');
+  const input = canonical.files[0];
+  const matches = assets.filter(asset => asset.kind === 'pointCloud'
+    && asset.root_key === input.rootKey && asset.relative_path === input.relativePath
+    && asset.byte_size === input.byteSize && asset.sha256 === input.sha256);
+  if (matches.length !== 1) fail('derivative_input_changed', 'point-cloud input no longer matches one registered source');
+  return matches[0];
+}
+
 module.exports = {
   MAX_DERIVATIVE_INPUT_BYTES,
   canonicalDerivativeInput,
   discoverMeshDerivativeInput,
   discoverPointDerivativeInput,
   verifyDerivativeInputSnapshot,
+  registeredPointDerivativeInput,
 };

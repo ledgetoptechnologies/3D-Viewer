@@ -56,3 +56,40 @@ Explicit metadata can resolve ODX products independently of producer inference.
   promotion, lease loss, exact retries, and output vertical-unit conflicts.
 
 No Ops changes or live records were touched in this audit.
+
+## Native metadata follow-up (not released)
+
+The native LAS/LAZ inspector now reads bounded LAS 1.2–1.4 VLR/EVLR
+metadata, binds its result to registered SHA-256/size and stable file identity,
+and preserves explicit metre/international-foot/US-survey-foot units. A
+horizontal-only CRS does not establish vertical units. This reader currently
+supports WGS84 UTM; unvalidated GeoTIFF vertical CRS/datum authority keys and
+unsupported declarations remain unresolved. It does not decode compressed
+points or establish producer provenance.
+
+Import/scheduled registration inspection now persists explicit native
+`pointCloud` evidence through the shared registry. Unsupported or conflicting
+metadata leaves the source available without unit evidence; changed bytes fail
+inspection. Native evidence cannot be relabeled as EPT evidence, and this does
+not expand staff-review or inferred-producer authorization. Twelve real LAS
+import cases cover both catalog and WebODM import routes. The first test run
+used an undiscovered fixture filename; corrected fixtures use the importer's
+existing supported native-cloud filename, with no discovery-policy change.
+
+The EPT worker now selects the exact registered source matching its immutable
+input snapshot instead of the first point-cloud row, and rehashes its input
+after conversion. These are prerequisites, not a completed conversion receipt:
+unit inheritance into EPT and receipt-bound resume still need implementation.
+
+Verification: nine native inspector tests pass. The derivative snapshot,
+imported-delivery and policy suites pass 20 tests; the Linux automatic-safety
+and native-inspector suites pass 42 tests. A Windows run of automatic-safety
+failed because its Linux `/proc` descriptor fixtures are unavailable there;
+the same suite passed in the isolated Linux container. No live worker was
+contacted successfully, no processing job was started, and no deployment was
+performed by this follow-up.
+
+Final combined verification after the fixture correction: full Linux server
+suite plus native inspector, 911 tests, 910 passed, one skipped, zero failures.
+This checkpoint is eligible for branch publication, not a claim that conversion
+inheritance, the ODX producer audit, deployment or live verification is complete.

@@ -11,6 +11,7 @@ const {
   discoverMeshDerivativeInput,
   discoverPointDerivativeInput,
   verifyDerivativeInputSnapshot,
+  registeredPointDerivativeInput,
 } = require('./derivativeInputSnapshot');
 const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
@@ -488,7 +489,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     const task = processing.getTask(attempt.taskId);
     const obj = assets.find((asset) => asset.kind === 'obj');
     const glb = assets.find((asset) => asset.kind === 'glb');
-    const point = assets.find((asset) => asset.kind === 'pointCloud');
+    let point = assets.find((asset) => asset.kind === 'pointCloud');
     const previousTiles = assets.find((asset) => asset.kind === 'tiles') || null;
     const audit = lodAuditScript || path.join(__dirname, '..', 'scripts', 'audit-lod-equivalence.mjs');
     let inputSnapshot = processing.derivativeInputSnapshot(job.id);
@@ -498,6 +499,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
         : await discoverMeshDerivativeInput(storage, obj, glb, { signal: controller.signal });
       inputSnapshot = processing.persistDerivativeInputSnapshot(job.id, job.derivative_type, discovered.files);
     }
+    if (job.derivative_type === 'ept') point = registeredPointDerivativeInput(inputSnapshot, assets);
     await verifyDerivativeInputSnapshot(storage, inputSnapshot, { signal: controller.signal });
     let derivativeResult;
 
@@ -573,6 +575,9 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
           const reservation=processing.derivativeStorageReservation(job.id);storage.requireDerivativeSpace('models',{sourceBytes:inputSnapshot.totalByteSize,expectedFiles:100000,reservedBytes:reservation?.accountedByteSize||0,otherReservedBytes:processing.activeDerivativeReservationBytes(job.id),reservedDatasetBytes:processing.activeProcessingReservationBytes(attempt.id)});
           derivativePhase(processing, job, owner, 'indexing');
           await run(config.entwineBin, ['build', '-i', source, '-o', incomplete], { signal: controller.signal });
+          // Conversion must still refer to the exact bytes verified before it
+          // started. This is required before any later unit-proof inheritance.
+          await verifyDerivativeInputSnapshot(storage, inputSnapshot, { signal: controller.signal });
           derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(incomplete);fs.renameSync(incomplete,complete);derivativePhase(processing,job,owner,'registering');
           const registered=processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token,promote:()=>{if(fs.existsSync(output))throw Object.assign(new Error('EPT final appeared during activation'),{code:'derivative_activation_conflict'});if(fs.statSync(complete).dev!==fs.statSync(base).dev)throw Object.assign(new Error('EPT activation crossed filesystems'),{code:'invalid_storage_location'});fs.renameSync(complete,output);}});
           if(!registered)throw Object.assign(new Error('derivative lease was lost before verified EPT registration'),{code:'lease_lost'});derivativeResult={verified:true,resumed:false,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};

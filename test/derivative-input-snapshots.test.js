@@ -9,7 +9,19 @@ const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
-const { MAX_DERIVATIVE_INPUT_BYTES, canonicalDerivativeInput, verifyDerivativeInputSnapshot } = require('../server/derivativeInputSnapshot');
+const { MAX_DERIVATIVE_INPUT_BYTES, canonicalDerivativeInput, verifyDerivativeInputSnapshot, registeredPointDerivativeInput } = require('../server/derivativeInputSnapshot');
+
+test('EPT conversion selects its exact registered input, never the first point-cloud row', () => {
+  const file={role:'point_cloud_source',rootKey:'datasets',relativePath:'source/cloud.laz',byteSize:10,sha256:'a'.repeat(64)};
+  const snapshot=canonicalDerivativeInput('ept',[file]);
+  const asset={id:'exact',kind:'pointCloud',root_key:file.rootKey,relative_path:file.relativePath,byte_size:file.byteSize,sha256:file.sha256};
+  const other={...asset,id:'other',relative_path:'source/other.laz'};
+  assert.equal(registeredPointDerivativeInput(snapshot,[other,asset]),asset);
+  for(const changed of [{root_key:'models'},{relative_path:'source/other.laz'},{byte_size:11},{sha256:'b'.repeat(64)}])
+    assert.throws(()=>registeredPointDerivativeInput(snapshot,[{...asset,...changed}]),{code:'derivative_input_changed'});
+  assert.throws(()=>registeredPointDerivativeInput(snapshot,[asset,{...asset,id:'duplicate'}]),{code:'derivative_input_changed'});
+  assert.throws(()=>registeredPointDerivativeInput({...snapshot,manifestSha256:'0'.repeat(64)},[asset]),{code:'derivative_input_changed'});
+});
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-derivative-input-'));
