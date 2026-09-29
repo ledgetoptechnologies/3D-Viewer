@@ -69,3 +69,5 @@
 .task-options-editor .task-options-list input[type=checkbox]{width:20px;height:20px;accent-color:var(--orange);justify-self:start}
 .task-options-editor .task-options-list button{justify-self:end;padding:5px 10px}
 @media(max-width:720px){.task-options-editor .task-options-list{grid-template-columns:minmax(0,1fr)}}
+.share-form{min-width:0;grid-template-columns:minmax(0,1fr)}
+.share-form label,.share-form input,.share-form select{min-width:0}

@@ -68,3 +68,21 @@ completed successfully for source checkpoint `6646032` on September 29:
   138 passed, zero skipped. Schema 38 and source identity checks passed.
 - Release-tag promotion and release-attestation publication were skipped as
   intended for a pull request. No production deployment is established.
+
+## Narrow-layout follow-up
+
+The in-app browser exercised production-built assets in a loopback-only synthetic
+workspace using 390px and 320px iframe viewports (layout QA, not touch emulation).
+At 390px the standalone preset editor showed one-column resolved options and a
+reachable Create preset footer. At 320px the task share dialog defaulted to
+Internal client; Public link creation, saved-link password changes, disabling
+camera positions, and Copy link succeeded against the synthetic API. The edit
+dialog's Save link settings button was visible and reachable. Clipboard contents
+and a real public-link destination were not independently verified in this pass.
+
+Visual QA found and corrected two narrow-layout defects: header actions extending
+beyond the viewport, and public-link create inputs exceeding their card's content
+width. Rebuilt screenshots confirm the wrapped header and contained inputs at
+320px. These checks neither mutate client data nor prove live authorization or
+session continuity. Desktop two-column options, remaining narrow-dialog actions,
+and live acceptance remain separate gates.
