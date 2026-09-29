@@ -32,19 +32,27 @@ async function prepareProcessingUnitEvidence({producer,destination,sourcePrefix,
   const log=await readArtifact(destination,logPath,files,signal),photos=await readArtifact(destination,'images.json',files,signal),coords=await readArtifact(destination,'odm_georeferencing/coords.txt',files,signal);
   if(!log||!photos||!coords)return[];
   const {inspectProcessingRasterUnits}=await import('./processingRasterUnitInspection.mjs');
+  const {inspectNativePointUnits}=await import('./nativePointUnitInspection.mjs');
   const candidates=[];
   for(const asset of assets){
-    if(!['dsm','dtm'].includes(asset.kind))continue;
-    const relativePath=`odm_dem/${asset.kind}.tif`;
+    if(!['dsm','dtm','pointCloud'].includes(asset.kind))continue;
+    const nativePoint=asset.kind==='pointCloud';
+    const relativePath=nativePoint?'odm_georeferencing/odm_georeferenced_model.laz':`odm_dem/${asset.kind}.tif`;
     if(asset.relativePath!==`${sourcePrefix}/${relativePath}`)continue;
     const entry=files.find(file=>file.relativePath===relativePath);
     if(!entry||entry.sha256!==asset.sha256||entry.byteSize!==asset.byteSize)continue;
     let physical;
-    try{physical=await inspectProcessingRasterUnits(path.join(destination,...relativePath.split('/')),asset,{signal});}
+    try{
+      const inspect=nativePoint?inspectNativePointUnits:inspectProcessingRasterUnits;
+      physical=await inspect(path.join(destination,...relativePath.split('/')),asset,{signal});
+      if(nativePoint&&physical)physical={...physical,verticalUnit:
+        physical.originalUnit===null&&physical.verticalFactor===null?null:
+          physical.originalUnit==='m'&&physical.verticalFactor===1?'metre':'nonmetre'};
+    }
     catch(error){
       // Unsupported/conflicting physical metadata remains unknown; never turn
       // its parse/scale/unit error into an "absent units" metre declaration.
-      if(typeof error.code==='string'&&error.code.startsWith('measurement_'))continue;
+      if(typeof error.code==='string'&&(error.code.startsWith('measurement_')||error.code.startsWith('native_point_metadata_')))continue;
       throw error;
     }
     if(!physical)continue;

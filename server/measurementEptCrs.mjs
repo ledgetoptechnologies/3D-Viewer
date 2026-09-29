@@ -176,7 +176,16 @@ export function resolveEptVerticalUnits(srs,expected){
   const evidence=[];
   for(const key of ['wkt','wkt2'])if(Object.hasOwn(srs,key)){const parts=compoundParts(parseWkt(srs[key]));if(parts)evidence.push(parts);}
   resolveEptUtmCrs(srs,expected);
-  if(!evidence.length)verticalFail('measurement_source_vertical_units_required');
+  if(!evidence.length){
+    // An encoded vertical CRS is not absent metadata. Without an independently
+    // supported vertical WKT we cannot interpret its units, and must not allow
+    // a reviewed/default metre fallback to bypass that declaration.
+    if(Object.hasOwn(srs,'vertical')){
+      if(!['number','string'].includes(typeof srs.vertical)||!/^\d{4,6}$/.test(String(srs.vertical)))verticalInvalid();
+      verticalFail('measurement_source_vertical_units_unsupported');
+    }
+    verticalFail('measurement_source_vertical_units_required');
+  }
   if(evidence.some(item=>item.factor!==evidence[0].factor))verticalFail('measurement_source_vertical_units_conflict');
   const identifiers=evidence.map(item=>item.id).filter(id=>id!==null);
   if(Object.hasOwn(srs,'vertical')){

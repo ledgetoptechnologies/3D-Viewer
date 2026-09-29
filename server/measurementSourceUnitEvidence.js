@@ -1,6 +1,6 @@
 'use strict';
 const crypto=require('node:crypto');
-const {resolveOdmSourceUnitProvenance}=require('./odmSourceUnitProvenance');
+const {resolveOdmSourceUnitProvenance,CONTRACT}=require('./odmSourceUnitProvenance');
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/i.test(value);
 const explicitBasis='server-inspected-explicit-metadata';
 const explicitFactors=Object.freeze({'m':1,'ft':0.3048,'us-ft':1200/3937,'cm':.01,'mm':.001,'km':1000});
@@ -14,7 +14,14 @@ function matchedSourceUnitEvidence(request,evidence=request?.sourceUnitEvidence)
   if(!binding||!evidence||evidence.schemaVersion!==1||evidence.verticalDatum!=='unknown')return null;
   if(evidence.basis===explicitBasis){
     if(!['dsm','dtm','ept','pointCloud'].includes(binding.kind)||!Object.hasOwn(explicitFactors,evidence.verticalUnit)||evidence.verticalFactor!==explicitFactors[evidence.verticalUnit])return null;
-  }else if(binding.kind==='pointCloud'||evidence.verticalUnit!=='m'||!['administrator-reviewed-source','verified-odm-source'].includes(evidence.basis))return null;
+  }else if(evidence.verticalUnit!=='m'||!['administrator-reviewed-source','verified-odm-source'].includes(evidence.basis)||
+    binding.kind==='pointCloud'&&evidence.basis!=='verified-odm-source')return null;
+  if(binding.kind==='pointCloud'&&evidence.basis==='verified-odm-source'){
+    const proof=evidence.producerProof;
+    if(!proof||proof.contract!==CONTRACT||proof.engine!=='ODM'||proof.engineVersion!=='3.5.6'||
+      !['archiveSha256','inputManifestSha256','logSha256','coordsSha256','photosSha256'].every(key=>hash(proof[key]))||
+      !Number.isFinite(proof.gpsZOffsetMetres))return null;
+  }
   if(Object.entries(binding).some(([key,value])=>evidence[key]!==value))return null;
   return evidence;
 }
@@ -68,15 +75,18 @@ class MeasurementSourceUnitEvidence {
   // "resolved" object. Native LAZ evidence does not authorize derived EPT/OBJ.
   recordVerifiedOdm(request,producerInput){
     const binding=sourceBinding(request);
-    if(!binding||!['dsm','dtm'].includes(binding.kind)||binding.manifestSha256)return null;
+    if(!binding||!['dsm','dtm','pointCloud'].includes(binding.kind)||binding.manifestSha256)return null;
     const proof=resolveOdmSourceUnitProvenance(producerInput);
     if(proof.status!=='resolved'||proof.sourceKind!==binding.kind||proof.sourceSha256!==binding.sha256||
       proof.sourceByteSize!==binding.byteSize||`EPSG:${proof.horizontalEpsg}`!==binding.crs||
       proof.verticalUnit!=='metre'||proof.verticalDatum!=='unknown')return null;
+    if(binding.kind==='pointCloud'&&request.source.relativePath!==producerInput.source.relativePath&&
+      !request.source.relativePath?.endsWith(`/${producerInput.source.relativePath}`))return null;
     // Persist only after the exact native asset is registered to this version.
     const registered=this.database.prepare(`SELECT 1 FROM model_assets a JOIN model_versions v ON v.id=a.version_id
       WHERE a.id=? AND a.version_id=? AND v.model_id=? AND a.kind=? AND a.sha256=? AND a.byte_size=?
-      AND COALESCE(a.manifest_sha256,'')=''`).get(binding.assetId,binding.modelVersionId,binding.modelId,binding.kind,binding.sha256,binding.byteSize);
+      AND COALESCE(a.manifest_sha256,'')=''
+      AND (?<>'pointCloud' OR a.relative_path=?)`).get(binding.assetId,binding.modelVersionId,binding.modelId,binding.kind,binding.sha256,binding.byteSize,binding.kind,request.source.relativePath||'');
     if(!registered)return null;
     const producerProof=Object.fromEntries(['contract','engine','engineVersion','archiveSha256','inputManifestSha256',
       'logSha256','coordsSha256','photosSha256','gpsZOffsetMetres'].map(key=>[key,proof[key]]));

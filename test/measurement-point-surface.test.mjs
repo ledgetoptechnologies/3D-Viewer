@@ -32,6 +32,17 @@ test('source-bound staff evidence permits untagged point preflight without a cli
   }
 });
 
+test('staff evidence and metre confirmation cannot bypass an unvalidated encoded vertical CRS',async t=>{
+  const f=fixture(t),file=path.join(f.root,'ept.json'),header=JSON.parse(fs.readFileSync(file,'utf8'));
+  header.srs.vertical='6360';
+  const identity=f.write('ept.json',header);
+  const request={...f.request,modelId:'model',source:{...f.request.source,kind:'ept',sha256:identity.sha256,byteSize:identity.byteSize}};
+  for(const reviewed of [false,true]){
+    const input={...request,...(reviewed?{sourceUnitEvidence:{schemaVersion:1,...unitRegistry.sourceBinding(request),verticalUnit:'m',verticalDatum:'unknown',basis:'administrator-reviewed-source'}}:{})};
+    await assert.rejects(preflightPointSurface(file,input),{code:'measurement_source_vertical_units_unsupported'});
+  }
+});
+
 test('exact point grid survives independent volume/section calls with verified reads and identical output',async t=>{
   const f=fixture(t),pointGridCacheRoot=path.join(f.root,'cache'),source={...f.request.source,kind:'ept'},request={...f.request,source},timings=[];
   const options={sourceFiles:f.files,pointGridCacheRoot,onTiming:value=>timings.push(value)};

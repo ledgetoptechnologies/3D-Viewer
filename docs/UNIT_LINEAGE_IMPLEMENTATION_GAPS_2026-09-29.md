@@ -93,3 +93,27 @@ Final combined verification after the fixture correction: full Linux server
 suite plus native inspector, 911 tests, 910 passed, one skipped, zero failures.
 This checkpoint is eligible for branch publication, not a claim that conversion
 inheritance, the ODX producer audit, deployment or live verification is complete.
+
+## Native producer integration and conversion contract follow-up
+
+Scheduled ingestion now prepares native LAZ evidence using the same byte-bound
+inspector and the existing audited ODM 3.5.6 receipt contract. The exact native
+archive path, registered source and physical metadata must agree. Missing units
+can be inferred only with the full accepted producer proof; feet, unsupported
+metadata, unknown versions and missing receipts do not become metre evidence.
+Native verified records require the persisted producer contract and digest fields
+when read back. This does not audit the user's still-unidentified ODX version.
+
+EPT parsing now distinguishes an encoded but unvalidated vertical CRS from
+absent vertical metadata. Staff metre confirmation cannot bypass that declared
+CRS. This is consistent with the [EPT SRS specification](https://entwine.io/en/latest/entwine-point-tile.html#srs).
+
+The pure conversion-receipt contract is being implemented separately. Durable
+receipt storage, lease-fenced promotion/recovery and factor-aware EPT consumer
+integration remain outstanding; the pure contract alone does not enable inherited
+units. Existing outputs must not acquire inferred lineage merely by hashing them.
+
+Integration verification: 905 server tests passed with one skip, and 987
+non-browser `.mjs` tests passed with ten skips. These runs cover native producer
+integration and the vertical-CRS fallback regression; they are not live worker,
+browser session, deployment, or EPT conversion-recovery verification.
