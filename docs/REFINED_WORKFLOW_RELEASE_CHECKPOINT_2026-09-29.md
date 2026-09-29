@@ -102,3 +102,40 @@ project selector, expiry and grant button fit within the card. No real link was
 revoked and no client grant was created. Focused sharing/preset tests: 48 passed,
 zero skipped; production build passed. Live node inspection remains blocked by
 the unauthenticated Viewer shell; the previous cluster address must not be used.
+
+## Live worker identity check — September 29
+
+Read-only SSH access to the user-confirmed cluster PC `192.168.50.89` succeeded
+with the existing ed25519 identity selected explicitly. Container metadata reports
+ClusterODX 1.5.9, image `webodm/clusterodx`, revision
+`818f50bbbfcab107c41fcf4a7101e2bfcbce87e5`, digest
+`sha256:b303d24a1f28d0cfa8a6626a9ce0826fc20e586398bd4279a2a70bedfbcc4afd`.
+The local `node-odx-gpu` container uses `opendronemap/nodeodm:gpu`, digest
+`sha256:214fe6a4421fe5283648400e9ce455457bb866c87a20a325fddfd494e4ad482a`.
+Its physical `/code/VERSION` and read-only `/info` agree on ODM 3.5.6;
+NodeODM reports 2.2.4. This identifies the installed engine version, but does not
+retroactively establish source-bound producer receipts for historical outputs.
+
+ClusterODX's registered workers are `node-odx-gpu:3000` and
+`192.168.50.88:3004`. The latter returned `EHOSTUNREACH` when queried from the
+cluster, so its engine version remains unverified. Tokens were kept inside the
+container and excluded from outputs. No task or container was changed. Viewer
+authentication, live renewal, real converter verification and release/deployment
+remain outstanding.
+
+The live ClusterODX `/info` response advertises API 1.5.3 (distinct from its
+package version 1.5.9), ODM 3.5.6, unlimited images (`null`) and the documented
+cluster resource sentinels. Its `/options` and the local worker both return 81
+ordered options beginning with end-with, rerun-from, min-num-features and
+feature-type. These responses match the adapter's existing detection contract.
+
+Read-only probing found Entwine 2.2.0 in the local worker. Its `--version` exits
+zero with a native usage banner, which the original identity parser rejected.
+The parser now recognizes that bounded banner and stores `Entwine 2.2.0` while
+retaining executable hash/stability checks and rejecting unrelated multiline
+responses. In-memory execution of the corrected identity module against the
+actual binary succeeded; executable SHA-256 was
+`f19d354ded7796a577d68963ab60718a9aa920b0ef8b19ee4fd047b78a21417c`.
+The focused Linux identity/receipt/recovery tests passed: 31 tests, zero skipped.
+No real conversion was performed; this verifies runtime identity compatibility,
+not conversion coordinates or the Viewer host's installed converter.

@@ -40,6 +40,18 @@ test('PATH lookup honors the first executable and captures a symlink target as t
   assert.equal((await captureEptConverterIdentity(alias)).executablePath, second.file);
 });
 
+test('native Entwine 2.2.0 usage banner yields a canonical version and exact executable identity', linux, async t => {
+  const banner = 'Invalid app type\n    Version: 2.2.0\n    Usage: entwine <app> <options>\n    Apps:\n        build\n            Build an EPT dataset\n        merge\n            Merge colocated entwine subsets\n        info\n            Gather metadata information about point cloud files\n        convert\n            Convert an entwine dataset to a different format\n\n';
+  const f = fixture(t, `process.stdout.write(${JSON.stringify(banner)})`);
+  const identity = await captureEptConverterIdentity(f.file);
+  assert.equal(identity.version, 'Entwine 2.2.0');
+  assert.equal(identity.executableSha256, crypto.createHash('sha256').update(f.bytes).digest('hex'));
+  for (const invalid of [banner.replace('Usage: entwine', 'Usage: other'), banner.replace('        build', '        unknown'), `${banner}unexpected`, banner.replace('Version: 2.2.0', 'Version: unknown')]) {
+    const bad = fixture(t, `process.stdout.write(${JSON.stringify(invalid)})`);
+    await assert.rejects(captureEptConverterIdentity(bad.file), { code: 'ept_converter_identity_invalid' });
+  }
+});
+
 test('same-path changed bytes and identical-byte replacement both invalidate captured execution identity', linux, async t => {
   for (const replace of [false, true]) {
     const f = fixture(t), identity = await captureEptConverterIdentity(f.file);

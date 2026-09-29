@@ -84,7 +84,12 @@ function probeVersion(executablePath, { signal, timeoutMs = 10000, env = process
     child.once('error', () => finish(invalid('ept_converter_unavailable')));
     child.once('close', code => {
       if (failure) return finish(failure);
-      const version = Buffer.concat(chunks).toString('utf8').trim();
+      const output = Buffer.concat(chunks).toString('utf8').trim();
+      // Entwine 2.2.0 treats --version as an app name and returns its native
+      // usage banner with exit code zero. Accept that bounded, recognizable
+      // banner and persist only the version, never arbitrary multiline output.
+      const native = /^(?:Invalid app type\n)?\s*Version: (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\n {4}Usage: entwine <app> <options>\n {4}Apps:\n(?: {8}(?:build|merge|info|convert)\n {12}[^\n\x00-\x1f\x7f\ufffd]+\n?)+$/.exec(output);
+      const version = native ? `Entwine ${native[1]}` : output;
       if (code !== 0 || !version || version.length > 200 || /[\x00-\x1f\x7f\ufffd]/.test(version)) return finish(invalid('ept_converter_identity_invalid'));
       finish(null, version);
     });
