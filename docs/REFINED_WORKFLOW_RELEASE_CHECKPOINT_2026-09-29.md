@@ -153,3 +153,60 @@ production build passed. The Operations handoff documents the existing Viewer
 caller and its current strict request/response contract. Operations still gates
 its endpoint to staging; production rollout and live browser acceptance remain
 external release gates.
+
+## Candidate and live density checkpoint — September 29, 23:47 UTC
+
+[Run 36646276248](https://github.com/ledgetoptechnologies/3D-Viewer/actions/runs/36646276248)
+passed for `a83fa6ba913fa4cc65731179cfba370203a04cd8`: 2,034 source tests,
+2,019 passed, 15 skipped, zero failures; exact-image tests: 138 passed, zero
+skipped or failed. Pull-request execution did not publish release tags or deploy.
+
+Operations' existing Open Viewer workspace action successfully opened an
+authenticated Viewer workspace. This supersedes the earlier browser access
+blocker, but does not prove background renewal. Public health headers still
+identify deployed revision `27b1ecd7daa942ce1a9ab67b0b87a60942792b74`, schema 33.
+
+Read-only Hickory Grove point-cloud QA kept the requested and active point budgets
+at 10M throughout. At the default 697 x 748 framebuffer, settled overview,
+medium and closer views submitted 5,469,010, 7,111,535 and 8,576,241 points.
+At a temporary 1599 x 910 desktop framebuffer, the same view submitted 9,992,117
+points across 221 nodes; further zoom submitted 7,917,961 points across 174 nodes
+and retained visible tire/ground detail. Selected detail pending was false,
+visible LOD levels reached 0-5 and reported frame rate was about 144 fps. The
+temporary viewport override was reset. These values are browser-reported CPU/
+submission diagnostics, not independent GPU performance measurements. Lower
+visible point totals after zoom do not alone imply loading failure: the visible
+region changes. The earlier sparse 0.4M adaptive-budget failure did not reproduce
+in this session; this is not a claim about every device or model. No measurement,
+client grant, public link or processing job was changed.
+
+Operations renewal PR 138 remained open and draft at `81e7279`; its current handler
+explicitly requires staging plus the default-off feature flag. Production silent
+renewal therefore still needs the separate Operations rollout and live acceptance.
+
+## Installed converter unit-preservation QA
+
+The actual worker's Entwine 2.2.0 / PDAL 2.4.3 converted three independent synthetic
+64-point LAS 1.4 cases: horizontal EPSG:32616 with compound vertical metre,
+international foot and US survey foot declarations. PDAL's LAS writer assigned
+the synthetic compound CRS metadata without any reprojection filter. Independent
+sorted XYZ comparisons confirmed base fixture = declared LAS = converted EPT in
+every case. All 64 points and schema scale 0.01 survived. EPT SRS retained the
+compound WKT and horizontal EPSG:32616; vertical factors were 1, 0.3048 and
+0.304800609601219 respectively (the latter is serialized US survey feet).
+
+Commands inside `node-odx-gpu` were `pdal translate BASE.laz INPUT.las
+--writers.las.a_srs=COMPOUND_WKT --writers.las.minor_version=4
+--writers.las.dataformat_id=6`, `pdal info --metadata INPUT.las`,
+`pdal info --point 0-63 INPUT.las`, `/usr/bin/entwine build -i INPUT.las -o OUTPUT`,
+and `pdal info --point 0-63 OUTPUT/ept.json`. Build times were 1,293 ms (metre),
+1,277 ms (international foot) and 1,262 ms (US survey foot). The repository's
+synthetic fixture was transmitted in memory; `/tmp/ltds-entwine-unit-C1nGm7` was
+removed only after resolved parent/prefix validation, and removal was confirmed.
+No installed code, container, client data or processing job was changed.
+
+This demonstrates coordinate and declared-unit preservation for this installed
+converter on synthetic inputs, not datum correctness, survey accuracy, production
+performance or the configuration of a separate Viewer-host converter. It supports
+retaining encoded foot elevations and applying the source factor once; it does
+not justify interpreting every historical or untagged source as metres.
