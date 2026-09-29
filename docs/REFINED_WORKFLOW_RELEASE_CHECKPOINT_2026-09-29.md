@@ -84,5 +84,12 @@ Visual QA found and corrected two narrow-layout defects: header actions extendin
 beyond the viewport, and public-link create inputs exceeding their card's content
 width. Rebuilt screenshots confirm the wrapped header and contained inputs at
 320px. These checks neither mutate client data nor prove live authorization or
-session continuity. Desktop two-column options, remaining narrow-dialog actions,
-and live acceptance remain separate gates.
+session continuity. Remaining narrow-dialog actions and live acceptance remain
+separate gates.
+
+At 1200px, subsequent synthetic browser QA confirmed the standalone preset
+editor's two-column layout and node option order. Numeric zero and boolean edits
+showed Modified state; Reset returned both controls to their node defaults and
+disabled their reset buttons. Search reduced the visible options to the matching
+feature-quality control. No preset was saved and no task was submitted in that
+pass. This adds rendered editor evidence, not real-node schema compatibility.
