@@ -18,6 +18,7 @@ const manualFixtureGrant = 'local_fixture_grant_00000000000000000000';
 if (manualFixture) setImmediate(async () => {
   const fixture = await startFixtureServer();
   console.log(`Synthetic workspace QA: ${fixture.origin}/workspace/${manualFixtureGrant}`);
+  console.log(`Responsive synthetic QA: ${fixture.origin}/manual-responsive?width=390`);
   const stop = () => fixture.server.close(() => process.exit(0));
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
 });
@@ -386,7 +387,13 @@ function startFixtureServer() {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
-    if (url.pathname.startsWith('/api/')) {
+    if (manualFixture && url.pathname === '/manual-responsive') {
+      // A real nested viewport exercises production media queries without
+      // changing the user's browser window. This is layout QA, not touch-device
+      // emulation. The route and grant exist only in the local synthetic fixture.
+      const width = [320, 390, 1200].includes(Number(url.searchParams.get('width'))) ? Number(url.searchParams.get('width')) : 390;
+      result = { status: 200, type: 'text/html; charset=utf-8', body: Buffer.from(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Synthetic responsive Viewer QA</title><style>body{margin:8px;background:#333;color:white;font:14px sans-serif}nav{margin-bottom:8px}a{color:white;margin-right:16px}iframe{display:block;border:1px solid #888;width:${width}px;height:844px;max-width:none}</style><nav>Synthetic layout viewport: <a href="?width=320">320px</a><a href="?width=390">390px</a><a href="?width=1200">1200px</a></nav><iframe title="Synthetic Viewer workspace" src="/workspace/${manualFixtureGrant}"></iframe>`) };
+    } else if (url.pathname.startsWith('/api/')) {
       if (manualFixture && url.pathname === '/api/v1/admin-sessions/redeem' && request.method === 'POST') {
         const chunks = []; for await (const chunk of request) chunks.push(chunk);
         let body = {}; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {}
