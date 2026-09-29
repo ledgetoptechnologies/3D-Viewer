@@ -29,7 +29,10 @@
 
 ## Deployment and unresolved checks
 
-This document does not attest to a deployed release. Migration target is schema 37.
+This document does not attest to a deployed release. The current working-tree
+migration target is schema 38: immutable EPT conversion receipts. Back up the
+database before deployment. Historical EPT outputs receive no invented receipts;
+only a successful, verified local conversion can establish inherited unit evidence.
 Preserve the configured session secret: encrypted public-link recovery uses a
 domain-separated key derived from it. Existing hash-only links without recoverable
 receipt data are left active and reported unrecoverable, never silently replaced.

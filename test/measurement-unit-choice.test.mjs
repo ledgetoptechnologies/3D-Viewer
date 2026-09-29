@@ -7,6 +7,10 @@ test('source review restores meters for another measurement only with matching i
  const source={assetId:'cloud',kind:'ept',modelVersionId:'version',byteSize:100,sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64)};
  source.unitEvidence={...source,modelId:'model',crs:'EPSG:32616',verticalUnit:'m',verticalDatum:'unknown',basis:'administrator-reviewed-source'};
  assert.equal(priorMeterDeclaration(record,source,[]),true);
+ const converted={...source,unitEvidence:{...source.unitEvidence,basis:'server-verified-ept-conversion',verticalFactor:1}};
+ assert.equal(priorMeterDeclaration(record,converted,[]),true);
+ assert.equal(priorMeterDeclaration(record,{...converted,unitEvidence:{...converted.unitEvidence,verticalFactor:.3048,verticalUnit:'ft'}},[]),false);
+ assert.equal(priorMeterDeclaration(record,{...converted,unitEvidence:{...converted.unitEvidence,verticalFactor:undefined}},[]),false);
  for(const [key,value] of [['modelId','other'],['crs','EPSG:32617'],['byteSize',101],['manifestSha256','c'.repeat(64)],['verticalUnit','ft']]){
    assert.equal(priorMeterDeclaration(record,{...source,unitEvidence:{...source.unitEvidence,[key]:value}},[]),false);
  }

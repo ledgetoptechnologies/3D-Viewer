@@ -58,14 +58,16 @@ export async function preflightPointSurface(absolutePath,request,{signal,require
   const expected=Number(request.coordinateReference.crs.replace(/^EPSG:/i,''));
   const evidence=sourceUnitRegistry.matchedSourceUnitEvidence(request);
   const explicitEvidence=evidence?.basis==='server-inspected-explicit-metadata';
+  const conversionEvidence=evidence?.basis==='server-verified-ept-conversion';
+  const evidenceFactor=explicitEvidence||conversionEvidence?evidence.verticalFactor:1;
   let vertical;
   try{vertical=resolveEptVerticalUnits(ept.srs,expected);}catch(error){
     if(error.code!=='measurement_source_vertical_units_required'||explicitEvidence||(!evidence&&(requireEncodedVerticalUnits||request.sourceVerticalUnit!=='m')))throw error;
     resolveEptUtmCrs(ept.srs,expected);
-    vertical={verticalFactor:1,verticalUnitBasis:evidence?.basis||'administrator-declared',verticalUnit:'m',verticalDatum:'unknown',...(evidence?{verticalUnitEvidence:sourceUnitRegistry.sourceUnitDisplayEvidence(evidence)}:{})};
+    vertical={verticalFactor:evidenceFactor,verticalUnitBasis:evidence?.basis||'administrator-declared',verticalUnit:'m',verticalDatum:'unknown',...(evidence?{verticalUnitEvidence:sourceUnitRegistry.sourceUnitDisplayEvidence(evidence)}:{})};
   }
-  if(evidence&&vertical.verticalFactor!==(explicitEvidence?evidence.verticalFactor:1))fail('measurement_source_vertical_units_conflict');
-  if(explicitEvidence)vertical.verticalUnitEvidence=sourceUnitRegistry.sourceUnitDisplayEvidence(evidence);
+  if(evidence&&vertical.verticalFactor!==evidenceFactor)fail('measurement_source_vertical_units_conflict');
+  if(explicitEvidence||conversionEvidence)vertical.verticalUnitEvidence=sourceUnitRegistry.sourceUnitDisplayEvidence(evidence);
   if(!Array.isArray(ept.bounds)||ept.bounds.length!==6||!ept.bounds.every(Number.isFinite)||!['laszip','binary'].includes(ept.dataType)||!Array.isArray(ept.schema))fail('measurement_ept_schema_unsupported');
   if(request.classFilter==='ground'&&!ept.schema.some(s=>s.name==='Classification'))fail('measurement_point_classification_unavailable');
   return{ept,expected,vertical};

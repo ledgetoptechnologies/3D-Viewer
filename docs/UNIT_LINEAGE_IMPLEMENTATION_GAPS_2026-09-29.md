@@ -117,3 +117,36 @@ Integration verification: 905 server tests passed with one skip, and 987
 non-browser `.mjs` tests passed with ten skips. These runs cover native producer
 integration and the vertical-CRS fallback regression; they are not live worker,
 browser session, deployment, or EPT conversion-recovery verification.
+
+## Working-tree conversion integration (verification in progress)
+
+Schema 38 adds an immutable, independently committed EPT receipt before final
+promotion. Receipt validation reloads the exact registered native asset, input
+snapshot and accepted unit proof under the current derivative lease. It binds
+the converter executable hash/version and fixed invocation to the complete EPT
+tree. The worker invokes the captured absolute executable and checks it again
+after conversion. Unreceipted existing folders retain display-only behavior;
+they cannot acquire inherited evidence from their location or hashes alone.
+
+Recovery uses either the verified final tree or the receipt's original-token
+completed staging tree. A receipted staging tree is retained if registration
+throws; SQL rollback cannot erase its already-committed receipt. Missing or
+changed output, native bytes or proof blocks recovery. Registration stores
+derived unit evidence in the same transaction as the EPT asset and file list.
+Original foot factors are preserved through calculations. A conflicting prior
+unit decision now blocks registration rather than silently overriding feet.
+
+This section describes implemented code, not a deployed feature. Synthetic
+worker-level tests now cover successful conversion, pre-promotion interruption,
+post-promotion SQL rollback, new-lease recovery without rerunning conversion,
+unreceipted output, changed input and substituted output. The converter is a
+synthetic executable fixture, not the user's installed Entwine. Twenty-four
+contract/repository/worker tests passed, and six converter-identity tests passed
+in Linux. Independent review found no additional blocking correctness defect.
+No live conversion or client mutation was performed.
+
+Final schema-38 checkpoint verification: full Linux server suite 935 passed,
+one skipped, zero failures; non-browser `.mjs` suite 988 passed, ten skipped,
+zero failures; production frontend build passed (existing LAZ CommonJS and
+large-chunk warnings remain). This does not verify the installed live converter,
+ODX version, deployment, point-cloud density or Operations session continuity.

@@ -43,6 +43,21 @@ test('staff evidence and metre confirmation cannot bypass an unvalidated encoded
   }
 });
 
+test('receipt-bound EPT units preserve feet through preflight and calculation',async t=>{
+  const f=fixture(t),request={...f.request,modelId:'model',sourceVerticalUnit:null,source:{...f.request.source,kind:'ept'}};
+  request.sourceUnitEvidence={schemaVersion:1,...unitRegistry.sourceBinding(request),verticalUnit:'ft',verticalFactor:.3048,verticalDatum:'unknown',basis:'server-verified-ept-conversion',conversionProof:{jobId:'job',receiptSha256:'c'.repeat(64),inputProofSha256:'d'.repeat(64)}};
+  const preflight=await preflightPointSurface(path.join(f.root,'ept.json'),request,{requireEncodedVerticalUnits:true});
+  assert.equal(preflight.vertical.verticalFactor,.3048);
+  assert.equal(preflight.vertical.verticalUnitBasis,'server-verified-ept-conversion');
+  const result=await calculatePointSurface(path.join(f.root,'ept.json'),request,{sourceFiles:f.files,requireEncodedVerticalUnits:true});
+  assert.ok(Math.abs(result.cutM3-10*.3048)<1e-10);
+  assert.equal(result.source.verticalUnitEvidence.verticalUnit,'ft');
+  assert.equal(result.source.verticalUnitEvidence.conversionProof,undefined,'private receipt details not exported');
+  for(const change of [{conversionProof:null},{verticalFactor:1},{manifestSha256:'e'.repeat(64)},{kind:'dsm'}]){
+    await assert.rejects(preflightPointSurface(path.join(f.root,'ept.json'),{...request,sourceUnitEvidence:{...request.sourceUnitEvidence,...change}},{requireEncodedVerticalUnits:true}),{code:'measurement_source_vertical_units_required'});
+  }
+});
+
 test('exact point grid survives independent volume/section calls with verified reads and identical output',async t=>{
   const f=fixture(t),pointGridCacheRoot=path.join(f.root,'cache'),source={...f.request.source,kind:'ept'},request={...f.request,source},timings=[];
   const options={sourceFiles:f.files,pointGridCacheRoot,onTiming:value=>timings.push(value)};

@@ -2008,6 +2008,21 @@ const MIGRATIONS = [
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
   `},
+  {version:38,name:'immutable_ept_conversion_receipts',sql:`
+    CREATE TABLE derivative_ept_conversion_receipts (
+      job_id TEXT PRIMARY KEY REFERENCES derivative_jobs(id) ON DELETE CASCADE,
+      receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json)),
+      receipt_sha256 TEXT NOT NULL CHECK(length(receipt_sha256)=64),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER derivative_ept_conversion_receipts_no_update
+      BEFORE UPDATE ON derivative_ept_conversion_receipts
+      BEGIN SELECT RAISE(ABORT,'EPT conversion receipts are immutable'); END;
+    CREATE TRIGGER derivative_ept_conversion_receipts_no_delete
+      BEFORE DELETE ON derivative_ept_conversion_receipts
+      WHEN EXISTS(SELECT 1 FROM derivative_jobs WHERE id=OLD.job_id)
+      BEGIN SELECT RAISE(ABORT,'EPT conversion receipts are immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {

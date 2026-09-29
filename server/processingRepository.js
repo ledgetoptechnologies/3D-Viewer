@@ -888,10 +888,20 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const expectedFiles=manifestFiles.map((file)=>({relative_path:file.relativePath,byte_size:file.byteSize,sha256:file.sha256})).sort((a,b)=>a.relative_path.localeCompare(b.relative_path));
       if(!expectedFiles.length||expectedFiles.some((file,index)=>!safeRelativePath(file.relative_path)||!Number.isSafeInteger(file.byte_size)||file.byte_size<0||!/^[a-f0-9]{64}$/i.test(String(file.sha256||''))||(index&&file.relative_path===expectedFiles[index-1].relative_path)))return false;
       const manifestFile=expectedFiles.find((file)=>file.relative_path==='ept.json');if(!manifestFile||manifestFile.byte_size!==byteSize||manifestFile.sha256!==sha256)return false;
+      const {EptConversionReceiptRepository}=require('./eptConversionReceiptRepository');
+      const receipts=new EptConversionReceiptRepository(this),receipt=receipts.get(id);
+      const outputAsset={versionId,rootKey,relativePath,byteSize,attemptId,sha256,manifestSha256,manifestFiles};
+      if(receipt&&!receipts.validate(id,owner,outputAsset,{leaseToken}))return false;
+      const recordUnits=assetId=>{
+        if(!receipt)return;
+        const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
+        const request={modelId:attempt.result_model_id,modelVersionId:versionId,coordinateReference:{crs:receipt.inputUnitProof.crs},source:{id:assetId,kind:'ept',sha256,byteSize,manifestSha256}};
+        if(!new MeasurementSourceUnitEvidence(this.database).recordVerifiedEptConversion(request,this,id,owner,{leaseToken}))throw Object.assign(new Error('EPT conversion evidence could not be registered'),{code:'ept_conversion_receipt_invalid'});
+      };
       const existing=this.database.prepare("SELECT * FROM model_assets WHERE version_id=? AND kind='ept'").get(versionId),existingFiles=existing?this.database.prepare('SELECT relative_path,byte_size,sha256 FROM model_asset_files WHERE asset_id=? ORDER BY relative_path').all(existing.id):[];
-      const idempotent=existing&&existing.root_key===rootKey&&existing.relative_path===relativePath&&existing.sha256===sha256&&existing.manifest_sha256===manifestSha256&&JSON.stringify(existingFiles)===JSON.stringify(expectedFiles);if(existing){if(!idempotent)return false;if(typeof promote==='function')promote();return true;}
+      const idempotent=existing&&existing.root_key===rootKey&&existing.relative_path===relativePath&&existing.sha256===sha256&&existing.manifest_sha256===manifestSha256&&JSON.stringify(existingFiles)===JSON.stringify(expectedFiles);if(existing){if(!idempotent)return false;if(typeof promote==='function')promote();recordUnits(existing.id);return true;}
       if(typeof promote==='function')promote();
-      const assetId=crypto.randomUUID(),t=now();this.database.prepare(`INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at) VALUES (?,?,'ept',?,?,?,?,?,'managed',0,?,?,?,?)`).run(assetId,versionId,rootKey,relativePath,format,contentType,byteSize,attemptId,sha256,manifestSha256,t);const insert=this.database.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)');for(const file of expectedFiles)insert.run(assetId,file.relative_path,file.byte_size,file.sha256);return true;
+      const assetId=crypto.randomUUID(),t=now();this.database.prepare(`INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at) VALUES (?,?,'ept',?,?,?,?,?,'managed',0,?,?,?,?)`).run(assetId,versionId,rootKey,relativePath,format,contentType,byteSize,attemptId,sha256,manifestSha256,t);const insert=this.database.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)');for(const file of expectedFiles)insert.run(assetId,file.relative_path,file.byte_size,file.sha256);recordUnits(assetId);return true;
     });
   }
   registerVerifiedLodAsset(id,owner,{versionId,rootKey,relativePath,format='3dtiles',contentType='application/json',byteSize,attemptId,sha256,manifestSha256,manifestFiles=[]},provenance,{leaseToken=null,promote=null}={}){
