@@ -93,3 +93,12 @@ showed Modified state; Reset returned both controls to their node defaults and
 disabled their reset buttons. Search reduced the visible options to the matching
 feature-quality control. No preset was saved and no task was submitted in that
 pass. This adds rendered editor evidence, not real-node schema compatibility.
+
+Follow-up 320px synthetic QA exercised the public-link revoke confirmation and
+confirmed project sharing exposes authenticated client access only. The client
+grant form had the same intrinsic input-width overflow as public sharing; the
+scoped width constraint now covers both forms. A rebuilt screenshot confirms the
+project selector, expiry and grant button fit within the card. No real link was
+revoked and no client grant was created. Focused sharing/preset tests: 48 passed,
+zero skipped; production build passed. Live node inspection remains blocked by
+the unauthenticated Viewer shell; the previous cluster address must not be used.

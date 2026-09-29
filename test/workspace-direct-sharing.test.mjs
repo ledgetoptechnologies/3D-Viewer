@@ -4,6 +4,11 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
+test('public and authenticated client sharing forms constrain intrinsic input widths',()=>{
+  const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
+  assert.match(css,/\.share-form,#client-grant-form\{min-width:0;grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(css,/#client-grant-form label,#client-grant-form input,#client-grant-form select\{min-width:0\}/);
+});
 test('conditional sharing fields stay hidden despite managed-form layout rules',()=>{
   const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
   assert.match(css,/\.manage-form\s+\[hidden\]\s*\{\s*display:\s*none\s*!important\s*;?\s*\}/);
