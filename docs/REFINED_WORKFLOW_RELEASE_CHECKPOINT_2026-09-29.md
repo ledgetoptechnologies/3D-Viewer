@@ -54,3 +54,17 @@ because the local test suite is green. No live client data or jobs were changed.
 Draft PR: https://github.com/ledgetoptechnologies/3D-Viewer/pull/4.
 The PR runs the candidate image checks without merging, publishing release tags,
 or deploying. Its checks must be inspected separately from these local results.
+
+## PR candidate CI result
+
+[Run 36629496980](https://github.com/ledgetoptechnologies/3D-Viewer/actions/runs/36629496980)
+completed successfully for source checkpoint `6646032` on September 29:
+
+- Full check suite: 2,032 tests; 2,017 passed, 15 skipped, zero failures.
+- Logs confirm execution of 390px and 320px workspace/project browser cases.
+  This is not complete visual acceptance of the new task-link editor and preset
+  layout; existing assertions do not cover every new control at those widths.
+- Candidate image built and exact-image runtime verification passed: 138 tests,
+  138 passed, zero skipped. Schema 38 and source identity checks passed.
+- Release-tag promotion and release-attestation publication were skipped as
+  intended for a pull request. No production deployment is established.
