@@ -137,5 +137,19 @@ responses. In-memory execution of the corrected identity module against the
 actual binary succeeded; executable SHA-256 was
 `f19d354ded7796a577d68963ab60718a9aa920b0ef8b19ee4fd047b78a21417c`.
 The focused Linux identity/receipt/recovery tests passed: 31 tests, zero skipped.
-No real conversion was performed; this verifies runtime identity compatibility,
-not conversion coordinates or the Viewer host's installed converter.
+Subsequent real-binary QA converted the repository's 64-point synthetic LAZ with
+the fixed `build -i INPUT -o OUTPUT` command. PDAL 2.4.3 read all input and output
+points independently; sorted XYZ tuples were exactly equal, with all 64 points
+retained. The measured build took 1,042 ms. Unique temporary test directories were
+removed. This verifies that worker's conversion command on this synthetic source;
+it does not verify the Viewer host's converter, historical provenance, CRS/unit
+metadata propagation or performance on a client model.
+
+Cross-repository renewal inspection at Operations `68ca140` identified required
+session correlation absent from the Viewer transport. Viewer now sends and
+validates the exact echoed session ID with the existing request ID and subject
+checks. Forty-one focused renewal/recovery/upload-continuity tests and the
+production build passed. The Operations handoff documents the existing Viewer
+caller and its current strict request/response contract. Operations still gates
+its endpoint to staging; production rollout and live browser acceptance remain
+external release gates.

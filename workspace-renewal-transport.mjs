@@ -20,15 +20,16 @@ async function readJson(response,url,signal){
 }
 
 // Only the server-issued controller origin and the current Viewer origin are
-// accepted. No bearer, target URL, permissions, session ID, or expiry is sent.
-export async function requestWorkspaceRenewalGrant({controllerOrigin,viewerOrigin,subject,requestId,signal,fetchImpl=fetch,now=()=>Date.now()}){
-  if(signal?.aborted||!exactRenewalOrigin(controllerOrigin)||!exactRenewalOrigin(viewerOrigin)||!UUID.test(requestId)||typeof subject!=='string'||!/^ops:[A-Za-z0-9._:@-]{1,196}$/.test(subject))throw failure();
+// accepted. The session ID is a correlation hint, never authentication.
+// No bearer, target URL, permissions, or expiry is sent to Operations.
+export async function requestWorkspaceRenewalGrant({controllerOrigin,viewerOrigin,subject,sessionId,requestId,signal,fetchImpl=fetch,now=()=>Date.now()}){
+  if(signal?.aborted||!exactRenewalOrigin(controllerOrigin)||!exactRenewalOrigin(viewerOrigin)||!UUID.test(requestId)||typeof sessionId!=='string'||!/^[A-Za-z0-9_-]{16,128}$/.test(sessionId)||typeof subject!=='string'||!/^ops:[A-Za-z0-9._:@-]{1,196}$/.test(subject))throw failure();
   const endpoint=controllerOrigin+PATH,challengeUrl=endpoint+'/challenge';
   const common={mode:'cors',credentials:'include',redirect:'error',cache:'no-store',referrerPolicy:'no-referrer',signal};
   const challenge=await readJson(await fetchImpl(challengeUrl,{...common,method:'GET'}),challengeUrl,signal);
   if(!keys(challenge,['protocolVersion','challenge','expiresAt'])||challenge.protocolVersion!==1||!TOKEN.test(challenge.challenge)||!Number.isSafeInteger(challenge.expiresAt)||challenge.expiresAt*1000<=now())throw failure();
   if(signal?.aborted)throw failure();
-  const grant=await readJson(await fetchImpl(endpoint,{...common,method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':challenge.challenge,'Idempotency-Key':requestId},body:JSON.stringify({protocolVersion:1,requestId,subject})}),endpoint,signal);
-  if(!keys(grant,['protocolVersion','requestId','grant','grantExpiresAt','sessionTtlSeconds','redeemUrl'])||grant.protocolVersion!==1||grant.requestId!==requestId||!TOKEN.test(grant.grant)||!Number.isSafeInteger(grant.sessionTtlSeconds)||grant.sessionTtlSeconds<=0||!Number.isFinite(Date.parse(grant.grantExpiresAt))||Date.parse(grant.grantExpiresAt)<=now()||grant.redeemUrl!==viewerOrigin+'/api/v1/admin-sessions/redeem')throw failure();
+  const grant=await readJson(await fetchImpl(endpoint,{...common,method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':challenge.challenge,'Idempotency-Key':requestId},body:JSON.stringify({protocolVersion:1,requestId,sessionId,subject})}),endpoint,signal);
+  if(!keys(grant,['protocolVersion','requestId','sessionId','grant','grantExpiresAt','sessionTtlSeconds','redeemUrl'])||grant.protocolVersion!==1||grant.requestId!==requestId||grant.sessionId!==sessionId||!TOKEN.test(grant.grant)||!Number.isSafeInteger(grant.sessionTtlSeconds)||grant.sessionTtlSeconds<=0||!Number.isFinite(Date.parse(grant.grantExpiresAt))||Date.parse(grant.grantExpiresAt)<=now()||grant.redeemUrl!==viewerOrigin+'/api/v1/admin-sessions/redeem')throw failure();
   return grant.grant;
 }

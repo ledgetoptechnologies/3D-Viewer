@@ -1,5 +1,47 @@
 # Operations / Viewer silent renewal handoff — September 29, 2026
 
+## Current integration checkpoint (supersedes the initial investigation below)
+
+Operations draft PR #138, inspected at `68ca140`, implements the credentialed
+challenge/grant transport. Viewer already has its caller in
+`workspace-renewal-transport.mjs`, invoked by
+`WorkspaceSessionRenewal.requestBackground` in `workspace-renewal.mjs`. Opening
+the workspace wires that coordinator from `workspace-projects.js`. Please do not
+treat the Viewer caller as missing solely because it lives in a separate repo.
+
+Cross-repository inspection found a contract drift: Operations now requires and
+echoes `sessionId`; Viewer previously omitted it and required a response without
+that field. Viewer now sends its current session ID and checks the exact echoed
+value before accepting a grant. It remains only a correlation hint. The Viewer
+bearer is sent solely to Viewer's redemption endpoint, never to Operations.
+
+The agreed browser contract is:
+
+- Credentialed, no-store `GET /api/viewer/workspace/session-renewal/challenge`
+  returns exactly `{protocolVersion:1, challenge, expiresAt}`.
+- Credentialed `POST /api/viewer/workspace/session-renewal` sends exactly
+  `{protocolVersion:1, requestId, sessionId, subject}` with `X-CSRF-Token` from
+  the challenge and `Idempotency-Key` equal to `requestId`.
+- Successful JSON response contains exactly `protocolVersion`, `requestId`,
+  `sessionId`, `grant`, `grantExpiresAt`, `sessionTtlSeconds`, and `redeemUrl`.
+  Viewer checks correlation and its exact redemption origin/path.
+- Operations authenticates current Access identity and staff binding and
+  computes permissions/authorization lifetime on every issuance. Viewer redeems
+  into its existing session and verifies the unchanged subject, ID and bearer.
+
+Operations currently gates this handler to `ENVIRONMENT === staging`, as well
+as `VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED === true` and processing integration.
+Staging must configure the Viewer service/origin and allow the credentialed
+challenge/preflight/POST through Access. Live production renewal cannot work
+through this endpoint until Operations performs its controlled production rollout.
+That change belongs to the Operations agent; no Operations files were changed by
+the Viewer agent. Keep the strict auth/CSRF/origin checks for every environment.
+
+Live acceptance remains outstanding: staged API availability, exact request and
+response contract, no-opener renewal after real expiry while retaining selected
+photos/draft/camera/edit state, and genuinely signed-out recovery. Historical
+green checks in either repo are not proof of this browser path.
+
 ## Scope and confirmed gap
 
 Implement background renewal for a valid Operations login without navigating or rebuilding the working Viewer tab. Preserve selected File objects, upload state, task drafts, camera/view, and measurement edits. This does not authorize extending an expired/revoked Operations login or modifying unrelated Operations behavior.

@@ -198,7 +198,7 @@ export class WorkspaceSessionRenewal {
       attempt.abortController.abort();this.transportAttempt=null;this.finishRequest(requestId);this.scheduleRetry();
     },RESPONSE_TIMEOUT_MS);
     try{
-      const grant=await requestWorkspaceRenewalGrant({controllerOrigin:this.controllerOrigin,viewerOrigin:this.viewerOrigin,subject:this.session.subject,requestId,signal:attempt.abortController.signal,fetchImpl:this.fetchImpl,now:this.now});
+      const grant=await requestWorkspaceRenewalGrant({controllerOrigin:this.controllerOrigin,viewerOrigin:this.viewerOrigin,subject:this.session.subject,sessionId:this.session.id,requestId,signal:attempt.abortController.signal,fetchImpl:this.fetchImpl,now:this.now});
       if(this.disposed||this.transportAttempt!==attempt||this.pendingRequestId!==requestId)return;
       this.transportAttempt=null;
       await this.redeemGrant(grant,requestId,'cors');
