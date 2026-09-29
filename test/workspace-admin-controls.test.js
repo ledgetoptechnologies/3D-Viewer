@@ -19,7 +19,15 @@ test('staff output actions exchange the admin bearer for streamed narrow downloa
   assert.match(source,/\/processing\/outputs\/\$\{encodeURIComponent\(id\)\}\/view-sessions/);
   assert.match(source,/import \{ beginIsolatedViewerLaunch \} from '\.\/isolated-viewer-launch\.mjs'/);
   assert.match(launcher,/windowRef\.open\(launcherUrl, windowName, 'noopener'\)/);
-  assert.doesNotMatch(source,/window\.open\('about:blank'/);
+  const publishedLaunch=source.split(/\r?\n/).find(line=>line.startsWith('async function viewPublishedOutput('));
+  assert.match(publishedLaunch,/await readyViewerLauncher\(\)/);
+  assert.match(source,/async function readyViewerLauncher\(\)\{const launch=beginIsolatedViewerLaunch\(\)/);
+  assert.doesNotMatch(publishedLaunch,/window\.open\('about:blank'/);
+  // Public-link Open reserves a window during the user gesture, then severs its
+  // opener before the authenticated URL lookup. Staff launches remain isolated.
+  const publicLinkOpen=source.slice(source.indexOf('async function retrieveShareLink('),source.indexOf('async function confirmSharedVersionUpdate('));
+  assert.match(publicLinkOpen,/if\(popup\)popup\.opener=null/);
+  assert.match(publicLinkOpen,/url\.origin!==location\.origin/);
   assert.match(source,/reviewSessionController\.track\(launch\.channelId,\{attemptId:result\.attemptId,modelId:result\.modelId,modelVersionId:result\.modelVersionId,sessionTtlSeconds:result\.sessionTtlSeconds\}\)/);
   assert.match(source,/sessionMode:'published',outputId:id,modelId:result\.modelId,modelVersionId:result\.modelVersionId/);
   assert.doesNotMatch(source,/launch\.navigate\(result\.embedUrl,\{renewable:false\}\)/);
@@ -43,12 +51,15 @@ test('task expansion loads bounded immutable attempt history',()=>{
 });
 
 test('node administration supports metadata credential and capability-bound preset maintenance',()=>{
-  for(const action of ['edit-provider','replace-provider-token','clear-provider-token','new-preset','edit-preset','delete-preset'])assert.ok(source.includes(action),action);
+  for(const action of ['edit-provider','replace-provider-token','clear-provider-token','new-preset','view-preset','duplicate-preset','import-preset','edit-preset','delete-preset'])assert.ok(source.includes(action),action);
   assert.match(source,/\/processing\/providers\/\$\{encodeURIComponent\(provider\.id\)\}\/credential/);
   assert.match(source,/Changing the endpoint disables the node until its capabilities are probed again/);
-  assert.match(source,/Provider options \(JSON\)/);
-  assert.match(source,/Options are checked against the node's latest detected capabilities/);
-  assert.match(source,/JSON\.parse\(event\.currentTarget\.elements\.options\.value\)/);
+  assert.match(source,/mountTaskOptions\(\{container:form\.querySelector\('#preset-options-editor'\)/);
+  assert.match(source,/refreshProviderCapabilities\(providerId\)/);
+  assert.match(source,/capabilities\/refresh/);
+  assert.match(source,/Unsupported values are rejected by server validation/);
+  assert.match(source,/options=\{\.\.\.baseOptions,\.\.\.editor\.getOptions\(\)\}/);
+  assert.doesNotMatch(source,/Provider options \(JSON\)/);
 });
 
 test('trash lifecycle keeps permanent deletion behind exact typed confirmation',()=>{

@@ -33,7 +33,9 @@ function pageQuery(req) { const raw=String(req.query.limit||'50');if(!/^\d{1,3}$
   function uploadView(processing,upload) { return {id:upload.id,datasetId:upload.datasetId,status:upload.status,chunkSize:upload.chunkSize,expiresAt:upload.expiresAt,files:upload.files.map((file)=>{const chunkCount=Math.ceil(file.byteSize/upload.chunkSize)||1,completedChunks=processing.listChunks(upload.id,file.id).map((c)=>c.chunk_index),done=new Set(completedChunks);return{id:file.id,relativePath:file.relativePath,byteSize:file.byteSize,sha256:file.sha256,processingRole:file.processingRole||'auto',chunkCount,completedChunks,missingChunks:Array.from({length:chunkCount},(_,i)=>i).filter((i)=>!done.has(i))};})}; }
 function publicStorageSpace(value) { return {availableBytes:Number(value.available),totalBytes:Number(value.total),reserveBytes:Number(value.reserve),requiredBytes:Number(value.required),sufficient:Boolean(value.ok)}; }
 function publicImportPreview(preview) { return {...preview,destinationSpace:publicStorageSpace(preview.destinationSpace)}; }
-function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:share.permissions,hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
+const shareVault=require('./shareTokenVault');
+const {VIEW_KINDS}=require('./publicSharePolicy');
+function adminShareView(share){return{id:share.id,modelId:share.modelId,label:share.label,permissions:share.permissions,allowedViews:share.allowedViews,linkRecoverable:Boolean(share.tokenCiphertext),hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function adminProjectShareView(share){return{id:share.id,projectId:share.projectId,label:share.label,permissions:share.permissions,hasPassword:share.hasPassword,expiresAt:share.expiresAt,displayUnits:share.displayUnits,versionPolicy:share.versionPolicy,createdAt:share.createdAt,revokedAt:share.revokedAt,accessCount:share.accessCount,lastAccessedAt:share.lastAccessedAt};}
 function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:config.opsBaseUrl};}
 function onlyKeys(value,allowed){return value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every((key)=>allowed.includes(key));}
@@ -60,6 +62,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   function authorizeAny(permissions) { return (req,res,next)=>{const principal=admin(req);if(!principal)return error(res,401,'authentication_required','authentication required');if(!permissions.some((permission)=>principal.permissions.includes(permission)))return error(res,403,'permission_denied','permission denied');req.actorId=principal.subject;next();}; }
   function authorizeOperationRetry(req,res,next){const principal=admin(req);if(!principal)return error(res,401,'authentication_required','authentication required');const operation=processing.getDatasetOperation(req.params.id,principal.subject),permission=operation?.type==='lod_recovery'?'viewer.processing.write':'viewer.datasets.import';if(!principal.permissions.includes(permission))return error(res,403,'permission_denied','permission denied');req.actorId=principal.subject;next();}
   createClientGrantProxy({ config, authorize, fetchImpl: clientGrantFetch || fetch }).mount(router);
+  router.post('/api/v1/projects/:id/public-shares',authorize('viewer.shares.create'),(_req,res)=>error(res,410,'project_public_sharing_disabled','Public links are task-only. Share projects with Operations clients.'));
   function shareReceiptDefinition(req) {
     if (req.method !== 'POST') return null;
     if (/^\/api\/v1\/projects\/[^/]+\/public-shares$/.test(req.path)) return { scope: 'project-public-share', segment: 'project' };
@@ -194,7 +197,6 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/projects',authorize('viewer.projects.write'),mutate,(req,res)=>{const b=req.body||{};if(!b.displayName)return error(res,400,'display_name_required');if(b.defaultUnits&&!validUnits(b.defaultUnits))return error(res,400,'invalid_units');const project=processing.auditedMutation({actorId:req.actorId,action:'project.created',entityType:'project'},()=>processing.createProject({...b,createdBy:req.actorId,defaultUnits:b.defaultUnits||config.defaultUnits}));res.status(201).json({project});});
   router.get('/api/v1/projects/:id',authorize('viewer.projects.read'),(req,res)=>{const p=processing.getProject(req.params.id);return p?res.json({project:p}):error(res,404,'project_not_found');});
   router.get('/api/v1/projects/:id/public-shares',authorizeAny(['viewer.shares.read','viewer.shares.revoke']),(req,res)=>{const project=processing.getProject(req.params.id);if(!project)return error(res,404,'project_not_found');return res.json({shares:repository.listProjectShares(project.id).map(adminProjectShareView)});});
-  router.post('/api/v1/projects/:id/public-shares',authorize('viewer.shares.create'),mutate,async(req,res,next)=>{try{const project=processing.getProject(req.params.id),b=req.body||{};if(!project||project.status!=='active')return error(res,404,'active_project_not_found');if(!processing.listActivePublishedProjectTasksPage(project.id,{limit:1}).items.length)return error(res,409,'no_published_tasks');if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits']))return error(res,400,'invalid_share');if(b.password!==undefined&&b.password!==''&&String(b.password).length<8)return error(res,400,'password_too_short');const expiry=b.expiresAt?Date.parse(b.expiresAt):null;if(b.expiresAt&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');const expiresAt=expiry?new Date(expiry).toISOString():null;if(b.displayUnits!==undefined&&!validUnits(b.displayUnits))return error(res,400,'invalid_units');const allowed=['view','measure','cameras','download'],permissions=b.permissions||{view:true,measure:true,cameras:true,download:false};if(!onlyKeys(permissions,allowed)||permissions.view!==true||Object.values(permissions).some((value)=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');const token=shareTokenFromReceipt({scope:'project-public-share'},req.adminIdempotency),tokenHash=auth.hashToken(token),passwordHash=b.password?await auth.hashPassword(String(b.password)):null,share=repository.transaction(()=>{const created=repository.createProjectShare({projectId:project.id,publicIdHash:tokenHash,passwordHash,permissions,label:b.label?String(b.label).slice(0,120):null,createdBy:req.actorId,expiresAt,displayUnits:b.displayUnits||req.adminPrincipal.displayUnits||project.defaultUnits});repository.audit({actorType:'admin',actorId:req.actorId,action:'project_share.created',entityType:'project_share',entityId:created.id,details:{projectId:project.id}});return created;});const base=config.publicBaseUrl||`${req.protocol}://${req.get('host')}`;return res.status(201).json({share:adminProjectShareView(share),viewUrl:`${base}/project/${token}`});}catch(e){next(e);}});
   router.delete('/api/v1/project-shares/:id',authorize('viewer.shares.revoke'),mutate,(req,res)=>{const share=repository.getProjectShare(req.params.id);if(!share)return error(res,404,'project_share_not_found');const revoked=repository.transaction(()=>{const updated=repository.revokeProjectShare(share.id,{actorId:req.actorId,reason:'revoked from Viewer workspace'});repository.audit({actorType:'admin',actorId:req.actorId,action:'project_share.revoked',entityType:'project_share',entityId:share.id,details:{projectId:share.projectId}});return updated;});return res.json({share:adminProjectShareView(revoked)});});
   router.patch('/api/v1/projects/:id',authorize('viewer.projects.write'),mutate,(req,res)=>{if(!onlyKeys(req.body,['displayName','description','tags','metadata','defaultUnits']))return error(res,400,'invalid_patch_fields');if(req.body?.defaultUnits&&!validUnits(req.body.defaultUnits))return error(res,400,'invalid_units');try{const p=processing.auditedMutation({actorId:req.actorId,action:'project.updated',entityType:'project',entityId:req.params.id},()=>processing.updateProject(req.params.id,req.body||{}));return p?res.json({project:p}):error(res,404,'project_not_found');}catch(e){return error(res,e.code?.includes('conflict')?409:400,e.code||'invalid_project');}});
   router.post('/api/v1/projects/:id/archive',authorize('viewer.projects.write'),mutate,(req,res)=>{const p=processing.auditedMutation({actorId:req.actorId,action:'project.archived',entityType:'project',entityId:req.params.id},()=>processing.archiveProject(req.params.id));return p?res.json({project:p}):error(res,409,'project_not_archivable');});
@@ -234,6 +236,32 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.patch('/api/v1/processing/providers/:id',authorize('viewer.providers.write'),mutate,(req,res)=>{const current=processing.getProvider(req.params.id);if(!current)return error(res,404,'provider_not_found');if(!onlyKeys(req.body,['displayName','endpoint','enabled','admissionLimit']))return error(res,400,'invalid_patch_fields');if(req.body.enabled!==undefined&&typeof req.body.enabled!=='boolean')return error(res,400,'invalid_provider_enabled');const b={...current,...req.body},admitted=providerAdmission(b.endpoint);if(!admitted.ok)return error(res,400,admitted.code);b.endpoint=admitted.origin;if(typeof b.displayName!=='string'||!b.displayName.trim())return error(res,400,'display_name_required');if(!Number.isSafeInteger(b.admissionLimit)||b.admissionLimit<1||b.admissionLimit>100)return error(res,400,'invalid_admission_limit');const endpointChanged=b.endpoint!==current.endpoint;if(endpointChanged&&current.activeAttempts>0)return error(res,409,'provider_in_use');if(endpointChanged)b.enabled=false;if(b.enabled===true){try{providerCredentials.resolve(current.id);}catch(e){return providerCredentials.configured(current.id)?providerCredentialFailure(res,e):error(res,409,'provider_credential_required');}if(!processing.providerProbeCurrent(current.id))return error(res,409,'provider_probe_required');}try{const provider=processing.updateProviderMetadata(current.id,b,{actorId:req.actorId,action:'provider.updated',entityType:'processing_provider',details:{endpointChanged,enabled:b.enabled}});return res.json({provider:providerView(provider)});}catch(e){if(['provider_in_use','provider_credential_required','provider_probe_required'].includes(e.code))return error(res,409,e.code);throw e;}});
   router.put('/api/v1/processing/providers/:id/credential',authorize('viewer.providers.write'),mutate,(req,res)=>{const current=processing.getProvider(req.params.id);if(!current)return error(res,404,'provider_not_found');if(!onlyKeys(req.body,['token'])||!Object.hasOwn(req.body,'token'))return error(res,400,'invalid_provider_credential');try{const sealed=providerCredentials.seal(current.id,req.body.token),provider=processing.setProviderCredential(current.id,sealed,{actorId:req.actorId,action:current.credential.configured?'provider.credential_rotated':'provider.credential_configured',entityType:'processing_provider'});return res.json({provider:providerView(provider)});}catch(e){return providerCredentialFailure(res,e);}});
   router.delete('/api/v1/processing/providers/:id/credential',authorize('viewer.providers.write'),mutate,(req,res)=>{const current=processing.getProvider(req.params.id);if(!current)return error(res,404,'provider_not_found');try{const provider=processing.clearProviderCredential(current.id,{actorId:req.actorId,action:'provider.credential_cleared',entityType:'processing_provider'});return res.json({provider:providerView(provider)});}catch(e){return providerCredentialFailure(res,e);}});
+  const capabilityRefreshes=new Map();
+  router.post('/api/v1/processing/providers/:id/capabilities/refresh',authorize('viewer.providers.read'),async(req,res)=>{
+    // Read-only callers may refresh observations, never change endpoints,
+    // credentials, admission limits, enabled state, or processing jobs.
+    if(!onlyKeys(req.body||{},[]))return error(res,400,'invalid_request');
+    if(repository.rateLimited(`capability-refresh:${req.actorId}`,30,60_000))return error(res,429,'rate_limited');
+    const p=processing.getProvider(req.params.id);if(!p)return error(res,404,'provider_not_found');
+    try{
+      let pending=capabilityRefreshes.get(p.id);
+      if(!pending){
+        if(repository.rateLimited(`capability-refresh-provider:${p.id}`,30,60_000))return error(res,429,'rate_limited');
+        pending=(async()=>{const credential=providerCredentials.resolveWithRevision(p.id);
+          const result=await new NodeOdmProvider({endpoint:p.endpoint,token:credential.token,providerType:p.type,...(providerFetch?{fetchImpl:providerFetch}:{})}).capabilities();
+          const updated=processing.updateProviderCapabilities(p.id,{...result,health:'healthy',expectedCredentialRevision:credential.revision,expectedEndpoint:p.endpoint});
+          if(!updated)throw Object.assign(new Error('provider_probe_stale'),{code:'provider_probe_stale'});
+          return result;
+        })();
+        capabilityRefreshes.set(p.id,pending);
+        pending.finally(()=>{if(capabilityRefreshes.get(p.id)===pending)capabilityRefreshes.delete(p.id);}).catch(()=>{});
+      }
+      const result=await pending,principal=admin(req);
+      if(!principal)return error(res,401,'authentication_required');
+      if(!principal.permissions.includes('viewer.providers.read'))return error(res,403,'permission_denied');
+      res.set('Cache-Control','no-store');return res.json(result);
+    }catch(e){if(e.code==='provider_probe_stale')return error(res,409,e.code);return providerProbeFailure(res,e);}
+  });
   router.get('/api/v1/processing/providers/:id/capabilities',authorize('viewer.providers.read'),(req,res)=>{const p=processing.getProvider(req.params.id);return p?res.json({capabilities:p.capabilities,fingerprint:p.capabilityFingerprint,lastHealth:p.lastHealth,lastHealthAt:p.lastHealthAt,runtimeHealth:p.runtimeHealth,runtimeHealthAt:p.runtimeHealthAt,runtimeHealthError:p.runtimeHealthError}):error(res,404,'provider_not_found');});
   router.post('/api/v1/processing/providers/:id/capabilities/probe',authorize('viewer.providers.write'),mutate,async(req,res)=>{try{const p=processing.getProvider(req.params.id);if(!p)return error(res,404,'provider_not_found');const credential=providerCredentials.resolveWithRevision(p.id),result=await new NodeOdmProvider({endpoint:p.endpoint,token:credential.token,providerType:p.type,...(providerFetch?{fetchImpl:providerFetch}:{})}).capabilities(),updated=processing.updateProviderCapabilities(p.id,{...result,health:'healthy',expectedCredentialRevision:credential.revision,expectedEndpoint:p.endpoint},{auditActorId:req.actorId});if(!updated)return error(res,409,'provider_probe_stale');res.json(result);}catch(e){return providerProbeFailure(res,e);}});
   router.get('/api/v1/processing/presets',authorize('viewer.processing.read'),(_q,res)=>res.json({presets:processing.listPresets()}));
@@ -330,7 +358,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     if (!active && !ready) return null;
     const version = repository.getModelVersion(output.modelId, output.id)?.activeVersion;
     const assets = version ? viewerEligibleAssets(version.metadata, version.assets)
-      .filter(asset => publicDerivativeKind(asset.kind)) : [];
+      .filter(asset => publicDerivativeKind(asset.kind) && (!active || asset.published)) : [];
     const model = repository.getModel(output.modelId);
     const existingAccessUpdateRequired = !active && (
       Boolean(model?.activeVersionId && model.activeVersionId !== output.id)
@@ -351,7 +379,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/processing/outputs/:id/shares',authorize('viewer.shares.create'),mutate,async(req,res,next)=>{
     try {
       const b=req.body||{};
-      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate']))
+      if(!onlyKeys(b,['label','password','expiresAt','permissions','displayUnits','publishIfReady','selectedAssetKinds','allowExistingAccessUpdate','allowedViews']))
         return error(res,400,'invalid_share');
       for(const flag of ['publishIfReady','allowExistingAccessUpdate'])
         if(b[flag]!==undefined&&typeof b[flag]!=='boolean')return error(res,400,'invalid_share');
@@ -367,6 +395,9 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         ||Object.values(permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');
       const initial=outputShareState(processing.getModelOutput(req.params.id));
       if(!initial)return error(res,404,'published_output_not_found');
+      const availableViews=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>(b.selectedAssetKinds||initial.eligibleAssetKinds).includes(kind)));
+      const allowedViews=b.allowedViews===undefined?availableViews:b.allowedViews;
+      if(!Array.isArray(allowedViews)||!allowedViews.length||allowedViews.some(view=>!availableViews.includes(view)))return error(res,400,'invalid_allowed_views');
       const reject=(status,code)=>{throw Object.assign(new Error(code),{shareStatus:status,code});};
       const checkConsent=(state)=>{
         if(!state.publicationRequired)return;
@@ -402,11 +433,12 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
           if(!processing.publishAttemptInTransaction(output.attemptId,selected,{actorId:req.actorId}))
             reject(409,'asset_integrity_not_ready');
         }
-        const share=repository.createPublicShare({
+        let share=repository.createPublicShare({
           modelId:output.modelId,versionPolicy:'latest',modelVersionId:null,publicIdHash:tokenHash,
           passwordHash,permissions,label:b.label?String(b.label).slice(0,120):null,createdBy:req.actorId,
           expiresAt,displayUnits:b.displayUnits||req.adminPrincipal.displayUnits,shareClass:'staff',sourceAuthorization:null,
         });
+        share=repository.updatePublicShare(share.id,{tokenCiphertext:shareVault.seal(token,tokenHash),allowedViews:[...new Set(allowedViews)]});
         repository.audit({actorType:'admin',actorId:req.actorId,action:'share.created',entityType:'share',
           entityId:share.id,details:{modelId:output.modelId,...(state.publicationRequired?{
             modelVersionId:output.id,publishedForSharing:true,existingAccessUpdateAcknowledged:b.allowExistingAccessUpdate===true,
@@ -425,6 +457,41 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(e.code==='publish_conflict')return error(res,409,'publish_conflict');
       return next(e);
     }
+  });
+  router.get('/api/v1/processing/shares/:id/link',authorize('viewer.shares.read'),(req,res)=>{
+    const share=repository.getPublicShare(req.params.id);
+    if(!share||share.shareClass!=='staff')return error(res,404,'share_not_found');
+    if(!repository.publicShareLive(share))return error(res,410,'share_expired_or_revoked');
+    let token=share.tokenCiphertext?shareVault.open(share.tokenCiphertext,share.publicIdHash):null;
+    if(!token&&!share.tokenCiphertext){
+      const receipts=processing.database.prepare(`SELECT * FROM admin_idempotency WHERE method='POST' AND response_status=201 AND json_valid(response_json) AND json_extract(response_json,'$.share.id')=?`).all(share.id);
+      for(const receipt of receipts){if(!/^\/api\/v1\/processing\/outputs\/[^/]+\/shares$/.test(receipt.path))continue;const candidate=shareTokenFromReceipt({scope:'model-public-share'},receipt);if(auth.hashToken(candidate)===share.publicIdHash){token=candidate;break;}}
+    }
+    if(!token)return error(res,409,'share_link_unavailable','The original link cannot be recovered; it has not been changed.');
+    // Preserve verified receipt recovery beyond the original admin session's lifetime.
+    if(!share.tokenCiphertext)repository.updatePublicShare(share.id,{tokenCiphertext:shareVault.seal(token,share.publicIdHash)});
+    repository.audit({actorType:'admin',actorId:req.actorId,action:'share.link_retrieved',entityType:'share',entityId:share.id});
+    return res.json({viewUrl:`${config.publicBaseUrl||`${req.protocol}://${req.get('host')}`}/view/${token}`});
+  });
+  router.patch('/api/v1/processing/shares/:id',authorize('viewer.shares.read'),authorize('viewer.shares.create'),mutate,async(req,res,next)=>{
+    try{
+      const b=req.body||{},share=repository.getPublicShare(req.params.id);
+      if(!share||share.shareClass!=='staff')return error(res,404,'share_not_found');
+      if(share.revokedAt)return error(res,409,'share_revoked');
+      if(!onlyKeys(b,['label','password','expiresAt','permissions','allowedViews','displayUnits'])||!Object.keys(b).length)return error(res,400,'invalid_share');
+      const patch={};
+      if(b.label!==undefined){if(b.label!==null&&(typeof b.label!=='string'||b.label.length>120))return error(res,400,'invalid_label');patch.label=b.label||null;}
+      if(b.password!==undefined){if(b.password!==null&&(typeof b.password!=='string'||(b.password!==''&&b.password.length<8)||b.password.length>1024))return error(res,400,'invalid_password');patch.passwordHash=b.password?await auth.hashPassword(b.password):null;}
+      if(b.expiresAt!==undefined){const expiry=b.expiresAt===null?null:Date.parse(b.expiresAt);if(b.expiresAt!==null&&(!Number.isFinite(expiry)||expiry<=Date.now()))return error(res,400,'invalid_expiry');patch.expiresAt=expiry?new Date(expiry).toISOString():null;}
+      if(b.permissions!==undefined){if(!onlyKeys(b.permissions,['view','measure','cameras','download'])||b.permissions.view!==true||Object.values(b.permissions).some(value=>typeof value!=='boolean'))return error(res,400,'invalid_permissions');patch.permissions=b.permissions;}
+      if(b.allowedViews!==undefined){const model=repository.getModel(share.modelId),available=Object.keys(VIEW_KINDS).filter(view=>VIEW_KINDS[view].some(kind=>model?.activeVersion?.assets.some(asset=>asset.kind===kind&&asset.published)));if(!Array.isArray(b.allowedViews)||!b.allowedViews.length||b.allowedViews.some(view=>!available.includes(view)))return error(res,400,'invalid_allowed_views');patch.allowedViews=[...new Set(b.allowedViews)];}
+      if(b.displayUnits!==undefined){if(!validUnits(b.displayUnits))return error(res,400,'invalid_units');patch.displayUnits=b.displayUnits;}
+      // Password hashing yields; recheck the administrative session before committing.
+      if(!admin(req))return error(res,401,'authentication_required');
+      if(!['viewer.shares.read','viewer.shares.create'].every(p=>req.adminPrincipal.permissions.includes(p)))return error(res,403,'permission_denied');
+      const updated=repository.transaction(()=>{const result=repository.updatePublicShare(share.id,{...patch,invalidateAuthorization:true});if(result)repository.audit({actorType:'admin',actorId:req.actorId,action:'share.updated',entityType:'share',entityId:share.id,details:{fields:Object.keys(patch)}});return result;});
+      return updated?res.json({share:adminShareView(updated)}):error(res,409,'share_changed');
+    }catch(e){next(e);}
   });
   router.delete('/api/v1/processing/shares/:id',authorize('viewer.shares.revoke'),mutate,(req,res)=>{const share=repository.getPublicShare(req.params.id);if(!share||share.shareClass!=='staff')return error(res,404,'share_not_found');const revoked=repository.transaction(()=>{const updated=repository.revokePublicShare(share.id,{actorId:req.actorId,reason:'revoked from Viewer workspace'});repository.audit({actorType:'admin',actorId:req.actorId,action:'share.revoked',entityType:'share',entityId:share.id});return updated;});return res.json({share:adminShareView(revoked)});});
   router.get('/api/v1/tasks',authorize('viewer.processing.read'),(req,res)=>{const page=pageQuery(req);if(!page)return error(res,400,'invalid_page');const result=processing.listTasksPage({...page,projectId:req.query.projectId||null});res.json({tasks:result.items.map(task=>({...task,metrics:taskImageInventory(processing.database,task.id,task.latestAttempt?.resultModelVersionId)})),nextCursor:result.nextCursor});});

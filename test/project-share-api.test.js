@@ -102,27 +102,19 @@ test('one project link dynamically exposes only active published derivatives and
   const revokeOnlyHeaders = { authorization: `Bearer ${revokeOnlyToken}`, 'content-type': 'application/json' };
   const createBody = JSON.stringify({ label: 'Client review', password: 'password123', permissions: { view: true, measure: true, cameras: false, download: false } });
 
-  database.exec("CREATE TRIGGER reject_project_share_audit BEFORE INSERT ON audit_events WHEN NEW.action='project_share.created' BEGIN SELECT RAISE(ABORT,'injected project share audit failure'); END");
   let response = await fetch(`${base}/api/v1/projects/${project.id}/public-shares`, { method: 'POST', headers: { ...adminHeaders, 'idempotency-key': 'project-share-audit-failure' }, body: createBody });
-  assert.equal(response.status, 500);
+  assert.equal(response.status, 410);
+  assert.equal((await response.json()).code,'project_public_sharing_disabled');
   assert.equal(database.prepare('SELECT COUNT(*) n FROM public_project_shares').get().n, 0);
-  database.exec('DROP TRIGGER reject_project_share_audit');
-
-  response = await fetch(`${base}/api/v1/projects/${project.id}/public-shares`, { method: 'POST', headers: { ...adminHeaders, 'idempotency-key': 'project-share-create-0001' }, body: createBody });
-  assert.equal(response.status, 201);
-  const created = await response.json();
-  assert.match(created.viewUrl, /\/project\/[A-Za-z0-9_-]+$/);
-  const publicToken = created.viewUrl.split('/').at(-1);
+  // Existing project links retain their behavior; only new creation is disabled.
+  const publicToken=auth.newShareToken().token;
+  const created={share:repository.createProjectShare({projectId:project.id,publicIdHash:auth.hashToken(publicToken),passwordHash:await auth.hashPassword('password123'),permissions:{view:true,measure:true,cameras:false,download:false},label:'Existing client review'})};
   const stored = database.prepare('SELECT public_id_hash,password_hash FROM public_project_shares WHERE id=?').get(created.share.id);
   assert.equal(stored.public_id_hash, auth.hashToken(publicToken));
   assert.equal(JSON.stringify(stored).includes(publicToken), false);
   response = await fetch(`${base}/api/v1/projects/${project.id}/public-shares`, { method: 'POST', headers: { ...adminHeaders, 'idempotency-key': 'project-share-create-0001' }, body: createBody });
-  assert.equal(response.status, 201);
-  assert.equal(response.headers.get('idempotency-replayed'), 'true');
-  assert.deepEqual(await response.json(), created, 'same receipt reconstructs the identical one-time URL');
+  assert.equal(response.status, 410);
   assert.equal(database.prepare('SELECT COUNT(*) n FROM public_project_shares').get().n, 1);
-  const receipt = database.prepare("SELECT response_json FROM admin_idempotency WHERE idempotency_key='project-share-create-0001'").get();
-  assert.equal(receipt.response_json.includes('viewUrl'), false);
   assertRawTokenAbsentFromTables(database, publicToken);
 
   assert.equal((await fetch(`${base}/api/project-share/${publicToken}`)).status, 401);

@@ -6,6 +6,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {calculatePointSurface,preflightPointSurface} from '../server/measurementPointSurface.mjs';
 import {calculatePointSurfaceTransect} from '../server/measurementPointTransect.mjs';
+import sourceUnits from '../server/measurementSourceUnitEvidence.js';
 
 const horizontal='PROJCS["WGS84 UTM16N",GEOGCS["WGS84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",-87],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1],AXIS["Easting",EAST],AXIS["Northing",NORTH]]';
 const compound=(name,factor,id)=>`COMPD_CS["Survey",${horizontal},VERT_CS["Height",VERT_DATUM["Survey datum",2005],UNIT["${name}",${factor},AUTHORITY["EPSG","${id}"]],AXIS["Height",UP]]]`;
@@ -34,6 +35,19 @@ for(const [unit,factor,id] of [['metre',1,9001],['foot',.3048,9002],['US survey 
   assert.ok(section.segments.every(s=>s.status==='sample'&&s.baseStartM===0&&s.baseEndM===0));
   for(const segment of section.segments)near(segment.surfaceM,(segment.cell[0]+1)*factor);
   near(section.segments.reduce((sum,s)=>sum+(s.endM-s.startM)*s.surfaceM,0),3*factor);
+});
+
+test('persisted explicit point units require current matching metadata, with original units retained',async t=>{
+  const bind=(request,verticalUnit,verticalFactor)=>({...request,modelId:'m',sourceVerticalUnit:'m',sourceUnitEvidence:{schemaVersion:1,...sourceUnits.sourceBinding({...request,modelId:'m'}),verticalUnit,verticalFactor,verticalDatum:'unknown',basis:'server-inspected-explicit-metadata'}});
+  for(const [name,verticalUnit,factor,id] of [['metre','m',1,9001],['foot','ft',.3048,9002],['US survey foot','us-ft',1200/3937,9003]]){
+    const f=fixture(t,{wkt:compound(name,factor,id)}),request=bind(f.request,verticalUnit,factor);
+    const result=await calculatePointSurface(f.file,request,{sourceFiles:f.files});
+    near(result.cutM3,10*factor);assert.equal(result.source.verticalUnitEvidence.verticalUnit,verticalUnit);
+    await assert.rejects(preflightPointSurface(f.file,bind(f.request,verticalUnit==='m'?'ft':'m',verticalUnit==='m'?.3048:1)),{code:'measurement_source_vertical_units_conflict'});
+    await assert.rejects(preflightPointSurface(f.file,{...request,source:{...request.source,sha256:'f'.repeat(64)}}),{code:'measurement_source_changed'});
+  }
+  const untagged=fixture(t,{wkt:horizontal});
+  for(const [unit,factor] of [['m',1],['ft',.3048],['us-ft',1200/3937]])await assert.rejects(preflightPointSurface(untagged.file,bind(untagged.request,unit,factor)),{code:'measurement_source_vertical_units_required'});
 });
 
 test('ordinary point requests cannot forge a metre declaration on a horizontal-only source',async t=>{

@@ -10,6 +10,7 @@ const express = require('express');
 const store = require('./store');
 const shareStore = require('./shareStore');
 const auth = require('./auth');
+const {revisionMatches,assetAllowed}=require('./publicSharePolicy');
 const { isAdminRequest } = require('./adminAuth');
 const { SHARE_COOKIE } = require('./shareApi');
 const { VIEWER_COOKIE } = require('./apiV1');
@@ -67,8 +68,10 @@ async function isAuthorizedForProject(req, projectId) {
   if (payload.modelId && canonicalRepository) {
     const requestedModelId = canonicalRepository.resolveModelId(projectId);
     const share = canonicalRepository.getPublicShare(payload.shareId);
+    req.publicShare=share;
     return requestedModelId === payload.modelId
       && canonicalRepository.publicShareLive(share)
+      && revisionMatches(share,payload)
       && await sourceAuthorizationValidator.allows(share)
       && share.modelId === payload.modelId;
   }
@@ -187,11 +190,12 @@ async function pathTokenAuthorization(req, projectId) {
       const model = canonicalRepository.getModel(requestedModelId);
       const allowed = payload.modelId === requestedModelId
         && canonicalRepository.publicShareLive(share)
+        && revisionMatches(share,payload)
         && await sourceAuthorizationValidator.allows(share)
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
-      return allowed ? { model, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
+      return allowed ? { model, share, review: false, cameras: share.permissions?.cameras !== false, download: share.permissions?.download === true } : false;
     }
     const share = shareStore.getById(payload.shareId);
     return shareStore.isLive(share) && share.viewerProjectId === projectId ? { model: null, review: false, cameras: share.permissions?.cameras !== false } : false;
@@ -231,7 +235,7 @@ function xAccelLocation(abs) {
   return null;
 }
 
-async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true } = {}) {
+async function sendAsset(req, res, authorizedModel = null, { review = false, publicOnly = false, cameras = true, share = req.publicShare } = {}) {
   const resolved = authorizedModel
     ? { project: authorizedModel, rootPath: canonicalAssetRoot(authorizedModel, req.params.root) }
     : resolveProject(req.params.id, req.params.root);
@@ -245,6 +249,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
     return res.status(404).json({ error: 'asset not found' });
   }
   if (publishedAsset?.kind === 'shots' && !cameras) return res.status(403).json({ error: 'not authorized' });
+  if (share && (!publishedAsset || !assetAllowed(share,publishedAsset.kind)))return res.status(403).json({error:'not authorized'});
   const abs = safeExistingFile(rootPath, rel);
   if (!abs) return res.status(404).json({ error: 'asset not found' });
   if (project.activeVersion) {
@@ -255,6 +260,7 @@ async function sendAsset(req, res, authorizedModel = null, { review = false, pub
   // Authorization/revocation is evaluated for every request. Prevent an
   // intermediary or browser cache from serving a previously authorized URL
   // after its session/share has expired or been revoked.
+  if(share){const current=canonicalRepository.getPublicShare(share.id);if(!canonicalRepository.publicShareLive(current)||!revisionMatches(current,{shareRevision:share.authorizationRevision})||!assetAllowed(current,publishedAsset?.kind))return res.status(403).json({error:'not authorized'});}
   res.setHeader('Cache-Control', 'private, no-store');
 
   const accelerated = xAccelLocation(abs);
@@ -286,7 +292,7 @@ router.get('/session-assets/:token/:id/:root/*', async (req, res, next) => {
   if(canonicalRepository?.rateLimited(`capability-asset:${auth.hashToken(req.params.token)}:${req.ip}:${req.params.id}`,6000,5*60_000))return res.status(429).json({error:'too many asset requests'});
   const authorization = await pathTokenAuthorization(req, req.params.id);
   if (!authorization) return res.status(403).json({ error: 'not authorized' });
-  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras }).catch(next);
+  return sendAsset(req, res, authorization.model, { review: authorization.review, publicOnly: authorization.publicOnly, cameras: authorization.cameras,share:authorization.share }).catch(next);
 });
 
 router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next) => {
@@ -303,6 +309,7 @@ router.get('/session-camera-photos/:token/:id/:filename', async (req, res, next)
     if (!absolute) return res.status(404).json({ error: 'photo not found' });
     const stat = fs.statSync(absolute);
     if (stat.size !== photo.byteSize || await sha256File(absolute) !== photo.sha256) return res.status(404).json({ error: 'photo not found' });
+    if(authorization.share){const current=await pathTokenAuthorization(req,req.params.id);if(!current?.cameras)return res.status(403).json({error:'not authorized'});}
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', photo.contentType);
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -318,7 +325,7 @@ router.get('/session-products/:token/:id', async (req,res,next) => {
     if(!access?.download)return res.status(403).json({error:'Downloads are not permitted for this model'});
     res.setHeader('Cache-Control','private, no-store');
     const base=`/session-products/${encodeURIComponent(req.params.token)}/${encodeURIComponent(req.params.id)}`;
-    res.json({products:registeredProducts(access.model?.activeVersion?.assets,{review:access.review,cameras:access.cameras,modelReport:true})
+    res.json({products:registeredProducts(access.model?.activeVersion?.assets.filter(asset=>!access.share||assetAllowed(access.share,asset.kind)),{review:access.review,cameras:access.cameras,modelReport:true})
       .map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
   }catch(error){next(error);}
 });
@@ -331,6 +338,7 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
     const access=await pathTokenAuthorization(req,req.params.id);
     if(!access?.download)return res.sendStatus(403);
     const asset=access.model?.activeVersion?.assets.find(candidate=>candidate.kind===req.params.kind);
+    if(access.share&&!assetAllowed(access.share,asset?.kind))return res.sendStatus(403);
     const product=productDescriptor(asset,{review:access.review,cameras:access.cameras,modelReport:true});
     if(!product)return res.sendStatus(404);
     // Retain only a minimal authorization request; never retain Express req
@@ -340,6 +348,7 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
       const current=await pathTokenAuthorization(original,id);
       if(!current?.download||current.model?.activeVersion?.id!==versionId)return null;
       const registered=current.model.activeVersion.assets.find(candidate=>candidate.id===asset.id&&candidate.sha256===asset.sha256);
+      if(current.share&&!assetAllowed(current.share,registered?.kind))return null;
       const descriptor=productDescriptor(registered,{review:current.review,cameras:current.cameras,modelReport:true});
       return descriptor?{model:current.model,asset:registered,product:descriptor}:null;
     });

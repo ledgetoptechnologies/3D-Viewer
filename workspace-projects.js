@@ -8,6 +8,7 @@ import { isRgbNoData, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { createStorageUsagePoll } from './storage-usage-poll.mjs';
 import { createWorkspaceDialogs } from './workspace-dialogs.mjs';
 import { mountNewTask } from './workspace-new-task.mjs';
+import { mountTaskOptions } from './workspace-task-options.mjs';
 import { createWorkspaceRecovery, relayWorkspaceRecoveryGrant } from './workspace-recovery.mjs';
 
 const dialogs=createWorkspaceDialogs();
@@ -58,7 +59,7 @@ function canShareOutput(output) {
     &&['viewer.shares.create','viewer.shares.read','viewer.client_grants.manage'].some(can);
 }
 async function openShareModal(projectId,onlyOutputId=null){
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
@@ -95,42 +96,17 @@ async function openShareModal(projectId,onlyOutputId=null){
   if(!onlyOutputId)injectProjectShareCard(projectId);
 }
 function injectProjectShareCard(projectId){
-  const mayCreate=can('viewer.shares.create'),mayRead=can('viewer.shares.read'),mayRevoke=can('viewer.shares.revoke');
-  if(!mayCreate&&!mayRead&&!mayRevoke)return;
-  const taskIds=new Set(state.tasks.filter(task=>task.projectId===projectId).map(task=>task.id)),published=state.outputs.filter(output=>output.activePublished&&taskIds.has(output.taskId)),shares=state.projectShares[projectId]||[],target=modalContent.querySelector('.share-columns > div:first-child');
-  if(!target)return;
-  const create=mayCreate?(published.length?`<form class="manage-form project-share-form" data-project-id="${esc(projectId)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><label class="check"><input type="checkbox" name="dynamicProjectAccess" required> Include all current and future published tasks in this project</label><button class="primary-button">Create whole-project link</button><p class="form-note">This link always shows the project's current published tasks, including tasks published later.</p></form>`:empty('Activate a verified task through sharing before creating a whole-project link.')):'';
-  const list=mayRead||mayRevoke?`<div class="data-list top-gap">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&mayRevoke?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')||empty('No whole-project public links.')}</div>`:'';
-  target.insertAdjacentHTML('afterbegin',card('Whole-project public link',create+list));
+  const target=modalContent.querySelector('[data-legacy-project-shares]');if(!target)return;
+  const shares=state.projectShares[projectId]||[];
+  target.innerHTML=shares.length?card('Existing public project links',`<p class="form-note">New project access is shared through Operations clients only. Existing public project links remain active until you revoke them.</p><div class="data-list">${shares.map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Whole-project link')}</strong><small>${share.hasPassword?'Password protected':'No password'} · ${share.accessCount||0} views</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-project-share',share.id,'Revoke'):''}</div></div>`).join('')}</div>`):'';
   bindProjectShareCard(projectId);
 }
 function bindProjectShareCard(projectId){
-  const form=modalContent.querySelector('.project-share-form');
-  if(form)form.onsubmit=async event=>{
-    event.preventDefault();if(form.shareBusy)return;form.shareBusy=true;
-    const submit=form.querySelector('button[type="submit"],button:not([type])');if(submit)submit.disabled=true;
-    try{
-      if(!can('viewer.shares.create'))throw new Error('Creating links requires share permission.');
-      if(!form.elements.dynamicProjectAccess.checked)throw new Error('Approve current and future published tasks before creating a whole-project link.');
-      const input=values(form),body={label:input.label,expiresAt:input.expiresAt?new Date(input.expiresAt).toISOString():null,
-        permissions:{view:true,measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}};
-      if(input.password)body.password=input.password;
-      const serialized=JSON.stringify(body);
-      if(form.shareRequest?.serialized!==serialized)form.shareRequest={serialized,key:crypto.randomUUID()};
-      const result=await api(`/api/v1/projects/${encodeURIComponent(projectId)}/public-shares`,{method:'POST',body,
-        headers:{'Idempotency-Key':form.shareRequest.key}});
-      rememberShareResult(result,projectId,null);
-      state.projectShares[projectId]=[result.share,...(state.projectShares[projectId]||[]).filter(share=>share.id!==result.share.id)];
-      delete form.shareRequest;
-      toast('Whole-project link created. Use Copy to share it.');
-      if(modal.open&&form.isConnected){shareModal(projectId);injectProjectShareCard(projectId)}
-    }catch(error){toast(error.message,true)}finally{form.shareBusy=false;if(submit)submit.disabled=false}
-  };
   modalContent.querySelectorAll('[data-action="revoke-project-share"]').forEach(element=>element.onclick=async()=>{
-    if(!can('viewer.shares.revoke')||!await dialogs.confirm('Revoke this whole-project public link?',
-      {title:'Revoke project link',submitLabel:'Revoke link',destructive:true}))return;
-    modal.close();const revoked=await mutate(`/api/v1/project-shares/${encodeURIComponent(element.dataset.id)}`,{method:'DELETE',body:{}},'Whole-project link revoked');
-    if(revoked)clearShareResult(element.dataset.id,'project');
+    if(!can('viewer.shares.revoke')||!await dialogs.confirm('Revoke this whole-project public link?',{title:'Revoke project link',submitLabel:'Revoke link',destructive:true})||!element.isConnected||!modal.open)return;
+    element.disabled=true;
+    try{await api(`/api/v1/project-shares/${encodeURIComponent(element.dataset.id)}`,{method:'DELETE',body:{}});clearShareResult(element.dataset.id,'project');const share=(state.projectShares[projectId]||[]).find(item=>item.id===element.dataset.id);if(share)share.revokedAt=new Date().toISOString();if(element.isConnected&&modal.open)injectProjectShareCard(projectId);toast('Whole-project link revoked')}
+    catch(error){toast(error.message,true);element.disabled=false}
   });
 }
 
@@ -187,9 +163,13 @@ async function workspaceFetch(path,init={}){
   // Renewal retains the bearer but replaces the authenticated session envelope.
   // A response from before that renewal must not revoke the newer authority.
   if(requestToken===state.token&&requestSession===state.adminSession){
-    clearWorkspaceAuthorization();
-    if(!workspaceRecovery.isPaused())return response;
-    await workspaceRecovery.wait(init.signal);
+    await workspaceRenewal?.waitForRenewal({signal:init.signal});
+    if(init.signal?.aborted)throw init.signal.reason||new DOMException('Aborted','AbortError');
+    if(requestToken===state.token&&requestSession===state.adminSession){
+      clearWorkspaceAuthorization();
+      if(!workspaceRecovery.isPaused())return response;
+      await workspaceRecovery.wait(init.signal);
+    }else if(!state.token||!state.adminSession)return response;
   }else if(!state.token||!state.adminSession)return response;
   requestToken=state.token;requestSession=state.adminSession;
   response=await fetch(path,{...init,headers:{...init.headers,Authorization:`Bearer ${requestToken}`}});
@@ -350,22 +330,102 @@ function providerModal(selectedId=state.selectedProviderId,activate=false){
   if(selectedId==='__new__'&&!can('viewer.providers.write'))return;
   const scroll=content.querySelector('.provider-list')?.scrollTop||0;
   state.selectedProviderId=selectedId==='__new__'?'__new__':selectedId||state.providers[0]?.id||null;
+  lastProviderEntry=null;
   // A completed save must not pull the user back after they navigate away.
   if(state.section!=='providers'){if(activate)navigateWorkspace({section:'providers'},'push');return;}else render();
   const list=content.querySelector('.provider-list');if(list)list.scrollTop=scroll;
 }
-function providerDetail(provider){const capabilities=provider.capabilities||{},options=Array.isArray(capabilities.options)?capabilities.options:[],presets=state.presets.filter(preset=>preset.providerType===provider.type&&preset.capabilityFingerprint===provider.capabilityFingerprint);return`<div class="provider-detail"><p class="eyebrow">Detected ${providerName(provider.type)}</p><h3>${esc(provider.displayName)}</h3><dl class="detail-list"><div><dt>Endpoint</dt><dd>${esc(provider.endpoint)}</dd></div><div><dt>API token</dt><dd>${provider.credential?.mode==='none'?'Not required':provider.credential?.configured?'Configured · hidden':'Not configured'}</dd></div><div><dt>Detected engine</dt><dd>${providerName(capabilities.providerType||provider.type)}</dd></div><div><dt>API version</dt><dd>${available(capabilities.apiVersion)}</dd></div><div><dt>Processing engine</dt><dd>${available(capabilities.engine)} · ${available(capabilities.engineVersion)}</dd></div><div><dt>Queue</dt><dd>${capabilities.taskQueueCount??'Unavailable'} queued · ${capabilities.maxParallelTasks===99999999999?'Cluster-managed capacity':`${esc(capabilities.maxParallelTasks??'Unavailable')} upstream slots`}</dd></div><div><dt>Viewer admission</dt><dd>${provider.admissionLimit} concurrent job${provider.admissionLimit===1?'':'s'}</dd></div><div><dt>Runtime health</dt><dd>${badge(provider.runtimeHealth||provider.lastHealth||'not probed')}</dd></div><div><dt>Presets</dt><dd>${presets.length}</dd></div><div><dt>Options</dt><dd>${options.length} detected</dd></div></dl>${presets.length?`<section class="provider-options"><h4>Processing presets</h4><div class="provider-option-list">${presets.map(preset=>`<div class="provider-option"><span><strong>${esc(preset.displayName)}</strong><small>${preset.builtIn?'Built in':preset.enabled?'Enabled':'Disabled'}</small></span><div class="row-actions">${preset.builtIn||!can('viewer.providers.write')?'':`${button('edit-preset',preset.id,'Edit')}${button('delete-preset',preset.id,'Delete')}`}</div></div>`).join('')}</div></section>`:''}${options.length?`<section class="provider-options" aria-label="Detected processing options"><h4>Processing options</h4><div class="provider-option-list">${options.slice(0,100).map(option=>`<div class="provider-option"><span><strong>${esc(option.name)}</strong><small>${esc(option.type||'unknown')}</small></span><code>${esc(optionValue(option.value))}</code></div>`).join('')}</div>${options.length>100?`<p class="form-note">Showing the first 100 of ${options.length} options.</p>`:''}</section>`:''}${can('viewer.providers.write')?`<div class="row-actions">${button('edit-provider',provider.id,'Edit node')}${button('replace-provider-token',provider.id,provider.credential?.configured?'Replace token':'Set token')}${provider.credential?.configured?button('clear-provider-token',provider.id,'Clear token'):''}${button('new-preset',provider.id,'New preset')}${button('probe-provider',provider.id,'Re-probe')}${button('toggle-provider',provider.id,provider.enabled?'Disable':'Enable',!provider.enabled,`data-enabled="${!provider.enabled}"`)}</div>`:''}<p class="form-note">Secrets are write-only and are never returned by the Viewer API. Engine type and capabilities come only from a successful endpoint probe.</p></div>`}
+const providerCapabilityRefreshes=new Map();
+const providerCapabilityStatus=new Map();
+let lastProviderEntry=null;
+function providerCapabilityNotice(provider){const status=providerCapabilityStatus.get(provider.id);return status?.loading?'Refreshing current node capabilities…':status?.error?`Cached capabilities · refresh failed: ${status.error}`:status?.checkedAt?`Capabilities refreshed ${dateTime(status.checkedAt)}`:'Cached capabilities · not refreshed in this visit'}
+async function refreshProviderCapabilities(id){
+  if(!id||id==='__new__'||!can('viewer.providers.read'))return false;
+  if(providerCapabilityRefreshes.has(id))return providerCapabilityRefreshes.get(id);
+  const pending=(async()=>{providerCapabilityStatus.set(id,{loading:true});try{
+    await api(`/api/v1/processing/providers/${encodeURIComponent(id)}/capabilities/refresh`,{method:'POST',body:{}});
+    const [nodes,presets]=await Promise.all([api('/api/v1/processing/providers?limit=100'),can('viewer.processing.read')?api('/api/v1/processing/presets'):Promise.resolve({presets:state.presets})]);
+    state.providers=nodes.providers||state.providers;state.presets=presets.presets||state.presets;
+    providerCapabilityStatus.set(id,{checkedAt:new Date().toISOString()});return true;
+  }catch(error){providerCapabilityStatus.set(id,{error:error.message});return false}
+  finally{providerCapabilityRefreshes.delete(id);if(state.section==='providers')render();}})();
+  providerCapabilityRefreshes.set(id,pending);return pending;
+}
+function refreshOpenedProvider(){
+  if(state.section!=='providers'){lastProviderEntry=null;return}
+  if(state.selectedProviderId===lastProviderEntry)return;
+  lastProviderEntry=state.selectedProviderId;
+  void refreshProviderCapabilities(lastProviderEntry);
+}
+function providerDetail(provider){
+  const capabilities=provider.capabilities||{},presets=state.presets.filter(preset=>preset.providerType===provider.type),write=can('viewer.providers.write');
+  return `<div class="provider-detail"><p class="eyebrow">Detected ${providerName(provider.type)}</p><h3>${esc(provider.displayName)}</h3><p class="form-note" role="status">${esc(providerCapabilityNotice(provider))}</p><dl class="detail-list"><div><dt>Endpoint</dt><dd>${esc(provider.endpoint)}</dd></div><div><dt>API token</dt><dd>${provider.credential?.mode==='none'?'Not required':provider.credential?.configured?'Configured · hidden':'Not configured'}</dd></div><div><dt>API version</dt><dd>${available(capabilities.apiVersion)}</dd></div><div><dt>Processing engine</dt><dd>${available(capabilities.engine)} · ${available(capabilities.engineVersion)}</dd></div><div><dt>Queue</dt><dd>${capabilities.taskQueueCount??'Unavailable'} queued · ${capabilities.maxParallelTasks===99999999999?'Cluster-managed capacity':`${esc(capabilities.maxParallelTasks??'Unavailable')} upstream slots`}</dd></div><div><dt>Viewer admission</dt><dd>${provider.admissionLimit} concurrent job${provider.admissionLimit===1?'':'s'}</dd></div><div><dt>Runtime health</dt><dd>${badge(provider.runtimeHealth||provider.lastHealth||'not probed')}</dd></div></dl><section class="provider-options"><h4>Processing presets</h4>${write?`<div class="row-actions">${button('new-preset',provider.id,'Create preset')}${button('import-preset',provider.id,'Import preset')}</div>`:''}<div class="provider-option-list">${presets.map(preset=>`<div class="provider-option"><span><strong>${esc(preset.displayName)}</strong><small>${preset.builtIn?'Built in · read-only':preset.enabled?'Enabled':'Disabled'}${preset.capabilityFingerprint!==provider.capabilityFingerprint?' · capabilities changed — review required':''}</small></span><div class="row-actions">${button('view-preset',preset.id,'View')}${write?`${button('duplicate-preset',preset.id,'Duplicate')}${preset.builtIn?'':`${button('edit-preset',preset.id,'Edit')}${button('delete-preset',preset.id,'Delete')}`}`:''}</div></div>`).join('')||empty('No processing presets yet.')}</div></section>${write?`<div class="row-actions">${button('edit-provider',provider.id,'Edit node')}${button('replace-provider-token',provider.id,provider.credential?.configured?'Replace token':'Set token')}${provider.credential?.configured?button('clear-provider-token',provider.id,'Clear token'):''}${button('probe-provider',provider.id,'Refresh capabilities')}${button('toggle-provider',provider.id,provider.enabled?'Disable':'Enable',!provider.enabled,`data-enabled="${!provider.enabled}"`)}</div>`:''}<p class="form-note">Secrets are write-only. Processing settings are edited in a preset or while scheduling a task.</p></div>`;
+}
 function providerForm(){return`<form id="provider-form" class="manage-form">${field('Node label','displayName','required maxlength="240"')}${field('HTTPS endpoint','endpoint','required type="url" placeholder="https://odm.example.com"')}${field('API token (if required)','token','type="password" autocomplete="new-password"')}<button class="primary-button">Detect & add node</button><p class="form-note">Viewer probes /info and /options, detects NodeODM or ClusterODM, and rejects unsupported or ambiguous endpoints. If supplied, the token is submitted once and is never displayed.</p></form>`}
 function editProviderModal(id){const provider=state.providers.find(item=>item.id===id);if(!provider)return;openModal(`Edit ${provider.displayName}`,`<form id="provider-edit-form" class="manage-form"><input type="hidden" name="providerId" value="${esc(provider.id)}">${field('Node label','displayName',`required maxlength="240" value="${esc(provider.displayName)}"`)}${field('HTTPS endpoint','endpoint',`required type="url" value="${esc(provider.endpoint)}"`)}${field('Viewer admission limit','admissionLimit',`required type="number" min="1" max="100" step="1" value="${esc(provider.admissionLimit)}"`)}<button class="primary-button">Save node</button><p class="form-note">Changing the endpoint disables the node until its capabilities are probed again.</p></form>`);modalContent.querySelector('#provider-edit-form').onsubmit=async event=>{event.preventDefault();const input=values(event.currentTarget);modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(provider.id)}`,{method:'PATCH',body:{displayName:input.displayName,endpoint:input.endpoint,admissionLimit:Number(input.admissionLimit)}},'Provider updated');providerModal(provider.id)}}
 function providerTokenModal(id){const provider=state.providers.find(item=>item.id===id);if(!provider)return;openModal(`API token for ${provider.displayName}`,`<form id="provider-token-form" class="manage-form">${field('New API token','token','required type="password" autocomplete="new-password"')}<button class="primary-button">Store token</button><p class="form-note">The token is encrypted at rest, submitted once, and never displayed again.</p></form>`);modalContent.querySelector('#provider-token-form').onsubmit=async event=>{event.preventDefault();const token=event.currentTarget.elements.token.value;modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(provider.id)}/credential`,{method:'PUT',body:{token}},'Provider token stored');providerModal(provider.id)}}
-function presetModal(providerId,presetId=null){const provider=state.providers.find(item=>item.id===providerId),preset=state.presets.find(item=>item.id===presetId);if(!provider)return;openModal(preset?'Edit processing preset':'New processing preset',`<form id="preset-form" class="manage-form">${field('Preset name','displayName',`required maxlength="240" value="${esc(preset?.displayName||'')}"`)}${field('Description','description',`maxlength="1000" value="${esc(preset?.description||'')}"`)}<label><span>Provider options (JSON)</span><textarea name="options" rows="10" spellcheck="false" required>${esc(JSON.stringify(preset?.options||{},null,2))}</textarea></label><label class="check"><input type="checkbox" name="enabled" ${preset?.enabled===false?'':'checked'}> Enabled</label><button class="primary-button">${preset?'Save preset':'Create preset'}</button><p class="form-note">Options are checked against the node's latest detected capabilities before they are stored.</p></form>`);modalContent.querySelector('#preset-form').onsubmit=async event=>{event.preventDefault();let options;try{options=JSON.parse(event.currentTarget.elements.options.value)}catch{return toast('Provider options must be valid JSON',true)}if(!options||Array.isArray(options)||typeof options!=='object')return toast('Provider options must be a JSON object',true);const body={displayName:event.currentTarget.elements.displayName.value,description:event.currentTarget.elements.description.value,providerId:provider.id,options,enabled:event.currentTarget.elements.enabled.checked},path=preset?`/api/v1/processing/presets/${encodeURIComponent(preset.id)}`:'/api/v1/processing/presets';modal.close();await mutate(path,{method:preset?'PATCH':'POST',body},preset?'Preset updated':'Preset created');providerModal(provider.id)}}
+let presetEditorGeneration=0;
+async function presetModal(providerId,presetId=null,mode='edit',imported=null){
+  const generation=++presetEditorGeneration;
+  openModal('Processing preset','<p role="status">Refreshing node capabilities…</p>','workspace-task-modal');
+  const loadingContext=modalContent.querySelector('[role="status"]');
+  await refreshProviderCapabilities(providerId);
+  if(generation!==presetEditorGeneration||!modal.open||!loadingContext?.isConnected)return;
+  const provider=state.providers.find(item=>item.id===providerId),preset=state.presets.find(item=>item.id===presetId);
+  if(!provider)return toast('The selected node is no longer available',true);
+  const readOnly=mode==='view'||(preset?.builtIn&&mode!=='duplicate')||!can('viewer.providers.write'),source=imported||preset||{},baseOptions={...(source.options||{})};
+  const editing=!!preset&&mode!=='duplicate',displayName=mode==='duplicate'?`${source.displayName||'Preset'} copy`:source.displayName||'';
+  openModal(readOnly?'View processing preset':editing?'Edit processing preset':'Create processing preset',`<form id="preset-form" class="manage-form">${field('Preset name','displayName',`required maxlength="240" value="${esc(displayName)}" ${readOnly?'readonly':''}`)}${field('Description','description',`maxlength="1000" value="${esc(source.description||'')}" ${readOnly?'readonly':''}`)}<p class="form-note" role="status">${esc(providerCapabilityNotice(provider))}</p>${source.capabilityFingerprint&&source.capabilityFingerprint!==provider.capabilityFingerprint?'<p class="form-note">Node capabilities changed since this preset was saved. Review all settings; saving revalidates against current capabilities.</p>':''}<div id="preset-options-editor"></div><details><summary>Stored preset values (including unsupported settings)</summary><pre>${esc(JSON.stringify(baseOptions,null,2))}</pre><p class="form-note">Existing and imported values are retained, not silently dropped. Unsupported values are rejected by server validation.</p></details><label class="check"><input type="checkbox" name="enabled" ${source.enabled===false?'':'checked'} ${readOnly?'disabled':''}> Enabled</label>${readOnly?'':`<button class="primary-button" type="submit">${editing?'Save preset':'Create preset'}</button>`}<p id="preset-save-status" class="form-note" role="status"></p></form>`,'workspace-task-modal');
+  const form=modalContent.querySelector('#preset-form'),editor=mountTaskOptions({container:form.querySelector('#preset-options-editor'),provider,presetOptions:baseOptions,title:'Processing options',helpText:'Edit this preset directly. Changes are stored only when you save the preset.',modifiedLabel:'Modified in this preset'});
+  const detail=form.querySelector('.task-options-editor');if(detail)detail.open=true;editor.setDisabled(readOnly);
+  if(!readOnly){
+    const known=new Set((provider.capabilities?.options||[]).map(option=>option.name));
+    const unsupported=Object.keys(baseOptions).filter(name=>!known.has(name));
+    if(unsupported.length){
+      const warning=document.createElement('fieldset'),legend=document.createElement('legend');legend.textContent='Unsupported stored options — explicitly remove to resolve';warning.append(legend);
+      for(const name of unsupported){const label=document.createElement('label'),checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.addEventListener('change',()=>{if(checkbox.checked)delete baseOptions[name];else baseOptions[name]=source.options[name]});label.append(checkbox,document.createTextNode(` Remove ${name}: ${JSON.stringify(baseOptions[name])}`));warning.append(label)}
+      form.querySelector('#preset-options-editor').append(warning);
+    }
+  }
+  modal.addEventListener('close',()=>editor.dispose(),{once:true});
+  let saving=false,saved=false;
+  const saveReceipts=new Map();
+  form.onsubmit=async event=>{
+    event.preventDefault();if(readOnly||saving||saved||!form.isConnected||!modal.open||!can('viewer.providers.write'))return;
+    const status=form.querySelector('#preset-save-status');
+    let fields=[];
+    try{
+      const options={...baseOptions,...editor.getOptions()},body={displayName:form.elements.displayName.value,description:form.elements.description.value,providerId:provider.id,options,enabled:form.elements.enabled.checked};
+      const identity=JSON.stringify(body);if(!saveReceipts.has(identity))saveReceipts.set(identity,crypto.randomUUID());
+      saving=true;fields=[...form.querySelectorAll('input,select,textarea,button')].filter(element=>!element.closest('.task-options-editor')).map(element=>[element,element.disabled]);for(const [element] of fields)element.disabled=true;editor.setDisabled(true);status.textContent='Validating and saving preset…';
+      await api(editing?`/api/v1/processing/presets/${encodeURIComponent(preset.id)}`:'/api/v1/processing/presets',{method:editing?'PATCH':'POST',body,headers:{'Idempotency-Key':saveReceipts.get(identity)}});
+      saved=true;
+      if(form.isConnected&&modal.open)modal.close();
+      toast(editing?'Preset updated':'Preset created');
+      try{await load()}catch(error){toast(`Preset saved; workspace refresh failed: ${error.message}`,true)}
+    }catch(error){if(form.isConnected)status.textContent=error.message}
+    finally{saving=false;if(!saved&&form.isConnected){for(const [element,disabled] of fields)element.disabled=disabled;editor.setDisabled(readOnly)}}
+  };
+}
+function importPresetModal(providerId){
+  openModal('Import processing preset','<form id="preset-import-form" class="manage-form"><label><span>Preset JSON file</span><input name="file" type="file" accept=".json,application/json" required></label><p class="form-note">Import one Viewer preset or a WebODM preset with name/value options. Review before saving.</p><button class="primary-button">Review preset</button><p role="status"></p></form>');
+  const form=modalContent.querySelector('#preset-import-form');
+  form.onsubmit=async event=>{event.preventDefault();try{
+    const file=form.elements.file.files[0];if(!file||file.size>256*1024)throw new Error('Choose a preset JSON file smaller than 256 KB.');
+    const value=JSON.parse(await file.text());if(!form.isConnected||!modal.open)return;if(!value||Array.isArray(value)||typeof value!=='object')throw new Error('Import one preset object.');
+    let options=value.options;if(typeof options==='string')options=JSON.parse(options);
+    if(Array.isArray(options)){const entries=options.map(option=>{if(!option||typeof option.name!=='string'||!Object.hasOwn(option,'value'))throw new Error('Each imported option needs a name and value.');return[option.name,option.value]});if(new Set(entries.map(([name])=>name)).size!==entries.length)throw new Error('Duplicate option names are not allowed.');options=Object.fromEntries(entries)}
+    if(!options||Array.isArray(options)||typeof options!=='object')throw new Error('The preset must contain an options object or name/value array.');
+    return presetModal(providerId,null,'create',{displayName:value.displayName||value.name||file.name.replace(/\.json$/i,''),description:value.description||'',options});
+  }catch(error){form.querySelector('[role="status"]').textContent=error.message}};
+}
 
 function trash(){if(state.trashLoadError)return`<section class="content-card load-error" role="alert"><p class="eyebrow">Recycle Bin unavailable</p><h2>Deleted items could not be loaded</h2><p>${esc(state.trashLoadError)}</p>${button('retry-trash-load','trash','Try again',true)}</section>`;const items=state.storage?.trash?.items||[],order=['project','task','dataset','output'],groups=order.map(type=>[type,items.filter(item=>item.entityType===type)]).filter(([,rows])=>rows.length),totalBytes=items.reduce((sum,item)=>sum+(Number(item.byteSize)||0),0),nextPurge=items.map(item=>Date.parse(item.purgeAfter||'')).filter(Number.isFinite).sort((a,b)=>a-b)[0];const sections=groups.map(([type,rows])=>`<section class="trash-group" aria-labelledby="trash-${esc(type)}"><div class="trash-group-heading"><h2 id="trash-${esc(type)}">${esc(type[0].toUpperCase()+type.slice(1))}s</h2><span>${rows.length} item${rows.length===1?'':'s'} · ${bytes(rows.reduce((sum,item)=>sum+(Number(item.byteSize)||0),0))}</span></div><div class="data-list">${rows.map(item=>`<article class="manage-row trash-row"><div><strong>${esc(item.displayName||item.entityType)}</strong><small>${esc(item.entityType)} ID: ${esc(item.entityId)}</small><small>${bytes(item.byteSize)} · Permanently deletes after ${dateTime(item.purgeAfter)}</small></div>${badge('trash')}<div class="row-actions">${can('viewer.storage.purge')?`${button('restore-trash',item.id,'Restore')}${dangerButton('purge-trash',item.id,'Delete permanently',`data-entity-id="${esc(item.entityId)}"`)}`:'Recovery controls require storage lifecycle permission.'}</div></article>`).join('')}</div></section>`).join('');return`<div class="metric-grid trash-summary">${metric('Deleted items',items.length,'Across projects, tasks, datasets, and outputs')}${metric('Recoverable data',bytes(totalBytes),'Recorded size in the Recycle Bin')}${metric('Next automatic purge',nextPurge?new Date(nextPurge).toLocaleDateString():'None scheduled','Restore before this date')}${metric('Retention',items.length?'Active':'Clear',items.length?'Items remain recoverable until their purge date':'No deleted items are waiting')}</div><div class="recycle-bin top-gap"><div class="section-heading"><div><p class="eyebrow">Storage recovery</p><h2>Recycle Bin</h2><p class="card-copy">Restore deleted work or permanently remove it after verifying the exact identifier. Permanent deletion cannot be undone.</p></div></div>${sections||empty('The Recycle Bin is empty.')}</div>`}
 function globalDiagnosticRun(item){const selected=state.selectedDiagnosticRunId===item.attemptId,panelId=`global-attempt-diagnostic-${item.attemptId}`,display={...item,id:item.attemptId,errorCode:item.error?.code,errorMessage:item.error?.message};return`<article class="attempt-run ${selected?'selected':''}" data-diagnostic-attempt-id="${esc(item.attemptId)}"><div class="attempt-run-heading"><div><strong>${attemptLabel(display)}</strong><small>${dateTime(item.createdAt)} · ${esc(stageName(item.phase||item.status))}</small>${display.errorMessage?`<small class="attempt-error-summary">${esc(display.errorCode||'processing_failed')}: ${esc(display.errorMessage)}</small>`:''}${Number.isFinite(item.derivativeCount)?`<small>${item.derivativeCount} derivative${item.derivativeCount===1?'':'s'}${item.failedDerivativeCount?` · ${item.failedDerivativeCount} failed`:''}</small>`:''}</div>${badge(item.status)}<div class="row-actions">${button('open-global-attempt-diagnostics',item.attemptId,selected?'Hide details':'View diagnostics',false,`aria-expanded="${selected}" aria-controls="${esc(panelId)}"`)}</div></div>${selected?attemptDiagnosticPanel(state.diagnosticDetails[item.attemptId],display,panelId,'retry-global-attempt-diagnostics'):''}</article>`}
 function globalDiagnosticHistory(){if(state.diagnosticRunsError&&!state.diagnosticRuns.length)return`<section class="content-card diagnostic-run-history load-error" role="alert"><p class="eyebrow">Processing run history unavailable</p><h2>Runs could not be loaded</h2><p>${esc(state.diagnosticRunsError)}</p>${button('retry-diagnostic-runs','diagnostics','Try again',true)}</section>`;const projects=new Map();for(const run of state.diagnosticRuns){const projectKey=run.projectId||'unassigned-project',taskKey=run.taskId||'unassigned-task';if(!projects.has(projectKey))projects.set(projectKey,{name:run.projectDisplayName||'Unassigned project',tasks:new Map()});const project=projects.get(projectKey);if(!project.tasks.has(taskKey))project.tasks.set(taskKey,{name:run.taskDisplayName||'Unassigned task',runs:[]});project.tasks.get(taskKey).runs.push(run)}const groups=[...projects.entries()].map(([projectId,project])=>`<section class="diagnostic-project-group" aria-labelledby="diagnostic-project-${esc(projectId)}"><h3 id="diagnostic-project-${esc(projectId)}">${esc(project.name)}</h3>${[...project.tasks.entries()].map(([taskId,task])=>`<section class="diagnostic-task-group" aria-labelledby="diagnostic-task-${esc(taskId)}"><div class="diagnostic-task-heading"><h4 id="diagnostic-task-${esc(taskId)}">${esc(task.name)}</h4><span>${task.runs.length} run${task.runs.length===1?'':'s'}</span></div><div class="data-list">${task.runs.map(globalDiagnosticRun).join('')}</div></section>`).join('')}</section>`).join('');return`<section class="content-card diagnostic-run-history"><div class="section-heading"><div><p class="eyebrow">All projects</p><h2>Processing run history</h2><p>Inspect every retained attempt, failure stage, derivative, and sanitized log without opening each task.</p></div>${button('retry-diagnostic-runs','diagnostics','Refresh')}</div>${state.diagnosticRunsError?`<p class="load-error" role="alert">Older runs could not be loaded: ${esc(state.diagnosticRunsError)}</p>`:''}<div class="diagnostic-run-groups">${groups||(state.diagnosticRunsLoading?empty('Loading processing runs…'):empty('No processing runs have been recorded.'))}</div>${state.diagnosticRunsCursor?`<div class="history-load-more">${button('load-more-diagnostic-runs','diagnostics',state.diagnosticRunsLoading?'Loading…':'Load older runs',false,state.diagnosticRunsLoading?'disabled':'')}</div>`:''}</section>`}
 function diagnostics(){const lifecycle=state.ready?.lifecycle||[],failed=state.failedMutations||[];const failedRows=failed.map(item=>`<div class="manage-row"><div><strong>${esc(item.type)} ${esc(item.entityType)}</strong><small>${esc(item.entityId)}</small><small>${esc(item.errorCode||'lifecycle_failed')}: ${esc(item.errorMessage||'The storage operation requires operator repair.')}</small></div>${badge(item.status)}<div class="row-actions">${can('viewer.storage.purge')?button('retry-storage-mutation',item.id,'Retry'):''}</div></div>`).join('')||empty('No failed storage mutations.');const trashCount=state.storage?.trash?.items?.length||0;return`<div class="metric-grid"><div id="storage-usage-cards" style="display:contents">${storageUsageCards(state.storage?.usage)}</div>${metric('Processing worker',state.ready?.worker?.live?'Live':'Unavailable','Queue and worker health')}${metric('Platform',state.ready?.ok?'Ready':'Attention needed','Aggregated readiness')}</div><div class="diagnostic-grid top-gap">${card('Queue & provider health',`<div class="data-list">${state.providers.map(provider=>`<div class="manage-row"><div><strong>${esc(provider.displayName)}</strong><small>${esc(provider.endpoint)}</small></div>${badge(provider.runtimeHealth||provider.lastHealth||'unknown')}<div></div></div>`).join('')||empty('No providers configured.')} ${lifecycle.map(item=>`<div class="manage-row"><div><strong>${esc(item.status)}</strong><small>Storage lifecycle operations</small></div><strong>${item.count}</strong><div></div></div>`).join('')}</div>`)}${card('Failed storage mutations',`<div class="data-list">${failedRows}</div><p class="form-note">Repair the reported storage conflict before retrying. A failed row keeps processing readiness blocked.</p>`)}${card('Storage trash & recovery',`${state.trashLoadError?`<p class="load-error" role="alert">Recycle Bin load failed: ${esc(state.trashLoadError)}</p>`:`<p class="card-copy">${trashCount} deleted item${trashCount===1?'':'s'} currently remain recoverable.</p>`}${button('open-trash','trash','Open Recycle Bin',true)}`)}</div><div class="top-gap">${globalDiagnosticHistory()}</div>`}
 
-function render(){clearInterval(state.logTimer);renderNav();updateActivityIndicator();document.querySelector('#page-title').textContent=NAV.find(item=>item[0]===state.section)?.[2]||'Dashboard';if(state.taskPage)document.querySelector('#page-title').textContent={gcp:'Ground control points',settings:'Task settings',files:'Task files'}[state.taskPage];content.innerHTML=`<div id="workspace-section">${(state.section==='dashboard'&&state.taskPage?taskWorkspacePage:({dashboard,background,providers,trash,diagnostics}[state.section]||dashboard))()}</div>`;bind();if(state.section==='providers')bindModalActions(content.querySelector('.provider-workspace'));bindTaskDisclosures();hydrateOrthophotoPreviews();storageUsagePoll.sync();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(ACTIVE.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000)}}
+function render(){clearInterval(state.logTimer);renderNav();updateActivityIndicator();document.querySelector('#page-title').textContent=NAV.find(item=>item[0]===state.section)?.[2]||'Dashboard';if(state.taskPage)document.querySelector('#page-title').textContent={gcp:'Ground control points',settings:'Task settings',files:'Task files'}[state.taskPage];content.innerHTML=`<div id="workspace-section">${(state.section==='dashboard'&&state.taskPage?taskWorkspacePage:({dashboard,background,providers,trash,diagnostics}[state.section]||dashboard))()}</div>`;bind();if(state.section==='providers')bindModalActions(content.querySelector('.provider-workspace'));refreshOpenedProvider();bindTaskDisclosures();hydrateOrthophotoPreviews();storageUsagePoll.sync();if(state.expandedTaskId){const task=state.tasks.find(item=>item.id===state.expandedTaskId);if(ACTIVE.has(task?.latestAttempt?.status))state.logTimer=setInterval(()=>refreshTaskDetails(task.id,true),5000)}}
 function bind(){content.querySelectorAll('[data-section]').forEach(element=>element.onclick=()=>navigateWorkspace({section:element.dataset.section},'push'));content.querySelectorAll('[data-action]').forEach(element=>element.onclick=()=>action(element));const filter=content.querySelector('#project-filter');if(filter)filter.oninput=()=>{state.projectQuery=filter.value;const query=state.projectQuery.trim().toLocaleLowerCase('en-US');content.querySelectorAll('[data-project-name]').forEach(row=>row.hidden=Boolean(query&&!row.dataset.projectName.includes(query)))};const backgroundSearch=content.querySelector('#background-search-form');if(backgroundSearch)backgroundSearch.onsubmit=event=>{event.preventDefault();state.backgroundQuery=backgroundSearch.elements.query.value.trim();state.backgroundImportLimit=3;state.backgroundDerivativeLimit=3;render()};content.querySelectorAll('.gcp-import-form').forEach(form=>form.onsubmit=importGcp);content.querySelectorAll('.gcp-set-select').forEach(select=>select.onchange=()=>changeGcpSet(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-point-select').forEach(select=>select.onchange=()=>changeGcpPoint(select.dataset.taskId,select.value));content.querySelectorAll('.gcp-candidate-form').forEach(form=>{form.elements.mode.onchange=()=>{gcpWorkspace(form.dataset.taskId).mode=form.elements.mode.value;render()};form.onsubmit=event=>refreshGcpCandidates(event)});content.querySelectorAll('.gcp-mark-form').forEach(form=>{form.onsubmit=saveGcpMark;form.oninput=()=>setGcpDraft(form.dataset.taskId,Number(form.elements.pixelX.value),Number(form.elements.pixelY.value))});content.querySelectorAll('.gcp-mark-image').forEach(image=>{image.onload=()=>configureGcpImage(image);image.onclick=event=>markGcpImage(event)})}
 async function action(element){
   const action=element.dataset.action,id=element.dataset.id,taskId=element.dataset.taskId;
@@ -393,7 +453,7 @@ async function action(element){
   if(action==='publish-attempt')return publishAttempt(id);
   if(action==='view-output')return viewPublishedOutput(id);
   if(action==='download-output'||action==='download-report')return downloadOutputAsset(id,element.dataset.url,action==='download-report');
-  if(action==='share-output')return openShareModal(state.selectedProjectId,id);
+  if(action==='share-output'){const output=state.outputs.find(item=>item.id===id),task=state.tasks.find(item=>item.id===output?.taskId);return openShareModal(task?.projectId||output?.projectId||state.selectedProjectId,id)}
   if(action==='trash-output')return trashMutation('Delete this output? Published assets will be unpublished and the output will remain recoverable in the Recycle Bin for 14 days. Active links or viewing sessions must be revoked first.',`/api/v1/processing/outputs/${encodeURIComponent(id)}`,'Output moved to Recycle Bin');
   if(action==='download-logs')return downloadLogs(id);
   if(action==='fullscreen-logs')return fullscreenLogs(id);
@@ -585,45 +645,114 @@ function visibleShareResult(projectId,onlyOutputId){
   }
   return result;
 }
+function shareViewLabels(){return {model:'3D model',pointCloud:'Point cloud',ortho:'Orthophoto',dsm:'DSM',dtm:'DTM'}}
+function availableShareViews(output){
+  const kinds=new Set(state.sharePreflight[output.id]?.eligibleAssetKinds||output.assetKinds||[]),mapping={model:['glb','tiles'],pointCloud:['ept'],ortho:['ortho'],dsm:['dsm'],dtm:['dtm']};
+  return Object.keys(mapping).filter(view=>mapping[view].some(kind=>kinds.has(kind)));
+}
+function shareViewControls(output,allowedViews=null){
+  const views=availableShareViews(output),selected=allowedViews===null?views:allowedViews,labels=shareViewLabels();
+  return `<fieldset class="share-view-controls"><legend>Available views</legend><label class="check"><input type="checkbox" data-all-share-views ${views.length&&views.every(view=>selected.includes(view))?'checked':''}> All available views</label><details><summary>Choose individual views</summary>${views.map(view=>`<label class="check"><input type="checkbox" name="allowedViews" value="${view}" ${selected.includes(view)?'checked':''}> ${labels[view]}</label>`).join('')||'<p class="form-note">No verified views are available.</p>'}</details></fieldset>`;
+}
+function bindShareViewControls(form){
+  const all=form.querySelector('[data-all-share-views]'),inputs=[...form.querySelectorAll('input[name="allowedViews"]')];if(!all)return;
+  const sync=()=>{const count=inputs.filter(input=>input.checked).length;all.checked=inputs.length>0&&count===inputs.length;all.indeterminate=count>0&&count<inputs.length;};
+  all.onchange=()=>{form.shareViewsChanged=true;for(const input of inputs)input.checked=all.checked;sync()};
+  for(const input of inputs)input.onchange=()=>{form.shareViewsChanged=true;sync()};
+  sync();
+}
+function selectedShareViews(form){
+  const selected=[...form.querySelectorAll('input[name="allowedViews"]')].filter(input=>input.checked).map(input=>input.value);
+  if(!selected.length)throw new Error('Allow at least one available view.');return selected;
+}
+function shareSettingsSummary(share){
+  const labels=shareViewLabels(),views=share.allowedViews===null||share.allowedViews===undefined?'All available views':share.allowedViews.map(view=>labels[view]||view).join(', ');
+  return `${views} · ${share.permissions?.measure?'Temporary measurements':'No measurements'} · ${share.permissions?.cameras?'Camera positions':'No camera positions'} · ${share.permissions?.download?'Downloads enabled':'No downloads'} · ${share.hasPassword?'Password protected':'No password'} · ${share.expiresAt?`Expires ${dateTime(share.expiresAt)}`:'No expiry'}`;
+}
 function shareModal(projectId,onlyOutputId=null){
-  const project=state.projects.find(item=>item.id===projectId),taskIds=new Set(state.tasks.filter(task=>task.projectId===projectId).map(task=>task.id));
-  const outputs=state.outputs.filter(output=>taskIds.has(output.taskId)&&(!onlyOutputId||output.id===onlyOutputId)
-    &&(output.activePublished||output.status==='ready'));
-  const selected=onlyOutputId?outputs.find(output=>output.id===onlyOutputId):null;
-  const checking=state.shareContext?.loading===true;
-  const result=visibleShareResult(projectId,onlyOutputId)
-    ?card('New public link — copy now',`<div class="share-result"><input readonly aria-label="New public link" value="${esc(state.lastShareUrl)}"><button class="primary-button" data-action="copy-share" data-url="${esc(state.lastShareUrl)}">Copy</button></div><p class="form-note">Link created successfully. Anyone with this link can access the allowed model content.</p>`):'';
-  const publicCards=outputs.map(output=>{
-    const preflight=state.sharePreflight[output.id],ready=!output.activePublished;
-    const mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
-    const blocked=Boolean(preflight?.error),warning=preflight?.existingAccessUpdateRequired
-      ?'Activating this version can update existing model/client access and project links. Confirmation is required before creating the link.'
-      :ready?'This model is private. Create public link activates its verified public derivatives and creates a revocable link.':'Links follow this model’s latest published version.';
-    const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked
-      ?`<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}<label class="check"><input type="checkbox" name="measure" checked> Measurements</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`
-      :blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty('Creating a link requires share permission and, for private ready models, activation permission.');
-    const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${share.hasPassword?'Password protected':'No password'}</small></div>${badge(share.revokedAt?'revoked':'active')}<div>${!share.revokedAt&&can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
-    return card(output.displayName||'Model',form+list);
-  }).join('')||card('Models',empty('No ready model is available to share.'));
-  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`<p class="form-note">Send a public link to anyone. No Operations account or client workspace is required. You control its password, expiry and permissions, and can revoke it at any time.</p><div class="share-columns public-share-first" data-share-context="${esc(state.shareContext?.id||'')}"><div>${result}${publicCards}</div><div><details class="authenticated-share-options"><summary>Share with an Operations client instead</summary><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></details></div></div>`,'wide-modal');
+  const project=state.projects.find(item=>item.id===projectId),selected=state.outputs.find(output=>output.id===onlyOutputId),checking=state.shareContext?.loading===true;
+  const mode=onlyOutputId&&state.shareContext?.mode==='public'?'public':'internal';
+  if(!onlyOutputId)visibleShareResult(projectId,onlyOutputId);
+  const result=onlyOutputId&&visibleShareResult(projectId,onlyOutputId)?card('Public link',`<div class="share-result"><input readonly aria-label="New public link" value="${esc(state.lastShareUrl)}"><button class="primary-button" data-action="copy-share" data-url="${esc(state.lastShareUrl)}">Copy</button></div><p class="form-note">Link created successfully. You can copy this link again from its saved entry.</p>`):'';
+  let publicCards='';
+  if(selected){
+    const output=selected,preflight=state.sharePreflight[output.id],ready=!output.activePublished,mayCreate=can('viewer.shares.create')&&(!ready||can('viewer.processing.publish'));
+    const blocked=Boolean(preflight?.error),views=availableShareViews(output),warning=preflight?.existingAccessUpdateRequired?'Activating this version can update existing model/client access and project links. Confirmation is required before creating the link.':ready?'This model is private. Create public link activates its verified public derivatives and creates a revocable link.':'Links follow this model’s latest published version.';
+    const form=checking?empty('Checking share eligibility…'):mayCreate&&!blocked&&views.length?
+      `<form class="manage-form share-form" data-output-id="${esc(output.id)}">${field('Link label','label','maxlength="120"')}${field('Optional password','password','type="password" minlength="8" autocomplete="new-password"')}${field('Expiry (optional)','expiresAt','type="datetime-local"')}${shareViewControls(output)}<label class="check"><input type="checkbox" name="measure" checked> Temporary measurements (not saved to the project)</label><label class="check"><input type="checkbox" name="cameras" checked> Camera positions</label><label class="check"><input type="checkbox" name="download"> Downloads, including model report</label><p class="form-note">${esc(warning)}</p><button class="primary-button">Create public link</button></form>`:
+      blocked?empty('Sharing eligibility could not be verified. Close and reopen Share to retry.'):empty(mayCreate?'No verified views are available for this link.':'Creating a link requires share permission and, for private ready models, activation permission.');
+    const list=can('viewer.shares.read')?`<div class="data-list top-gap">${(state.shares[output.id]||[]).map(share=>`<div class="manage-row"><div><strong>${esc(share.label||'Public link')}</strong><small>${esc(shareSettingsSummary(share))}</small></div>${badge(share.revokedAt?'revoked':share.expiresAt&&Date.parse(share.expiresAt)<=Date.now()?'expired':'active')}<div class="row-actions">${!share.revokedAt?`${button('copy-existing-share',share.id,'Copy link')}${button('open-existing-share',share.id,'Open')}${can('viewer.shares.create')?button('edit-share',share.id,'Edit settings'):''}${can('viewer.shares.revoke')?button('revoke-share',share.id,'Revoke'):''}`:''}</div></div>`).join('')||empty('No public links.')}</div>`:'';
+    publicCards=card(output.displayName||'Model',form+list);
+  }
+  openModal(`Share ${selected?.displayName||project?.displayName||'model'}`,`${onlyOutputId?`<div class="row-actions" role="group" aria-label="Sharing audience"><button class="secondary-button" data-share-mode="internal" aria-pressed="${mode==='internal'}">Internal client</button><button class="secondary-button" data-share-mode="public" aria-pressed="${mode==='public'}">Public link</button></div>`:'<p class="form-note">Share whole projects with authenticated Operations clients. Use a task’s Share button to create a public link for that task only.</p>'}<div class="share-columns" style="grid-template-columns:1fr" data-share-context="${esc(state.shareContext?.id||'')}"><div data-share-mode-panel="internal" ${mode==='internal'?'':'hidden'}><div data-client-share-panel>${clientSharePanel(selected,onlyOutputId)}</div></div>${onlyOutputId?`<div data-share-mode-panel="public" ${mode==='public'?'':'hidden'}><p class="form-note">No Operations account or client workspace is required. Anyone with the link can access its allowed content.</p>${result}${publicCards}</div>`:'<div data-legacy-project-shares></div>'}</div>`,'wide-modal');
   bindShareModal(projectId,onlyOutputId);
+}
+function shareExpiryInput(value){
+  if(!value)return '';const date=new Date(value);if(!Number.isFinite(date.getTime()))return '';
+  return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+}
+function editShareModal(projectId,outputId,shareId){
+  const output=state.outputs.find(item=>item.id===outputId),share=(state.shares[outputId]||[]).find(item=>item.id===shareId);
+  if(!output||!share||share.revokedAt||!can('viewer.shares.read')||!can('viewer.shares.create'))return;
+  openModal('Edit public link',`<form id="share-edit-form" class="manage-form">${field('Link label','label',`maxlength="120" value="${esc(share.label||'')}"`)}<label><span>Password</span><select name="passwordAction"><option value="keep">Keep current password setting</option><option value="set">Set or replace password</option><option value="remove">Remove password</option></select></label><label data-password-input hidden><span>New password</span><input name="password" type="password" minlength="8" autocomplete="new-password" disabled></label>${field('Expiry (optional)','expiresAt',`type="datetime-local" value="${esc(shareExpiryInput(share.expiresAt))}"`)}${shareViewControls(output,share.allowedViews??null)}<label class="check"><input name="measure" type="checkbox" ${share.permissions?.measure?'checked':''}> Temporary measurements (not saved to the project)</label><label class="check"><input name="cameras" type="checkbox" ${share.permissions?.cameras?'checked':''}> Camera positions</label><label class="check"><input name="download" type="checkbox" ${share.permissions?.download?'checked':''}> Downloads, including model report</label><p class="form-note">The URL stays the same. Password and permission changes apply to existing sessions. Link version behavior stays unchanged.</p><button class="primary-button" type="submit">Save link settings</button><p role="status"></p></form>`,'wide-modal');
+  const form=modalContent.querySelector('#share-edit-form');bindShareViewControls(form);
+  form.elements.passwordAction.onchange=()=>{const setting=form.elements.passwordAction.value==='set';form.querySelector('[data-password-input]').hidden=!setting;form.elements.password.disabled=!setting;form.elements.password.required=setting;};
+  form.onsubmit=async event=>{
+    event.preventDefault();if(form.shareBusy||form.shareSaved||!form.isConnected||!modal.open)return;
+    let fields=[];const status=form.querySelector('[role="status"]');
+    try{
+      if(!can('viewer.shares.read')||!can('viewer.shares.create'))throw new Error('Editing public links requires share permissions.');
+      const body={label:form.elements.label.value,expiresAt:form.elements.expiresAt.value===shareExpiryInput(share.expiresAt)?share.expiresAt||null:form.elements.expiresAt.value?new Date(form.elements.expiresAt.value).toISOString():null,permissions:{view:share.permissions?.view!==false,measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}};
+      if(form.shareViewsChanged)body.allowedViews=selectedShareViews(form);
+      if(form.elements.passwordAction.value==='set'){if(form.elements.password.value.length<8)throw new Error('Use at least eight characters for the password.');body.password=form.elements.password.value}
+      if(form.elements.passwordAction.value==='remove')body.password=null;
+      const serialized=JSON.stringify(body);if(form.shareRequest?.serialized!==serialized)form.shareRequest={serialized,key:crypto.randomUUID()};
+      form.shareBusy=true;fields=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);for(const [element] of fields)element.disabled=true;status.textContent='Saving link settings…';
+      const result=await api(`/api/v1/processing/shares/${encodeURIComponent(share.id)}`,{method:'PATCH',body,headers:{'Idempotency-Key':form.shareRequest.key}});
+      form.shareSaved=true;state.shares[outputId]=(state.shares[outputId]||[]).map(item=>item.id===share.id?result.share:item);toast('Link settings updated');
+      if(form.isConnected&&modal.open){if(state.shareContext)state.shareContext.mode='public';shareModal(projectId,outputId)}
+    }catch(error){if(form.isConnected)status.textContent=error.message}
+    finally{form.shareBusy=false;if(!form.shareSaved&&form.isConnected)for(const [element,disabled] of fields)element.disabled=disabled}
+  };
+}
+async function retrieveShareLink(element){
+  if(element.disabled||!can('viewer.shares.read'))return;
+  let popup=null;
+  if(element.dataset.action==='open-existing-share'){popup=window.open('about:blank','_blank');if(popup)popup.opener=null;}
+  element.disabled=true;
+  try{
+    const result=await api(`/api/v1/processing/shares/${encodeURIComponent(element.dataset.id)}/link`);
+    if(!element.isConnected||!modal.open){popup?.close();return}
+    const url=new URL(result.viewUrl,location.origin);if(!['https:','http:'].includes(url.protocol)||url.origin!==location.origin)throw new Error('The server returned an invalid share URL.');
+    if(element.dataset.action==='open-existing-share'){
+      if(popup){popup.location.replace(url.href);return}
+      const link=document.createElement('a');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';link.textContent='Open public link';element.closest('.manage-row').append(link);toast('Pop-up blocked. Use the Open public link below.',true);return;
+    }
+    try{if(!navigator.clipboard?.writeText)throw new Error('unavailable');await navigator.clipboard.writeText(url.href);toast('Link copied')}
+    catch{
+      if(!element.isConnected||!modal.open)return;
+      const row=element.closest('.manage-row');let input=row.querySelector('[data-recovered-share-url]');if(!input){input=document.createElement('input');input.readOnly=true;input.dataset.recoveredShareUrl='';input.setAttribute('aria-label','Public link to copy');row.append(input)}input.value=url.href;input.focus();input.select();toast('Clipboard unavailable. Select and copy the displayed link.',true);
+    }
+  }catch(error){popup?.close();const unavailable=error.status===409&&/share_link_unavailable|original link cannot be recovered/i.test(error.message);toast(unavailable?'The original URL is not recoverable. The existing link has not been changed or revoked; create a separate link if needed.':error.message,true)}finally{element.disabled=false}
 }
 async function confirmSharedVersionUpdate(){
   return dialogs.confirm('Activating this model version can change what existing model links, associated clients, and whole-project links can see. Whole-project links include newly activated tasks. Continue and create the public link?',
     {title:'Update existing shared access?',submitLabel:'Activate and create link'});
 }
 async function createOutputShare(form,projectId,onlyOutputId){
-  if(form.shareBusy)return;
+  if(form.shareBusy||form.shareSaved||!onlyOutputId)return;
   form.shareBusy=true;
   const submit=form.querySelector('button[type="submit"],button:not([type])');
+  let fields=[];
   if(submit)submit.disabled=true;
   try{
     const output=state.outputs.find(item=>item.id===form.dataset.outputId);
     if(!output||!can('viewer.shares.create')||(!output.activePublished&&!can('viewer.processing.publish')))throw new Error('Sharing is not permitted for this output.');
-    const input=values(form);let body={label:input.label,expiresAt:input.expiresAt?new Date(input.expiresAt).toISOString():null,
+    const input=values(form);let body={label:input.label,expiresAt:input.expiresAt?new Date(input.expiresAt).toISOString():null,allowedViews:selectedShareViews(form),
       permissions:{view:true,measure:form.elements.measure.checked,cameras:form.elements.cameras.checked,download:form.elements.download.checked}};
     if(input.password)body.password=input.password;
     const inputSignature=JSON.stringify(body);
+    fields=[...form.querySelectorAll('input,select,button')].map(element=>[element,element.disabled]);for(const [element] of fields)element.disabled=true;
     if(form.shareRequest?.inputSignature===inputSignature)body={...form.shareRequest.body};
     else if(!output.activePublished){
       body.publishIfReady=true;
@@ -649,6 +778,7 @@ async function createOutputShare(form,projectId,onlyOutputId){
       result=await send();
     }
     rememberShareResult(result,projectId,output.id);
+    form.shareSaved=true;if(state.shareContext)state.shareContext.mode='public';
     state.shares[output.id]=[result.share,...(state.shares[output.id]||[]).filter(share=>share.id!==result.share.id)];
     state.sharePreflight[output.id]={...state.sharePreflight[output.id],publicationRequired:false,existingAccessUpdateRequired:false,error:null};
     output.activePublished=true;output.status='published';
@@ -657,9 +787,18 @@ async function createOutputShare(form,projectId,onlyOutputId){
     // Clipboard is a separate explicit action, never part of creation success.
     if(modal.open&&form.isConnected){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
   }catch(error){toast(error.message,true)}
-  finally{form.shareBusy=false;if(submit)submit.disabled=false}
+  finally{form.shareBusy=false;if(form.isConnected&&!form.shareSaved){for(const [element,disabled] of fields)element.disabled=disabled;if(submit)submit.disabled=false}}
 }
 function bindShareModal(projectId,onlyOutputId){
+  modalContent.querySelectorAll('[data-share-mode]').forEach(element=>element.onclick=()=>{
+    if(!onlyOutputId||!state.shareContext)return;
+    const mode=element.dataset.shareMode==='public'?'public':'internal';state.shareContext.mode=mode;
+    modalContent.querySelectorAll('[data-share-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shareMode===mode)));
+    modalContent.querySelectorAll('[data-share-mode-panel]').forEach(panel=>panel.hidden=panel.dataset.shareModePanel!==mode);
+  });
+  modalContent.querySelectorAll('.share-form').forEach(bindShareViewControls);
+  modalContent.querySelectorAll('[data-action="copy-existing-share"],[data-action="open-existing-share"]').forEach(element=>element.onclick=()=>retrieveShareLink(element));
+  modalContent.querySelectorAll('[data-action="edit-share"]').forEach(element=>element.onclick=()=>editShareModal(projectId,onlyOutputId,element.dataset.id));
   const grantForm=modalContent.querySelector('#client-grant-form');
   if(grantForm)grantForm.onsubmit=async event=>{
     event.preventDefault();if(grantForm.shareBusy)return;grantForm.shareBusy=true;
@@ -672,14 +811,14 @@ function bindShareModal(projectId,onlyOutputId){
       if(grantForm.shareRequest?.serialized!==serialized)grantForm.shareRequest={serialized,key:crypto.randomUUID()};
       const result=await api('/api/v1/workspace/client-grants',{method:'POST',body,headers:{'Idempotency-Key':grantForm.shareRequest.key}});
       state.clientAccess=result;toast('Client access granted');
-      if(modal.open){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
+      if(modal.open&&grantForm.isConnected){shareModal(projectId,onlyOutputId);if(!onlyOutputId)injectProjectShareCard(projectId)}
     }catch(error){toast(error.message,true)}finally{grantForm.shareBusy=false}
   };
   modalContent.querySelectorAll('.share-form').forEach(form=>form.onsubmit=event=>{event.preventDefault();return createOutputShare(form,projectId,onlyOutputId)});
   modalContent.querySelectorAll('[data-action="revoke-client-grant"]').forEach(element=>element.onclick=async()=>{const input=await dialogs.form({title:'Revoke client access',submitLabel:'Revoke access',destructive:true,fields:[{name:'reason',label:'Reason for revoking this client access',required:true,maxLength:240}]});if(input){modal.close();mutate('/api/v1/workspace/client-grants',{method:'DELETE',body:{grantId:element.dataset.id,reason:input.reason}},'Client access revoked')}});
   modalContent.querySelectorAll('[data-action="revoke-share"]').forEach(element=>element.onclick=async()=>{
     if(!can('viewer.shares.revoke')||!await dialogs.confirm('Revoke this public link? Future access through this link will be blocked.',
-      {title:'Revoke public link',submitLabel:'Revoke link',destructive:true}))return;
+      {title:'Revoke public link',submitLabel:'Revoke link',destructive:true})||!element.isConnected||!modal.open)return;
     modal.close();const revoked=await mutate(`/api/v1/processing/shares/${encodeURIComponent(element.dataset.id)}`,{method:'DELETE',body:{}},'Link revoked');
     if(revoked)clearShareResult(element.dataset.id,'model');
   });
@@ -688,7 +827,7 @@ function bindShareModal(projectId,onlyOutputId){
     catch{toast('The link is created, but clipboard access is unavailable. Select the link above and copy it manually.',true)}
   });
 }
-function bindModalActions(host=modalContent){if(!host)return;host.querySelectorAll('[data-action]').forEach(element=>element.onclick=async()=>{const action=element.dataset.action,id=element.dataset.id;if(action==='provider-new')return providerModal('__new__');if(action==='select-provider')return providerModal(id);if(!can('viewer.providers.write'))return;if(action==='edit-provider')return editProviderModal(id);if(action==='replace-provider-token')return providerTokenModal(id);if(action==='clear-provider-token'){if(!await dialogs.confirm('Clear this node token and disable the provider?',{title:'Clear node token',submitLabel:'Clear token',destructive:true}))return;modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(id)}/credential`,{method:'DELETE',body:{}},'Provider token cleared');return providerModal(id)}if(action==='new-preset')return presetModal(id);if(action==='edit-preset'){const preset=state.presets.find(item=>item.id===id),provider=state.providers.find(item=>item.type===preset?.providerType&&item.capabilityFingerprint===preset?.capabilityFingerprint);return provider?presetModal(provider.id,id):toast('The preset no longer matches a current provider probe',true)}if(action==='delete-preset'){const preset=state.presets.find(item=>item.id===id),provider=state.providers.find(item=>item.type===preset?.providerType&&item.capabilityFingerprint===preset?.capabilityFingerprint);if(!provider||!await dialogs.confirm(`Delete preset "${preset.displayName}"?`,{title:'Delete preset',submitLabel:'Delete preset',destructive:true}))return;modal.close();await mutate(`/api/v1/processing/presets/${encodeURIComponent(id)}`,{method:'DELETE',body:{}},'Preset deleted');return providerModal(provider.id)}if(action==='probe-provider'){modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(id)}/capabilities/probe`,{method:'POST',body:{}},'Provider capabilities refreshed');return providerModal(id)}if(action==='toggle-provider'){modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(id)}`,{method:'PATCH',body:{enabled:element.dataset.enabled==='true'}},'Provider updated');return providerModal(id)}});const form=host.querySelector('#provider-form');if(form)form.onsubmit=async event=>{event.preventDefault();if(state.busy||!can('viewer.providers.write'))return;const input=values(form),submit=form.querySelector('button[type="submit"],button:not([type])'),body={displayName:input.displayName,endpoint:input.endpoint};if(input.token)body.credential={token:input.token};state.busy=true;submit.disabled=true;submit.textContent='Detecting…';try{const result=await api('/api/v1/processing/providers',{method:'POST',body});toast(`${providerName(result.detection?.providerType)} detected and added`);modal.close();await load();providerModal(result.provider.id)}catch(error){toast(error.message,true);submit.disabled=false;submit.textContent='Detect & add node'}finally{state.busy=false}}}
+function bindModalActions(host=modalContent){if(!host)return;host.querySelectorAll('[data-action]').forEach(element=>element.onclick=async()=>{const action=element.dataset.action,id=element.dataset.id;if(action==='provider-new')return providerModal('__new__');if(action==='select-provider')return providerModal(id);if(action==='view-preset')return presetModal(state.selectedProviderId,id,'view');if(!can('viewer.providers.write'))return;if(action==='edit-provider')return editProviderModal(id);if(action==='replace-provider-token')return providerTokenModal(id);if(action==='clear-provider-token'){if(!await dialogs.confirm('Clear this node token and disable the provider?',{title:'Clear node token',submitLabel:'Clear token',destructive:true}))return;modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(id)}/credential`,{method:'DELETE',body:{}},'Provider token cleared');return providerModal(id)}if(action==='new-preset')return presetModal(id);if(action==='import-preset')return importPresetModal(id);if(action==='duplicate-preset')return presetModal(state.selectedProviderId,id,'duplicate');if(action==='edit-preset'){const preset=state.presets.find(item=>item.id===id),provider=state.providers.find(item=>item.id===state.selectedProviderId&&item.type===preset?.providerType);return provider?presetModal(provider.id,id):toast('The preset no longer matches a current provider probe',true)}if(action==='delete-preset'){const preset=state.presets.find(item=>item.id===id),provider=state.providers.find(item=>item.id===state.selectedProviderId&&item.type===preset?.providerType);if(!provider||!await dialogs.confirm(`Delete preset "${preset.displayName}"?`,{title:'Delete preset',submitLabel:'Delete preset',destructive:true}))return;modal.close();await mutate(`/api/v1/processing/presets/${encodeURIComponent(id)}`,{method:'DELETE',body:{}},'Preset deleted');return providerModal(provider.id)}if(action==='probe-provider'){return refreshProviderCapabilities(id)}if(action==='toggle-provider'){modal.close();await mutate(`/api/v1/processing/providers/${encodeURIComponent(id)}`,{method:'PATCH',body:{enabled:element.dataset.enabled==='true'}},'Provider updated');return providerModal(id)}});const form=host.querySelector('#provider-form');if(form)form.onsubmit=async event=>{event.preventDefault();if(state.busy||!can('viewer.providers.write'))return;const input=values(form),submit=form.querySelector('button[type="submit"],button:not([type])'),body={displayName:input.displayName,endpoint:input.endpoint};if(input.token)body.credential={token:input.token};state.busy=true;submit.disabled=true;submit.textContent='Detecting…';try{const result=await api('/api/v1/processing/providers',{method:'POST',body});toast(`${providerName(result.detection?.providerType)} detected and added`);modal.close();await load();providerModal(result.provider.id)}catch(error){toast(error.message,true);submit.disabled=false;submit.textContent='Detect & add node'}finally{state.busy=false}}}
 
 function logText(taskId){return(state.taskDetails[taskId]?.logs||[]).map(log=>`[${log.createdAt||''}] ${String(log.level||'info').toUpperCase()} ${log.message||''}`).join('\n')||'No task output has been recorded.'}
 function downloadLogs(taskId){const task=state.tasks.find(item=>item.id===taskId),link=document.createElement('a');link.href=URL.createObjectURL(new Blob([logText(taskId)],{type:'text/plain'}));link.download=`${(task?.displayName||'task').replace(/[^a-z0-9_-]+/gi,'-')}-log-tail.txt`;link.click();URL.revokeObjectURL(link.href)}

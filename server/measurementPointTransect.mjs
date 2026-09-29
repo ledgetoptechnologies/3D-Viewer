@@ -6,9 +6,10 @@ const fail=code=>{throw Object.assign(new Error(code),{code});};
 const at=(line,t)=>line.start.map((v,i)=>v+(line.end[i]-v)*t);
 
 // Called with the completed parent's immutable grid policy and frozen base.
-// This repeats the verified all-node grid construction; it never profiles the
+// This reuses the exact grid when cached, after verified all-node reads; it never profiles the
 // viewer's loaded points or the deliberately reduced volume-preview samples.
 export async function calculatePointSurfaceTransect(absolutePath,request,options={}) {
+  const started=performance.now();
   if(options.signal?.aborted)fail('measurement_cancelled');
   if(request.method!=='surface-transect'||request.source?.kind!=='ept')fail('measurement_transect_invalid');
   const policy=request.samplingGrid;
@@ -17,6 +18,7 @@ export async function calculatePointSurfaceTransect(absolutePath,request,options
   if(baseHash!==request.baseHash)fail('measurement_transect_reference_invalid');
   const patches=frozenReferenceIntervals(request.line,request.referencePatches);
   const {grid,pointsRead,nodesRead,vertical}=await calculatePointSurface(absolutePath,request,{...options,collectOnly:false,gridOnly:true});
+  const sampleStarted=performance.now();
   if(grid.width!==policy.width||grid.height!==policy.height||['minE','minN','maxE','maxN'].some(k=>grid.bounds[k]!==policy.bounds?.[k]))fail('measurement_transect_source_mismatch');
   const line=request.line,lengthM=Math.hypot(...line.end.map((v,i)=>v-line.start[i]));
   const cells=traceRasterCells(line,{ox:grid.bounds.minE,oy:grid.bounds.maxN,dx:request.cellSizeM,dy:-request.cellSizeM,width:grid.width,height:grid.height});
@@ -46,6 +48,7 @@ export async function calculatePointSurfaceTransect(absolutePath,request,options
     if(i%128===0)await new Promise(resolve=>setImmediate(resolve));
   }
   if(options.signal?.aborted)fail('measurement_cancelled');
+  try{options.onTiming?.({phase:'point-transect',sampleMs:performance.now()-sampleStarted,totalMs:performance.now()-started,cellCount:cells.filter(c=>c.col!==null).length,segmentCount:segments.length});}catch{}
   return{schemaVersion:1,status:'calculated',method:'surface-transect',calculationOrigin:'server-original-point-surface',sampling:'point-grid-step',parentCalculationId:request.parentCalculationId,baseHash,reference:request.reference,line,lengthM,segments,cellCount:cells.filter(c=>c.col!==null).length,
     source:{assetId:request.source.id,kind:'ept',sha256:request.source.sha256,manifestSha256:request.source.manifestSha256,modelVersionId:request.modelVersionId,samplingGrid:policy,crs:request.coordinateReference.crs,...vertical,classFilter:request.classFilter||'all',pointsRead,nodesRead},
     warnings:['This section uses the volume’s maximum-height point grid and frozen reference base, not native raster cells. Empty cells remain gaps. Vertical datum is unverified.',...(vertical.verticalUnitBasis==='administrator-declared'?['Source height units were administrator-declared.']:[])]};

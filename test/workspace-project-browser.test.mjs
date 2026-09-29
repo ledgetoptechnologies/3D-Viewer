@@ -57,7 +57,12 @@ const fixtures = {
       enabled: true, admissionLimit: 2, runtimeHealth: 'healthy', capabilityFingerprint: 'browser-fingerprint', credential: { configured: true, mode: 'token' },
       capabilities: {
         providerType: 'nodeodm', apiVersion: '2.2.3', engine: 'ODM', engineVersion: '3.5.0', taskQueueCount: 1,
-        maxParallelTasks: 99999999999, options: [{ name: 'orthophoto-resolution', type: 'integer', value: 5 }],
+        maxParallelTasks: 99999999999, options: [
+          { name: 'orthophoto-resolution', type: 'float', value: 5, domain: 'float > 0', help: 'Orthophoto resolution in cm/pixel.' },
+          { name: 'dsm', type: 'bool', value: false, help: 'Generate a digital surface model.' },
+          { name: 'feature-quality', type: 'string', value: 'high', domain: ['ultra', 'high', 'medium', 'low', 'lowest'], help: 'Feature extraction quality.' },
+          { name: 'min-num-features', type: 'int', value: 10000, help: 'Minimum number of features per image.' },
+        ],
       },
     },
   ],
@@ -165,6 +170,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
   if (pathname === '/api/v1/processing/providers/provider-nodeodm' && method === 'PATCH') return json({ provider: { ...fixtures.providers[0], ...body } });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/credential' && ['PUT', 'DELETE'].includes(method)) return json({ provider: fixtures.providers[0] });
   if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/probe' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
+  if (pathname === '/api/v1/processing/providers/provider-nodeodm/capabilities/refresh' && method === 'POST') return json({ capabilities: fixtures.providers[0].capabilities, fingerprint: 'browser-fingerprint' });
   if (pathname === '/api/v1/processing/presets' && method === 'GET') return json({ presets: fixtures.presets });
   if (pathname === '/api/v1/processing/presets' && method === 'POST') return json({ preset: { id: 'preset-new', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', ...body } }, 201);
   if (pathname.startsWith('/api/v1/processing/presets/') && ['PATCH', 'DELETE'].includes(method)) return method === 'DELETE' ? { status: 204, body: Buffer.alloc(0), type: 'application/json' } : json({ preset: { ...fixtures.presets[0], ...body } });
@@ -180,9 +186,24 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       if (!output.activePublished && body.publishIfReady !== true) return json({ error: 'publication_confirmation_required' }, 409);
       output.activePublished = true; output.status = 'published';
       const share = { id: `synthetic-share-${runtime.shares.length + 1}`, outputId: output.id,
-        label: body.label, hasPassword: Boolean(body.password), revokedAt: null };
+        label: body.label, hasPassword: Boolean(body.password), revokedAt: null,
+        expiresAt: body.expiresAt || null, permissions: body.permissions,
+        allowedViews: body.allowedViews ?? null, accessCount: 0 };
       runtime.shares.push(share);
-      return json({ share, viewUrl: 'https://example.invalid/synthetic-viewer-demo-link' }, 201);
+      return json({ share, viewUrl: `/share/synthetic-${share.id}` }, 201);
+    }
+  }
+  const managedShare = pathname.match(/^\/api\/v1\/processing\/shares\/([^/]+)(\/link)?$/);
+  if (manualFixture && managedShare && ['GET', 'PATCH'].includes(method)) {
+    const share = runtime.shares.find(item => item.id === managedShare[1]);
+    if (!share || share.revokedAt) return json({ error: 'share_not_found' }, 404);
+    if (managedShare[2] && method === 'GET') return json({ viewUrl: `/share/synthetic-${share.id}` });
+    if (!managedShare[2] && method === 'PATCH') {
+      for (const key of ['label', 'expiresAt', 'permissions', 'allowedViews']) {
+        if (Object.hasOwn(body, key)) share[key] = body[key];
+      }
+      if (Object.hasOwn(body, 'password')) share.hasPassword = Boolean(body.password);
+      return json({ share });
     }
   }
   if (manualFixture && pathname.startsWith('/api/v1/processing/shares/') && method === 'DELETE') {
@@ -811,7 +832,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="new-preset"]').click()`);
     await waitFor(client, "document.querySelector('#preset-form') !== null", `${viewport.name}: preset form did not open`);
     await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
-    await client.evaluate(`(() => { const form=document.querySelector('#preset-form'); form.elements.displayName.value='Browser preset'; form.elements.options.value='{}'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    await client.evaluate(`(() => { const form=document.querySelector('#preset-form'); form.elements.displayName.value='Browser preset'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"delete-preset\"]') !== null", `${viewport.name}: preset creation did not return to refreshed node detail`);
     await confirmAppAction(client, runtime, '[data-action="delete-preset"]', { title: 'Delete preset', cancelFirst: true });
     await waitForRequest(runtime, requestStart, 'DELETE', '/api/v1/processing/presets/preset-fast');

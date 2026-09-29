@@ -1,5 +1,6 @@
 'use strict';
 const auth=require('./auth');
+const {revisionMatches}=require('./publicSharePolicy');
 const {ProcessingRepository}=require('./processingRepository');
 const {sourceAuthorizationValidator}=require('./sourceAuthorization');
 const fail=()=>{throw Object.assign(new Error('temporary_measurement_access_unavailable'),{code:'temporary_measurement_access_unavailable',status:403});};
@@ -15,7 +16,7 @@ function localAccess(authority,repository,at=Date.now()){
     permissions=session.permissions;
   }else if(authority.kind==='share-asset'){
     share=repository.getPublicShare(authority.shareId);model=repository.getModel(authority.modelId);
-    if(!repository.publicShareLive(share)||share.modelId!==authority.modelId||(share.versionPolicy==='pinned'&&share.modelVersionId!==authority.modelVersionId))return null;
+    if(!repository.publicShareLive(share)||!revisionMatches(share,authority)||share.modelId!==authority.modelId||(share.versionPolicy==='pinned'&&share.modelVersionId!==authority.modelVersionId))return null;
     permissions=share.permissions;
   }else if(authority.kind==='project-share-asset'){
     share=repository.getProjectShare(authority.shareId);
@@ -37,7 +38,7 @@ async function resolveEphemeralAccess(token,repository,{validator=sourceAuthoriz
     if(token.split('.').length!==2)return fail();const payload=auth.verify(token);
     if(!payload||!['share-asset','project-share-asset'].includes(payload.kind)||typeof payload.modelId!=='string')return fail();
     const model=repository.getModel(payload.modelId);if(!model?.activeVersion)return fail();
-    authority={kind:payload.kind,shareId:payload.shareId,modelId:payload.modelId,modelVersionId:payload.kind==='project-share-asset'?payload.modelVersionId:model.activeVersion.id,expiresAt:payload.exp,...(payload.kind==='project-share-asset'?{projectId:payload.projectId,taskId:payload.taskId}:{})};
+    authority={kind:payload.kind,shareId:payload.shareId,shareRevision:payload.shareRevision||0,modelId:payload.modelId,modelVersionId:payload.kind==='project-share-asset'?payload.modelVersionId:model.activeVersion.id,expiresAt:payload.exp,...(payload.kind==='project-share-asset'?{projectId:payload.projectId,taskId:payload.taskId}:{})};
   }
   const access=localAccess(authority,repository);if(!access||(access.share&&!await validator.allows(access.share)))return fail();
   // Recheck local grant/version after the possibly awaited source authorization.

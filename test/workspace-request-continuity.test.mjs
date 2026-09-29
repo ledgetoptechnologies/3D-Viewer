@@ -22,7 +22,8 @@ function fixture(handler,{pauseOnClear=false}={}){
   const state={token:'same-bearer',adminSession:{id:'session',subject:'operator',expiresAt:'old'}};
   const requests=[],clears=[];let paused=false;
   const recovery={isPaused:()=>paused,async wait(signal){if(signal?.aborted)throw new DOMException('Cancelled','AbortError');if(paused){state.adminSession={...state.adminSession,expiresAt:'renewed'};paused=false;}}};
-  const send=new Function('state','workspaceRecovery','fetch','clearWorkspaceAuthorization','responseError',`return (${source.slice(start,end)});`)(state,recovery,async(path,init)=>{requests.push({path,...init});return handler(state,requests.length);},reason=>{clears.push(reason);paused=pauseOnClear&&reason!=='revoked';},(message,status)=>Object.assign(new Error(message),{status}));
+  // These cases exercise interactive fallback when silent renewal is unavailable.
+  const send=new Function('state','workspaceRecovery','fetch','clearWorkspaceAuthorization','responseError','workspaceRenewal',`return (${source.slice(start,end)});`)(state,recovery,async(path,init)=>{requests.push({path,...init});return handler(state,requests.length);},reason=>{clears.push(reason);paused=pauseOnClear&&reason!=='revoked';},(message,status)=>Object.assign(new Error(message),{status}),null);
   return{state,requests,clears,send};
 }
 

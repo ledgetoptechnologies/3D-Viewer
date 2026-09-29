@@ -17,14 +17,15 @@ export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_
   if (Number(keys.GTRasterTypeGeoKey || 1) !== 1) fail('measurement_pixel_is_point_unsupported');
   const staffDeclaration=request.authority?.adminHash&&!request.authority.scope;
   const evidence=reviewedRasterUnitEvidence(request,image);
+  const explicitEvidence=evidence?.basis==='server-inspected-explicit-metadata';
   let units;
-  try { units=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:request.sourceVerticalUnit==='m',confirmationBasis:staffDeclaration?'administrator-declared':'requester-declared'}); }
+  try { units=resolveRasterVerticalUnits(image,{bandMetadata,confirmMeters:!explicitEvidence&&request.sourceVerticalUnit==='m',confirmationBasis:staffDeclaration?'administrator-declared':'requester-declared'}); }
   catch(error) {
-    if(error.code!=='measurement_source_vertical_units_required'||!evidence)throw error;
+    if(error.code!=='measurement_source_vertical_units_required'||!evidence||explicitEvidence)throw error;
     units={verticalFactor:1,verticalUnitBasis:evidence.basis};
   }
   // A reviewed metre source never silently overrides conflicting explicit units.
-  if(evidence&&units.verticalFactor!==1)fail('measurement_source_vertical_units_conflict');
+  if(evidence&&units.verticalFactor!==(explicitEvidence?evidence.verticalFactor:1))fail('measurement_source_vertical_units_conflict');
   if(evidence&&['requester-declared','administrator-declared'].includes(units.verticalUnitBasis))units.verticalUnitBasis=evidence.basis;
   const {verticalFactor,verticalUnitBasis}=units;
   const transform = rasterDirectoryValue(directory, 'ModelTransformation');
@@ -54,7 +55,8 @@ export async function preflightNativeRaster(absolutePath, request, options = {})
   try { const image=await tiff.getImage(0),definition=nativeRasterDefinition(image, request, {...options,bandMetadata:await readRasterBandMetadata(image)});await validateRasterEncodedBlocks(image,{maxBlockBytes:Math.min(options.maxBlockBytes || NATIVE_RASTER_BLOCK_LIMIT,NATIVE_RASTER_BLOCK_LIMIT)});return definition; }
   finally { await tiff.close(); }
 }
-export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 100_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 512, onProgress = () => {} } = {}) {
+export async function calculateNativeRaster(absolutePath, request, { signal, maxCells = 100_000_000, maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, windowSize = 512, onProgress = () => {}, onTiming = () => {} } = {}) {
+  const started=performance.now();let rasterReadMs=0,windowReads=0;
   // Large outlines remain native resolution. Only a bounded window (at most
   // 2 MiB of normalized Float64 samples) is resident during integration.
   if(!Number.isInteger(windowSize)||windowSize<1||windowSize>512)fail('measurement_limit');
@@ -65,9 +67,10 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
   if (!sourceStat.isFile() || sourceStat.size !== Number(request.source.byteSize)) fail('measurement_source_changed');
   // Hashed imported assets are immutable by contract; verify that contract before
   // reading, then compare inode/size/mtime after integration as a second guard.
-  const hash = crypto.createHash('sha256');
+  const hashStarted=performance.now(),hash = crypto.createHash('sha256');
   for await (const chunk of fs.createReadStream(absolutePath, { highWaterMark: 1024 * 1024, signal })) { check(); hash.update(chunk); }
   if (hash.digest('hex') !== request.source.sha256) fail('measurement_source_changed');
+  const sourceHashMs=performance.now()-hashStarted,samplingStarted=performance.now();
   await validateMeasurementTiffHeader(absolutePath);
   const tiff = await fromFile(absolutePath);
   try {
@@ -86,7 +89,7 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
       for(const [e,n]of request.vertices){
         const x=Math.floor((e-ox)/dx),y=Math.floor((n-oy)/dy);
         if(x<0||y<0||x>=width||y>=height)fail('measurement_boundary_elevation_unavailable');
-        const values=await image.readRasters({window:[x,y,x+1,y+1],samples:[0],interleave:true,signal}),z=Number(values[0]),nodata=image.getGDALNoData();
+        const readStarted=performance.now(),values=await image.readRasters({window:[x,y,x+1,y+1],samples:[0],interleave:true,signal}),z=Number(values[0]),nodata=image.getGDALNoData();rasterReadMs+=performance.now()-readStarted;windowReads++;
         if(!Number.isFinite(z)||(nodata!=null&&z===Number(nodata)))fail('measurement_boundary_elevation_unavailable');
         vertices.push([e,n,z * definition.verticalFactor]);
       }
@@ -99,7 +102,7 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
     for (let row = top; row < bottom; row += windowSize) for (let col = left; col < right; col += windowSize) {
       check();
       const r = Math.min(right, col + windowSize), b = Math.min(bottom, row + windowSize);
-      const values = await image.readRasters({ window: [col, row, r, b], samples: [0], interleave: true, signal });
+      const readStarted=performance.now(),values = await image.readRasters({ window: [col, row, r, b], samples: [0], interleave: true, signal });rasterReadMs+=performance.now()-readStarted;windowReads++;
       const rawNodata = image.getGDALNoData();
       for(let y=0;y<b-row;y++)for(let x=0;x<r-col;x++){
         const index=(row+y-top)*(right-left)+(col+x-left),z=Number(values[y*(r-col)+x]);
@@ -120,6 +123,7 @@ export async function calculateNativeRaster(absolutePath, request, { signal, max
     if (['size','ino','dev','mtimeMs','ctimeMs'].some(k => sourceStat[k] !== finalStat[k])) fail('measurement_source_changed');
     const result = { ...accumulator.result(), ...(request.reference?.type!=='custom'?{boundaryVertices:vertices}: {}) };
     const declaredBy=definition.verticalUnitBasis==='administrator-declared'?'requesting administrator':definition.verticalUnitBasis==='requester-declared'?'requester':null;
+    try{onTiming({phase:'raster-volume',sourceHashMs,rasterReadMs,sampleMs:Math.max(0,performance.now()-samplingStarted-rasterReadMs),totalMs:performance.now()-started,cellCount:cells,windowReads});}catch{}
     return { ...result, calculationOrigin: 'server-native-raster', preview:{previewOnly:true,samples:previewSamples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))}, source: { assetId: request.source.id, kind: request.source.kind, sha256: request.source.sha256, modelVersionId: request.modelVersionId, resolutionM: [dx, -dy], crs: definition.crs, verticalUnit: definition.verticalUnit, verticalUnitBasis: definition.verticalUnitBasis, ...(definition.verticalUnitEvidence?{verticalUnitEvidence:definition.verticalUnitEvidence}:{}), boundaryElevationBasis:request.reference?.type==='custom'?'custom-reference':'native-raster' }, warnings: [...result.warnings, ...(declaredBy ? [`Raster vertical units were declared as metres by the ${declaredBy}; they were not encoded in the raster or independently verified by this calculation.`] : [])] };
   } finally { await tiff.close(); }
 }

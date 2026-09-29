@@ -8,6 +8,7 @@ const { createMeasurementCalculationApi } = require('./measurementCalculationApi
 const { reconstructionAvailable } = require('./measurementReconstructionSupport');
 const { config } = require('./config');
 const {createEphemeralMeasurementApi}=require('./ephemeralMeasurementApi');
+const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
 
 function getMeasurementPrincipal(req, repository, { allowTransient = false } = {}) {
   // Deliberately no ambient-cookie fallback: personal mutations need an explicit
@@ -39,6 +40,7 @@ function createMeasurementApi(repository, { preflightRaster, preflightPoint } = 
   const router = express.Router();
   router.use('/temporary',createEphemeralMeasurementApi(repository,{config,preflightRaster,preflightPoint}));
   const measurements = new MeasurementRepository(repository.database);
+  const sourceUnits = new MeasurementSourceUnitEvidence(repository.database);
   const principalFor = (req) => getMeasurementPrincipal(req, repository);
   const adminFor = (req, principal) => measurementAdmin(req, principal, repository.database);
   router.use((req, res, next) => {
@@ -62,7 +64,8 @@ function createMeasurementApi(repository, { preflightRaster, preflightPoint } = 
     const calculationSources = (version?.assets || []).filter(asset => asset.sha256).flatMap(asset => {
       const methods = ['dsm','dtm'].includes(asset.kind) && /^(tif|tiff|geotiff)$/i.test(asset.format || '') ? ['surface-cut-fill','surface-transect'] : authorized && asset.kind === 'obj' && asset.format === 'obj' && hasMeshCrs ? ['closed-mesh'] : asset.kind === 'ept' && asset.format === 'ept' && asset.manifestSha256 ? ['point-surface-cut-fill','surface-transect'] : [];
       if(authorized&&methods.length&&hasMeshCrs&&['obj','ept'].includes(asset.kind)&&reconstructionAvailable(config))methods.push('reconstructed-estimate');
-      return methods.length ? [{ assetId: asset.id, kind: asset.kind, format: asset.format, byteSize: asset.byteSize ?? null, modelVersionId: version.id, sha256: asset.sha256, ...(asset.manifestSha256?{manifestSha256:asset.manifestSha256}:{}), methods }] : [];
+      const unitEvidence=sourceUnits.summary(req.measurementPrincipal.modelId,version.id,asset);
+      return methods.length ? [{ assetId: asset.id, kind: asset.kind, format: asset.format, byteSize: asset.byteSize ?? null, modelVersionId: version.id, sha256: asset.sha256, ...(asset.manifestSha256?{manifestSha256:asset.manifestSha256}:{}), ...(unitEvidence?{unitEvidence}:{}), methods }] : [];
     });
     res.json({ capabilities: { personalPersistence: true, rasterCalculations: rasterAuthorized, pointSurfaceCalculations:rasterAuthorized, transectCalculations:rasterAuthorized, serverCalculations: authorized }, calculationSources, calculationMethods: [...new Set(calculationSources.flatMap(source => source.methods))] });
   }));

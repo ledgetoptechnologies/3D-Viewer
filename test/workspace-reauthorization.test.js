@@ -16,7 +16,12 @@ test('expired workspaces use a fixed Operations reauthorization bounce with same
   assert.match(source, /sessionStorage\.setItem\(OPS_ORIGIN_KEY,checked\.controllerOrigin\)/);
   assert.match(source, /parsed\.protocol==='https:'&&parsed\.origin===value/);
   assert.doesNotMatch(source, /return(?:Url|_url)=/);
-  assert.doesNotMatch(source,/location\.(?:assign|replace|reload)\(/);
+  // Opening an existing share in a separate popup is not a workspace reload.
+  const workspaceNavigation=/(?<![\w.])(?:(?:window|self|globalThis)\.)?location\.(?:assign|replace|reload)\(/;
+  assert.doesNotMatch(source,workspaceNavigation);
+  assert.match('window.location.reload()',workspaceNavigation);
+  assert.match('location.replace(url)',workspaceNavigation);
+  assert.doesNotMatch('popup.location.replace(url)',workspaceNavigation);
 });
 
 test('known expiry pauses without disposing uploads; unknown authorization loss clears access',()=>{

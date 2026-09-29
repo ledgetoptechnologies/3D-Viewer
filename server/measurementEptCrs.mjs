@@ -105,6 +105,15 @@ function wktUtmCode(text){
   return code;
 }
 
+// Discover the native supported horizontal code, then run the same full
+// cross-declaration validation as calculations (including WKT-only sources).
+export function inspectEptUtmCrs(srs){
+  if(!srs||typeof srs!=='object'||Array.isArray(srs))fail();
+  const candidate=Object.hasOwn(srs,'horizontal')?Number(srs.horizontal):Object.hasOwn(srs,'code')?Number(srs.code):
+    Object.hasOwn(srs,'wkt')?wktUtmCode(srs.wkt):Object.hasOwn(srs,'wkt2')?wktUtmCode(srs.wkt2):null;
+  return resolveEptUtmCrs(srs,candidate);
+}
+
 export function resolveEptUtmCrs(srs,expected){
   if(!Number.isInteger(expected)||!((expected>=32601&&expected<=32660)||(expected>=32701&&expected<=32760))||!srs||typeof srs!=='object'||Array.isArray(srs))fail();
   const codes=[];

@@ -7,9 +7,12 @@ const {resolveEphemeralAccess}=require('./ephemeralMeasurementAccess');
 const {EphemeralMeasurementRepository}=require('./ephemeralMeasurementRepository');
 const {StorageManager}=require('./storageManager');
 const {validateTransectRequest,sameTransectEvidence}=require('./measurementTransectRequest');
+const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
 const fail=(code,status=400)=>{throw Object.assign(new Error(code),{code,status});};
 function createEphemeralMeasurementApi(repository,{config={},preflightRaster,preflightPoint,validator}={}){
   const router=express.Router(),jobs=new EphemeralMeasurementRepository(repository.database);
+  const sourceUnits=new MeasurementSourceUnitEvidence(repository.database);
+  const withSourceEvidence=request=>{const evidence=sourceUnits.get(request);if(evidence)request.sourceUnitEvidence=evidence;return request;};
   const resolve=async req=>{const access=await resolveEphemeralAccess(String(req.get('authorization')||'').match(/^Bearer\s+(\S+)$/i)?.[1],repository,{validator});if(req.get('X-Measurement-Model-Version')!==access.authority.modelVersionId)fail('temporary_measurement_access_unavailable',403);return access;};
   const page=req=>{const handle=req.get('X-Measurement-Page');if(!/^[A-Za-z0-9_-]{43}$/.test(handle||''))fail('temporary_measurement_page_required',403);return auth.hashToken(handle);};
   const sourceVersion=access=>({...access.model.activeVersion,assets:access.model.activeVersion.assets.filter(a=>access.authority.kind==='viewer'||a.published===true)});
@@ -27,10 +30,11 @@ function createEphemeralMeasurementApi(repository,{config={},preflightRaster,pre
     const transect=req.body.request.method==='surface-transect',parent=transect?jobs.parent(access.scopeKey,pageHash,req.body.request.parentCalculationId):null;
     const request=transect?validateTransectRequest(req.body.request,measurement,sourceVersion(access),parent,{temporary:true,allowPointSurface:true}):validateCalculationRequest(req.body.request,measurement,sourceVersion(access),{ordinaryPoint:req.body.request.method==='point-surface-cut-fill'});
     if(request.source.kind==='ept')request.requireEncodedVerticalUnits=true;
+    if(!transect)withSourceEvidence(request);
     try{await(request.source.kind==='ept'?pointPreflight:preflight)(request);}catch(e){fail(/^measurement_(source_|pixel_|rotated_|raster_|ept_|point_)/.test(e.code||'')?e.code:'measurement_source_preflight_unavailable',422);}
     const current=await resolve(req);if(current.scopeKey!==access.scopeKey)fail('temporary_measurement_access_unavailable',403);
     if(transect){const rebuilt=validateTransectRequest(req.body.request,measurement,sourceVersion(current),jobs.parent(current.scopeKey,pageHash,req.body.request.parentCalculationId),{temporary:true,allowPointSurface:true});if(!sameTransectEvidence(request,rebuilt))fail('measurement_transect_parent_stale',409);}
-    else{const rebuilt=validateCalculationRequest(req.body.request,measurement,sourceVersion(current),{ordinaryPoint:req.body.request.method==='point-surface-cut-fill'});if(JSON.stringify(request)!==JSON.stringify(rebuilt))fail('measurement_source_changed',409);}
+    else{const rebuilt=withSourceEvidence(validateCalculationRequest(req.body.request,measurement,sourceVersion(current),{ordinaryPoint:req.body.request.method==='point-surface-cut-fill'}));if(JSON.stringify(request)!==JSON.stringify(rebuilt))fail('measurement_source_changed',409);}
     res.status(202).json({calculation:jobs.enqueue(transect?{...access,expiresAt:Math.min(access.expiresAt,Date.parse(parent.job.expiresAt))}:access,pageHash,measurement,request)});
   }catch(e){next(e);}});
   router.get('/calculations',async(req,res,next)=>{try{const access=await resolve(req),measurementId=req.query.measurementId;if(measurementId!==undefined&&(typeof measurementId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(measurementId)))fail('measurement_calculation_invalid');jobs.prune();res.json({calculations:jobs.list(access.scopeKey,page(req),measurementId)});}catch(e){next(e);}});

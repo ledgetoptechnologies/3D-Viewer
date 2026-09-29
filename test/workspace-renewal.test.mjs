@@ -177,3 +177,27 @@ test('closed controller and exhausted retry budget expire only after actual work
     assert.equal(context.renewal.requestRenewal('expiry'),false);assert.equal(context.expired(),'expired');
   }
 });
+
+test('concurrent API expiry waiters share renewal and resolve only after verified session installation',async()=>{
+  const context=harness({fetchImpl:async()=>({ok:true,status:200,json:async()=>({...context.envelope,session:{...context.envelope.session,expiresAt:new Date(Date.now()+1800000).toISOString()}})})});
+  context.renewal.start();const first=context.renewal.waitForRenewal(),second=context.renewal.waitForRenewal();
+  assert.equal(context.posted.filter(x=>x.message.type==='ltds-viewer:workspace-session-expiring').length,1);
+  const request=context.posted.at(-1).message;
+  await context.renewal.handleMessage({source:context.controllerWindow,origin:ORIGIN,data:{version:1,type:'ltds-viewer:renew-workspace-session',requestId:request.requestId,grant:GRANT}});
+  assert.deepEqual(await Promise.all([first,second]),[true,true]);assert.equal(context.sessions.length,1);assert.equal(context.renewal.renewalWaiters.size,0);
+  context.renewal.dispose();
+});
+
+test('API renewal waiters are bounded, abortable, and fail closed without an authority transport',async()=>{
+  const context=harness();context.renewal.start();
+  const controller=new AbortController(),aborted=context.renewal.waitForRenewal({signal:controller.signal});controller.abort();assert.equal(await aborted,false);
+  const timed=context.renewal.waitForRenewal({timeoutMs:25000});context.timers.findLast(t=>t.delay===25000&&!t.cleared).handler();assert.equal(await timed,false);
+  const disposed=context.renewal.waitForRenewal();context.renewal.dispose();assert.equal(await disposed,false);assert.equal(context.renewal.renewalWaiters.size,0);
+  const missing=harness();missing.controllerWindow.closed=true;assert.equal(await missing.renewal.waitForRenewal(),false);assert.equal(missing.posted.length,0);missing.renewal.dispose();
+});
+
+test('authoritative rejection settles API waiters without retrying protected work',async()=>{
+  const context=harness({fetchImpl:async()=>({ok:false,status:401,json:async()=>({})})});context.renewal.start();const waiting=context.renewal.waitForRenewal();const request=context.posted.at(-1).message;
+  await context.renewal.handleMessage({source:context.controllerWindow,origin:ORIGIN,data:{version:1,type:'ltds-viewer:renew-workspace-session',requestId:request.requestId,grant:GRANT}});
+  assert.equal(await waiting,false);assert.equal(context.expired(),'unauthorized');assert.equal(context.sessions.length,0);
+});

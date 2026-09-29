@@ -2,6 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {adminCalculationRequest,priorMeterDeclaration} from '../measurement-admin-dialog.mjs';
 
+test('source review restores meters for another measurement only with matching immutable identity',()=>{
+ const record={id:'new-polygon',modelId:'model',modelVersionId:'version',coordinateReference:{crs:'EPSG:32616'}};
+ const source={assetId:'cloud',kind:'ept',modelVersionId:'version',byteSize:100,sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64)};
+ source.unitEvidence={...source,modelId:'model',crs:'EPSG:32616',verticalUnit:'m',verticalDatum:'unknown',basis:'administrator-reviewed-source'};
+ assert.equal(priorMeterDeclaration(record,source,[]),true);
+ for(const [key,value] of [['modelId','other'],['crs','EPSG:32617'],['byteSize',101],['manifestSha256','c'.repeat(64)],['verticalUnit','ft']]){
+   assert.equal(priorMeterDeclaration(record,{...source,unitEvidence:{...source.unitEvidence,[key]:value}},[]),false);
+ }
+});
+
 test('point calculation leaves encoded units to server without inventing a meter declaration',()=>{
   const record={id:'one',kind:'polygon',revision:2},sources=[{assetId:'cloud',kind:'ept',methods:['point-surface-cut-fill']}];
   const body=adminCalculationRequest(record,{sourceAssetId:'cloud',method:'point-surface-cut-fill',reference:'boundary-triangulated',offsetM:0,cellSizeM:.1,classFilter:'all',confirmMeters:false},sources);

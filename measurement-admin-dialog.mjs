@@ -27,6 +27,11 @@ export function availableAdminSources(envelope) {
 }
 export function priorMeterDeclaration(record,source,jobs){
   if(!record?.modelVersionId||source?.modelVersionId!==record.modelVersionId||!/^[a-f0-9]{64}$/i.test(source.sha256||''))return false;
+  const evidence=source.unitEvidence;
+  if(evidence&&evidence.verticalUnit==='m'&&['administrator-reviewed-source','verified-odm-source'].includes(evidence.basis)
+    &&evidence.assetId===source.assetId&&evidence.modelVersionId===record.modelVersionId&&evidence.modelId===record.modelId
+    &&evidence.crs===record.coordinateReference?.crs&&evidence.kind===source.kind&&evidence.sha256===source.sha256
+    &&evidence.byteSize===source.byteSize&&(source.kind!=='ept'||evidence.manifestSha256===source.manifestSha256))return true;
   return (jobs||[]).some(job=>{
     const result=job?.result,evidence=result?.source;
     return job.measurementId===record.id&&job.status==='complete'&&['surface-cut-fill','point-surface-cut-fill'].includes(job.method)

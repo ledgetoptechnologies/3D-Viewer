@@ -71,7 +71,8 @@ export function frozenReferenceIntervals(line,patches){
   });
 }
 
-export async function calculateNativeRasterTransect(absolutePath,request,{signal,maxCells=NATIVE_TRANSECT_LIMIT,maxSegments=NATIVE_TRANSECT_LIMIT,maxBlockBytes=NATIVE_RASTER_BLOCK_LIMIT,windowSize=32,maxWindows=4,onProgress=()=>{}}={}){
+export async function calculateNativeRasterTransect(absolutePath,request,{signal,maxCells=NATIVE_TRANSECT_LIMIT,maxSegments=NATIVE_TRANSECT_LIMIT,maxBlockBytes=NATIVE_RASTER_BLOCK_LIMIT,windowSize=32,maxWindows=4,onProgress=()=>{},onTiming=()=>{}}={}){
+  const started=performance.now();let rasterReadMs=0;
   const check=()=>{if(signal?.aborted)fail('measurement_cancelled');};check();
   if(request?.method!=='surface-transect')fail('measurement_transect_invalid');
   validateLine(request.line);validatePolygon(request.vertices);
@@ -83,9 +84,10 @@ export async function calculateNativeRasterTransect(absolutePath,request,{signal
   const windowSide=Math.min(64,Math.max(1,Number.isSafeInteger(windowSize)?windowSize:32)),cacheLimit=Math.min(4,Math.max(1,Number.isSafeInteger(maxWindows)?maxWindows:4));
   const sourceStat=await fs.promises.stat(absolutePath);
   if(!sourceStat.isFile()||sourceStat.size!==Number(request.source.byteSize))fail('measurement_source_changed');
-  const hash=crypto.createHash('sha256');
+  const hashStarted=performance.now(),hash=crypto.createHash('sha256');
   try{for await(const chunk of fs.createReadStream(absolutePath,{highWaterMark:1024*1024,signal})){check();hash.update(chunk);}}catch(error){check();throw error;}
   if(hash.digest('hex')!==request.source.sha256)fail('measurement_source_changed');check();
+  const sourceHashMs=performance.now()-hashStarted,samplingStarted=performance.now();
   await validateMeasurementTiffHeader(absolutePath);check();
   const tiff=await fromFile(absolutePath);
   try{
@@ -100,7 +102,7 @@ export async function calculateNativeRasterTransect(absolutePath,request,{signal
       if(window){cache.delete(key);cache.set(key,window);}
       else{
         check();if(++reads>NATIVE_TRANSECT_LIMIT)fail('measurement_transect_limit');
-        const values=await image.readRasters({window:[left,top,right,bottom],samples:[0],interleave:true,signal});check();
+        const readStarted=performance.now(),values=await image.readRasters({window:[left,top,right,bottom],samples:[0],interleave:true,signal});rasterReadMs+=performance.now()-readStarted;check();
         window={values,width:right-left};cache.set(key,window);if(cache.size>cacheLimit)cache.delete(cache.keys().next().value);
       }
       return Number(window.values[(row-top)*window.width+col-left]);
@@ -127,6 +129,7 @@ export async function calculateNativeRasterTransect(absolutePath,request,{signal
     }
     check();const finalStat=await fs.promises.stat(absolutePath);if(['size','ino','dev','mtimeMs','ctimeMs'].some(k=>sourceStat[k]!==finalStat[k]))fail('measurement_source_changed');
     const declared=definition.verticalUnitBasis==='requester-declared'||definition.verticalUnitBasis==='administrator-declared';
+    try{onTiming({phase:'raster-transect',sourceHashMs,rasterReadMs,sampleMs:Math.max(0,performance.now()-samplingStarted-rasterReadMs),totalMs:performance.now()-started,cellCount:cells.filter(c=>c.col!==null).length,segmentCount:segments.length,windowReads:reads});}catch{}
     return {schemaVersion:1,status:'calculated',method:'surface-transect',calculationOrigin:'server-native-raster',sampling:'native-cell-step',parentCalculationId:request.parentCalculationId,baseHash,reference:request.reference,line,lengthM,segments,cellCount:cells.filter(c=>c.col!==null).length,
       source:{assetId:request.source.id,kind:request.source.kind,sha256:request.source.sha256,modelVersionId:request.modelVersionId,resolutionM:[definition.dx,-definition.dy],crs:definition.crs,verticalUnit:'m',verticalUnitBasis:definition.verticalUnitBasis,...(definition.verticalUnitEvidence?{verticalUnitEvidence:definition.verticalUnitEvidence}:{}),verticalDatum:'unknown'},
       warnings:['Elevations use constant native cell values; the base follows the completed measurement’s frozen reference triangles. Gaps are not interpolated. Vertical datum has not been verified.',...(declared?['Source height units were requester-declared, not encoded in the raster or independently verified.']:[])]};

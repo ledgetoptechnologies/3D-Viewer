@@ -51,6 +51,8 @@ async function readyShareFixture(t) {
   app.use((_err,_req,res,_next)=>res.status(500).json({error:'injected failure'}));
   const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});
   const base=`http://127.0.0.1:${server.address().port}`;
+  c.manage=(id,{method='GET',body,token=c.admin,suffix='/link',key=crypto.randomUUID()}={})=>fetch(`${base}/api/v1/processing/shares/${id}${suffix}`,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key},...(body?{body:JSON.stringify(body)}:{})});
+  c.base=base;
   c.request=({item=c.item,method='POST',body={publishIfReady:true},token=c.admin,key=crypto.randomUUID()}={})=>fetch(
     `${base}/api/v1/processing/outputs/${item.versionId}/shares`,{
       method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':key},
@@ -64,6 +66,31 @@ async function readyShareFixture(t) {
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(root,{recursive:true,force:true})});
   return c;
 }
+
+test('durable recopy is authenticated, encrypted, stable through edits and fails closed for unrecoverable legacy links',async t=>{
+  const c=await readyShareFixture(t),created=await (await c.request()).json(),id=created.share.id;
+  assert.deepEqual(created.share.allowedViews,['model']);
+  let response=await c.manage(id);assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');assert.equal((await response.json()).viewUrl,created.viewUrl);
+  const token=created.viewUrl.split('/').pop(),stored=c.repository.getPublicShare(id);
+  assert.ok(stored.tokenCiphertext);assert.ok(!stored.tokenCiphertext.includes(token));
+  assert.equal((await c.manage(id,{token:c.token([])})).status,403);
+  assert.equal((await c.manage(id,{method:'PATCH',suffix:'',token:c.token(['viewer.shares.read']),body:{label:'Changed'}})).status,403);
+  response=await c.manage(id,{method:'PATCH',suffix:'',body:{label:'Updated',password:'password 123',permissions:{view:true,measure:false,cameras:false,download:false},allowedViews:['model']}});
+  assert.equal(response.status,200);assert.equal((await response.json()).share.hasPassword,true);
+  assert.equal(c.repository.getPublicShare(id).authorizationRevision,1);
+  assert.equal((await (await c.manage(id)).json()).viewUrl,created.viewUrl);
+  response=await c.manage(id,{method:'PATCH',suffix:'',body:{password:null,expiresAt:null}});assert.equal(response.status,200);assert.equal((await response.json()).share.hasPassword,false);
+  assert.equal((await c.manage(id,{method:'PATCH',suffix:'',body:{allowedViews:['dsm']}})).status,400);
+  assert.equal((await c.manage(id,{method:'PATCH',suffix:'',body:{expiresAt:'2000-01-01'}})).status,400);
+  c.db.prepare('UPDATE public_shares SET token_ciphertext=NULL WHERE id=?').run(id);
+  assert.equal((await (await c.manage(id)).json()).viewUrl,created.viewUrl,'verified receipt recovery preserves exact URL');
+  assert.ok(c.repository.getPublicShare(id).tokenCiphertext,'recovery is durable beyond receipt retention');
+  const unknown=c.repository.createPublicShare({modelId:stored.modelId,publicIdHash:auth.hashToken('legacy unknown'),permissions:{view:true}});
+  assert.equal((await c.manage(unknown.id)).status,409);
+  const vault=require('../server/shareTokenVault');assert.equal(vault.open(stored.tokenCiphertext,auth.hashToken('other')),null);
+  c.repository.revokePublicShare(id);assert.equal((await c.manage(id)).status,410);
+  response=await fetch(`${c.base}/api/v1/projects/${c.project.id}/public-shares`,{method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json'},body:'{}'});assert.equal(response.status,410);
+});
 
 test('ready Share is read-only until explicit link creation, publishes only eligible assets, and defaults passwordless/downloads off',async t=>{
   const c=await readyShareFixture(t);

@@ -29,6 +29,31 @@ function fixture(t) {
   return { database, repository, processing, measurements, jobs, model, principal, measurement, document, viewerToken, adminToken, body, request };
 }
 
+test('staff preflight records source review once and ordinary calculations reuse only server evidence',async t=>{
+ const f=fixture(t),seen=[];
+ const app=express();app.use(express.json());app.use('/measurements',createMeasurementApi(f.repository,{preflightRaster:async request=>{seen.push(structuredClone(request));return {verticalFactor:1};}}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const url=`http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`;
+ const call=(body,staff=false)=>fetch(url,{method:'POST',headers:{Authorization:`Bearer ${f.viewerToken}`,'Content-Type':'application/json',...(staff?{'X-Viewer-Admin-Authorization':`Bearer ${f.adminToken}`}:{})},body:JSON.stringify(body)});
+ const first=await call(f.body,true);assert.equal(first.status,202);const job=(await first.json()).calculation;
+ const evidence=f.jobs.parent(f.measurement.id,job.id).request.sourceUnitEvidence;
+ assert.equal(evidence.basis,'administrator-reviewed-source');assert.equal(evidence.reviewedBy,f.principal.subject);assert.equal(seen[0].sourceUnitEvidence,undefined);
+ f.jobs.cancel(f.measurement.id,job.id);
+ const {sourceVerticalUnit,...ordinary}=f.body;
+ const second=await call(ordinary);assert.equal(second.status,202);assert.deepEqual(seen[1].sourceUnitEvidence,evidence);assert.equal(seen[1].sourceVerticalUnit,null);
+ assert.equal((await call({...ordinary,sourceUnitEvidence:evidence})).status,400);
+ assert.equal(f.database.prepare('SELECT COUNT(*) AS n FROM measurement_source_unit_evidence').get().n,1);
+});
+
+test('encoded feet preflight never records an incidental metres checkbox as source evidence',async t=>{
+ const f=fixture(t),app=express();app.use(express.json());app.use('/measurements',createMeasurementApi(f.repository,{preflightRaster:async()=>({verticalFactor:0.3048})}));
+ const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const response=await fetch(`http://127.0.0.1:${server.address().port}/measurements/${f.measurement.id}/calculations`,{method:'POST',headers:{Authorization:`Bearer ${f.viewerToken}`,'X-Viewer-Admin-Authorization':`Bearer ${f.adminToken}`,'Content-Type':'application/json'},body:JSON.stringify(f.body)});
+ assert.equal(response.status,202);const job=(await response.json()).calculation;
+ assert.equal(f.jobs.parent(f.measurement.id,job.id).request.sourceUnitEvidence,undefined);
+ assert.equal(f.database.prepare('SELECT COUNT(*) AS n FROM measurement_source_unit_evidence').get().n,0);
+});
+
 test('ordinary point jobs require encoded-unit preflight and narrowly scoped worker authority',async t=>{
  const f=fixture(t);
  f.database.prepare("UPDATE model_assets SET kind='ept',format='ept',manifest_sha256=? WHERE id=?").run('b'.repeat(64),f.request.source.id);

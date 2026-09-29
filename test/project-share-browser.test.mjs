@@ -287,7 +287,7 @@ async function revokeProjectLink(client, runtime, shareId) {
   assert.equal(runtime.projectShares.find(item => item.id === shareId).revokedAt, null);
   await open();
   await client.evaluate(`document.querySelector('.workspace-decision button[type="submit"]').click()`);
-  await waitFor(client, `!document.querySelector('.workspace-decision') && !document.querySelector('#workspace-modal').open && !document.querySelector('#workspace').hasAttribute('aria-busy')`, 'Confirmed revoke did not settle');
+  await waitFor(client, `!document.querySelector('.workspace-decision') && !document.querySelector('[data-action="revoke-project-share"][data-id="${shareId}"]') && document.querySelector('[data-legacy-project-shares]')?.textContent.includes('revoked')`, 'Confirmed revoke did not settle');
   assert.equal(deletes(), before + 1, 'One confirmed revoke must issue exactly one DELETE');
   assert.ok(runtime.projectShares.find(item => item.id === shareId).revokedAt);
 }
@@ -299,8 +299,6 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
   try {
     await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `
       sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(adminToken)});
-      window.__copied='';
-      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText(value){if(window.__failCopy)return Promise.reject(new Error('clipboard unavailable'));window.__copied=value;return Promise.resolve();}}});
     ` });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, `document.querySelector('[data-action="open-project"]') !== null`, `${viewport.name}: workspace did not load`);
@@ -308,61 +306,33 @@ async function verifyStaffShare(devTools, origin, viewport, runtime) {
     await waitFor(client, `document.querySelector('[data-action="project-share"]') !== null`, `${viewport.name}: project did not open`);
     runtime.holdClientRead = true;
     await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
-    await waitFor(client, `document.querySelector('.project-share-form') !== null`, `${viewport.name}: whole-project share form did not open`);
-    assert.equal(typeof runtime.releaseClientRead, 'function', 'Only the optional Share lookup should now be held pending');
+    await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`, `${viewport.name}: existing public project link did not load`);
+    assert.equal(typeof runtime.releaseClientRead, 'function', 'Optional Operations lookup should be pending');
     assert.match(await client.evaluate(`document.querySelector('[data-client-share-panel]').textContent`), /Checking Operations/);
-    assert.equal(await client.evaluate(`(() => {
-      const form=document.querySelector('.share-form'),button=form.querySelector('button');
-      window.__retainedPublicForm=form;form.elements.label.value='Keep this public label';form.elements.password.value='Keep this password';
-      button.scrollIntoView({block:'center'});const box=button.getBoundingClientRect();
-      return !button.disabled && /Create public link/.test(button.textContent) && box.width>0 && box.height>0
-        && button.contains(document.elementFromPoint(box.x+box.width/2,box.y+box.height/2));
-    })()`), true, 'Public creation must be visible and hittable before Operations responds');
-    runtime.holdClientRead = false;
-    runtime.releaseClientRead();runtime.releaseClientRead = null;
-    await waitFor(client, `!document.querySelector('[data-client-share-panel]').textContent.includes('Checking Operations')`, `${viewport.name}: optional client panel did not settle`);
-    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('.share-form');return {same:form===window.__retainedPublicForm,label:form.elements.label.value,password:form.elements.password.value}})()`),
-      {same:true,label:'Keep this public label',password:'Keep this password'}, 'Late client response must not rebuild or reset the public form');
-    assert.match(await client.evaluate(`document.querySelector('.project-share-form .form-note').textContent`), /tasks published later/);
-    assert.equal(await client.evaluate(`document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`), true);
+    assert.equal(await client.evaluate(`document.querySelector('.project-share-form,.share-form,[data-share-mode="public"]') === null`), true, 'Project dialog must not expose public creation or per-task public forms');
+    assert.match(await client.evaluate(`document.querySelector('[data-legacy-project-shares]').textContent`), /remain active until you revoke/);
+    await client.evaluate(`window.__legacyRow=document.querySelector('[data-action="revoke-project-share"]')`);
     assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Opening Share must remain read-only');
-    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('.project-share-form');return{future:form.elements.dynamicProjectAccess.checked,download:form.elements.download.checked,password:form.elements.password.required}})()`),
-      { future: false, download: false, password: false }, 'Project-wide consent and downloads must default off; password stays optional');
-    await client.evaluate(`(() => { const form=document.querySelector('.project-share-form'); form.elements.label.value='Created in browser'; form.elements.password.value='browser password'; form.elements.download.checked=true; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
-    await waitFor(client, `document.querySelector('#workspace-toast')?.textContent.includes('Approve current and future published tasks')`, `${viewport.name}: missing project-scope consent was not rejected`);
-    assert.equal(runtime.requests.slice(start).some(item => item.method === 'POST'), false, 'Missing project-wide consent must not create a link');
-    await client.evaluate(`document.querySelector('.modal-close').click()`);
-    assert.equal(runtime.requests.slice(start).some(item => item.method === 'POST'), false, 'Cancelling Share must not create a link');
-    await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
-    await waitFor(client, `document.querySelector('.project-share-form') !== null`, `${viewport.name}: Share did not reopen`);
-    await client.evaluate(`(() => { const form=document.querySelector('.project-share-form'); form.elements.label.value='Created in browser'; form.elements.password.value='browser password'; form.elements.download.checked=true; form.elements.dynamicProjectAccess.checked=true; form.querySelector('button').click(); return true })()`);
-    await waitFor(client, `document.querySelector('input[aria-label="New public link"]')?.value === ${JSON.stringify(`${origin}/project/created-project-token`)}`, `${viewport.name}: created link was not displayed`);
-    await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-created"]') !== null`, `${viewport.name}: created link was not listed`);
-    assert.equal(await client.evaluate('window.__copied'), '', 'Creating a link must not silently access the clipboard');
-    const creations = () => runtime.requests.slice(start).filter(item => item.method === 'POST' && item.path === '/api/v1/projects/project-one/public-shares');
-    assert.equal(creations().length, 1, 'Explicit creation must create exactly one project link');
-    assert.deepEqual(creations()[0].body, { label: 'Created in browser', password: 'browser password', expiresAt: null, permissions: { view: true, measure: true, cameras: true, download: true } });
-    assert.match(creations()[0].idempotencyKey, /^[0-9a-f-]{36}$/i);
-    await client.evaluate(`window.__failCopy=true; document.querySelector('[data-action="copy-share"]').click()`);
-    await waitFor(client, `document.querySelector('#workspace-toast')?.textContent.includes('clipboard access is unavailable')`, `${viewport.name}: clipboard failure was not distinguished from link failure`);
-    assert.equal(creations().length, 1, 'Clipboard failure must not retry link creation');
-    assert.equal(await client.evaluate(`document.querySelector('input[aria-label="New public link"]').value`), `${origin}/project/created-project-token`);
-    await client.evaluate(`window.__failCopy=false; document.querySelector('[data-action="copy-share"]').click()`);
-    await waitFor(client, `window.__copied === ${JSON.stringify(`${origin}/project/created-project-token`)}`, `${viewport.name}: explicit copy did not complete`);
-    assert.equal(creations().length, 1, 'Copy must not issue another link mutation');
-    await revokeProjectLink(client, runtime, 'share-created');
-    await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
-    await waitFor(client, `document.querySelector('.project-share-form') !== null`, `${viewport.name}: Share did not reopen after revocation`);
-    assert.equal(await client.evaluate(`document.querySelector('input[aria-label="New public link"]') === null`), true, 'Revoked result URL must not reappear as a newly created link');
-    const recent = runtime.requests.slice(start);
-    assert.ok(recent.some((item) => item.method === 'POST' && item.path === '/api/v1/projects/project-one/public-shares'));
-    assert.ok(recent.some((item) => item.method === 'DELETE' && item.path === '/api/v1/project-shares/share-created'));
-    assert.deepEqual(client.events.filter((event) => event.method === 'Runtime.exceptionThrown'), []);
-  } finally {
     runtime.holdClientRead = false;
-    runtime.releaseClientRead?.();runtime.releaseClientRead = null;
-    await client.command('Page.close', {}, 2_000).catch(() => {});
-    client.close();
+    runtime.releaseClientRead(); runtime.releaseClientRead = null;
+    await waitFor(client, `document.querySelector('#client-grant-form') !== null`, `${viewport.name}: Operations client form did not load`);
+    assert.equal(await client.evaluate(`window.__legacyRow===document.querySelector('[data-action="revoke-project-share"]')`), true, 'Late client response must not replace legacy link controls');
+    assert.deepEqual(await client.evaluate(`(() => {const form=document.querySelector('#client-grant-form');return {whole:form.elements.wholeProject.checked,future:form.elements.includeFuturePublished.checked,download:form.elements.download.checked}})()`),
+      {whole:false,future:false,download:false}, 'Whole project and future client access require explicit opt-in');
+    await client.evaluate(`document.querySelector('.modal-close').click()`);
+    assert.equal(runtime.requests.slice(start).some(item => item.method !== 'GET'), false, 'Closing Share must not mutate access');
+    await client.evaluate(`document.querySelector('[data-action="project-share"]').click()`);
+    await waitFor(client, `document.querySelector('[data-action="revoke-project-share"][data-id="share-existing"]') !== null`, `${viewport.name}: legacy link did not reappear`);
+    await revokeProjectLink(client, runtime, 'share-existing');
+    assert.equal(await client.evaluate(`document.querySelector('#workspace-modal').open`), true, 'Revocation updates the current dialog without unrelated navigation');
+    assert.match(await client.evaluate(`document.querySelector('[data-legacy-project-shares]').textContent`), /revoked/);
+    const recent=runtime.requests.slice(start);
+    assert.equal(recent.some(item=>item.method==='POST'&&item.path==='/api/v1/projects/project-one/public-shares'),false,'Project public links must never be newly created');
+    assert.equal(recent.filter(item=>item.method==='DELETE'&&item.path==='/api/v1/project-shares/share-existing').length,1);
+    assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
+  } finally {
+    runtime.holdClientRead=false; runtime.releaseClientRead?.(); runtime.releaseClientRead=null;
+    await client.command('Page.close',{},2_000).catch(()=>{}); client.close();
   }
 }
 
@@ -425,7 +395,7 @@ async function verifyRevokeOnlyStaff(devTools, origin, runtime) {
   }
 }
 
-test('whole-project public sharing works in real desktop and mobile browsers', { timeout: 180_000 }, async (t) => {
+test('project sharing is internal-only while legacy public links remain viewable and revocable', { timeout: 180_000 }, async (t) => {
   const executable = browserPath();
   if (!executable) {
     t.skip('Set CHROME_PATH or EDGE_PATH to a Chromium-family browser to run the real browser verification.');

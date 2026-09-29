@@ -113,7 +113,7 @@ test('authenticated request waits for recovery and retries only rejected request
   const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
   const start=source.indexOf('async function workspaceFetch('),end=source.indexOf('\nasync function api(',start),fn=source.slice(start,end);assert.ok(start>=0&&end>start);
   let paused=false,release;const calls=[],state={token:'original',adminSession:{id:'retained-session',subject:'ops:one'}};
-  const context=vm.createContext({state,responseError:(message,status)=>Object.assign(new Error(message),{status}),workspaceRecovery:{wait:async()=>{if(paused)await new Promise(resolve=>release=resolve);},isPaused:()=>paused},clearWorkspaceAuthorization:()=>{paused=true;},fetch:async(path,init)=>{calls.push({path,init});return{status:calls.length===1?401:200};}});
+  const context=vm.createContext({state,workspaceRenewal:null,responseError:(message,status)=>Object.assign(new Error(message),{status}),workspaceRecovery:{wait:async()=>{if(paused)await new Promise(resolve=>release=resolve);},isPaused:()=>paused},clearWorkspaceAuthorization:()=>{paused=true;},fetch:async(path,init)=>{calls.push({path,init});return{status:calls.length===1?401:200};}});
   vm.runInContext(fn,context);
   const body=new Uint8Array([1,2,3]),pending=context.workspaceFetch('/upload',{method:'PUT',body,headers:{'Idempotency-Key':'one','X-Chunk-SHA256':'hash'}});
   await new Promise(resolve=>setImmediate(resolve));assert.equal(calls.length,1);

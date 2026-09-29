@@ -8,6 +8,7 @@ const {createEphemeralMeasurementApi}=require('../server/ephemeralMeasurementApi
 const {processOneEphemeralMeasurement}=require('../server/ephemeralMeasurementWorker');
 const {resolveEphemeralAccess}=require('../server/ephemeralMeasurementAccess');
 const auth=require('../server/auth');
+const {MeasurementSourceUnitEvidence}=require('../server/measurementSourceUnitEvidence');
 async function fixture(t,{preflightPoint=async()=>{}}={}){
  const database=new DatabaseSync(':memory:');database.exec('PRAGMA foreign_keys=ON');applyMigrations(database);t.after(()=>database.close());
  const repository=new ViewerRepository(database),jobs=new EphemeralMeasurementRepository(database);
@@ -24,6 +25,18 @@ async function fixture(t,{preflightPoint=async()=>{}}={}){
  f.run=runCalculation=>processOneEphemeralMeasurement({repository,config:{},storage:{resolve:()=>'/trusted/ept.json'},validator:{allows:async()=>true},runCalculation},'point-worker');
  return f;
 }
+
+test('public calculations reuse staff source evidence without gaining review or persistence authority',async t=>{
+ let seen;const f=await fixture(t,{preflightPoint:async request=>{seen=request;}});
+ const registry=new MeasurementSourceUnitEvidence(f.database);
+ const evidence=registry.recordStaffReview({modelId:f.model.id,modelVersionId:f.model.activeVersion.id,source:f.asset,coordinateReference:f.measurement.coordinateReference,sourceVerticalUnit:'m'},'staff');
+ const response=await f.create();assert.equal(response.status,202);
+ assert.equal(seen.sourceVerticalUnit,null);assert.deepEqual(seen.sourceUnitEvidence,evidence);
+ await f.run(async(_file,request)=>{assert.deepEqual(request.sourceUnitEvidence,evidence);return {method:'point-surface-cut-fill'};});
+ assert.equal((await f.call('/calculations','POST',{measurement:f.measurement,request:{...f.request,sourceUnitEvidence:evidence}})).status,400);
+ assert.equal(f.database.prepare('SELECT COUNT(*) n FROM private_measurements').get().n,0);
+ assert.equal(f.database.prepare('SELECT COUNT(*) n FROM measurement_source_unit_evidence').get().n,1);
+});
 
 test('public EPT capability and queue stay page scoped without exposing admin controls',async t=>{
  let preflights=0;const f=await fixture(t,{preflightPoint:async request=>{preflights++;assert.equal(request.requireEncodedVerticalUnits,true);}});

@@ -5,6 +5,7 @@ const { MeasurementCalculationRepository } = require('./measurementCalculationRe
 const { reconstructionAvailable } = require('./measurementReconstructionSupport');
 const { StorageManager } = require('./storageManager');
 const {validateTransectRequest,sameTransectEvidence}=require('./measurementTransectRequest');
+const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
 const fail = (code, status = 400) => { throw Object.assign(new Error(code), { code, status }); };
 function validateCalculationRequest(input, measurement, version, {ordinaryPoint=false}={}) {
   if (!input || Array.isArray(input) || Object.keys(input).some(k => !['revision','method','sourceAssetId','reference','sourceVerticalUnit','selection','sourceCoordinateFrame','cellSizeM','classFilter','reconstruction'].includes(k)) || input.revision !== measurement.revision) fail('measurement_calculation_invalid');
@@ -39,6 +40,7 @@ function validateCalculationRequest(input, measurement, version, {ordinaryPoint=
 }
 function createMeasurementCalculationApi({ repository, measurements, getPrincipal, admin, config = {}, preflightRaster, preflightPoint }) {
   const router = express.Router(), jobs = new MeasurementCalculationRepository(repository.database);
+  const sourceUnits = new MeasurementSourceUnitEvidence(repository.database);
   const rasterPreflight = preflightRaster || (async request => {
     const storage = new StorageManager(config);
     const absolutePath = storage.resolve(request.source.rootKey, request.source.relativePath, { mustExist: true });
@@ -68,21 +70,29 @@ function createMeasurementCalculationApi({ repository, measurements, getPrincipa
     const version = repository.getModelVersion(principal.modelId, principal.modelVersionId)?.activeVersion;
     const transect=req.body?.method==='surface-transect';
     const request = transect?validateTransectRequest(req.body,measurement,version,jobs.parent(measurement.id,req.body.parentCalculationId),{allowPointSurface:true}):validateCalculationRequest(req.body, measurement, version,{ordinaryPoint:req.body?.method==='point-surface-cut-fill'&&(!authority||req.body.sourceVerticalUnit===undefined)});
+    if(!transect){const evidence=sourceUnits.get(request);if(evidence)request.sourceUnitEvidence=evidence;}
     if(!authority&&request.source.kind==='ept'){
       if(request.sourceVerticalUnit)fail('measurement_source_vertical_units_required',422);
       request.requireEncodedVerticalUnits=true;
     }
     if (['surface-cut-fill','point-surface-cut-fill','surface-transect'].includes(request.method)) {
-      try { await (request.source.kind==='ept'?pointPreflight:rasterPreflight)(request); }
+      let preflight;
+      try { preflight=await (request.source.kind==='ept'?pointPreflight:rasterPreflight)(request); }
       catch (error) {
         const allowed = /^measurement_(source_|pixel_|rotated_|raster_)/.test(error.code || '');
         fail(allowed ? error.code : 'measurement_source_preflight_unavailable', 422);
       }
       // Awaited I/O may outlive access or an edit. Recheck before enqueuing,
       // retaining worker authorization/hash validation as an independent gate.
-      const current = gate(req).measurement;
+      const currentAccess = gate(req), current = currentAccess.measurement;
       if (current.revision !== measurement.revision) fail('measurement_calculation_invalid', 409);
       if(transect){const currentVersion=repository.getModelVersion(principal.modelId,principal.modelVersionId)?.activeVersion,rebuilt=validateTransectRequest(req.body,current,currentVersion,jobs.parent(current.id,req.body.parentCalculationId),{allowPointSurface:true});if(!sameTransectEvidence(request,rebuilt))fail('measurement_transect_parent_stale',409);}
+      // Persist only an authenticated staff review after source preflight. An
+      // encoded feet source must never acquire a metres assertion as a side effect.
+      const verticalFactor=request.source.kind==='ept'?preflight?.vertical?.verticalFactor:preflight?.verticalFactor;
+      if(!transect&&currentAccess.authority&&request.sourceVerticalUnit==='m'&&verticalFactor===1){
+        request.sourceUnitEvidence=sourceUnits.recordStaffReview(request,currentAccess.principal.subject);
+      }
     }
     // Keep only server-side capability hashes for worker revalidation, never raw
     // bearer values. They are omitted from every public job representation.

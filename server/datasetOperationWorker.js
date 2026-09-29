@@ -134,7 +134,7 @@ async function processOneDatasetOperation(deps, owner) {
       const payload=JSON.parse(operation.payload_json||'{}');
       if(payload.lodRecovery){result=await processLodRecovery(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'lod_recovery.materialized',entityType:'dataset_operation',entityId:operation.id,details:{sourceVersionId:result.recovery.sourceVersionId,targetVersionId:result.recovery.targetVersionId,recoveryRevision:result.recovery.recoveryRevision}});}
       else if(payload.webodmTaskImport){result=await importWebodmTask(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'webodm_task_import.completed',entityType:'dataset_operation',entityId:operation.id,details:{projectId:result.project.id,taskId:result.task.id,assetKinds:result.assetKinds}});}
-      else{result=await mapCatalogCandidate(operation,deps,updateProgress);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});}
+      else{result=await mapCatalogCandidate(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});}
     }
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
     let completed;

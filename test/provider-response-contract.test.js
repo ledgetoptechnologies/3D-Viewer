@@ -4,6 +4,13 @@ const assert=require('node:assert/strict');
 const {NodeOdmProvider}=require('../server/nodeOdmProvider');
 const adapter=(value,observe=()=>{})=>new NodeOdmProvider({endpoint:'https://provider.example.test',fetchImpl:async(url,init)=>{observe(url,init);return new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});}});
 
+test('task status retains engine only when explicitly present in exact task-info response',async()=>{
+  const base={uuid:'task',status:{code:40},imagesCount:2};
+  const missing=await adapter(base).status('task');assert.equal(Object.hasOwn(missing,'engine'),false);assert.equal(Object.hasOwn(missing,'engineVersion'),false);
+  const explicit=await adapter({...base,engine:'odm',engineVersion:'3.5.6'}).status('task');assert.equal(explicit.engine,'odm');assert.equal(explicit.engineVersion,'3.5.6');
+  const invalid=await adapter({...base,engine:'https://user:secret@example',engineVersion:'x'.repeat(121)}).status('task');assert.equal(Object.hasOwn(invalid,'engine'),false);assert.equal(Object.hasOwn(invalid,'engineVersion'),false);
+});
+
 test('ODX output preserves array record boundaries, blank lines and exact cursor',async()=>{
   let requested;const output=await adapter(['stage, setting','', 'next\nembedded'],url=>requested=new URL(url)).output('task',17);
   assert.deepEqual(output,{lines:['stage, setting','','next\nembedded'],nextLine:20});assert.equal(requested.searchParams.get('line'),'17');

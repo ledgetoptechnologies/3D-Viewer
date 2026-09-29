@@ -129,6 +129,7 @@ test('processIngest rejects a provider mesh without EPT before adopting it', asy
   let adopted = false;
   const processing = {
     getAttempt: () => attempt,
+    getAttemptTransferProvenance: () => null,
     getTask: () => task,
     getProject: () => ({ id:task.projectId, displayName:'EPT project' }),
     getProvider: () => ({ id:attempt.providerId, type:'nodeodm', endpoint:'http://127.0.0.1:3000' }),

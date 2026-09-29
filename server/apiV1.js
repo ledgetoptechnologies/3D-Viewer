@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const express = require('express');
 const auth = require('./auth');
+const shareTokenVault = require('./shareTokenVault');
 const { config } = require('./config');
 const { requireService } = require('./serviceAuth');
 const { encrypt, idempotent } = require('./serviceIdempotency');
@@ -459,6 +460,7 @@ function createApiV1(repository) {
         versionPolicy: 'latest',
         modelVersionId: null,
         publicIdHash: tokenHash,
+        tokenCiphertext: shareClass==='staff'?shareTokenVault.seal(token,tokenHash):null,
         passwordHash,
         permissions: permissions(body.permissions),
         label: body.label ? String(body.label).slice(0, 120) : null,
