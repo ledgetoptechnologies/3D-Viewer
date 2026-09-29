@@ -1,6 +1,8 @@
 # Remaining source-unit implementation
 
-This is a current-source audit, not a completed feature or a claim about deployed workers.
+This is a chronological implementation audit, not a claim about deployed workers.
+The opening sections record the initial gaps; the follow-up sections below record
+their implementation and verification, through the schema-38 checkpoint.
 
 ## Explicit imported metadata
 
@@ -42,8 +44,11 @@ inputs, actual producer, or that adjacent products came from those logs. Do not
 fabricate a fresh-task receipt. Missing metadata remains one-time staff review
 unless a separately audited producer/import contract resolves it.
 
-The actual ODX worker version remains unavailable because the known SSH endpoint
-timed out. This is an unaudited producer path, not proof its units are unknowable.
+The actual ODX worker version remains unavailable. The user confirmed that the
+previously attempted SSH address was incorrect; that timeout is not evidence of
+a problem with the configured cluster. Retrieve the current endpoint from the
+authenticated Viewer Providers & Nodes page before further connection attempts.
+This is an unaudited producer path, not proof its units are unknowable.
 Explicit metadata can resolve ODX products independently of producer inference.
 
 ## Required tests
