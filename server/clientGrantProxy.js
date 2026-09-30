@@ -1,6 +1,7 @@
 'use strict';
 
 const { signViewerEvent } = require('./viewerEvents');
+const { randomUUID } = require('node:crypto');
 
 const REMOTE_PATH = '/api/viewer/workspace/client-grants';
 const LOCAL_PATH = '/api/v1/workspace/client-grants';
@@ -18,7 +19,7 @@ function validSnapshot(value) {
     && (value.replayed === undefined || typeof value.replayed === 'boolean');
 }
 
-function createClientGrantProxy({ config, authorize, fetchImpl = fetch }) {
+function createClientGrantProxy({ config, authorize, fetchImpl = fetch, diagnostic = record => console.warn(`[client-grant-proxy] ${JSON.stringify(record)}`) }) {
   async function proxy(req, res, action) {
     if (!/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(String(req.adminPrincipal?.subject || '')))
       return res.status(403).json({ error: 'Viewer workspace authorization is invalid', code: 'invalid_workspace_subject' });
@@ -39,12 +40,23 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch }) {
       envelope.reason = supplied.reason.trim();
     }
 
+    const requestId = randomUUID();
+    res.set('X-LTDS-Client-Access-Request', requestId);
+    let stage = 'configuration', upstreamStatus = null;
+    const report = (status, code) => {
+      // Fixed fields only: never include subjects, URLs, bodies, headers or
+      // exception text, any of which can contain credentials or client data.
+      try { diagnostic({ event: 'client_grant_proxy_failed', timestamp: new Date().toISOString(),
+        requestId, action, stage, upstreamStatus, status, code }); } catch { /* Diagnostics must not change authorization or responses. */ }
+    };
     try {
       const body = JSON.stringify(envelope);
       const url = new URL(REMOTE_PATH, config.opsAutomationBaseUrl);
       if (url.origin !== config.opsAutomationBaseUrl || url.pathname !== REMOTE_PATH || url.search || url.hash || url.username || url.password)
         throw new Error('invalid_destination');
+      stage = 'signing';
       const signed = signViewerEvent({ secret: config.viewerEventSecret, keyId: config.viewerEventKeyId, method: 'POST', path: REMOTE_PATH, body });
+      stage = 'request';
       const response = await fetchImpl(url, {
         method: 'POST',
         redirect: 'error',
@@ -52,17 +64,27 @@ function createClientGrantProxy({ config, authorize, fetchImpl = fetch }) {
         headers: { ...signed, Accept: 'application/json', 'Content-Type': 'application/json' },
         body,
       });
+      upstreamStatus = response.status;
+      stage = 'response_headers';
       const declared = Number(response.headers.get('content-length') || 0);
       if (declared > 1024 * 1024) throw new Error('response_too_large');
+      stage = 'response_body';
       const text = await response.text();
       if (Buffer.byteLength(text) > 1024 * 1024) throw new Error('response_too_large');
+      stage = 'response_json';
       let payload;
       try { payload = JSON.parse(text); } catch { throw new Error('invalid_response'); }
-      if (!response.ok) return res.status(response.status >= 400 && response.status < 500 ? response.status : 502)
-        .json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
+      if (!response.ok) {
+        stage = 'upstream_rejection';
+        const status = response.status >= 400 && response.status < 500 ? response.status : 502;
+        report(status, 'operations_request_failed');
+        return res.status(status).json({ error: 'Operations rejected the client access request', code: 'operations_request_failed' });
+      }
+      stage = 'response_schema';
       if (!validSnapshot(payload)) throw new Error('invalid_response');
       return res.status(action === 'create' && !payload.replayed ? 201 : 200).json(payload);
     } catch {
+      report(502, 'operations_unavailable');
       return res.status(502).json({ error: 'Operations client access service is unavailable', code: 'operations_unavailable' });
     }
   }

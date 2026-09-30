@@ -1,5 +1,36 @@
 # Operations client access: post-restart diagnostic handoff
 
+## September 30 follow-up, approximately 06:29 AM Central
+
+Viewer health now identifies deployed revision
+`f4dc364de49da12513fd1fde1974d29266e75089`, schema 38. The public temporary
+measurement notice is visible. Operations recovery restored the existing workspace
+without a manual workspace reload, but reopening task Share still fails to load
+Internal client access. This recovery action is not silent-renewal acceptance.
+
+Hermes found one corresponding upstream proxy URL at September 30 02:40 UTC
+(September 29 09:40 PM Central), without a recorded status or error code; no
+matching output-share request was found in that window. That evidence does not
+identify a root cause or establish that no request occurred elsewhere.
+
+The diagnostic follow-up adds failure-only `[client-grant-proxy]` JSON records
+with fixed fields: event, timestamp, generated requestId, action, stage,
+upstreamStatus, local status, and local code. No URL, employee identity, client
+data, response body, signature, token, cookie, or exception text is logged.
+`X-LTDS-Client-Access-Request` echoes the generated correlation ID. No ID is
+accepted from an incoming request. The records do not alter authorization,
+request signatures, timeouts, response status mapping, or error bodies.
+
+After that diagnostic image is deployed, reproduce a read-only Internal client
+lookup and collect its failure record from the Viewer API container logs.
+`upstream_rejection` with an upstream status proves a rejected upstream response;
+`request` with null upstream status indicates no response was obtained;
+`response_json`/`response_schema` distinguishes invalid JSON/snapshot handling.
+Do not treat these stages as proof of the upstream configuration or reason.
+If no record is present, check local authorization/access logs: the proxy does
+not log failures that were rejected by middleware before reaching it.
+This diagnostic is pending release, not present in deployed `f4dc364`.
+
 ## Observed state
 
 After nginx recovered on September 30 (approximately 04:17–04:19 UTC), a fresh
