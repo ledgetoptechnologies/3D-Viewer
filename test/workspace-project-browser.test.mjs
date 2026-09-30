@@ -410,6 +410,9 @@ function startFixtureServer() {
         if (url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.orthophotoResponseGate) {
           await runtime.orthophotoResponseGate;
         }
+        if (url.pathname === '/api/v1/tasks/task-johnson' && runtime.taskDetailResponseGate) {
+          await runtime.taskDetailResponseGate;
+        }
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
         result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
           ? json({ error: 'synthetic_preview_unavailable' }, 503)
@@ -1006,8 +1009,8 @@ test('orthophoto preview settles on the mounted task after navigation during dec
         assert.equal(runtime.requests.filter(item => item.path === '/api/v1/processing/outputs/output-johnson/assets/ortho').length, 1, 'Rerender must reuse one in-flight decode rather than issuing duplicate reads');
       } finally {
         releaseResponse?.();
+        await client.command('Page.close').catch(() => {});
         client.close();
-        await fetch(`${devTools}/json/close/${target.id}`).catch(() => {});
       }
     });
   } finally {
@@ -1018,7 +1021,7 @@ test('orthophoto preview settles on the mounted task after navigation during dec
       await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
     }
     releaseBrowserLock();
-    if (server) await new Promise(resolve => server.close(resolve));
+    if (server) await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
     await removeBrowserProfile(profile, t);
   }
 });
@@ -1049,6 +1052,11 @@ test('companion product restore is explicit, immutable-version scoped, and permi
       { name: 'source rejection restores an actionable control', click: 'create', reject: true },
     ];
     for (const scenario of cases) await t.test(scenario.name, async () => {
+      let releaseTaskDetail;
+      // Force one slow detail response so opening Settings cannot accidentally
+      // rely on the speed of the synthetic server or Chromium scheduling.
+      runtime.taskDetailResponseGate = scenario.reject
+        ? new Promise(resolve => { releaseTaskDetail = resolve; }) : null;
       runtime.requests = [];
       runtime.permissions = scenario.readOnly ? readOnly : null;
       runtime.rejectCompanionRepair = Boolean(scenario.reject);
@@ -1083,6 +1091,13 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         await waitFor(client, `Boolean(document.querySelector('[data-action="task-settings"]'))`, 'Task settings navigation did not load');
         await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
         await waitFor(client, `new URL(location.href).searchParams.get('panel')==='settings' && Boolean(document.querySelector('.task-workspace-page'))`, 'Task settings route did not load');
+        if (scenario.reject) {
+          await waitForRequest(runtime, 0, 'GET', '/api/v1/tasks/task-johnson');
+          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading authoritative task details')`), true, 'Settings must expose the pending detail state');
+          assert.equal(await client.evaluate(`document.querySelectorAll('.task-workspace-page button').length`), 0, 'The loading placeholder is not the settled action list');
+          releaseTaskDetail();
+        }
+        await waitFor(client, `Boolean(document.querySelector('.task-workspace-page .task-options'))`, 'Authoritative task settings did not finish loading');
         assert.equal(runtime.requests.filter(request => request.method === 'POST').length, 0, 'Opening settings must never create/retry/import/publish work');
         const actions = await client.evaluate(`Array.from(document.querySelectorAll('.task-workspace-page button'), button => ({ text: button.textContent, action: button.dataset.action, disabled: button.disabled, title: button.title }))`);
         if (scenario.readOnly) {
@@ -1134,6 +1149,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown');
         assert.deepEqual(exceptions, []);
       } finally {
+        releaseTaskDetail?.();
         await client.command('Page.close').catch(() => {});
         client.close();
       }
