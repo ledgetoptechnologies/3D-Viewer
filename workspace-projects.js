@@ -82,10 +82,10 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Optional Operations lookup must not hold the independent public-link form.
   // A late result updates only its own panel, preserving typed public-link fields.
   if(context.clientLoading)void(async()=>{
-    let access=null,failed=false;
-    try{access=await api('/api/v1/workspace/client-grants')}catch{failed=true;}
+    let access=null,failure=null;
+    try{access=await api('/api/v1/workspace/client-grants')}catch(error){failure=clientAccessDiagnostic(error);}
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientAccess=access;context.clientLoading=false;context.clientError=failed?'unavailable':null;
+    state.clientAccess=access;context.clientLoading=false;context.clientError=failure;
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -153,6 +153,12 @@ function syncWorkspaceView(mode='replace'){history[mode==='push'?'pushState':'re
 function navigateWorkspace(view,mode='push'){releaseAllGcpImages();applyWorkspaceView(view);validateWorkspaceView();syncWorkspaceView(mode);shell.classList.remove('nav-open');render();hydrateExpandedTask()}
 function hydrateExpandedTask(){const taskId=state.expandedTaskId;if(!taskId||state.taskDetails[taskId])return;state.taskDetails[taskId]={loading:true};render();void refreshTaskDetails(taskId)}
 function responseError(message,status){const error=Error(message);error.status=status;return error}
+function clientAccessDiagnostic(error){
+  const codes=['authentication_required','permission_denied','invalid_workspace_subject','operations_request_failed','operations_unavailable'];
+  return{status:Number.isInteger(error?.status)&&error.status>=400&&error.status<=599?error.status:null,
+    code:codes.includes(error?.code)?error.code:null,
+    requestId:typeof error?.requestId==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(error.requestId)?error.requestId:null};
+}
 function validOpsOrigin(value){try{const parsed=new URL(value);return parsed.protocol==='https:'&&parsed.origin===value&&parsed.pathname==='/'&&!parsed.search&&!parsed.hash?value:null}catch{return null}}
 function beginWorkspaceReauthorization(){if(!state.adminSession||!state.token||!validOpsOrigin(sessionStorage.getItem(OPS_ORIGIN_KEY)))return false;void workspaceRecovery.pause();return true}
 function clearWorkspaceAuthorization(reason='unauthorized'){if(workspaceAuthorizationClearing)return;workspaceAuthorizationClearing=true;const expired=reason==='expired'||(reason==='unauthorized'&&Date.parse(state.adminSession?.expiresAt||'')<=Date.now());workspaceRenewal?.dispose();workspaceRenewal=null;if(expired&&beginWorkspaceReauthorization())return;activeNewTask?.dispose();reviewSessionController.suspend({preserve:false});storageUsagePoll.stop();releaseAllGcpImages();sessionStorage.removeItem(TOKEN_KEY);state.token=null;state.adminSession=null;clearInterval(state.logTimer);clearTimeout(state.operationTimer);renderNav();access()}
@@ -184,7 +190,7 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status);return payload}
+async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(path==='/api/v1/workspace/client-grants'&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status);return payload}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,options);toast(message);await load();return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -602,7 +608,13 @@ function clientGrantBody(form,onlyOutputId){
 }
 function clientSharePanel(output,onlyOutputId){
   if(can('viewer.client_grants.manage')&&state.shareContext?.clientLoading)return card('Authenticated client access',empty('Checking Operations client access… Public links can be created separately.'));
-  if(can('viewer.client_grants.manage')&&state.shareContext?.clientError)return card('Authenticated client access',empty('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.'));
+  if(can('viewer.client_grants.manage')&&state.shareContext?.clientError){
+    const diagnostic=clientAccessDiagnostic(state.shareContext.clientError);
+    const details=[diagnostic.status?`HTTP ${diagnostic.status}`:null,diagnostic.code?`Code: ${diagnostic.code}`:null].filter(Boolean).join(' · ');
+    return card('Authenticated client access',empty('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.')
+      +(details?`<p class="form-note">${esc(details)}</p>`:'')
+      +`<p class="form-note">${diagnostic.requestId?`Reference: ${esc(diagnostic.requestId)}. Share this reference with your administrator.`:'No proxy reference was returned; this alone does not identify the failure stage.'}</p>`);
+  }
   return clientShareCard(output,onlyOutputId);
 }
 function clientShareCard(output,onlyOutputId){

@@ -20,7 +20,7 @@ function declaration(name){
   const rest=source.slice(match.index),next=/\n(?:async )?function \w+\(|\nconst \w+\s*=/.exec(rest);
   return next?rest.slice(0,next.index):rest;
 }
-const names=['canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
+const names=['clientAccessDiagnostic','canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
   'exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
   'createOutputShare','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
@@ -113,6 +113,77 @@ test('optional client errors are honest and cannot hide the available public-lin
   await f.context.openShareModal('project','output');reject(new Error('Unavailable'));await new Promise(resolve=>setImmediate(resolve));
   assert.match(f.clientPanel.innerHTML,/could not be loaded.*Public links are unaffected/);
   assert.match(f.html(),/Create public link/);assert.equal(f.state.clientAccess,null);
+});
+
+for(const [label,status,code,requestId] of [
+  ['local authorization',403,'permission_denied',null],
+  ['upstream rejection',403,'operations_request_failed','59a59c20-c042-4e70-966b-ab87ad0aa833'],
+  ['service unavailable',502,'operations_unavailable','59a59c20-c042-4e70-966b-ab87ad0aa833'],
+])test(`client lookup displays safe ${label} diagnostics without altering public fields`,async()=>{
+  const f=fixture();let reject;
+  f.respond(path=>path.endsWith('/client-grants')?new Promise((_yes,no)=>{reject=no;}):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project','output');const renders=f.rendered.length;
+  f.form.elements.label.value='Keep label';f.form.elements.password.value='Keep password';
+  reject(Object.assign(new Error('https://upstream.test/private?token=secret'),{status,code,requestId}));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.clientPanel.innerHTML,new RegExp(`HTTP ${status}`));assert.match(f.clientPanel.innerHTML,new RegExp(`Code: ${code}`));
+  if(requestId)assert.match(f.clientPanel.innerHTML,new RegExp(`Reference: ${requestId}`));
+  else assert.match(f.clientPanel.innerHTML,/No proxy reference was returned; this alone does not identify the failure stage/);
+  assert.doesNotMatch(f.clientPanel.innerHTML,/upstream\.test|token=|secret/);
+  assert.equal(f.rendered.length,renders);assert.equal(f.form.elements.label.value,'Keep label');assert.equal(f.form.elements.password.value,'Keep password');
+});
+
+test('client-grants API keeps only bounded status, allowlisted code and UUID reference, and no raw error body',async()=>{
+  const f=fixture();let response,cleared=0;
+  f.context.workspaceFetch=async()=>response;f.context.clearWorkspaceAuthorization=()=>{cleared++;};
+  vm.runInContext([declaration('responseError'),declaration('api')].join('\n'),f.context);
+  const uuid='59a59c20-c042-4e70-966b-ab87ad0aa833';
+  for(const [status,code,header,expectedCode,expectedReference]of [
+    [403,'permission_denied',null,'permission_denied',null],
+    [403,'operations_request_failed',uuid,'operations_request_failed',uuid],
+    [502,'operations_unavailable',uuid,'operations_unavailable',uuid],
+    [401,'authentication_required',null,'authentication_required',null],
+    [502,'<script>secret</script>','https://private.test/token',null,null],
+    [502,'operations_unavailable',`${uuid}\nsecret`, 'operations_unavailable',null],
+    [502,{toString:()=> 'operations_unavailable'},'secret',null,null],
+  ]){
+    response={status,ok:false,json:async()=>({code,error:'raw secret',message:'https://private.test/token'}),headers:{get:name=>name==='X-LTDS-Client-Access-Request'?header:null}};
+    await assert.rejects(()=>f.context.api('/api/v1/workspace/client-grants'),error=>{
+      assert.equal(error.message,'Operations client access request failed');assert.equal(error.status,status);
+      assert.equal(error.code,expectedCode);assert.equal(error.requestId,expectedReference);return true;
+    });
+  }
+  assert.equal(cleared,1,'401 must retain the existing authentication-loss behavior');
+  response={status:403,ok:false,json:async()=>({code:'permission_denied'}),headers:{get:()=>uuid}};
+  await assert.rejects(()=>f.context.api('/api/v1/processing/outputs/output/shares'),error=>{
+    assert.equal(error.message,'Your current Viewer grant does not permit this action');assert.equal(error.code,undefined);assert.equal(error.requestId,undefined);return true;
+  });
+});
+
+test('client panel independently suppresses malformed diagnostic fields rather than rendering arbitrary error text',()=>{
+  const f=fixture();
+  for(const diagnostic of [
+    {status:'502<script>secret</script>',code:'operations_unavailable<script>secret</script>',requestId:'https://private.test/secret'},
+    {status:200,code:{toString:()=> 'operations_unavailable'},requestId:'59a59c20-c042-4e70-966b-ab87ad0aa833\nsecret'},
+    {status:600,code:'authentication_required secret',requestId:'<img src=secret>'},
+  ]){
+    f.state.shareContext.clientError=diagnostic;
+    const html=f.context.clientSharePanel(f.output,'output');
+    assert.match(html,/could not be loaded/);assert.match(html,/No proxy reference was returned/);
+    assert.doesNotMatch(html,/HTTP |Code: |Reference: |secret|private\.test|script|img src/);
+  }
+});
+
+for(const change of ['closed','context','token','subject','permission'])test(`late client diagnostic is ignored after ${change} changes`,async()=>{
+  const permissions=['viewer.shares.read','viewer.shares.create','viewer.processing.publish','viewer.client_grants.manage'],f=fixture(permissions);let reject;
+  f.respond(path=>path.endsWith('/client-grants')?new Promise((_yes,no)=>{reject=no;}):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project','output');const context=f.state.shareContext,access=f.state.clientAccess;
+  if(change==='closed')f.modal.close();if(change==='context')f.state.shareContext={id:'other'};
+  if(change==='token')f.state.token='other';if(change==='subject')f.state.adminSession={subject:'other'};
+  if(change==='permission')permissions.splice(permissions.indexOf('viewer.client_grants.manage'),1);
+  reject(Object.assign(new Error('unsafe secret'),{status:502,code:'operations_unavailable',requestId:'59a59c20-c042-4e70-966b-ab87ad0aa833'}));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.state.clientAccess,access);assert.equal(context.clientError,null);assert.equal(f.clientPanel.innerHTML,'');
 });
 
 for(const change of ['closed','context','token','subject','permission'])test(`late client result is ignored after ${change} changes`,async()=>{
