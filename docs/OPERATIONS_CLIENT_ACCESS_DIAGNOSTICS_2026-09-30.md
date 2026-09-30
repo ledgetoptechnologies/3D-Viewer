@@ -1,5 +1,26 @@
 # Operations client access: post-restart diagnostic handoff
 
+## September 30 follow-up, approximately 11:12 AM Central
+
+Viewer health identified `9ad97c22ee315430f0312334608988ed75e47160`, schema 38,
+at 11:10 AM Central. This revision includes the proxy diagnostics described below.
+A fresh read-only task Internal client lookup failed at approximately 11:11:57 AM
+Central. The existing UI still hides its status/code; the root cause remains unknown.
+Check Viewer API stderr/stdout for `[client-grant-proxy]` and nginx access logs for
+the local GET between 11:11 and 11:13 AM Central. A missing proxy record alone does
+not establish whether the request was denied locally or logs were unavailable.
+
+The next UI patch displays only an HTTP status, allowlisted safe error code and
+validated UUID correlation reference. It never displays arbitrary upstream bodies,
+URLs or credentials. If no reference is returned, the panel explicitly says this
+does not identify the failure stage. Authentication and permission enforcement,
+stale-result guards and independent public-link form data remain unchanged.
+This UI patch is not deployed merely because the earlier diagnostic revision is.
+
+Read-only live preset inspection confirmed enabled native enum controls and typed
+defaults after opening Cluster and refreshing capabilities. The preset editor was
+closed without saving; no client grant, share, preset or processing job was mutated.
+
 ## September 30 follow-up, approximately 06:29 AM Central
 
 Viewer health now identifies deployed revision
@@ -29,7 +50,8 @@ lookup and collect its failure record from the Viewer API container logs.
 Do not treat these stages as proof of the upstream configuration or reason.
 If no record is present, check local authorization/access logs: the proxy does
 not log failures that were rejected by middleware before reaching it.
-This diagnostic is pending release, not present in deployed `f4dc364`.
+At that earlier checkpoint the diagnostic was pending release and absent from
+`f4dc364`; it is now deployed in `9ad97c2` as noted above.
 
 ## Observed state
 
