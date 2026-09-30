@@ -48,6 +48,12 @@ test('disposed list releases observers and ignores queued resize callbacks', () 
   f.layout.update(0);assert.equal(f.list.dataset.scrollable,'true');assert.ok(f.disconnects()>=2);
 });
 
+test('temporary collection label survives accessible count and scroll updates',()=>{
+  const f=fixture([140,190,250]);f.layout.update(3,'Temporary measurements');
+  assert.equal(f.list.attributes['aria-label'],'Temporary measurements, 3 records. Scroll to see more.');
+  f.layout.update(0,'Temporary measurements');assert.equal(f.list.attributes['aria-label'],'Temporary measurements, 0 records');f.layout.dispose();
+});
+
 test('native scroll behavior, orange thumb, keyboard focus and high-contrast fallback are preserved', () => {
   const css=readFileSync(new URL('../measurement-workspace.css',import.meta.url),'utf8');
   assert.match(css,/\[data-scrollable=true\]\{[^}]*overflow-y:auto/);

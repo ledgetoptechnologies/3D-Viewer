@@ -13,13 +13,13 @@ export function createMeasurementListLayout(list, { ResizeObserverClass = global
   };
   const observer = typeof ResizeObserverClass === 'function' ? new ResizeObserverClass(measure) : null;
   return {
-    update(recordCount) {
+    update(recordCount, label = 'Saved measurements') {
       if (disposed) return;
       count = recordCount;
       list.dataset.empty = String(count === 0);
       list.dataset.scrollable = String(count > 2);
       list.setAttribute('tabindex', count > 2 ? '0' : '-1');
-      list.setAttribute('aria-label', `Saved measurements, ${count} ${count === 1 ? 'record' : 'records'}${count > 2 ? '. Scroll to see more.' : ''}`);
+      list.setAttribute('aria-label', `${label}, ${count} ${count === 1 ? 'record' : 'records'}${count > 2 ? '. Scroll to see more.' : ''}`);
       observer?.disconnect();
       rows = [...(list.querySelectorAll?.('.measurement-row') || [])].slice(0, 2);
       if (count <= 2) {

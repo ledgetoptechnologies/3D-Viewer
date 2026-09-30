@@ -33,7 +33,7 @@ class Element {
   setPointerCapture(){} releasePointerCapture(){} focus(){} click(){}
 }
 
-function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2),onBeforeAccessLost=()=>{},storeFactory=createMeasurementStore}={}){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2),onBeforeAccessLost=()=>{},token=()=>null,storeFactory=createMeasurementStore}={}){
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
@@ -49,7 +49,7 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
     setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>now},
     openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permission,toolChanged(){},onBeforeAccessLost,coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token,permitted:()=>permission,toolChanged(){},onBeforeAccessLost,coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
   return{workspace,controls,panel,canvas,window,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
@@ -65,6 +65,27 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
 }
 
 const document=(collection,name)=>({id:crypto.randomUUID(),name,collection,kind:'distance',vertices:collection==='map'?[[250,200,0],[390,230,0]]:[[20,40,132.123456789],[100,60,139.987654321]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true,source:{kind:collection==='map'?'ortho':'mesh'},results:{status:'geometry-only',method:'vertex-geometry',...(collection==='map'?{elevationBasis:'not-sampled'}:{})}});
+
+test('public page-only measurements clearly distinguish temporary records and exports from saved project data',async t=>{
+  const f=fixture();t.after(()=>f.workspace.dispose());
+  assert.equal(f.controls.querySelector('[data-m-list-title]').textContent,'Temporary measurements');
+  assert.match(f.controls.querySelector('[data-m-list-caption]').textContent,/page only.*reset on refresh or closing the tab.*not saved to the project.*Export all measurements/);
+  assert.match(f.list(),/No temporary measurements yet/);
+  await f.workspace.store.save(document('spatial3d','Public scratch measurement'));
+  assert.match(f.controls.querySelector('[data-m-list]').getAttribute('aria-label'),/^Temporary measurements, 1 record/);
+  assert.match(f.list(),/Temporary — resets on refresh/);
+  assert.equal(f.workspace.store.persistent(),false);
+  assert.equal((await f.exportJson()).measurements.length,1);
+});
+
+for(const persistence of [true,false])test(`authenticated measurement capability personalPersistence=${persistence} controls collection copy`,async t=>{
+  const calls=[];
+  const f=fixture({token:()=> 'fixture-session',storeFactory:options=>createMeasurementStore({...options,fetcher:async(url,request)=>{calls.push(request.method);return{ok:true,status:200,json:async()=>({measurements:[],capabilities:{personalPersistence:persistence}})};}})});t.after(()=>f.workspace.dispose());
+  await flush();f.workspace.tick();
+  assert.equal(f.controls.querySelector('[data-m-list-title]').textContent,persistence?'Saved measurements':'Temporary measurements');
+  assert.match(f.controls.querySelector('[data-m-list-caption]').textContent,persistence?/Exports include all saved measurements/:/not saved to the project/);
+  assert.ok(calls.length>=2);assert.ok(calls.every(method=>method==='GET'));
+});
 function attachedPoint(basis='ept-vertical-crs'){
   const record={...document('map','Saved point boundary'),kind:'polygon',modelVersionId:'point-version',revision:2,vertices:[[250,200,0],[390,200,0],[390,300,0]],results:{method:'point-surface-cut-fill',calculationOrigin:'browser',calculationJobId:'point-job',source:{verticalUnitBasis:basis},netM3:77}};
   const result={method:'point-surface-cut-fill',calculationOrigin:'server-original-point-surface',boundaryVertices:record.vertices.map(([e,n])=>[e,n,181]),source:{kind:'ept',assetId:'ept-source',modelVersionId:record.modelVersionId,crs:'EPSG:32616',verticalUnit:'m',verticalUnitBasis:basis,boundaryElevationBasis:'point-grid',sha256:'a'.repeat(64),manifestSha256:'b'.repeat(64)}};
