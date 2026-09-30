@@ -22,8 +22,13 @@ export function taskOptionDomain(spec) {
 }
 export function taskOptionRestriction(spec) {
   if (REQUIRED.has(spec.name)) return 'Required for Viewer outputs; enabled automatically.';
-  if (FILE_OPTIONS.has(spec.name) || (spec.type === 'string' && /\b(?:file|directory|folder|path)\b/i.test(`${spec.domain || ''} ${spec.help || ''}`))) return 'This input needs a registered file or boundary workflow; arbitrary paths are not supported here.';
-  if (!['bool', 'int', 'float', 'string'].includes(spec.type)) return 'This node option type is not supported by this editor.';
+  if (FILE_OPTIONS.has(spec.name) || (['string', 'enum'].includes(spec.type) && /\b(?:file|directory|folder|path)\b/i.test(`${spec.domain || ''} ${spec.help || ''}`))) return 'This input needs a registered file or boundary workflow; arbitrary paths are not supported here.';
+  // ODM exposes supported-choice settings as enum, not string. Only accept
+  // its bounded string choice list; an unknown/malformed enum is not free text.
+  if (spec.type === 'enum') {
+    const choices = taskOptionDomain(spec)?.values;
+    if (!choices?.length || !choices.every(value => typeof value === 'string' && value.length <= 4000)) return 'This node option type is not supported by this editor.';
+  } else if (!['bool', 'int', 'float', 'string'].includes(spec.type)) return 'This node option type is not supported by this editor.';
   return null;
 }
 export function parseTaskOption(spec, raw) {
