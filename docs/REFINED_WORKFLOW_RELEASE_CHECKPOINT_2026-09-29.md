@@ -1,5 +1,83 @@
 # Refined Viewer workflow — candidate checkpoint
 
+## Latest state — September 30, 04:12 UTC
+
+This section supersedes earlier release/deployment status below; historical test
+checkpoints remain evidence for their stated scope, not current completion claims.
+
+- The restarted Viewer returned HTTP 200 at `/api/v1/health`, revision
+  `9b2a6d790afbf2c790be356c23d8bb78180607af`, schema 38. Its release workflow
+  `36651663873` passed and promoted the verified image digest
+  `sha256:5d39f4c6e1dce6f74cc88eada0e05975d257ebff29fb78c954915f3da457a279`.
+- Live node QA exposed native ODM `enum` domains being populated but disabled in
+  the shared task/preset editor. PR 6 fixes bounded string enum choices while
+  preserving unsupported/file restrictions and server validation. Its exact head
+  `87c39679e6beefd9d355c96204d4a5f01ea07196` passed 2,028 source tests
+  (15 skipped, zero failed) and 138 exact-image tests (zero skipped/failed).
+  The local real-browser suite also passed 16/16.
+- PR 6 merged as `86c10a6b5ba97fb32ee841dbda0a06f7b482eaee`. Main release
+  workflow `36667732671` completed successfully: 2,028 source tests passed
+  (15 skipped, zero failed), and 138 exact-image tests passed without skips or
+  failures. It promoted digest
+  `sha256:32cf03fce236dac27bc87bee629b74e522afab90c05806b77f54677b4309b401`.
+  The downloaded attestation binds that digest to the merge, schema 38 and the
+  exact workflow SHA; its file hash matches the accompanying checksum. This is
+  publication evidence, not deployment of that merge.
+- The existing Hickory Grove tab reports 6,828,524 visible points, active 7.5M
+  of 10M requested, 153 nodes and LOD 0–5. It subsequently entered access renewal
+  and hid personal measurements. These are browser diagnostics, not independent
+  GPU measurements or successful session-renewal acceptance.
+- Live sharing retry remains unverified: Operations launch inspection timed out,
+  and a fresh Viewer workspace requires an Operations launch. Earlier client-grant
+  and share-eligibility errors occurred around the nginx outage; await the
+  requested status/error logs and recheck before attributing them to code.
+- A new focused run passed 49 profile/source/cache/timing tests without skips or
+  failures. The 64-point synthetic LAZ diagnostic measured cold total 448.303 ms
+  versus warm 4.771 ms, with warm decode/grid zero and full-result equality.
+  This does not establish representative client latency; a larger isolated
+  benchmark is in progress.
+- The user explicitly deferred live Operations silent-refresh acceptance until
+  the other agent's rollout. The full goal is not complete. No live presets,
+  links, client grants, measurements or processing jobs were changed.
+
+### Post-restart follow-up — September 30, 04:19 UTC
+
+A fresh Operations tab successfully launched the authenticated Viewer workspace,
+without reloading the existing model tab. The task share dialog still defaults to
+Internal client. Public-link eligibility now loads, saved settings are summarized,
+and Copy link returned the visible `Link copied` status without creating a new
+link. The existing Edit settings dialog exposes password/expiry/views/features;
+it was closed without saving. Operations client access still reports that it
+could not be loaded; this failure remains separate from the now-working public
+sharing path and requires the requested upstream status/error evidence.
+Opening the saved public link loaded the Hickory Grove model, all five allowed
+view buttons, camera controls and a measurement list with zero staff records.
+No new measurement was created and no existing share settings were saved.
+
+The opt-in `node scripts/benchmark-measurement-profile.mjs` now exercises
+1,048,576 unique binary-EPT points across five nodes, a native 0.25 m grid, and a
+native tiled 1024-by-1024 TIFF through independent bounded calculation children.
+Root verification passed full cold/warm volume and profile equality, parent-grid
+reuse, complete counts/coverage and same-size source-tampering rejection.
+
+For that root run, EPT profile child time was 384.193 ms cold and 146.647 ms warm;
+verified source I/O plus hashes was 22.096/22.743 ms, decode/grid 232.715/0 ms,
+and sampling 1.518/1.899 ms. TIFF profile child time was 114.556/116.109 ms,
+including source hashing 4.050/4.283 ms and raster reads 5.199/4.982 ms.
+These are synthetic local timings, not live latency, large-LAZ decoding evidence,
+queue wait measurements or persistent raster-cache claims. The benchmark bypasses
+the queue and explicitly records its wait as unknown. Existing queue timing and
+rapid-input coalescing remain covered by their scoped tests. A further root run
+passed 37 preset/profile-control tests without failures or skips.
+
+Public-view QA found generic `Saved measurements` copy despite the collection
+being page-only. The follow-up now labels temporary collections and explains
+refresh/close lifetime, project non-persistence and exports; staff persistent
+collections retain their original wording. Forty-eight focused tests passed,
+the production build passed, and an isolated local in-app-browser preview showed
+the temporary heading, accessible region and visible notice correctly. This
+changes copy only, not authority or persistence. It is not deployed yet.
+
 ## Implemented locally
 
 - Stable in-place workspace renewal, including the Operations credentialed CORS
