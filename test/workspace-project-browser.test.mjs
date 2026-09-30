@@ -407,8 +407,16 @@ function startFixtureServer() {
         let body = {};
         if (raw) try { body = JSON.parse(raw); } catch {}
         runtime.requests.push({ method: request.method, path: url.pathname, body, idempotencyKey: request.headers['idempotency-key']||null });
+        if (url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.orthophotoResponseGate) {
+          await runtime.orthophotoResponseGate;
+        }
+        if (url.pathname === '/api/v1/tasks/task-johnson' && runtime.taskDetailResponseGate) {
+          await runtime.taskDetailResponseGate;
+        }
         if (manualFixture && request.method !== 'GET') console.log(`Synthetic mutation: ${request.method} ${url.pathname}`);
-        result = apiResponse(url, runtime, request.method, body);
+        result = url.pathname === '/api/v1/processing/outputs/output-johnson/assets/ortho' && runtime.failOrthophotoResponse
+          ? json({ error: 'synthetic_preview_unavailable' }, 503)
+          : apiResponse(url, runtime, request.method, body);
       }
     } else {
       const relative = url.pathname === '/workspace' || url.pathname === '/' || (manualFixture && url.pathname === `/workspace/${manualFixtureGrant}`) ? 'workspace.html' : decodeURIComponent(url.pathname.slice(1));
@@ -958,6 +966,66 @@ test('project-first workspace is interactive and overflow-free in real desktop a
   }
 });
 
+test('orthophoto preview settles on the mounted task after navigation during decoding', { timeout: 60_000, skip: manualFixture }, async t => {
+  const executable = browserPath();
+  if (!executable) { t.skip('Chrome or Edge is required for preview lifecycle browser QA.'); return; }
+  const releaseBrowserLock = await acquireBrowserHarnessLock({ root });
+  let server, runtime, origin, profile, browser, releaseResponse;
+  try {
+    ({ server, runtime, origin } = await startFixtureServer());
+    profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-browser-'));
+    browser = spawn(executable, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox',
+      '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank',
+    ], { windowsHide: true, stdio: 'ignore' });
+    const devTools = await waitForDevTools(profile);
+    for (const fail of [false, true]) await t.test(fail ? 'failed response updates replacement preview' : 'decoded response updates replacement preview', async () => {
+      runtime.requests = [];
+      runtime.failOrthophotoResponse = fail;
+      runtime.orthophotoResponseGate = new Promise(resolve => { releaseResponse = resolve; });
+      const target = await (await fetch(`${devTools}/json/new?about:blank`, { method: 'PUT' })).json();
+      const client = await CdpClient.connect(target.webSocketDebuggerUrl);
+      try {
+        await client.command('Page.enable');
+        await client.command('Runtime.enable');
+        await client.command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+        await client.command('Page.addScriptToEvaluateOnNewDocument', { source: `sessionStorage.setItem('ltds-viewer-admin-token', ${JSON.stringify(token)});` });
+        await client.command('Page.navigate', { url: `${origin}/workspace?section=dashboard&project=project-johnson&task=task-johnson` });
+        await waitForRequest(runtime, 0, 'GET', '/api/v1/processing/outputs/output-johnson/assets/ortho');
+        await waitFor(client, "document.querySelector('.compact-task-detail .task-facts') !== null", 'Initial task details did not settle');
+        await client.evaluate(`window.__firstPreview=document.querySelector('.task-ortho-preview canvas'); document.querySelector('[data-section="background"]').click()`);
+        await waitFor(client, "document.querySelector('#import-activity') !== null", 'Background route did not replace the task');
+        await client.evaluate(`history.back()`);
+        await waitFor(client, "Boolean(document.querySelector('.task-ortho-preview canvas'))", 'Returning to Dashboard did not restore the pending preview');
+        assert.equal(await client.evaluate(`!window.__firstPreview.isConnected && window.__firstPreview !== document.querySelector('.task-ortho-preview canvas')`), true, 'Navigation must replace the captured preview while its response is pending');
+        releaseResponse();
+        if (fail) {
+          await waitFor(client, "document.querySelector('.task-ortho-preview.unavailable')?.textContent.includes('Preview unavailable')", 'Failed decode did not update the mounted replacement preview');
+          assert.equal(await client.evaluate(`document.querySelector('.task-ortho-preview.loading') === null`), true);
+        } else {
+          await waitFor(client, "document.querySelector('.task-ortho-preview canvas')?.getAttribute('aria-label') === 'Published orthophoto preview' || (()=>{const image=document.querySelector('.task-ortho-preview img');return Boolean(image?.complete && image.naturalWidth>0)})()", 'Successful decode did not update the mounted replacement preview');
+          assert.equal(await client.evaluate(`(() => {const canvas=document.querySelector('.task-ortho-preview canvas'),image=document.querySelector('.task-ortho-preview img');return canvas ? [...canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data].some(value=>value>0) : Boolean(image?.complete && image.naturalWidth>0)})()`), true, 'Mounted preview must contain decoded pixels');
+        }
+        assert.equal(runtime.requests.filter(item => item.path === '/api/v1/processing/outputs/output-johnson/assets/ortho').length, 1, 'Rerender must reuse one in-flight decode rather than issuing duplicate reads');
+      } finally {
+        releaseResponse?.();
+        await client.command('Page.close').catch(() => {});
+        client.close();
+      }
+    });
+  } finally {
+    releaseResponse?.();
+    if (browser) {
+      const exited = new Promise(resolve => browser.once('exit', resolve));
+      browser.kill();
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5_000))]);
+    }
+    releaseBrowserLock();
+    if (server) await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+    await removeBrowserProfile(profile, t);
+  }
+});
+
 test('companion product restore is explicit, immutable-version scoped, and permission-safe in a real browser', { timeout: 120_000, skip: manualFixture }, async t => {
   const executable = browserPath();
   if (!executable) { t.skip('Chrome or Edge is required for companion repair browser QA.'); return; }
@@ -984,6 +1052,11 @@ test('companion product restore is explicit, immutable-version scoped, and permi
       { name: 'source rejection restores an actionable control', click: 'create', reject: true },
     ];
     for (const scenario of cases) await t.test(scenario.name, async () => {
+      let releaseTaskDetail;
+      // Force one slow detail response so opening Settings cannot accidentally
+      // rely on the speed of the synthetic server or Chromium scheduling.
+      runtime.taskDetailResponseGate = scenario.reject
+        ? new Promise(resolve => { releaseTaskDetail = resolve; }) : null;
       runtime.requests = [];
       runtime.permissions = scenario.readOnly ? readOnly : null;
       runtime.rejectCompanionRepair = Boolean(scenario.reject);
@@ -1018,6 +1091,13 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         await waitFor(client, `Boolean(document.querySelector('[data-action="task-settings"]'))`, 'Task settings navigation did not load');
         await client.evaluate(`document.querySelector('[data-action="task-settings"]').click()`);
         await waitFor(client, `new URL(location.href).searchParams.get('panel')==='settings' && Boolean(document.querySelector('.task-workspace-page'))`, 'Task settings route did not load');
+        if (scenario.reject) {
+          await waitForRequest(runtime, 0, 'GET', '/api/v1/tasks/task-johnson');
+          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading authoritative task details')`), true, 'Settings must expose the pending detail state');
+          assert.equal(await client.evaluate(`document.querySelectorAll('.task-workspace-page button').length`), 0, 'The loading placeholder is not the settled action list');
+          releaseTaskDetail();
+        }
+        await waitFor(client, `Boolean(document.querySelector('.task-workspace-page .task-options'))`, 'Authoritative task settings did not finish loading');
         assert.equal(runtime.requests.filter(request => request.method === 'POST').length, 0, 'Opening settings must never create/retry/import/publish work');
         const actions = await client.evaluate(`Array.from(document.querySelectorAll('.task-workspace-page button'), button => ({ text: button.textContent, action: button.dataset.action, disabled: button.disabled, title: button.title }))`);
         if (scenario.readOnly) {
@@ -1069,6 +1149,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         const exceptions = client.events.filter(event => event.method === 'Runtime.exceptionThrown');
         assert.deepEqual(exceptions, []);
       } finally {
+        releaseTaskDetail?.();
         await client.command('Page.close').catch(() => {});
         client.close();
       }
