@@ -40,11 +40,13 @@ function fixture({storeFactory=createMeasurementStore,token=()=>null}={}){
 const record=()=>({id:crypto.randomUUID(),name:'Distance',kind:'distance',collection:'spatial3d',vertices:[[10,10,0],[120,100,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
 
 test('signed-in retry loading control stays hidden until failure and hides after recovery across rerenders',async()=>{
-  let fail=false;const f=fixture({token:()=> 'signed-in',storeFactory:({changed})=>({records:new Map(),statuses:new Map(),load:async()=>{if(fail)throw new Error('Temporary failure');changed();},invalidate(){}})});
+  let fail=false;const f=fixture({token:()=> 'signed-in',storeFactory:({changed})=>({records:new Map(),statuses:new Map(),persistent:()=>true,load:async()=>{if(fail)throw new Error('Temporary failure');changed();},invalidate(){}})});
   const retry=f.controls.querySelector('[data-m="reload"]'),flush=()=>new Promise(resolve=>setImmediate(resolve));
   assert.equal(retry.hidden,true);await flush();assert.equal(retry.hidden,true);f.units('metric');assert.equal(retry.hidden,true);
+  assert.equal(f.controls.querySelector('[data-m-list-title]').textContent,'Saved measurements');
   fail=true;f.action('reload');await flush();assert.equal(retry.hidden,false);f.units('feet');assert.equal(retry.hidden,false);
-  fail=false;f.action('reload');await flush();assert.equal(retry.hidden,true);f.units('metric');assert.equal(retry.hidden,true);f.workspace.dispose();
+  fail=false;f.action('reload');await flush();assert.equal(retry.hidden,true);f.units('metric');assert.equal(retry.hidden,true);
+  assert.equal(f.controls.querySelector('[data-m-list-title]').textContent,'Saved measurements');f.workspace.dispose();
 });
 
 test('centered polygon label and card preserve negative net volume rather than converting fill to positive',async()=>{

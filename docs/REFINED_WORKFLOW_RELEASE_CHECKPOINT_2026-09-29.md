@@ -78,6 +78,20 @@ the production build passed, and an isolated local in-app-browser preview showed
 the temporary heading, accessible region and visible notice correctly. This
 changes copy only, not authority or persistence. It is not deployed yet.
 
+Subsequent live public QA created one page-only orthophoto distance. Its card and
+status explicitly reported `Temporary — resets on refresh`; reloading only that
+public tab returned its list to zero. No calculation was started and no staff
+measurement was edited. The pending copy update remains separate from this
+verified deployed non-persistence behavior.
+
+PR 7's first CI run (`36668849284`) found one stale test-only store double:
+`measurement-overlay-performance.test.mjs` omitted the real store's `persistent`
+method. The fixture now provides that method and checks that saved staff wording
+survives loading/retry recovery. Fifty-six combined overlay/cross-view/list tests
+passed with no failures or skips. A fresh full CI run is required; the failed run
+did not publish an image. The Operations client-access diagnostic handoff is in
+`OPERATIONS_CLIENT_ACCESS_DIAGNOSTICS_2026-09-30.md`.
+
 ## Implemented locally
 
 - Stable in-place workspace renewal, including the Operations credentialed CORS
