@@ -6,6 +6,7 @@ const { fork } = require('node:child_process');
 const { MeasurementCalculationRepository } = require('./measurementCalculationRepository');
 const {MeasurementRepository}=require('./measurementRepository');
 const {validateTransectRequest,sameTransectEvidence}=require('./measurementTransectRequest');
+const {emitMeasurementTiming,sanitizedMeasurementTiming,readQueueTiming}=require('./measurementTiming');
 function authorizationLive(request, repository, processing) {
   const viewer = request.authority?.viewerHash ? repository.getViewerSessionByHash(request.authority.viewerHash) : null, admin = request.authority?.adminHash ? processing.getAdminSessionByHash(request.authority.adminHash) : null;
   const model = viewer && repository.getModel(viewer.modelId), version = viewer && repository.getModelVersion(viewer.modelId, viewer.modelVersionId)?.activeVersion;
@@ -15,7 +16,8 @@ function authorizationLive(request, repository, processing) {
   if(request.authority?.scope==='personal-raster')return Boolean(['surface-cut-fill','surface-transect'].includes(request.method)&&['dsm','dtm'].includes(request.source?.kind)&&['ops','client'].includes(viewer.audience)&&viewer.audience===request.authority.audience&&(viewer.audience==='ops'||viewer.permissions.personalMeasurements===true));
   return Boolean(viewer.audience === 'ops' && processing.adminSessionLive(admin) && admin.subject === viewer.subject && admin.permissions?.includes('viewer.processing.write'));
 }
-async function childCalculation(absolutePath, request, { config, isLive, sourceFiles, forkProcess = fork }) {
+async function childCalculation(absolutePath, request, { config, isLive, sourceFiles, forkProcess = fork, onTiming }) {
+  const started=performance.now();let timingMessages=0;
   const scratchRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'viewer-measurement-job-'));
   try { return await new Promise((resolve, reject) => {
     const child = forkProcess(path.join(__dirname, 'measurementCalculationChild.js'), [], { execArgv: ['--max-old-space-size=1024'], detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore','ignore','ignore','ipc'], env: { ...process.env, UV_THREADPOOL_SIZE: '2', OMP_NUM_THREADS: '2', OPENBLAS_NUM_THREADS: '2', MEASUREMENT_POISSON_BIN: config.measurementPoissonBin || process.env.MEASUREMENT_POISSON_BIN || '/opt/poisson/PoissonRecon' } });
@@ -31,6 +33,7 @@ async function childCalculation(absolutePath, request, { config, isLive, sourceF
     }, 1000);
     const deadline = setTimeout(() => stop('measurement_timeout'), config.measurementTimeoutMs || 300_000);
     child.on('message', message => {
+      if(message?.type==='timing'&&timingMessages++<8){const timing=sanitizedMeasurementTiming(message.timing);if(timing)emitMeasurementTiming(request,timing,onTiming);}
       if (message?.type === 'memory' && message.rss > (config.measurementMemoryMiB || 4096) * 1024 * 1024) stop('measurement_memory_limit');
       if (message?.type === 'result') stop(null, message.result);
       if (message?.type === 'error') stop(message.code);
@@ -40,13 +43,15 @@ async function childCalculation(absolutePath, request, { config, isLive, sourceF
     // drainage, so a valid final result wins over a successful child exit.
     child.on('close', () => { if (!settled) stop('measurement_worker_interrupted'); });
     const raster = ['dsm', 'dtm'].includes(request.source?.kind);
-    child.send({ absolutePath, request, maxCells: raster ? (config.measurementRasterMaxCells || 100_000_000) : (config.measurementMaxCells || 2_000_000), memoryMiB: config.measurementMemoryMiB || 4096, sourceFiles, scratchRoot }, error => { if (error) stop('measurement_worker_unavailable'); });
-  }); } finally { const resolved = path.resolve(scratchRoot); if (resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(resolved).startsWith('viewer-measurement-job-')) await fs.promises.rm(resolved, { recursive: true, force: true }); }
+    const pointGridCacheRoot = config.cacheMount ? path.join(path.resolve(config.cacheMount), 'measurement-point-surfaces-v1') : undefined;
+    child.send({ absolutePath, request, maxCells: raster ? (config.measurementRasterMaxCells || 100_000_000) : (config.measurementMaxCells || 2_000_000), memoryMiB: config.measurementMemoryMiB || 4096, sourceFiles, scratchRoot, pointGridCacheRoot }, error => { if (error) stop('measurement_worker_unavailable'); });
+  }); } finally { emitMeasurementTiming(request,{phase:'child',totalMs:performance.now()-started},onTiming);const resolved = path.resolve(scratchRoot); if (resolved.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(resolved).startsWith('viewer-measurement-job-')) await fs.promises.rm(resolved, { recursive: true, force: true }); }
 }
 async function processOneMeasurementCalculation({ repository, processing, storage, config, runCalculation = childCalculation }, owner) {
   if (config.measurementCalculationsEnabled === false) return false;
   const jobs = new MeasurementCalculationRepository(repository.database), job = jobs.claim(owner);
   if (!job) return require('./ephemeralMeasurementWorker').processOneEphemeralMeasurement({repository,processing,storage,config,runCalculation},owner);
+  emitMeasurementTiming(job.request,readQueueTiming(repository.database,'measurement_calculation_jobs',job.id));
   try {
     const request = job.request;
     if (!authorizationLive(request, repository, processing)) throw Object.assign(new Error('authorization lost'), { code: 'measurement_authorization_lost' });

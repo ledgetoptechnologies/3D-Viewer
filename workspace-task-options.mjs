@@ -46,10 +46,10 @@ export function parseTaskOption(spec, raw) {
 }
 export function createTaskOptionsModel({ provider = null, presetOptions = {} } = {}) {
   let specs = [], inherited = {}, overrides = new Map(), identity;
-  function update({ provider: nextProvider = null, presetOptions: nextPreset = {} } = {}) {
+  function update({ provider: nextProvider = null, presetOptions: nextPreset = {}, preserveOverrides = false } = {}) {
     const nextIdentity = JSON.stringify([nextProvider?.id, nextProvider?.capabilityFingerprint, nextProvider?.capabilities?.options, nextPreset]);
     if (nextIdentity === identity) return false;
-    identity = nextIdentity; overrides = new Map();
+    identity = nextIdentity;if(!preserveOverrides)overrides = new Map();
     const names = new Set();
     specs = (Array.isArray(nextProvider?.capabilities?.options) ? nextProvider.capabilities.options : []).slice(0, 1000).filter(spec => {
       if (!spec || typeof spec.name !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/.test(spec.name) || names.has(spec.name)) return false;
@@ -60,6 +60,7 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
   }
   update({ provider, presetOptions });
   function setOverride(name, value) {
+    if(value===undefined){overrides.delete(name);return;}
     const spec = specs.find(item => item.name === name);
     if (!spec) throw new Error('This option is not available on the selected node.');
     if (taskOptionRestriction(spec)) throw new Error(taskOptionRestriction(spec));
@@ -68,7 +69,7 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
   function validate() {
     const errors = [];
     if (overrides.size > 200) errors.push({ name: '', message: 'Use at most 200 task overrides.' });
-    for (const [name, raw] of overrides) { try { parseTaskOption(specs.find(item => item.name === name), raw); } catch (error) { errors.push({ name, message: error.message }); } }
+    for (const [name, raw] of overrides) { try {const spec=specs.find(item => item.name === name);if(!spec)throw new Error('No longer supported by this node. Remove this retained change or choose a compatible node.');parseTaskOption(spec, raw); } catch (error) { errors.push({ name, message: error.message }); } }
     return { valid: errors.length === 0, errors };
   }
   function getOptions() {
@@ -78,15 +79,18 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
     if (new TextEncoder().encode(JSON.stringify(result)).length > 64 * 1024) throw new Error('Task options exceed the request size limit.');
     return result;
   }
-  return { update, setOverride, validate, getOptions, entries: () => specs.map(spec => ({ spec, restriction: taskOptionRestriction(spec), inherited: REQUIRED.has(spec.name) ? true : Object.hasOwn(inherited, spec.name) ? inherited[spec.name] : spec.value, inheritedFrom: REQUIRED.has(spec.name) ? 'Viewer requirement' : Object.hasOwn(inherited, spec.name) ? 'Preset' : 'Node default', overridden: overrides.has(spec.name), value: overrides.has(spec.name) ? overrides.get(spec.name) : undefined })) };
+  return { update, setOverride, validate, getOptions, entries: () => [
+    ...specs.map(spec => ({ spec, restriction: taskOptionRestriction(spec), inherited: REQUIRED.has(spec.name) ? true : Object.hasOwn(inherited, spec.name) ? inherited[spec.name] : spec.value, inheritedFrom: REQUIRED.has(spec.name) ? 'Viewer requirement' : Object.hasOwn(inherited, spec.name) ? 'Preset' : 'Node default', overridden: overrides.has(spec.name), value: overrides.has(spec.name) ? overrides.get(spec.name) : undefined })),
+    ...[...overrides].filter(([name])=>!specs.some(spec=>spec.name===name)).map(([name,value])=>({spec:{name,type:'string'},restriction:'This node no longer supports this option. Your draft is retained until you explicitly remove it.',missing:true,overridden:true,value,inheritedFrom:'Previous draft'}))
+  ] };
 }
 
-export function mountTaskOptions({ container, provider = null, presetOptions = {} }) {
+export function mountTaskOptions({ container, provider = null, presetOptions = {}, title = 'Advanced processing options', helpText = 'Edit settings directly for this task. Reset restores the preset or node default. Changes do not modify your saved preset.', modifiedLabel = 'Modified for this task' }) {
   const model = createTaskOptionsModel({ provider, presetOptions }), document = container.ownerDocument;
   const root = document.createElement('details'); root.className = 'task-options-editor';
-  const summary = document.createElement('summary'); summary.textContent = 'Advanced processing options'; root.append(summary);
+  const summary = document.createElement('summary'); summary.textContent = title; root.append(summary);
   const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Search options'; search.setAttribute('aria-label', 'Search processing options'); root.append(search);
-  const help = document.createElement('p'); help.className = 'form-note'; help.textContent = 'Leave options inherited to use the preset or node defaults. Overrides apply only to this task; the server validates the final settings.'; root.append(help);
+  const help = document.createElement('p'); help.className = 'form-note'; help.textContent = helpText; root.append(help);
   const list = document.createElement('div'); list.className = 'task-options-list'; root.append(list);
   const status = document.createElement('p'); status.setAttribute('role', 'status'); root.append(status); container.append(root);
   let rows = [], disposed = false, disabled = false;
@@ -96,20 +100,31 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
     for (const entry of model.entries()) {
       const { spec } = entry, row = document.createElement('fieldset'), legend = document.createElement('legend'); legend.textContent = spec.name; row.append(legend);
       const info = document.createElement('p'); info.className = 'form-note'; info.textContent = `${entry.inheritedFrom}: ${entry.inherited === undefined || entry.inherited === null ? 'not specified' : String(entry.inherited)}. ${spec.help || ''}`; row.append(info);
-      const mode = document.createElement('select'); mode.setAttribute('aria-label', `${spec.name} value source`);
-      for (const [value, text] of [['inherit', 'Use inherited value'], ['override', 'Override for this task']]) { const option = document.createElement('option'); option.value = value; option.textContent = text; mode.append(option); }
-      mode.value = entry.overridden ? 'override' : 'inherit'; mode.disabled = disabled || Boolean(entry.restriction); row.append(mode);
-      const domain = taskOptionDomain(spec), choices = spec.type === 'bool' ? [true, false] : domain?.values;
+      const reset = document.createElement('button'); reset.type = 'button'; reset.textContent = entry.missing?'Remove retained change':'Reset'; reset.setAttribute('aria-label', entry.missing?`Remove retained change ${spec.name}`:`Reset ${spec.name} to ${entry.inheritedFrom.toLowerCase()}`); row.append(reset);
+      const domain = taskOptionDomain(spec), choices = spec.type === 'bool' ? null : domain?.values;
       const control = document.createElement(choices ? 'select' : 'input'); control.setAttribute('aria-label', `${spec.name} override`);
-      if (choices) for (const choice of choices) { const option = document.createElement('option'); option.value = String(choice); option.textContent = spec.type === 'bool' ? choice ? 'Enabled' : 'Disabled' : String(choice); control.append(option); }
-      else { control.type = ['int','float'].includes(spec.type) ? 'number' : 'text'; if (control.type === 'number') { control.step = spec.type === 'int' ? '1' : 'any'; if (domain?.min !== undefined) control.min = String(domain.min); if (domain?.max !== undefined) control.max = String(domain.max); } else control.maxLength = 4000; }
-      control.value = String(entry.overridden ? entry.value : entry.inherited ?? ''); control.disabled = disabled || !entry.overridden || Boolean(entry.restriction); row.append(control);
+      if (choices) {const current=entry.overridden?entry.value:entry.inherited;if(current!==undefined&&!choices.some(choice=>String(choice)===String(current))){const retained=document.createElement('option');retained.value=String(current);retained.textContent=`${String(current)} (no longer supported)`;control.append(retained)}for (const choice of choices) { const option = document.createElement('option'); option.value = String(choice); option.textContent = spec.type === 'bool' ? choice ? 'Enabled' : 'Disabled' : String(choice); control.append(option); }}
+      else { control.type = spec.type === 'bool' ? 'checkbox' : ['int','float'].includes(spec.type) ? 'number' : 'text'; if (control.type === 'number') { control.step = spec.type === 'int' ? '1' : 'any'; if (domain?.min !== undefined) control.min = String(domain.min); if (domain?.max !== undefined) control.max = String(domain.max); } else control.maxLength = 4000; }
+      control.setAttribute('aria-label', spec.name);
+      function showValue(value) { control.value = String(value ?? ''); if (spec.type === 'bool') control.checked = value === true || value === 'true'; }
+      showValue(entry.overridden ? entry.value : entry.inherited); control.disabled = disabled || Boolean(entry.restriction); row.append(control);
+      const modified = document.createElement('span'); modified.className = 'form-note'; row.append(modified);
+      function showModified(value) { modified.textContent = value ? modifiedLabel : ''; reset.disabled = disabled || !value; }
+      showModified(entry.overridden);
       if (entry.restriction) { const note = document.createElement('p'); note.className = 'form-note'; note.textContent = entry.restriction; row.append(note); }
-      function save() { model.setOverride(spec.name, mode.value === 'override' ? control.value : undefined); control.disabled = mode.value !== 'override'; status.textContent = ''; }
-      mode.addEventListener('change', save); control.addEventListener('input', save); control.addEventListener('change', save);
+      function save() {
+        if (disabled || entry.restriction) return;
+        const raw = spec.type === 'bool' ? control.checked : control.value;
+        let changed = true;
+        try { changed = parseTaskOption(spec, raw) !== entry.inherited; } catch { /* Keep invalid drafts visible for validation. */ }
+        model.setOverride(spec.name, changed ? raw : undefined); showModified(changed); status.textContent = '';
+      }
+      reset.addEventListener('click', () => { if (disabled || !entry.overridden&&!model.entries().find(item=>item.spec.name===spec.name)?.overridden) return; model.setOverride(spec.name, undefined);if(entry.missing){render();return}showValue(entry.inherited); showModified(false); status.textContent = ''; });
+      control.addEventListener('input', save); control.addEventListener('change', save);
       rows.push({ element: row, search: `${spec.name} ${spec.help || ''}`.toLowerCase() }); list.append(row);
     }
     if (!rows.length) status.textContent = 'Select a node with available processing capabilities.';
+    else status.textContent=model.validate().errors.map(error=>`${error.name}: ${error.message}`).join(' ');
     filter();
   }
   search.addEventListener('input', filter); render();

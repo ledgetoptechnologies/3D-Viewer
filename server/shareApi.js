@@ -4,6 +4,7 @@ const express = require('express');
 const store = require('./store');
 const shareStore = require('./shareStore');
 const auth = require('./auth');
+const {revisionMatches,assetAllowed}=require('./publicSharePolicy');
 const { requireAdmin } = require('./adminAuth');
 const { toClientConfig } = require('./api');
 const { config } = require('./config');
@@ -37,6 +38,7 @@ function shareSummary(s) {
 function issueShareSession(req, res, share) {
   const cookieVal = auth.sign({
     shareId: share.id,
+    shareRevision: share.authorizationRevision||0,
     ...(share.modelId ? { modelId: share.modelId } : { viewerProjectId: share.viewerProjectId }),
   }, SHARE_SESSION_TTL_MS);
   res.cookie(SHARE_COOKIE, cookieVal, auth.cookieAttrs(req, { maxAge: SHARE_SESSION_TTL_MS }));
@@ -45,16 +47,17 @@ function issueShareSession(req, res, share) {
 function hasUnlockedSession(req, share) {
   const cookieVal = req.cookies && req.cookies[SHARE_COOKIE];
   const payload = cookieVal ? auth.verify(cookieVal) : null;
-  return !!(payload && payload.shareId === share.id);
+  return !!(payload && payload.shareId === share.id && revisionMatches(share,payload));
 }
 
 function sharedViewerConfig(project, share) {
   const assetToken = auth.sign({
     kind: 'share-asset',
     shareId: share.id,
+    shareRevision: share.authorizationRevision||0,
     ...(share.modelId ? { modelId: share.modelId } : { viewerProjectId: share.viewerProjectId }),
   }, SHARE_SESSION_TTL_MS);
-  if (share.modelId) return toViewerConfig(project, { assetToken });
+  if (share.modelId) return toViewerConfig(project, { assetToken,assetFilter:asset=>assetAllowed(share,asset.kind) });
   const result = toClientConfig(project);
   const prefix = `/session-assets/${encodeURIComponent(assetToken)}`;
   for (const [kind, value] of Object.entries(result.assets || {})) {
@@ -120,7 +123,7 @@ router.delete('/api/share-links/:id', requireAdmin, (req, res) => {
 router.get('/api/share/:token', async (req, res) => {
   const tokenHash = auth.hashToken(req.params.token);
   const legacyShare = shareStore.getByTokenHash(tokenHash);
-  const share = legacyShare || (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash));
+  const share = (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash)) || legacyShare;
   if (!share) return res.status(404).json({ error: 'link not found' });
   const live = share.modelId ? canonicalRepository.publicShareLive(share) : shareStore.isLive(share);
   if (!live) return res.status(410).json({ error: 'link expired or revoked' });
@@ -149,7 +152,7 @@ router.post('/api/share/:token/unlock', async (req, res) => {
   }
   const tokenHash = auth.hashToken(req.params.token);
   const legacyShare = shareStore.getByTokenHash(tokenHash);
-  const share = legacyShare || (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash));
+  const share = (canonicalRepository && canonicalRepository.getPublicShareByHash(tokenHash)) || legacyShare;
   if (!share) return res.status(404).json({ error: 'link not found' });
   const live = share.modelId ? canonicalRepository.publicShareLive(share) : shareStore.isLive(share);
   if (!live) return res.status(410).json({ error: 'link expired or revoked' });

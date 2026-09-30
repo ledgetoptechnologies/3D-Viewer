@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { recordImportedSourceUnits } = require('./importSourceUnitEvidence');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
@@ -128,6 +129,7 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     if(rediscovered.sourceFingerprint!==replay.sourceFingerprint)throw Object.assign(new Error('WebODM import replay source changed'),{code:'webodm_import_replay_conflict'});
     const assets=rediscovered.assets.map((asset)=>({...asset,rootKey:'datasets',relativePath:`${dataset.relativePath}/${asset.relativePath}`,storageMode:'adopted',published:false,sourceAttemptId:attempt.id})),summary=capabilitySummary(assets);
     if(JSON.stringify(summary.assetKinds)!==JSON.stringify(replay.assetKinds))throw Object.assign(new Error('WebODM import replay assets changed'),{code:'webodm_import_replay_conflict'});
+    await recordImportedSourceUnits(operation, { processing, repository, storage }, model.id, replay.modelVersionId, { signal });
     const requiredDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
     return{project,task,attempt,model,import:replay,requiredDerivatives,retainedLeaseToken:retainedImport.leaseToken,...summary};
   }
@@ -162,6 +164,7 @@ async function importWebodmTask(operation, { processing, repository, storage, co
   const cameraPhotos = retainedManifest.cameraPhotos.map((photo) => ({ ...photo, rootKey: 'datasets', relativePath: `${dataset.relativePath}/${photo.relativePath}` }));
   const registeredAssets = assets.filter((asset) => asset.kind !== 'tiles');
   const model = repository.upsertModelVersion({ modelId: ids.modelId, versionId: ids.versionId, provider: 'webodm', providerModelId: `task-import:${operation.id}`, providerVersionId: retainedDiscovered.sourceFingerprint, displayName: request.taskDisplayName, status: 'importing', metadata: { projectName: processing.getProject(request.projectId).displayName, taskName: request.taskDisplayName, webodmTaskImportOperationId: operation.id }, versionMetadata: { webodmTaskImport: true, assetKinds: summary.assetKinds, processingMetrics: odmMetadata.processingMetrics }, georef: odmMetadata.georef, pointCount: odmMetadata.pointCount, sourceLocator: { webodmTaskImport: true, sourceRelativePath: request.sourceRelativePath }, assets: registeredAssets, cameraPhotos, makeActive: false });
+  await recordImportedSourceUnits(operation, { processing, repository, storage }, model.id, ids.versionId, { signal });
   processing.setAttemptResult(attempt.id, model.id, ids.versionId);
   // Existing accounting assigns adopted/reference trees to the output and
   // excludes their source dataset from the project dataset subtotal.

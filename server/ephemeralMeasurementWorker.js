@@ -3,9 +3,11 @@ const {EphemeralMeasurementRepository}=require('./ephemeralMeasurementRepository
 const {localAccess}=require('./ephemeralMeasurementAccess');
 const {sourceAuthorizationValidator}=require('./sourceAuthorization');
 const {validateTransectRequest,sameTransectEvidence}=require('./measurementTransectRequest');
+const {emitMeasurementTiming,readQueueTiming}=require('./measurementTiming');
 async function processOneEphemeralMeasurement({repository,storage,config,runCalculation,validator=sourceAuthorizationValidator},owner){
  if(config.measurementCalculationsEnabled===false)return false;
  const jobs=new EphemeralMeasurementRepository(repository.database),job=jobs.claim(owner);if(!job)return false;const request=job.request;
+ emitMeasurementTiming(request,readQueueTiming(repository.database,'ephemeral_measurement_jobs',job.id));
  let timer=null,externalLive=true,lastExternalCheck=0,checking=false;
  const access=()=>localAccess(request.ephemeralAuthority,repository);
  const parentLive=value=>{if(request.method!=='surface-transect')return true;try{const measurement={...request,id:job.measurementId,kind:'polygon',revision:1},version={...value.model.activeVersion,assets:value.model.activeVersion.assets.filter(asset=>request.ephemeralAuthority.kind==='viewer'||asset.published===true)},rebuilt=validateTransectRequest({revision:1,method:'surface-transect',parentCalculationId:request.parentCalculationId,line:request.line},measurement,version,jobs.parent(job.scopeKey,job.pageHash,request.parentCalculationId),{temporary:true,allowPointSurface:true});return sameTransectEvidence(request,rebuilt);}catch{return false;}};

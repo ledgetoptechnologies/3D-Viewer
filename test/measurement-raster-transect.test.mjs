@@ -8,6 +8,8 @@ import {writeArrayBuffer} from 'geotiff';
 import {createReference} from '../measurement-volume.mjs';
 import {calculateNativeRasterTransect,traceRasterCells,frozenReferenceIntervals,transectRasterWindow} from '../server/measurementRasterTransect.mjs';
 import {nativeTiffFixture} from './helpers/native-tiff-fixture.mjs';
+import {calculateNativeRaster} from '../server/measurementRasterCalculation.mjs';
+import {childCalculation} from '../server/measurementCalculationWorker.js';
 
 const grid={ox:0,oy:4,dx:1,dy:-1,width:4,height:4};
 const line=(start,end)=>({start,end});
@@ -19,6 +21,20 @@ function fixture(t,{values=Array.from({length:16},(_,i)=>i),width=4,height=4,ver
   return {file,request,bytes};
 }
 function contiguous(result){assert.equal(result.segments[0].startM,0);assert.equal(result.segments.at(-1).endM,result.lengthM);for(let i=0;i<result.segments.length;i++){const s=result.segments[i];assert.ok(s.endM>s.startM);if(i)assert.equal(result.segments[i-1].endM,s.startM);if(s.status==='sample')assert.ok(Number.isFinite(s.surfaceM));else assert.equal(s.surfaceM,undefined);}}
+
+test('raster profile and volume timing cross the child boundary without changing numerical results',async t=>{
+  const f=fixture(t),timings=[];
+  for(const method of ['surface-transect','surface-cut-fill']){
+    const request={...f.request,method},calculate=method==='surface-transect'?calculateNativeRasterTransect:calculateNativeRaster;
+    const baseline=await calculate(f.file,request);
+    assert.deepEqual(await calculate(f.file,request,{onTiming:()=>{throw Error('diagnostic sink failure');}}),baseline);
+    const actual=await childCalculation(f.file,request,{config:{measurementTimeoutMs:10000},isLive:()=>true,onTiming:x=>timings.push(x)});
+    assert.deepEqual(actual,baseline);
+    const phase=timings.at(-2);assert.equal(phase.phase,method==='surface-transect'?'raster-transect':'raster-volume');
+    for(const key of ['sourceHashMs','rasterReadMs','sampleMs','totalMs'])assert.ok(Number.isFinite(phase[key])&&phase[key]>=0,key);
+    assert.ok(phase.windowReads>0);assert.equal(timings.at(-1).phase,'child');assert.doesNotMatch(JSON.stringify(timings),/surface\.tif|vertices|sha256|authority/);
+  }
+});
 
 test('ordered native cells cover horizontal, reverse, diagonal and exact grid-boundary lines once',()=>{
   const horizontal=traceRasterCells(line([.25,3.5],[3.75,3.5]),grid);assert.deepEqual(horizontal.map(c=>[c.col,c.row]),[[0,0],[1,0],[2,0],[3,0]]);

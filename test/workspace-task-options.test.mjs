@@ -34,15 +34,18 @@ class Element {
   constructor(tag,ownerDocument){this.tag=tag;this.ownerDocument=ownerDocument;this.children=[];this.listeners={};this.value='';}
   append(child){this.children.push(child);}setAttribute(name,value){this[name]=value;}addEventListener(name,fn){this.listeners[name]=fn;}replaceChildren(){this.children=[];}remove(){this.removed=true;}
 }
-test('mounted editor renders inherited values as text, searches help, collects edits and disposes',()=>{
+test('mounted editor directly edits effective values, resets, searches and preserves drafts when disabled',()=>{
   const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
   const editor=mountTaskOptions({container,provider,presetOptions:{count:7}}),root=container.children[0],search=root.children[1],list=root.children[3];
-  const row=list.children[0],mode=row.children[2],control=row.children[3];assert.equal(control.disabled,true);
-  mode.value='override';control.value='false';mode.listeners.change();assert.deepEqual(editor.getOptions(),{dtm:false});
+  const row=list.children[0],reset=row.children[2],control=row.children[3];assert.equal(control.disabled,false);assert.equal(control.type,'checkbox');assert.equal(reset.disabled,true);
+  control.checked=true;control.listeners.change();assert.deepEqual(editor.getOptions(),{dtm:true});assert.equal(reset.disabled,false);
+  reset.listeners.click();assert.deepEqual(editor.getOptions(),{});assert.equal(control.checked,false);assert.equal(reset.disabled,true);
+  const count=list.children[1].children[3];assert.equal(count.value,'7');count.value='0';count.listeners.input();assert.deepEqual(editor.getOptions(),{count:0});
   search.value='quality';search.listeners.input();assert.equal(row.hidden,true);assert.equal(list.children[3].hidden,false);
-  editor.update({provider,presetOptions:{count:7}});assert.deepEqual(editor.getOptions(),{dtm:false});
+  editor.update({provider,presetOptions:{count:7}});assert.deepEqual(editor.getOptions(),{count:0});
   editor.setDisabled(true);assert.equal(list.children[0].children[2].disabled,true);assert.equal(list.children[0].children[3].disabled,true);
-  editor.setDisabled(false);assert.equal(list.children[0].children[2].disabled,false);assert.equal(list.children[0].children[3].disabled,false);assert.equal(list.children[1].children[3].disabled,true);
+  editor.setDisabled(false);assert.equal(list.children[0].children[2].disabled,true);assert.equal(list.children[0].children[3].disabled,false);assert.equal(list.children[1].children[3].disabled,false);assert.equal(list.children[1].children[3].value,'0');
+  list.children[1].children[3].value='7';list.children[1].children[3].listeners.input();assert.deepEqual(editor.getOptions(),{});
   editor.dispose();assert.equal(root.removed,true);
 });
 
@@ -52,4 +55,32 @@ test('known descriptive numeric domains are validated without executing arbitrar
   for(const value of [-1,11])assert.throws(()=>parseTaskOption({name:'numeric',type:'float',domain:'0 <= x <= 10'},value));
   assert.equal(parseTaskOption({name:'numeric',type:'float',domain:'0 <= x <= 10'},10),10);
   assert.equal(taskOptionDomain({domain:'process.exit()'}),null);
+});
+test('explicit capability refresh preserves valid drafts and visibly retains removed or incompatible changes',()=>{
+  const model=createTaskOptionsModel({provider});model.setOverride('count','8');model.setOverride('quality','low');
+  const changed={...provider,capabilityFingerprint:'changed',capabilities:{options:[{name:'count',type:'int',value:5,domain:{max:6}}]}};
+  model.update({provider:changed,preserveOverrides:true});
+  assert.equal(model.entries().find(item=>item.spec.name==='count').value,'8');
+  const missing=model.entries().find(item=>item.spec.name==='quality');assert.equal(missing.value,'low');assert.equal(missing.missing,true);
+  assert.equal(model.validate().errors.length,2);assert.throws(()=>model.getOptions(),/quality/);
+  model.setOverride('count',4);model.setOverride('quality',undefined);assert.deepEqual(model.getOptions(),{count:4});
+});
+test('refreshed select retains unsupported draft visibly and removed settings require explicit removal',()=>{
+  const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
+  const editor=mountTaskOptions({container,provider}),list=container.children[0].children[3];
+  const quality=list.children[3].children[3];quality.value='low';quality.listeners.input();
+  editor.update({provider:{...provider,capabilityFingerprint:'enum-change',capabilities:{options:[{name:'quality',type:'string',value:'high',domain:['high']}]}},preserveOverrides:true});
+  assert.equal(list.children[0].children[3].value,'low');assert.match(list.children[0].children[3].children[0].textContent,/no longer supported/);
+  editor.update({provider:{...provider,capabilityFingerprint:'removed',capabilities:{options:[]}},preserveOverrides:true});
+  assert.equal(list.children[0].children[3].value,'low');assert.equal(list.children[0].children[3].disabled,true);assert.equal(list.children[0].children[2].disabled,false);
+  assert.equal(editor.validate().valid,false);list.children[0].children[2].listeners.click();assert.deepEqual(editor.getOptions(),{});
+});
+
+test('preset context labels are configurable and restricted settings cannot be changed by events',()=>{
+  const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
+  const editor=mountTaskOptions({container,provider:{capabilities:{options:[specs[1],{name:'gltf',type:'bool',value:false}]}},title:'Preset options',helpText:'Save explicitly.',modifiedLabel:'Modified preset value'});
+  const root=container.children[0],list=root.children[3];assert.equal(root.children[0].textContent,'Preset options');assert.equal(root.children[2].textContent,'Save explicitly.');
+  const count=list.children[0].children[3];count.value='8';count.listeners.input();assert.equal(list.children[0].children[4].textContent,'Modified preset value');
+  const required=list.children[1].children[3];assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
+  editor.setDisabled(true);const disabled=list.children[0].children[3];disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
 });

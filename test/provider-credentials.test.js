@@ -74,6 +74,33 @@ async function request(context, route, { method = 'GET', body, key } = {}) {
   });
 }
 
+test('read-only capability refresh observes an existing node without permitting configuration changes',async t=>{
+ const odm=await odmServer(t),c=await fixture(t,{providerFetch:odm.fetchImpl});
+ const oldCidrs=[...config.processingProviderAllowedCidrs];config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...parseProviderCidrs('192.168.50.0/24'));t.after(()=>config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...oldCidrs));
+ const created=await request(c,'/api/v1/processing/providers',{method:'POST',key:'refresh-create-0001',body:{displayName:'Read-only refresh',endpoint:odm.origin,credential:{token:TOKEN}}});assert.equal(created.status,201);
+ const provider=(await created.json()).provider,readToken=crypto.randomBytes(32).toString('base64url');
+ c.processing.createAdminSession({tokenHash:auth.hashToken(readToken),subject:'reader',permissions:['viewer.providers.read'],expiresAt:new Date(Date.now()+60_000).toISOString()});
+ const reader={...c,accessToken:readToken},route=`/api/v1/processing/providers/${provider.id}`;
+ const refreshed=await request(reader,`${route}/capabilities/refresh`,{method:'POST',body:{}});assert.equal(refreshed.status,200);assert.equal(refreshed.headers.get('cache-control'),'no-store');
+ const body=await refreshed.json();assert.equal(body.capabilities.engine,'odm');assert.doesNotMatch(JSON.stringify(body),/node-token|ciphertext/);
+ assert.equal(c.processing.getProvider(provider.id).enabled,false);
+ assert.equal((await request(reader,route,{method:'PATCH',key:'reader-change-0001',body:{enabled:true}})).status,403);
+ assert.equal((await request(reader,`${route}/capabilities/refresh`,{method:'POST',body:{endpoint:'http://different'}})).status,400);
+});
+
+test('capability refresh rechecks reader authorization after provider I/O',async t=>{
+ let release,entered,armed=false;
+ const arrived=new Promise(resolve=>{entered=resolve;}),blocked=new Promise(resolve=>{release=resolve;});
+ const odm=await odmServer(t,{beforeInfo:async()=>{if(armed){entered();await blocked;}}}),c=await fixture(t,{providerFetch:odm.fetchImpl});
+ const oldCidrs=[...config.processingProviderAllowedCidrs];config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...parseProviderCidrs('192.168.50.0/24'));t.after(()=>config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...oldCidrs));
+ const created=await request(c,'/api/v1/processing/providers',{method:'POST',key:'refresh-revoke-0001',body:{displayName:'Refresh revocation',endpoint:odm.origin}});assert.equal(created.status,201);
+ const provider=(await created.json()).provider;
+ armed=true;const pending=request(c,`/api/v1/processing/providers/${provider.id}/capabilities/refresh`,{method:'POST',body:{}});
+ await arrived;c.processing.revokeAdminSession(c.processing.getAdminSessionByHash(auth.hashToken(c.accessToken)).id);release();
+ const response=await pending;assert.equal(response.status,401);assert.equal((await response.json()).code,'authentication_required');
+ assert.equal(c.processing.getProvider(provider.id).enabled,false);
+});
+
 test('provider tokens are encrypted, private, restart-safe, auto-detected before storage, rotatable and clearable', async (t) => {
   const odm = await odmServer(t);
   const c = await fixture(t, { providerFetch: odm.fetchImpl });

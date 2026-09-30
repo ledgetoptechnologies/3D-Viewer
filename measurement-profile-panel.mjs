@@ -6,6 +6,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   host.innerHTML = `<section class="surface-section native-profile"><div class="surface-section-header"><h3>Elevation cross-section</h3><p>Inspect the original elevation cells along a line through this polygon, using the same reference base as its saved volume.</p></div>
   <div class="section-controls"><div><label>Direction <output data-direction>0° · east → west axis</output><input data-azimuth type="range" min="0" max="179" value="0" aria-label="Native section direction"></label><label class="profile-number">Degrees<input data-direction-number type="number" min="0" max="179" step="1" value="0" aria-label="Section direction in degrees"></label></div><div><label>Position <output data-position>Center</output><input data-position-input type="range" min="-100" max="100" value="0" aria-label="Native section position"></label><label class="profile-number">Offset (%)<input data-position-number type="number" min="-100" max="100" step="1" value="0" aria-label="Section position percentage"></label></div><div class="profile-actions"><button data-reset>Reset section</button><button data-update>Retry profile</button><button data-cancel hidden>Cancel</button></div></div>
   <p data-profile-status role="status" class="section-provenance">Loading the section automatically. The saved polygon and volume will not change.</p>
+  <p data-profile-previous hidden role="status" class="section-provenance">Showing the previous completed section. The chart and plan below belong to that section, not the new slider settings. Exports are unavailable until the requested section is ready.</p>
   <div class="section-charts"><canvas data-profile-plan width="300" height="300" aria-label="Polygon boundary and selected section line, viewed from above"></canvas><canvas data-profile-chart width="850" height="300" tabindex="0" aria-label="Native elevation section. Use left and right arrows to inspect cells; Home and End go to the endpoints."></canvas></div>
   <div class="section-readout" data-profile-readout role="status">Elevations will appear when this section is ready.</div>
   <p class="section-provenance" data-profile-provenance>Orange: above base · Blue: below base · Gray: reference base. Gaps are missing data, not zero elevation. Section area is not volume.</p>
@@ -18,7 +19,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   const factor = {imperial: .3048, feet: .3048, metric: 1, yards: .9144, centimeters: .01}[units] || .3048;
   const suffix = {imperial: 'ft', feet: 'ft', metric: 'm', yards: 'yd', centimeters: 'cm'}[units] || 'ft';
   const format = v => measurementValue(v, 1, units), tick = v => (v / factor).toLocaleString('en-US', {maximumFractionDigits: 1});
-  let retired = false, controller = null, generation = 0, result = null, inspected = null, scales = null, line = null, cancelJob = null, cancelling = false, cachedResult = null, pendingUpdate = false, debounce = null;
+  let retired = false, controller = null, generation = 0, result = null, stale = false, inspected = null, scales = null, line = null, cancelJob = null, cancelling = false, cachedResult = null, pendingUpdate = false, debounce = null;
   const initialRecord = structuredClone(getRecord() || record);
   const vertices = initialRecord.vertices;
   const xs = vertices.map(p => p[0]), ys = vertices.map(p => p[1]);
@@ -31,7 +32,8 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     if(result&&cachedResult===result&&scales){ctx.drawImage(chartImage,0,0);pc.drawImage(planImage,0,0);paintInspection();return;}
     pc.clearRect(0, 0, plan.width, plan.height); pc.fillStyle = '#0d141d'; pc.fillRect(0, 0, plan.width, plan.height);
     pc.beginPath(); vertices.forEach((p, i) => { const xy = project(p); i ? pc.lineTo(...xy) : pc.moveTo(...xy); }); pc.closePath(); pc.fillStyle = '#5b6b7b24'; pc.fill(); pc.strokeStyle = '#8fa1b5'; pc.lineWidth = 1.4; pc.stroke();
-    if (line) { pc.beginPath(); pc.moveTo(...project(line.start)); pc.lineTo(...project(line.end)); pc.strokeStyle = '#f37523'; pc.lineWidth = 2; pc.stroke(); }
+    const displayedLine=result?.line||line;
+    if (displayedLine) { pc.beginPath(); pc.moveTo(...project(displayedLine.start)); pc.lineTo(...project(displayedLine.end)); pc.strokeStyle = '#f37523'; pc.lineWidth = 2; pc.stroke(); }
     pc.fillStyle = '#bac9d8'; pc.font = '12px system-ui'; pc.fillText('Polygon · north ↑', 14, 20);
     ctx.clearRect(0, 0, chart.width, chart.height); ctx.fillStyle = '#0d141d'; ctx.fillRect(0, 0, chart.width, chart.height); scales = null;
     if (!result) { ctx.fillStyle = '#adbbcb'; ctx.font = '12px system-ui'; ctx.fillText(controller||pendingUpdate?'Loading this section…':'No section data to display. See the status above.', 16, chart.height/2,chart.width-32); return; }
@@ -70,9 +72,9 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     else { const p = inspected, s = p.segment; readout.textContent = `Distance ${format(p.station)} · ${s.status === 'sample' ? `Surface ${format(s.surfaceM)} · Base ${format(p.base)} · Δ ${format(p.difference)}` : gapNames[s.status]} · X ${p.x.toFixed(3)}, Y ${p.y.toFixed(3)} (source coordinates, m)`; }
     plot();
   }
-  function clearResult() { result = null; cachedResult=null;inspected = null; find('[data-profile-csv]').disabled = true; find('[data-profile-png]').disabled = true; }
+  function markPending() { stale=Boolean(result);inspected=null;find('[data-profile-previous]').hidden=!stale;find('[data-profile-csv]').disabled=true;find('[data-profile-png]').disabled=true; }
   function changeLine() {
-    if(retired)return;generation++;clearResult();
+    if(retired)return;generation++;markPending();
     const angle = Number(find('[data-azimuth]').value), offset = Number(find('[data-position-input]').value);
     line = profileLine(vertices, angle, offset); find('[data-direction]').textContent = `${angle}° from east`; find('[data-position]').textContent = offset === 0 ? 'Center' : `${offset > 0 ? '+' : ''}${offset}%`;
     find('[data-direction-number]').value=String(angle);find('[data-position-number]').value=String(offset);find('[data-direction-number]').setCustomValidity('');find('[data-position-number]').setCustomValidity('');
@@ -98,16 +100,17 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
     controller = new AbortController(); const mine = controller, key = ++generation, selectedLine = structuredClone(line); cancelling = false;
     find('[data-update]').hidden=true;
     const current = () => !retired && generation === key && !mine.signal.aborted;
-    clearResult(); plot(); find('[data-update]').disabled = true; host.setAttribute('aria-busy', 'true'); cancelJob = null; find('[data-cancel]').hidden = true;
+    markPending(); plot(); find('[data-update]').disabled = true; host.setAttribute('aria-busy', 'true'); cancelJob = null; find('[data-cancel]').hidden = true;
     try {
       status.textContent='Loading elevation cross-section…';
       const next = await calculate(getRecord() || record, {line: selectedLine, signal: mine.signal, onProgress: text => { if (current()) status.textContent = text; }, onJob: job => { if (!retired && controller===mine && !cancelling) { cancelJob = job; find('[data-cancel]').hidden = !job; find('[data-cancel]').disabled = false; } }});
       if (!current() || cancelling) return;
       result = validateNativeProfile(next, {line: selectedLine}); status.textContent = `Native section ready · ${result.cellCount.toLocaleString('en-US')} crossed cells. Your saved volume is unchanged.`;
+      stale=false;find('[data-profile-previous]').hidden=true;cancelJob=null;
       const point=result.source.kind==='ept';
       find('[data-profile-provenance]').textContent = `${point?'Every crossed cell of the saved maximum-height point grid':'Every crossed native cell'} is represented without interpolation; gaps remain missing data. Source: ${result.source.kind.toUpperCase()} · ${result.source.crs} · cell size ${point?format(result.source.samplingGrid.cellSizeM):result.source.resolutionM?.map(format).join(' × ') || 'unavailable'}. Height-unit basis: ${result.source.verticalUnitBasis || 'unspecified'}. Vertical datum unverified. Orange: above base · Blue: below base · Gray: saved reference. Section area is not volume.`;
       find('[data-profile-csv]').disabled = false; find('[data-profile-png]').disabled = false; inspect(null);
-    } catch (error) { if (current() && !cancelling) { clearResult(); plot();find('[data-update]').hidden=false; status.textContent = `Profile unavailable. ${error.message}`; } }
+    } catch (error) { if (current() && !cancelling) { markPending(); plot();find('[data-update]').hidden=false; status.textContent = `Profile unavailable. ${error.message}`; } }
     finally { const owns=controller===mine;if(owns)controller=null;if (owns && !retired && !cancelling) {host.removeAttribute('aria-busy');find('[data-update]').disabled=false;find('[data-cancel]').hidden=!cancelJob;if(!result&&!pendingUpdate)plot();if(pendingUpdate&&!debounce)runUpdate();} }
   }
   find('[data-update]').onclick=()=>runUpdate();
@@ -120,9 +123,9 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   };
   const links = new Set();
   function download(blob, filename) { if (retired) return; const url = URL.createObjectURL(blob); links.add(url); const link = document.createElement('a'); link.href = url; link.download = filename; link.click(); setTimeout(() => { URL.revokeObjectURL(url); links.delete(url); }, 1000); }
-  find('[data-profile-csv]').onclick = () => { if (!retired && result) download(new Blob([exportNativeProfile(result)], {type: 'text/csv;charset=utf-8'}), 'elevation-profile.csv'); };
+  find('[data-profile-csv]').onclick = () => { if (!retired && result && !stale && !controller && !pendingUpdate) download(new Blob([exportNativeProfile(result)], {type: 'text/csv;charset=utf-8'}), 'elevation-profile.csv'); };
   find('[data-profile-png]').onclick = () => {
-    if (retired || !result) return; const snapshot = result, key = generation, output = document.createElement('canvas'); output.width = plan.width+chart.width; output.height = Math.max(plan.height,chart.height)+105;
+    if (retired || !result || stale || controller || pendingUpdate) return; const snapshot = result, key = generation, output = document.createElement('canvas'); output.width = plan.width+chart.width; output.height = Math.max(plan.height,chart.height)+105;
     const c = output.getContext('2d'); c.fillStyle = '#0d141d'; c.fillRect(0,0,output.width,output.height); c.fillStyle = '#ecf2f9'; c.font = 'bold 17px system-ui'; c.fillText(`${initialRecord.name} · ${pointProfile?'point surface':'native elevation'} section`,18,27,output.width-36); c.drawImage(plan,0,40); c.drawImage(chart,plan.width,40);
     c.fillStyle = '#b9c6d6'; c.font = '11px system-ui'; c.fillText(`${snapshot.source.kind.toUpperCase()} · ${snapshot.source.crs} · elevations (${suffix}) · vertical datum unverified · missing cells are gaps`,18,output.height-42,output.width-36); c.fillText(`Source SHA-256 ${snapshot.source.sha256} · section is not volume`,18,output.height-22,output.width-36);
     output.toBlob(blob => { if (blob && !retired && generation === key && result === snapshot) download(blob, 'elevation-profile.png'); }, 'image/png');

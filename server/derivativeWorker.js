@@ -11,6 +11,7 @@ const {
   discoverMeshDerivativeInput,
   discoverPointDerivativeInput,
   verifyDerivativeInputSnapshot,
+  registeredPointDerivativeInput,
 } = require('./derivativeInputSnapshot');
 const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
@@ -488,7 +489,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     const task = processing.getTask(attempt.taskId);
     const obj = assets.find((asset) => asset.kind === 'obj');
     const glb = assets.find((asset) => asset.kind === 'glb');
-    const point = assets.find((asset) => asset.kind === 'pointCloud');
+    let point = assets.find((asset) => asset.kind === 'pointCloud');
     const previousTiles = assets.find((asset) => asset.kind === 'tiles') || null;
     const audit = lodAuditScript || path.join(__dirname, '..', 'scripts', 'audit-lod-equivalence.mjs');
     let inputSnapshot = processing.derivativeInputSnapshot(job.id);
@@ -498,6 +499,7 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
         : await discoverMeshDerivativeInput(storage, obj, glb, { signal: controller.signal });
       inputSnapshot = processing.persistDerivativeInputSnapshot(job.id, job.derivative_type, discovered.files);
     }
+    if (job.derivative_type === 'ept') point = registeredPointDerivativeInput(inputSnapshot, assets);
     await verifyDerivativeInputSnapshot(storage, inputSnapshot, { signal: controller.signal });
     let derivativeResult;
 
@@ -560,25 +562,64 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       fs.mkdirSync(base, { recursive: true });
       const outputName = `ept-${job.id}`, outputRelative = `${task.id}/${attempt.id}/${outputName}`, output = path.join(base, outputName);
       const incomplete = `${output}.${job.lease_token}.incomplete`, complete = `${output}.${job.lease_token}.complete`;
+      const {EptConversionReceiptRepository}=require('./eptConversionReceiptRepository');
+      const {inspectEptConversionOutput}=require('./eptConversionReceipt');
+      const {captureEptConverterIdentity,assertEptConverterIdentity}=require('./eptConverterIdentity');
+      const receipts=new EptConversionReceiptRepository(processing);
+      let durableReceipt=receipts.get(job.id);
       const verifiedAsset = async (directory) => {
         const integrity=await hashTree(directory),manifest=integrity.files.find((file)=>file.relativePath==='ept.json');
         if(!manifest)throw Object.assign(new Error('Entwine did not produce ept.json'),{code:'invalid_asset_tree'});
         return{asset:{versionId:attempt.resultModelVersionId,rootKey:'models',relativePath:`${outputRelative}/ept.json`,format:'ept',contentType:'application/json',byteSize:manifest.byteSize,attemptId:attempt.id,sha256:manifest.sha256,manifestSha256:integrity.manifestSha256,manifestFiles:integrity.files},retainedBytes:manifestTreeBytes(integrity.files)};
       };
       try {
-        if(fs.existsSync(output)){
+        if(durableReceipt){
+          if(!/^[A-Za-z0-9-]{1,200}$/.test(durableReceipt.generationLeaseToken))throw Object.assign(new Error('Invalid EPT recovery token'),{code:'ept_conversion_receipt_invalid'});
+          const retainedComplete=`${output}.${durableReceipt.generationLeaseToken}.complete`;
+          const recovery=fs.existsSync(output)?output:retainedComplete;
+          if(!fs.existsSync(recovery))throw Object.assign(new Error('Receipted EPT output is missing; a new conversion job is required'),{code:'ept_conversion_output_missing'});
+          derivativePhase(processing,job,owner,'verifying');
+          const verified=await verifiedAsset(recovery);
+          if(!receipts.validate(job.id,owner,verified.asset,{leaseToken:job.lease_token}))throw Object.assign(new Error('EPT recovery bytes or source evidence changed'),{code:'ept_conversion_receipt_invalid'});
+          const registered=processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token,...(recovery!==output?{promote:()=>{
+            if(fs.existsSync(output)||fs.statSync(recovery).dev!==fs.statSync(base).dev)throw Object.assign(new Error('EPT recovery activation conflict'),{code:'derivative_activation_conflict'});
+            fs.renameSync(recovery,output);
+          }}:{})});
+          if(!registered)throw Object.assign(new Error('EPT recovery lease was lost'),{code:'lease_lost'});
+          derivativeResult={verified:true,resumed:true,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};
+        }else if(fs.existsSync(output)){
           derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(output);derivativePhase(processing,job,owner,'registering');if(!processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token}))throw Object.assign(new Error('derivative lease was lost before verified EPT registration'),{code:'lease_lost'});derivativeResult={verified:true,resumed:true,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};
         }else{
           fs.rmSync(incomplete,{recursive:true,force:true});fs.rmSync(complete,{recursive:true,force:true});
           const reservation=processing.derivativeStorageReservation(job.id);storage.requireDerivativeSpace('models',{sourceBytes:inputSnapshot.totalByteSize,expectedFiles:100000,reservedBytes:reservation?.accountedByteSize||0,otherReservedBytes:processing.activeDerivativeReservationBytes(job.id),reservedDatasetBytes:processing.activeProcessingReservationBytes(attempt.id)});
           derivativePhase(processing, job, owner, 'indexing');
-          await run(config.entwineBin, ['build', '-i', source, '-o', incomplete], { signal: controller.signal });
-          derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(incomplete);fs.renameSync(incomplete,complete);derivativePhase(processing,job,owner,'registering');
+          const inputEvidence=receipts.inputEvidence(job.id);
+          const converter=inputEvidence?await captureEptConverterIdentity(config.entwineBin,{signal:controller.signal}):null;
+          await run(converter?.executablePath||config.entwineBin, ['build', '-i', source, '-o', incomplete], { signal: controller.signal });
+          // Conversion must still refer to the exact bytes verified before it
+          // started. This is required before any later unit-proof inheritance.
+          await verifyDerivativeInputSnapshot(storage, inputSnapshot, { signal: controller.signal });
+          if(converter)await assertEptConverterIdentity(converter,{signal:controller.signal});
+          derivativePhase(processing,job,owner,'verifying');const verified=await verifiedAsset(incomplete);
+          if(inputEvidence){
+            const headerPath=path.join(incomplete,'ept.json');
+            if(fs.statSync(headerPath).size>1024*1024)throw Object.assign(new Error('EPT metadata exceeds inspection limit'),{code:'measurement_ept_schema_unsupported'});
+            await inspectEptConversionOutput(JSON.parse(fs.readFileSync(headerPath,'utf8')),inputEvidence);
+          }
+          fs.renameSync(incomplete,complete);
+          if(converter){
+            durableReceipt=receipts.create(job.id,owner,{converter,outputAsset:verified.asset},{leaseToken:job.lease_token});
+            if(!durableReceipt)throw Object.assign(new Error('EPT conversion lease or source proof was lost'),{code:'lease_lost'});
+          }
+          derivativePhase(processing,job,owner,'registering');
           const registered=processing.registerVerifiedEptAsset(job.id,owner,verified.asset,{leaseToken:job.lease_token,promote:()=>{if(fs.existsSync(output))throw Object.assign(new Error('EPT final appeared during activation'),{code:'derivative_activation_conflict'});if(fs.statSync(complete).dev!==fs.statSync(base).dev)throw Object.assign(new Error('EPT activation crossed filesystems'),{code:'invalid_storage_location'});fs.renameSync(complete,output);}});
           if(!registered)throw Object.assign(new Error('derivative lease was lost before verified EPT registration'),{code:'lease_lost'});derivativeResult={verified:true,resumed:false,retainedBytes:verified.retainedBytes,fileCount:verified.asset.manifestFiles.length};
         }
       } catch (error) {
-        fs.rmSync(incomplete, { recursive: true, force: true });fs.rmSync(complete,{recursive:true,force:true});
+        fs.rmSync(incomplete, { recursive: true, force: true });
+        // A committed receipt must retain its completed generation for a later
+        // lease to recover, including a failure between rename and SQL commit.
+        if(!durableReceipt)fs.rmSync(complete,{recursive:true,force:true});
         throw error;
       }
     } else if (job.derivative_type === 'mesh_tiles') {

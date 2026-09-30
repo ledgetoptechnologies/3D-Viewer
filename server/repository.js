@@ -572,8 +572,8 @@ class ViewerRepository {
     this.database.prepare(`INSERT INTO public_shares(
       id,model_id,version_policy,model_version_id,public_id_hash,password_hash,permissions_json,label,created_by,
       created_at,updated_at,expires_at,display_units,share_class,source_authorization_id,source_authorization_version,
-      source_authorization_subject,source_authorization_expires_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      source_authorization_subject,source_authorization_expires_at,token_ciphertext
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       id,
       input.modelId,
       input.versionPolicy || 'latest',
@@ -592,6 +592,7 @@ class ViewerRepository {
       input.sourceAuthorization?.version == null ? null : String(input.sourceAuthorization.version),
       input.sourceAuthorization?.subject || null,
       input.sourceAuthorization?.expiresAt || null,
+      input.tokenCiphertext || null,
     );
     return this.getPublicShare(id);
   }
@@ -629,6 +630,9 @@ class ViewerRepository {
       versionPolicy: row.version_policy,
       modelVersionId: row.model_version_id,
       publicIdHash: row.public_id_hash,
+      tokenCiphertext: row.token_ciphertext || null,
+      authorizationRevision: row.authorization_revision || 0,
+      allowedViews: parseJson(row.allowed_views_json, null),
       hasPassword: Boolean(row.password_hash),
       passwordHash: row.password_hash,
       permissions: parseJson(row.permissions_json, {}),
@@ -650,6 +654,13 @@ class ViewerRepository {
 
   getPublicShare(id) {
     return this.publicShare(this.database.prepare('SELECT * FROM public_shares WHERE id=?').get(id));
+  }
+
+  updatePublicShare(id,patch) {
+    const share=this.getPublicShare(id);if(!share||share.revokedAt)return null;
+    const next={...share,...patch};
+    this.database.prepare(`UPDATE public_shares SET label=?,password_hash=?,expires_at=?,permissions_json=?,allowed_views_json=?,token_ciphertext=?,authorization_revision=authorization_revision+?,updated_at=? WHERE id=? AND revoked_at IS NULL`).run(next.label,next.passwordHash,next.expiresAt,JSON.stringify(next.permissions),next.allowedViews?JSON.stringify(next.allowedViews):null,next.tokenCiphertext,patch.invalidateAuthorization?1:0,now(),id);
+    return this.getPublicShare(id);
   }
 
   getPublicShareByHash(hash) {

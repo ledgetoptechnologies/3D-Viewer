@@ -32,10 +32,12 @@ function validateTransectRequest(input,measurement,version,parent,{temporary=fal
     pointFields={cellSizeM:sourceRequest.cellSizeM,classFilter:sourceRequest.classFilter||'all',samplingGrid:structuredClone(grid),...(sourceRequest.requireEncodedVerticalUnits===true?{requireEncodedVerticalUnits:true}:{})};
   }
   const patches=result.preview?.referencePatches;
+  if(sourceRequest.sourceUnitEvidence)pointFields.sourceUnitEvidence=structuredClone(sourceRequest.sourceUnitEvidence);
   if(!Array.isArray(patches)||patches.length<1||patches.length>254||!patches.every(p=>Array.isArray(p)&&p.length===3&&p.every(v=>vector(v,3))))fail('measurement_transect_base_unavailable');
   return {schemaVersion:1,method:'surface-transect',modelId:measurement.modelId,modelVersionId:measurement.modelVersionId,collection:measurement.collection,vertices:structuredClone(measurement.vertices),coordinateReference:structuredClone(measurement.coordinateReference),source:structuredClone(sourceRequest.source),sourceVerticalUnit:sourceRequest.sourceVerticalUnit||null,reference:structuredClone(sourceRequest.reference),referencePatches:structuredClone(patches),baseHash:hashBase(patches),parentCalculationId:job.id,parentRevision:job.revision,line:structuredClone(line),...pointFields};
 }
 function sameTransectEvidence(request,rebuilt){
+  if(JSON.stringify(request.sourceUnitEvidence||null)!==JSON.stringify(rebuilt.sourceUnitEvidence||null))return false;
   if((request.requireEncodedVerticalUnits===true)!==(rebuilt.requireEncodedVerticalUnits===true))return false;
   return request.parentCalculationId===rebuilt.parentCalculationId&&request.parentRevision===rebuilt.parentRevision&&request.baseHash===rebuilt.baseHash&&hashBase(request.referencePatches)===rebuilt.baseHash&&geometry(request)===geometry(rebuilt)&&JSON.stringify(request.source)===JSON.stringify(rebuilt.source)&&reference(request.reference)===reference(rebuilt.reference)&&request.sourceVerticalUnit===rebuilt.sourceVerticalUnit&&request.cellSizeM===rebuilt.cellSizeM&&request.classFilter===rebuilt.classFilter&&JSON.stringify(request.samplingGrid)===JSON.stringify(rebuilt.samplingGrid);
 }

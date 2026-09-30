@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 import { calculatePointSurface, pointSurfaceGrid, preflightPointSurface } from '../server/measurementPointSurface.mjs';
 import {calculatePointSurfaceTransect} from '../server/measurementPointTransect.mjs';
 import {traceRasterCells,frozenReferenceIntervals} from '../server/measurementRasterTransect.mjs';
+import {childCalculation} from '../server/measurementCalculationWorker.js';
+import unitRegistry from '../server/measurementSourceUnitEvidence.js';
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'measurement-point-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));fs.mkdirSync(path.join(root,'ept-hierarchy'));fs.mkdirSync(path.join(root,'ept-data'));
   const files=[],write=(relative,bytes)=>{bytes=Buffer.isBuffer(bytes)?bytes:Buffer.from(JSON.stringify(bytes));fs.writeFileSync(path.join(root,relative),bytes);const file={relativePath:relative,byteSize:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};files.push(file);return file;};
@@ -17,6 +19,95 @@ function fixture(t){
   const request={vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]],reference:{type:'custom',elevationM:0},coordinateReference:{crs:'EPSG:32616'},sourceVerticalUnit:'m',cellSizeM:1,source:{id:'ept',byteSize:manifest.byteSize,sha256:manifest.sha256,manifestSha256:'b'.repeat(64)},modelVersionId:'v1'};
   return{root,files,request,write};
 }
+
+test('source-bound staff evidence permits untagged point preflight without a client assertion',async t=>{
+  const f=fixture(t),request={...f.request,modelId:'model',sourceVerticalUnit:null,source:{...f.request.source,kind:'ept'},requireEncodedVerticalUnits:true};
+  request.sourceUnitEvidence={schemaVersion:1,...unitRegistry.sourceBinding(request),verticalUnit:'m',verticalDatum:'unknown',basis:'administrator-reviewed-source'};
+  const result=await preflightPointSurface(path.join(f.root,'ept.json'),request,{requireEncodedVerticalUnits:true});
+  assert.equal(result.vertical.verticalFactor,1);
+  assert.equal(result.vertical.verticalUnitBasis,'administrator-reviewed-source');
+  assert.equal(result.vertical.verticalDatum,'unknown');
+  for(const change of [{modelVersionId:'changed'},{modelId:'changed'},{sourceUnitEvidence:{...request.sourceUnitEvidence,manifestSha256:'c'.repeat(64)}}]){
+    await assert.rejects(preflightPointSurface(path.join(f.root,'ept.json'),{...request,...change},{requireEncodedVerticalUnits:true}),{code:'measurement_source_vertical_units_required'});
+  }
+});
+
+test('staff evidence and metre confirmation cannot bypass an unvalidated encoded vertical CRS',async t=>{
+  const f=fixture(t),file=path.join(f.root,'ept.json'),header=JSON.parse(fs.readFileSync(file,'utf8'));
+  header.srs.vertical='6360';
+  const identity=f.write('ept.json',header);
+  const request={...f.request,modelId:'model',source:{...f.request.source,kind:'ept',sha256:identity.sha256,byteSize:identity.byteSize}};
+  for(const reviewed of [false,true]){
+    const input={...request,...(reviewed?{sourceUnitEvidence:{schemaVersion:1,...unitRegistry.sourceBinding(request),verticalUnit:'m',verticalDatum:'unknown',basis:'administrator-reviewed-source'}}:{})};
+    await assert.rejects(preflightPointSurface(file,input),{code:'measurement_source_vertical_units_unsupported'});
+  }
+});
+
+test('receipt-bound EPT units preserve feet through preflight and calculation',async t=>{
+  const f=fixture(t),request={...f.request,modelId:'model',sourceVerticalUnit:null,source:{...f.request.source,kind:'ept'}};
+  request.sourceUnitEvidence={schemaVersion:1,...unitRegistry.sourceBinding(request),verticalUnit:'ft',verticalFactor:.3048,verticalDatum:'unknown',basis:'server-verified-ept-conversion',conversionProof:{jobId:'job',receiptSha256:'c'.repeat(64),inputProofSha256:'d'.repeat(64)}};
+  const preflight=await preflightPointSurface(path.join(f.root,'ept.json'),request,{requireEncodedVerticalUnits:true});
+  assert.equal(preflight.vertical.verticalFactor,.3048);
+  assert.equal(preflight.vertical.verticalUnitBasis,'server-verified-ept-conversion');
+  const result=await calculatePointSurface(path.join(f.root,'ept.json'),request,{sourceFiles:f.files,requireEncodedVerticalUnits:true});
+  assert.ok(Math.abs(result.cutM3-10*.3048)<1e-10);
+  assert.equal(result.source.verticalUnitEvidence.verticalUnit,'ft');
+  assert.equal(result.source.verticalUnitEvidence.conversionProof,undefined,'private receipt details not exported');
+  for(const change of [{conversionProof:null},{verticalFactor:1},{manifestSha256:'e'.repeat(64)},{kind:'dsm'}]){
+    await assert.rejects(preflightPointSurface(path.join(f.root,'ept.json'),{...request,sourceUnitEvidence:{...request.sourceUnitEvidence,...change}},{requireEncodedVerticalUnits:true}),{code:'measurement_source_vertical_units_required'});
+  }
+});
+
+test('exact point grid survives independent volume/section calls with verified reads and identical output',async t=>{
+  const f=fixture(t),pointGridCacheRoot=path.join(f.root,'cache'),source={...f.request.source,kind:'ept'},request={...f.request,source},timings=[];
+  const options={sourceFiles:f.files,pointGridCacheRoot,onTiming:value=>timings.push(value)};
+  const cold=await calculatePointSurface(path.join(f.root,'ept.json'),request,options);
+  const warm=await calculatePointSurface(path.join(f.root,'ept.json'),request,options);
+  assert.deepEqual(warm,cold);assert.equal(timings[0].cacheHit,false);assert.equal(timings[1].cacheHit,true);assert.equal(timings[1].decodeGridMs,0);assert.equal(timings[1].nodesRead,2);
+  const referencePatches=cold.preview.referencePatches,section={...request,method:'surface-transect',parentCalculationId:'parent',samplingGrid:cold.source.samplingGrid,referencePatches,baseHash:crypto.createHash('sha256').update(JSON.stringify(referencePatches)).digest('hex'),line:{start:[0,.5],end:[2,.5]}};
+  const cached=await calculatePointSurfaceTransect(path.join(f.root,'ept.json'),section,options);
+  assert.equal(timings.findLast(value=>value.phase==='point-surface').cacheHit,true,'volume grid is reusable without preview subsampling');
+  assert.equal(timings.at(-1).phase,'point-transect');assert.ok(timings.at(-1).sampleMs>=0);
+  const fresh=await calculatePointSurfaceTransect(path.join(f.root,'ept.json'),section,{sourceFiles:f.files});
+  assert.deepEqual(cached,fresh);
+  // Same-size edits cannot hide behind timestamps or a valid cache header.
+  const node=path.join(f.root,'ept-data/0-0-0-0.bin'),before=fs.statSync(node);fs.writeFileSync(node,Buffer.alloc(before.size));fs.utimesSync(node,before.atime,before.mtime);
+  await assert.rejects(calculatePointSurfaceTransect(path.join(f.root,'ept.json'),section,options),{code:'measurement_source_changed'});
+});
+
+test('point grid cache keys isolate source version manifest polygon units class and cell resolution',async t=>{
+  const f=fixture(t),timings=[],options={sourceFiles:f.files,pointGridCacheRoot:path.join(f.root,'cache'),onTiming:x=>timings.push(x)};
+  await calculatePointSurface(path.join(f.root,'ept.json'),f.request,options);
+  for(const change of [{modelVersionId:'v2'},{source:{...f.request.source,manifestSha256:'c'.repeat(64)}},{vertices:[[0,0,0],[1,0,0],[1,2,0],[0,2,0]]},{cellSizeM:.5},{classFilter:'ground'}]){
+    await calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,...change},options);assert.equal(timings.at(-1).cacheHit,false);
+  }
+  await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,sourceVerticalUnit:null},options),{code:'measurement_source_vertical_units_required'});
+  await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,requireEncodedVerticalUnits:true},options),{code:'measurement_source_vertical_units_required'});
+  await assert.rejects(calculatePointSurface(path.join(f.root,'ept.json'),f.request,{...options,maxCells:1}),{code:'measurement_limit'});
+});
+
+test('corrupt or unavailable disk grid cache falls back and collected reconstruction points bypass it',async t=>{
+  const f=fixture(t),pointGridCacheRoot=path.join(f.root,'cache'),timings=[],options={sourceFiles:f.files,pointGridCacheRoot,onTiming:x=>timings.push(x)};
+  const cold=await calculatePointSurface(path.join(f.root,'ept.json'),f.request,options);
+  for(const file of fs.readdirSync(pointGridCacheRoot))fs.writeFileSync(path.join(pointGridCacheRoot,file),'bad');
+  assert.deepEqual(await calculatePointSurface(path.join(f.root,'ept.json'),f.request,options),cold);assert.equal(timings.at(-1).cacheHit,false);
+  const selected=await calculatePointSurface(path.join(f.root,'ept.json'),{...f.request,selection:{minElevationM:1.5,maxElevationM:3.5}},{...options,collectOnly:true});
+  assert.deepEqual(selected.points,[[1.5,.5,2],[.5,1.5,3]]);assert.equal(timings.at(-1).cacheHit,false);
+  const unavailable=path.join(f.root,'file-not-directory');fs.writeFileSync(unavailable,'x');
+  assert.deepEqual(await calculatePointSurface(path.join(f.root,'ept.json'),f.request,{...options,pointGridCacheRoot:unavailable}),cold);
+});
+
+test('separate bounded child jobs reuse worker-owned point grid and preserve full results',async t=>{
+  const f=fixture(t),timings=[],config={cacheMount:path.join(f.root,'worker-cache'),measurementTimeoutMs:10000},options={config,isLive:()=>true,sourceFiles:f.files,onTiming:x=>timings.push(x)},request={...f.request,method:'point-surface-cut-fill',source:{...f.request.source,kind:'ept'}};
+  const first=await childCalculation(path.join(f.root,'ept.json'),request,options);
+  const cacheRoot=path.join(config.cacheMount,'measurement-point-surfaces-v1'),files=fs.readdirSync(cacheRoot);
+  assert.equal(files.length,1);
+  const entry=path.join(cacheRoot,files[0]);fs.utimesSync(entry,1000,1000);const timestamp=fs.statSync(entry).mtimeMs;
+  const second=await childCalculation(path.join(f.root,'ept.json'),request,options);
+  assert.deepEqual(second,first);assert.equal(fs.statSync(entry).mtimeMs,timestamp,'second process hit does not rebuild/rewrite grid');
+  assert.deepEqual(timings.map(x=>x.phase),['point-surface','child','point-surface','child']);assert.equal(timings[2].cacheHit,true);assert.equal(timings[2].decodeGridMs,0);assert.ok(timings[2].verifiedReadMs>=0);
+  assert.ok(timings.every(x=>JSON.stringify(x).length<512));assert.doesNotMatch(JSON.stringify(timings),/worker-cache|authority|vertices/);
+});
 
 test('UTM point sections omit only collapsed metric contacts and preserve continuous positive station coverage',async t=>{
   const f=fixture(t),poly=[[500018.4621418826,4870020.323978993,0],[500094.7803548956,4870021.415496769,0],[500099.24383717007,4870047.501313193,0],[500018.4621418826,4870047.501313193,0]];
@@ -130,5 +221,9 @@ test('native LAZ source decodes all points using bundled offline WASM',async t=>
  const manifest=f.write('ept.json',{bounds:[367000,4759000,99,367016,4759004,101],dataType:'laszip',srs:{horizontal:'32616'},schema:[{name:'X',type:'signed',size:4},{name:'Y',type:'signed',size:4},{name:'Z',type:'signed',size:4},{name:'Classification',type:'unsigned',size:1}]});
  f.write('ept-hierarchy/0-0-0-0.json',{'0-0-0-0':64});f.write('ept-data/0-0-0-0.laz',bytes);
  const request={...f.request,vertices:[[367000,4759000,0],[367016,4759000,0],[367016,4759004,0],[367000,4759004,0]],source:{...f.request.source,byteSize:manifest.byteSize,sha256:manifest.sha256}};
- const result=await calculatePointSurface(path.join(f.root,'ept.json'),request,{sourceFiles:f.files});assert.equal(result.source.pointsRead,64);assert.ok(result.cutM3>0);
+ const timings=[],options={sourceFiles:f.files,pointGridCacheRoot:path.join(f.root,'cache'),onTiming:x=>timings.push(x)};
+ const result=await calculatePointSurface(path.join(f.root,'ept.json'),request,options);assert.equal(result.source.pointsRead,64);assert.ok(result.cutM3>0);
+ assert.deepEqual(await calculatePointSurface(path.join(f.root,'ept.json'),request,options),result);
+ assert.equal(timings[1].cacheHit,true);assert.equal(timings[1].decodeGridMs,0);assert.equal(timings[1].pointsRead,64);
+ t.diagnostic(`Synthetic LAZ cold/warm only, not live speed: ${JSON.stringify(timings)}`);
 });

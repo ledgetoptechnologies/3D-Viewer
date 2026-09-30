@@ -23,7 +23,9 @@ test('explicit upward vertical WKT1/WKT2 units are independent of horizontal met
 });
 
 test('horizontal-only CRS, numeric vertical IDs, schema units and confirmations cannot supply absent evidence',()=>{
-  for(const srs of [{horizontal:32616},{wkt:horizontal},{wkt2:horizontal2},{horizontal:32616,vertical:5703},{wkt:horizontal,verticalUnit:'m',sourceVerticalUnit:'m',schema:[{name:'Z',scale:.001}]}])reject(srs,'measurement_source_vertical_units_required');
+  for(const srs of [{horizontal:32616},{wkt:horizontal},{wkt2:horizontal2},{wkt:horizontal,verticalUnit:'m',sourceVerticalUnit:'m',schema:[{name:'Z',scale:.001}]}])reject(srs,'measurement_source_vertical_units_required');
+  for(const vertical of [5703,'6360'])reject({horizontal:32616,vertical},'measurement_source_vertical_units_unsupported');
+  for(const vertical of ['',null,{},'unknown'])reject({horizontal:32616,vertical},'measurement_source_vertical_metadata_invalid');
 });
 
 test('unit, authority and multiple-WKT conflicts fail closed',()=>{

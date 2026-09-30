@@ -1980,6 +1980,49 @@ const MIGRATIONS = [
       CREATE INDEX ephemeral_measurement_jobs_status_idx ON ephemeral_measurement_jobs(status,created_at);
     `,
   },
+  {version:34,name:'manageable_public_share_links',sql:`
+    ALTER TABLE public_shares ADD COLUMN token_ciphertext TEXT;
+    ALTER TABLE public_shares ADD COLUMN authorization_revision INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE public_shares ADD COLUMN allowed_views_json TEXT;
+  `},
+  {version:35,name:'dataset_source_unit_evidence',sql:`
+    CREATE TABLE measurement_source_unit_evidence (
+      id TEXT PRIMARY KEY, model_id TEXT NOT NULL, model_version_id TEXT NOT NULL,
+      asset_id TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+      manifest_sha256 TEXT NOT NULL DEFAULT '', byte_size INTEGER NOT NULL,
+      evidence_json TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+      UNIQUE(model_id,model_version_id,asset_id,source_sha256,manifest_sha256)
+    );
+  `},
+  {version:36,name:'immutable_processing_attempt_provenance',sql:`
+    CREATE TABLE processing_attempt_provenance (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE CASCADE,
+      submission_json TEXT NOT NULL, provider_result_json TEXT,
+      created_at TEXT NOT NULL
+    );
+  `},
+  {version:37,name:'processing_transfer_provenance',sql:`
+    CREATE TABLE processing_attempt_transfer_provenance (
+      attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id) ON DELETE CASCADE,
+      initialization_json TEXT NOT NULL, archive_json TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+  `},
+  {version:38,name:'immutable_ept_conversion_receipts',sql:`
+    CREATE TABLE derivative_ept_conversion_receipts (
+      job_id TEXT PRIMARY KEY REFERENCES derivative_jobs(id) ON DELETE CASCADE,
+      receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json)),
+      receipt_sha256 TEXT NOT NULL CHECK(length(receipt_sha256)=64),
+      created_at TEXT NOT NULL
+    );
+    CREATE TRIGGER derivative_ept_conversion_receipts_no_update
+      BEFORE UPDATE ON derivative_ept_conversion_receipts
+      BEGIN SELECT RAISE(ABORT,'EPT conversion receipts are immutable'); END;
+    CREATE TRIGGER derivative_ept_conversion_receipts_no_delete
+      BEFORE DELETE ON derivative_ept_conversion_receipts
+      WHEN EXISTS(SELECT 1 FROM derivative_jobs WHERE id=OLD.job_id)
+      BEGIN SELECT RAISE(ABORT,'EPT conversion receipts are immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {

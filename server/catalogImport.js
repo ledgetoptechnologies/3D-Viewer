@@ -6,6 +6,7 @@ const path = require('node:path');
 const { hashFile, hashFileChunks, hashTree } = require('./storageManager');
 const { lodDerivativeSpecs } = require('./lodDerivativePolicy');
 const { CUTLINE_PATTERN, validateCutlineFile } = require('./orthophotoCutline');
+const { recordImportedSourceUnits } = require('./importSourceUnitEvidence');
 
 const ASSET_RULES = [
   ['tiles', /(^|\/)tileset\.json$/i, '3dtiles'],
@@ -113,7 +114,7 @@ function manifestHash(files) {
   return crypto.createHash('sha256').update(JSON.stringify(files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })))).digest('hex');
 }
 
-async function mapCatalogCandidate(operation, { processing, repository, storage, config }, progress = async () => {}) {
+async function mapCatalogCandidate(operation, { processing, repository, storage, config }, progress = async () => {}, signal = null) {
   const payload = JSON.parse(operation.payload_json || '{}'), request = payload.request || {}, ids = payload.ids || {};
   const candidate = processing.getCatalogCandidate(payload.candidateId);
   if (!candidate) throw Object.assign(new Error('catalog candidate is unavailable'), { code: 'candidate_unavailable' });
@@ -154,6 +155,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   for(const asset of candidate.assets){const relativePath=[assetPrefix,asset.relativePath].filter(Boolean).join('/'),entry={kind:asset.kind,rootKey:assetRootKey,relativePath,format:asset.format,contentType:asset.contentType||null,byteSize:asset.byteSize,sha256:asset.sha256,chunks:asset.chunks||[],storageMode:request.storageMode,published:false,sourceAttemptId:attempt.id};if(['ept','tiles'].includes(asset.kind)){const tree=await hashTree(path.dirname(path.join(originalRoot,...asset.relativePath.split('/'))));entry.manifestSha256=tree.manifestSha256;entry.manifestFiles=tree.files;}assets.push(entry);}
   const registeredAssets=assets.filter((asset)=>asset.kind!=='tiles');
   const model=repository.upsertModelVersion({modelId:ids.modelId,versionId:ids.versionId,provider:candidate.provider,providerModelId:`catalog:${candidate.id}`,providerVersionId:approvedFingerprint,displayName:request.taskDisplayName,status:'importing',metadata:{projectName:project.displayName,taskName:task.displayName,catalogCandidateId:candidate.id,catalogImportOperationId:operation.id},versionMetadata:{catalogImport:true,storageMode:request.storageMode,catalogImportOperationId:operation.id},sourceLocator:{catalogImport:true,projectId:candidate.externalProjectId,taskId:candidate.externalTaskId,sourceRootKey,sourceRelativePath},assets:registeredAssets,makeActive:false});
+  await recordImportedSourceUnits(operation, { processing, repository, storage }, model.id, ids.versionId, { signal });
   processing.setAttemptResult(attempt.id,model.id,ids.versionId);
   processing.registerModelOutput({versionId:ids.versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:request.storageMode==='external_reference'?`${assetRootKey}@${ids.versionId}`:assetRootKey,relativePath:sourceRelativePath,storageMode:request.storageMode,status:'staged',byteSize:dataset.byteSize,assetCount:registeredAssets.length});
   const lodDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});

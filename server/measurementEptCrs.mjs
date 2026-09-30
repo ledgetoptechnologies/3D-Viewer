@@ -105,6 +105,15 @@ function wktUtmCode(text){
   return code;
 }
 
+// Discover the native supported horizontal code, then run the same full
+// cross-declaration validation as calculations (including WKT-only sources).
+export function inspectEptUtmCrs(srs){
+  if(!srs||typeof srs!=='object'||Array.isArray(srs))fail();
+  const candidate=Object.hasOwn(srs,'horizontal')?Number(srs.horizontal):Object.hasOwn(srs,'code')?Number(srs.code):
+    Object.hasOwn(srs,'wkt')?wktUtmCode(srs.wkt):Object.hasOwn(srs,'wkt2')?wktUtmCode(srs.wkt2):null;
+  return resolveEptUtmCrs(srs,candidate);
+}
+
 export function resolveEptUtmCrs(srs,expected){
   if(!Number.isInteger(expected)||!((expected>=32601&&expected<=32660)||(expected>=32701&&expected<=32760))||!srs||typeof srs!=='object'||Array.isArray(srs))fail();
   const codes=[];
@@ -167,7 +176,16 @@ export function resolveEptVerticalUnits(srs,expected){
   const evidence=[];
   for(const key of ['wkt','wkt2'])if(Object.hasOwn(srs,key)){const parts=compoundParts(parseWkt(srs[key]));if(parts)evidence.push(parts);}
   resolveEptUtmCrs(srs,expected);
-  if(!evidence.length)verticalFail('measurement_source_vertical_units_required');
+  if(!evidence.length){
+    // An encoded vertical CRS is not absent metadata. Without an independently
+    // supported vertical WKT we cannot interpret its units, and must not allow
+    // a reviewed/default metre fallback to bypass that declaration.
+    if(Object.hasOwn(srs,'vertical')){
+      if(!['number','string'].includes(typeof srs.vertical)||!/^\d{4,6}$/.test(String(srs.vertical)))verticalInvalid();
+      verticalFail('measurement_source_vertical_units_unsupported');
+    }
+    verticalFail('measurement_source_vertical_units_required');
+  }
   if(evidence.some(item=>item.factor!==evidence[0].factor))verticalFail('measurement_source_vertical_units_conflict');
   const identifiers=evidence.map(item=>item.id).filter(id=>id!==null);
   if(Object.hasOwn(srs,'vertical')){

@@ -4,6 +4,16 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
+test('public and authenticated client sharing forms constrain intrinsic input widths',()=>{
+  const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
+  assert.match(css,/\.share-form,#client-grant-form\{min-width:0;grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(css,/#client-grant-form label,#client-grant-form input,#client-grant-form select\{min-width:0\}/);
+});
+test('conditional sharing fields stay hidden despite managed-form layout rules',()=>{
+  const css=readFileSync(new URL('../workspace-management.css',import.meta.url),'utf8');
+  assert.match(css,/\.manage-form\s+\[hidden\]\s*\{\s*display:\s*none\s*!important\s*;?\s*\}/);
+  assert.match(source,/data-password-input hidden/);
+});
 function declaration(name){
   const match=new RegExp(`^(?:async )?function ${name}\\(`,'m').exec(source);
   assert.ok(match,`Missing shipped function ${name}`);
@@ -12,9 +22,9 @@ function declaration(name){
 }
 const names=['canShareOutput','openShareModal','associationModelId','associationProjectId','portalAccountId',
   'exactClientAssociations','clientGrantBody','clientSharePanel','clientShareCard','rememberShareResult','clearShareResult','visibleShareResult','shareModal','confirmSharedVersionUpdate',
-  'createOutputShare','bindShareModal','bindProjectShareCard'];
+  'createOutputShare','bindShareModal','bindProjectShareCard','shareViewLabels','availableShareViews','shareViewControls','bindShareViewControls','selectedShareViews','shareSettingsSummary','shareExpiryInput','editShareModal','retrieveShareLink'];
 function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.client_grants.manage']){
-  const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false};
+  const output={id:'output',modelId:'model',projectId:'project',taskId:'task',attemptId:'attempt',status:'ready',activePublished:false,assetKinds:['glb']};
   const state={token:'signed-in',projects:[{id:'project',displayName:'Site'}],tasks:[{id:'task',projectId:'project'}],outputs:[output],
     shares:{},sharePreflight:{},projectShares:{},clientAccess:{projects:[],associations:[],grants:[]},shareContext:{id:'context'},lastShareUrl:null};
   const calls=[],notices=[],rendered=[],decisions=[],copyButtons=[];
@@ -27,7 +37,7 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   };
   const esc=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
   const context=vm.createContext({state,modal,modalContent,crypto:{randomUUID:()=>`request-${++sequence}`},
-    can:permission=>permissions.includes(permission),esc,card:(title,body)=>`<section><h3>${esc(title)}</h3>${body}</section>`,
+    can:permission=>permissions.includes(permission),esc,dateTime:value=>value,card:(title,body)=>`<section><h3>${esc(title)}</h3>${body}</section>`,
     empty:text=>`<p>${esc(text)}</p>`,field:(label,name,attrs='')=>`<label>${esc(label)}<input name="${name}" ${attrs}></label>`,
     badge:value=>`<span>${esc(value)}</span>`,button:(action,id,label)=>`<button data-action="${action}" data-id="${id}">${label}</button>`,
     openModal:(title,html)=>{rendered.push({title,html});modal.open=true},injectProjectShareCard:()=>{},
@@ -38,7 +48,8 @@ function fixture(permissions=['viewer.shares.read','viewer.shares.create','viewe
   });
   vm.runInContext(names.map(declaration).join('\n'),context);
   const form={dataset:{outputId:'output'},isConnected:true,elements:{label:{value:''},password:{value:''},expiresAt:{value:''},
-    measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button}};
+    measure:{checked:true},cameras:{checked:true},download:{checked:false}},button:{disabled:false},querySelector(){return this.button},
+    querySelectorAll(selector){return selector==='input[name="allowedViews"]'?[{checked:true,value:'model'}]:[]}};
   return {context,state,output,calls,notices,rendered,decisions,modal,modalContent,clientPanel,form,copyButtons,
     respond(fn){respond=fn},html:()=>rendered.at(-1)?.html||''};
 }
@@ -72,8 +83,8 @@ test('dedicated ready sharing offers explicit link creation without publish UX o
   assert.match(f.html(),/Downloads, including model report/);
   assert.match(f.html(),/Direct Operations client sharing is not available/);
   assert.match(f.html(),/No Operations account or client workspace is required/);
-  assert.ok(f.html().indexOf('Create public link')<f.html().indexOf('Share with an Operations client instead'));
-  assert.match(f.html(),/<details class="authenticated-share-options"><summary>/);
+  assert.match(f.html(),/data-share-mode="internal" aria-pressed="true"/);
+  assert.match(f.html(),/data-share-mode-panel="public" hidden/);
   assert.equal(f.calls.every(call=>!call.options.method||call.options.method==='GET'),true);
 });
 
@@ -220,13 +231,12 @@ test('whole-project client scope and future publications are separate opt-ins',(
   assert.doesNotMatch(f.html(),/name="(?:includeFuturePublished|wholeProject)" checked/);
 });
 
-test('whole-project public creation requires future-scope opt-in and separates clipboard from success',async()=>{
-  const f=fixture();f.form.elements.dynamicProjectAccess={checked:false};
-  f.modalContent.querySelector=selector=>selector==='.project-share-form'?f.form:null;
-  f.context.bindProjectShareCard('project');await f.form.onsubmit({preventDefault(){}});assert.equal(f.calls.length,0);
-  f.form.elements.dynamicProjectAccess.checked=true;await f.form.onsubmit({preventDefault(){}});
-  assert.equal(f.calls.length,1);assert.equal(f.calls[0].path,'/api/v1/projects/project/public-shares');
-  assert.equal(f.state.lastShareUrl,'https://viewer.test/view/capability');assert.match(f.notices.at(-1)[0],/created.*Use Copy/);
+test('project sharing has no public creation form or public task forms',async()=>{
+  const f=fixture();f.context.shareModal('project');f.context.bindProjectShareCard('project');
+  assert.doesNotMatch(f.html(),/project-share-form|class="manage-form share-form"|Create public link|Create whole-project link/);
+  assert.match(f.html(),/whole projects with authenticated Operations clients/);
+  assert.match(f.html(),/data-legacy-project-shares/);assert.equal(f.calls.length,0);
+  await f.context.createOutputShare(f.form,'project',null);assert.equal(f.calls.length,0);
 });
 
 test('new link result is bound to its project, output and share identity',async()=>{
@@ -251,7 +261,7 @@ test('loaded revoked or expired link metadata hides and clears the stale creatio
 });
 
 for(const kind of ['model','project'])test(`successful ${kind} revoke clears only its matching creation result`,async()=>{
-  const f=fixture(),element={dataset:{id:'share'}};
+  const f=fixture(),element={dataset:{id:'share'},isConnected:true};
   f.context.rememberShareResult({share:{id:'share'},viewUrl:'https://viewer.test/link'},'project',kind==='model'?'output':null);
   f.modalContent.querySelectorAll=selector=>selector===`[data-action="revoke-${kind==='model'?'share':'project-share'}"]`?[element]:[];
   f.context.mutate=async()=>({share:{id:'share',revokedAt:'now'}});
@@ -261,11 +271,92 @@ for(const kind of ['model','project'])test(`successful ${kind} revoke clears onl
 });
 
 test('failed or cancelled revoke does not erase an otherwise valid created link',async()=>{
-  const f=fixture(),element={dataset:{id:'share'}};
+  const f=fixture(),element={dataset:{id:'share'},isConnected:true};
   f.context.rememberShareResult({share:{id:'share'},viewUrl:'https://viewer.test/link'},'project','output');
   f.modalContent.querySelectorAll=selector=>selector==='[data-action="revoke-share"]'?[element]:[];
   f.context.bindShareModal('project','output');f.context.dialogs.confirm=async()=>false;
   await element.onclick();assert.equal(f.state.lastShareUrl,'https://viewer.test/link');
   f.context.dialogs.confirm=async()=>true;f.context.mutate=async()=>undefined;
   await element.onclick();assert.equal(f.state.lastShareUrl,'https://viewer.test/link');
+});
+
+test('available-view selection comes from verified kinds and defaults to all supported views only',()=>{
+  const f=fixture();f.state.sharePreflight.output={eligibleAssetKinds:['glb','tiles','ept','ortho','dsm','dtm','report','camera']};
+  assert.deepEqual([...f.context.availableShareViews(f.output)],['model','pointCloud','ortho','dsm','dtm']);
+  const html=f.context.shareViewControls(f.output);
+  assert.equal((html.match(/name="allowedViews"/g)||[]).length,5);
+  assert.match(html,/data-all-share-views checked/);assert.doesNotMatch(html,/value="report"|value="camera"/);
+  const scoped=f.context.shareViewControls(f.output,['ortho']);assert.doesNotMatch(scoped,/data-all-share-views checked/);assert.match(scoped,/value="ortho" checked/);
+  assert.throws(()=>f.context.selectedShareViews({querySelectorAll:()=>[]}),/at least one/);
+});
+test('existing task share lists settings and durable management actions without exposing password',()=>{
+  const f=fixture();f.state.shares.output=[{id:'saved',label:'Client',hasPassword:true,permissions:{measure:true,cameras:false,download:false},allowedViews:['model'],linkRecoverable:true}];
+  f.context.shareModal('project','output');
+  for(const action of ['copy-existing-share','open-existing-share','edit-share','revoke-share'])assert.match(f.html(),new RegExp(action));
+  assert.match(f.html(),/Temporary measurements.*No camera positions.*No downloads.*Password protected/);
+  assert.doesNotMatch(f.html(),/No expiry.*secret/);
+});
+test('unencrypted legacy task links still offer Copy and Open for receipt-based recovery',()=>{
+  const f=fixture();f.state.shares.output=[{id:'legacy',label:'Legacy',hasPassword:false,permissions:{view:true},allowedViews:null,linkRecoverable:false}];
+  f.context.shareModal('project','output');
+  assert.match(f.html(),/copy-existing-share/);assert.match(f.html(),/open-existing-share/);
+  assert.doesNotMatch(f.html(),/cannot be retrieved|not recoverable/);
+});
+test('editing preserves legacy all-views and password unless explicitly changed; same-body retries reuse receipt',async()=>{
+  const f=fixture(),status={},all={checked:true},views=[{checked:true,value:'model'}];
+  const share={id:'share',allowedViews:null,hasPassword:true,expiresAt:'2030-01-01T12:00:37.000Z',permissions:{view:true,measure:true,cameras:true,download:false}};
+  f.state.shares.output=[share];
+  const form={isConnected:true,elements:{label:{value:'Client'},passwordAction:{value:'keep'},password:{value:''},expiresAt:{value:f.context.shareExpiryInput(share.expiresAt)},measure:{checked:true},cameras:{checked:true},download:{checked:false}},
+    querySelector:selector=>selector==='[data-all-share-views]'?all:selector==='[role="status"]'?status:{},
+    querySelectorAll:selector=>selector==='input[name="allowedViews"]'?views:[]};
+  f.modalContent.querySelector=selector=>selector==='#share-edit-form'?form:null;
+  f.context.editShareModal('project','output','share');f.respond(async()=>{throw new Error('Network unavailable')});
+  const submit=()=>form.onsubmit({preventDefault(){}});
+  await submit();await submit();
+  assert.equal(f.calls.length,2);assert.equal(f.calls[0].options.headers['Idempotency-Key'],f.calls[1].options.headers['Idempotency-Key']);
+  assert.equal(f.calls[0].options.body.expiresAt,share.expiresAt);
+  assert.equal(Object.hasOwn(f.calls[0].options.body,'password'),false);assert.equal(Object.hasOwn(f.calls[0].options.body,'allowedViews'),false);
+  form.elements.passwordAction.value='remove';form.shareViewsChanged=true;await submit();
+  assert.equal(f.calls[2].options.body.password,null);assert.deepEqual(f.calls[2].options.body.allowedViews,['model']);
+  assert.notEqual(f.calls[2].options.headers['Idempotency-Key'],f.calls[1].options.headers['Idempotency-Key']);
+});
+test('link editing suppresses duplicate saves and does not replace a newer dialog',async()=>{
+  const f=fixture(),status={},form={isConnected:true,elements:{label:{value:'Client'},passwordAction:{value:'keep'},password:{value:''},expiresAt:{value:''},measure:{checked:true},cameras:{checked:true},download:{checked:false}},
+    querySelector:selector=>selector==='[data-all-share-views]'?null:status,querySelectorAll:()=>[]};
+  f.state.shares.output=[{id:'share',allowedViews:null,permissions:{view:true}}];f.modalContent.querySelector=selector=>selector==='#share-edit-form'?form:null;
+  f.context.editShareModal('project','output','share');const renders=f.rendered.length;let finish;f.respond(()=>new Promise(resolve=>{finish=resolve}));
+  const save=form.onsubmit({preventDefault(){}});await form.onsubmit({preventDefault(){}});assert.equal(f.calls.length,1);
+  form.isConnected=false;finish({share:{id:'share',label:'Client'}});await save;assert.equal(f.rendered.length,renders);
+});
+test('existing link copy is read-only and ignores responses for detached dialogs',async()=>{
+  const f=fixture(),copied=[],element={isConnected:true,disabled:false,dataset:{id:'saved',action:'copy-existing-share'}};
+  f.context.URL=URL;f.context.location={origin:'https://viewer.test'};
+  f.context.navigator.clipboard.writeText=async value=>copied.push(value);
+  f.respond(async()=>({viewUrl:'https://viewer.test/view/existing'}));
+  await f.context.retrieveShareLink(element);
+  assert.equal(f.calls[0].path,'/api/v1/processing/shares/saved/link');assert.equal(f.calls[0].options.method,undefined);
+  assert.deepEqual(copied,['https://viewer.test/view/existing']);
+  let complete;f.respond(()=>new Promise(resolve=>{complete=resolve}));
+  const pending=f.context.retrieveShareLink(element);element.isConnected=false;complete({viewUrl:'https://viewer.test/view/late'});await pending;
+  assert.equal(copied.length,1);assert.equal(element.disabled,false);
+});
+test('Open reserves isolated popup synchronously and validates returned URL before navigation',async()=>{
+  const f=fixture(),navigated=[],popup={opener:'original',location:{replace:value=>navigated.push(value)},close(){this.closed=true}};
+  f.context.URL=URL;f.context.location={origin:'https://viewer.test'};let opens=0;
+  f.context.window={open:()=>{opens++;return popup}};
+  let complete;f.respond(()=>new Promise(resolve=>{complete=resolve}));
+  const element={isConnected:true,disabled:false,dataset:{id:'saved',action:'open-existing-share'}};
+  const pending=f.context.retrieveShareLink(element);assert.equal(opens,1);assert.equal(popup.opener,null);
+  complete({viewUrl:'https://viewer.test/view/existing'});await pending;assert.deepEqual(navigated,['https://viewer.test/view/existing']);
+  f.respond(async()=>({viewUrl:'https://unrelated.test/view/secret'}));await f.context.retrieveShareLink(element);
+  assert.equal(navigated.length,1);assert.equal(popup.closed,true);
+});
+test('failed legacy URL recovery reports unrecoverable only after GET and never creates or revokes links',async()=>{
+  const f=fixture(),element={isConnected:true,disabled:false,dataset:{id:'legacy',action:'copy-existing-share'}};
+  f.state.shares.output=[{id:'legacy',linkRecoverable:false}];
+  f.respond(async()=>{const error=new Error('The original link cannot be recovered; it has not been changed.');error.status=409;throw error});
+  await f.context.retrieveShareLink(element);
+  assert.equal(f.calls.length,1);assert.equal(f.calls[0].path,'/api/v1/processing/shares/legacy/link');assert.equal(f.calls[0].options.method,undefined);
+  assert.match(f.notices.at(-1)[0],/not recoverable.*not been changed or revoked/);
+  assert.equal(f.state.shares.output[0].revokedAt,undefined);assert.equal(element.disabled,false);
 });

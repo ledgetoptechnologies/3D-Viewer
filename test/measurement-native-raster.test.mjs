@@ -8,10 +8,23 @@ import { writeArrayBuffer, fromArrayBuffer } from 'geotiff';
 import { rasterDecodedBlockBytes, validateRasterEncodedBlocks } from '../raster-source-metadata.mjs';
 import { validateMeasurementTiffHeader } from '../server/measurementTiffHeader.mjs';
 import { nativeTiffFixture } from './helpers/native-tiff-fixture.mjs';
+import sourceUnits from '../server/measurementSourceUnitEvidence.js';
 import { calculateNativeRaster, nativeRasterDefinition, preflightNativeRaster, NATIVE_RASTER_BLOCK_LIMIT } from '../server/measurementRasterCalculation.mjs';
 function image(overrides = {}) {
   return { getGeoKeys: () => ({ ProjectedCSTypeGeoKey: 32616, ProjLinearUnitsGeoKey: 9001, VerticalUnitsGeoKey: 9001 }), fileDirectory: { BitsPerSample: [32], RowsPerStrip: 2 }, getOrigin: () => [0, 2], getResolution: () => [1, -1], getWidth: () => 2, getHeight: () => 2, ...overrides };
 }
+test('persisted explicit raster units require matching current metadata and never grant a metre override',()=>{
+  const request={modelId:'m',modelVersionId:'v',coordinateReference:{crs:'EPSG:32616'},sourceVerticalUnit:'m',source:{id:'a',kind:'dsm',sha256:'a'.repeat(64),byteSize:123}};
+  for(const [verticalUnit,verticalFactor,key] of [['m',1,9001],['ft',.3048,9002],['us-ft',1200/3937,9003]]){
+    const bound={...request,sourceUnitEvidence:{schemaVersion:1,...sourceUnits.sourceBinding(request),verticalUnit,verticalFactor,verticalDatum:'unknown',basis:'server-inspected-explicit-metadata'}};
+    const raster=value=>image({getGeoKeys:()=>({ProjectedCSTypeGeoKey:32616,...(value?{VerticalUnitsGeoKey:value}:{})})});
+    const result=nativeRasterDefinition(raster(key),bound);
+    assert.equal(result.verticalFactor,verticalFactor);assert.equal(result.verticalUnit,'m');assert.equal(result.verticalUnitEvidence.verticalUnit,verticalUnit);
+    assert.throws(()=>nativeRasterDefinition(raster(key===9001?9002:9001),bound),{code:'measurement_source_vertical_units_conflict'});
+    assert.throws(()=>nativeRasterDefinition(raster(null),bound),{code:'measurement_source_vertical_units_required'});
+    assert.throws(()=>nativeRasterDefinition(raster(key),bound,{bandMetadata:{UNITTYPE:key===9001?'ft':'m'}}),{code:'measurement_source_vertical_units_conflict'});
+  }
+});
 test('native source validation rejects CRS, units, point pixels, rotation and oversized codec blocks', () => {
   const request = { coordinateReference: { crs: 'EPSG:32616' } };
   assert.equal(nativeRasterDefinition(image(), request).dx, 1);

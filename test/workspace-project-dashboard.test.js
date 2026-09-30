@@ -45,7 +45,12 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
   for(const permission of ['viewer.shares.create','viewer.shares.read','viewer.shares.revoke','viewer.client_grants.manage'])assert.match(source,new RegExp(`'${permission.replaceAll('.','\\.')}'`));
   assert.match(source,/\['viewer\.shares\.create','viewer\.shares\.read','viewer\.shares\.revoke','viewer\.client_grants\.manage'\]\.some\(can\)/);
   assert.match(source,/can\('viewer\.shares\.read'\)\|\|can\('viewer\.shares\.revoke'\)/);
-  assert.match(source,/const list=mayRead\|\|mayRevoke\?/);
+  const legacyProjectLinks=source.slice(source.indexOf('function injectProjectShareCard('),source.indexOf('function bindProjectShareCard('));
+  assert.match(legacyProjectLinks,/state\.projectShares\[projectId\]/);
+  assert.match(legacyProjectLinks,/can\('viewer\.shares\.revoke'\)/);
+  assert.match(legacyProjectLinks,/revoke-project-share/);
+  assert.match(legacyProjectLinks,/Existing public project links/);
+  assert.doesNotMatch(source,/class="manage-form project-share-form"/);
   assert.match(source,/This device/);
   assert.match(source,/Server import folder/);
   assert.doesNotMatch(source,/Scan WebODM mount|scan-webodm/);
@@ -178,11 +183,13 @@ test('providers are master-detail and diagnostics owns storage health and trash'
   assert.match(source,/Detect & add node/);
   assert.match(source,/API token \(if required\)/);
   assert.match(source,/Not required/);
-  assert.match(source,/Detected engine/);
+  assert.match(source,/Detected \$\{providerName\(provider\.type\)\}/);
   assert.match(source,/API version/);
   assert.match(source,/Processing engine/);
   assert.match(source,/Queue/);
   assert.match(source,/provider-option-list/);
+  assert.match(source,/Processing presets/);
+  assert.doesNotMatch(source,/aria-label="Detected processing options"/);
   assert.doesNotMatch(source,/select\('Type','type'/);
   assert.doesNotMatch(source,/name="admissionLimit"/);
   assert.match(source,/Secrets are write-only/);

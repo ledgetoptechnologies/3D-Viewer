@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { createSurfaceAccumulator } from '../measurement-volume.mjs';
 import { insideSelection } from './measurementSelection.mjs';
 import { resolveEptUtmCrs, resolveEptVerticalUnits } from './measurementEptCrs.mjs';
+import sourceUnitRegistry from './measurementSourceUnitEvidence.js';
+import {pointGridCacheKey,readPointGridCache,writePointGridCache} from './measurementPointGridCache.mjs';
 const require = createRequire(import.meta.url), fail = code => { throw Object.assign(new Error(code), { code }); };
 let decoderReady;
 async function lazModule() {
@@ -54,27 +56,41 @@ export async function preflightPointSurface(absolutePath,request,{signal,require
   const files=new Map([['ept.json',{byteSize:request.source.byteSize,sha256:request.source.sha256}]]);
   const ept=JSON.parse((await readVerified(root,'ept.json',files,{maxBytes:1024*1024,signal})).toString('utf8'));
   const expected=Number(request.coordinateReference.crs.replace(/^EPSG:/i,''));
+  const evidence=sourceUnitRegistry.matchedSourceUnitEvidence(request);
+  const explicitEvidence=evidence?.basis==='server-inspected-explicit-metadata';
+  const conversionEvidence=evidence?.basis==='server-verified-ept-conversion';
+  const evidenceFactor=explicitEvidence||conversionEvidence?evidence.verticalFactor:1;
   let vertical;
   try{vertical=resolveEptVerticalUnits(ept.srs,expected);}catch(error){
-    if(error.code!=='measurement_source_vertical_units_required'||requireEncodedVerticalUnits||request.sourceVerticalUnit!=='m')throw error;
+    if(error.code!=='measurement_source_vertical_units_required'||explicitEvidence||(!evidence&&(requireEncodedVerticalUnits||request.sourceVerticalUnit!=='m')))throw error;
     resolveEptUtmCrs(ept.srs,expected);
-    vertical={verticalFactor:1,verticalUnitBasis:'administrator-declared',verticalUnit:'m',verticalDatum:'unknown'};
+    vertical={verticalFactor:evidenceFactor,verticalUnitBasis:evidence?.basis||'administrator-declared',verticalUnit:'m',verticalDatum:'unknown',...(evidence?{verticalUnitEvidence:sourceUnitRegistry.sourceUnitDisplayEvidence(evidence)}:{})};
   }
+  if(evidence&&vertical.verticalFactor!==evidenceFactor)fail('measurement_source_vertical_units_conflict');
+  if(explicitEvidence||conversionEvidence)vertical.verticalUnitEvidence=sourceUnitRegistry.sourceUnitDisplayEvidence(evidence);
   if(!Array.isArray(ept.bounds)||ept.bounds.length!==6||!ept.bounds.every(Number.isFinite)||!['laszip','binary'].includes(ept.dataType)||!Array.isArray(ept.schema))fail('measurement_ept_schema_unsupported');
   if(request.classFilter==='ground'&&!ept.schema.some(s=>s.name==='Classification'))fail('measurement_point_classification_unavailable');
   return{ept,expected,vertical};
 }
-export async function calculatePointSurface(absolutePath,request,{maxCells=2_000_000,signal,sourceFiles=[],collectOnly=false,gridOnly=false}={}) {
+export async function calculatePointSurface(absolutePath,request,{maxCells=2_000_000,signal,sourceFiles=[],collectOnly=false,gridOnly=false,pointGridCacheRoot,onTiming=()=>{}}={}) {
+  const started=performance.now();
   const root=await fs.promises.realpath(path.dirname(absolutePath)),files=new Map(sourceFiles.map(f=>[f.relativePath,f]));
   files.set('ept.json',{byteSize:request.source.byteSize,sha256:request.source.sha256});
   const {ept,expected,vertical}=await preflightPointSurface(absolutePath,request,{signal,requireEncodedVerticalUnits:request.requireEncodedVerticalUnits===true});
   const grid=collectOnly?{bounds:{minE:Math.min(...request.vertices.map(p=>p[0])),maxE:Math.max(...request.vertices.map(p=>p[0])),minN:Math.min(...request.vertices.map(p=>p[1])),maxN:Math.max(...request.vertices.map(p=>p[1]))}}:pointSurfaceGrid(request.vertices,request.cellSizeM,maxCells),hierarchies=['0-0-0-0'],seenHierarchies=new Set(),nodes=new Map(),collected=[];
+  const cacheKey=!collectOnly&&pointGridCacheRoot?pointGridCacheKey(root,request,files,vertical):null;
+  const cached=cacheKey?await readPointGridCache(pointGridCacheRoot,cacheKey,grid):null;
+  // A hit still traverses and hashes all selected source files below. Neither
+  // mtime nor the cache entry can stand in for immutable-source verification.
+  if(cached)grid.values=cached.values;
+  let verifiedReadMs=0,decodeGridMs=0;
   while(hierarchies.length){if(signal?.aborted)fail('measurement_cancelled');const key=hierarchies.pop();if(seenHierarchies.has(key))continue;seenHierarchies.add(key);if(seenHierarchies.size>10_000)fail('measurement_ept_selection_limit');
-    const values=JSON.parse((await readVerified(root,`ept-hierarchy/${key}.json`,files,{maxBytes:16*1024*1024,signal})).toString('utf8'));
+    const readStart=performance.now();
+    const values=JSON.parse((await readVerified(root,`ept-hierarchy/${key}.json`,files,{maxBytes:16*1024*1024,signal})).toString('utf8'));verifiedReadMs+=performance.now()-readStart;
     if(!values||Array.isArray(values)||typeof values!=='object')fail('measurement_ept_hierarchy_invalid');
     for(const[key,count]of Object.entries(values)){const bounds=boundsForKey(key,ept.bounds);if(!Number.isSafeInteger(count)||count< -1)fail('measurement_ept_hierarchy_invalid');if(!intersects(bounds,grid.bounds))continue;if(count===-1)hierarchies.push(key);else if(count>0)nodes.set(key,count);if(nodes.size>20_000)fail('measurement_ept_selection_limit');}
   }
-  let pointsRead=0,pointsUsed=0,nodesRead=0;
+  let pointsRead=0,pointsUsed=cached?.pointsUsed||0,nodesRead=0;
   const add=(x,y,z,classification)=>{
     z*=vertical.verticalFactor;
     if(![x,y,z].every(Number.isFinite))fail('measurement_point_node_invalid');
@@ -86,7 +102,10 @@ export async function calculatePointSurface(absolutePath,request,{maxCells=2_000
   };
   for(const[key,count]of nodes){if(signal?.aborted)fail('measurement_cancelled');if(pointsRead+count>20_000_000)fail('measurement_point_selection_limit');
     if(count>2_000_000)fail('measurement_point_node_limit');
-    const bytes=await readVerified(root,`ept-data/${key}.${ept.dataType==='laszip'?'laz':'bin'}`,files,{signal});
+    const readStart=performance.now();
+    const bytes=await readVerified(root,`ept-data/${key}.${ept.dataType==='laszip'?'laz':'bin'}`,files,{signal});verifiedReadMs+=performance.now()-readStart;
+    if(cached){pointsRead+=count;nodesRead++;await new Promise(resolve=>setImmediate(resolve));continue;}
+    const decodeStart=performance.now();
     if(ept.dataType==='laszip'){
       if(lasPointCount(bytes)!==count)fail('measurement_point_node_invalid');
       const loader=await lazModule(),buffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength),decoded=await loader.parse(buffer,{las:{shape:'mesh',fp64:true,skip:1,colorDepth:8}}),positions=decoded?.attributes?.POSITION?.value,classes=decoded?.attributes?.classification?.value;
@@ -97,8 +116,12 @@ export async function calculatePointSurface(absolutePath,request,{maxCells=2_000
       if(xyz.some(f=>!f)||stride<12||bytes.length!==stride*count)fail('measurement_point_node_invalid');const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
       for(let i=0;i<count;i++){const values=xyz.map(f=>binaryRead(view,i*stride+f.byteOffset,f));add(...values,classification?binaryRead(view,i*stride+classification.byteOffset,classification):undefined);}
     }
+    decodeGridMs+=performance.now()-decodeStart;
     pointsRead+=count;nodesRead++;await new Promise(resolve=>setImmediate(resolve));
   }
+  if(signal?.aborted)fail('measurement_cancelled');
+  if(cacheKey&&!cached)await writePointGridCache(pointGridCacheRoot,cacheKey,grid,pointsUsed);
+  onTiming({phase:'point-surface',cacheHit:Boolean(cached),verifiedReadMs,decodeGridMs,totalMs:performance.now()-started,pointsRead,nodesRead});
   if(collectOnly)return{points:collected,pointsRead,nodesRead};
   if(gridOnly)return{grid,pointsRead,pointsUsed,nodesRead,vertical};
   let vertices=request.vertices;
@@ -117,5 +140,5 @@ export async function calculatePointSurface(absolutePath,request,{maxCells=2_000
   // A matching section must reconstruct this exact grid, not use display points
   // or silently choose a different resolution/reduction for the preview.
   const samplingGrid={version:1,width:grid.width,height:grid.height,bounds:{...grid.bounds},cellSizeM:request.cellSizeM,rowOrder:'north-to-south',reduction:'maximum-z',emptyCells:'missing'};
-  const result=accumulator.result();return{...result,...(sampledBoundary?{boundaryVertices:vertices.map(p=>p.slice())}:{}),method:'point-surface-cut-fill',calculationOrigin:'server-original-point-surface',preview:{previewOnly:true,samples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))},source:{assetId:request.source.id,kind:'ept',sha256:request.source.sha256,manifestSha256:request.source.manifestSha256,modelVersionId:request.modelVersionId,crs:`EPSG:${expected}`,cellSizeM:request.cellSizeM,samplingGrid,...vertical,...(sampledBoundary?{boundaryElevationBasis:'point-grid'}:{}),classFilter:request.classFilter||'all',pointsRead,pointsUsed,nodesRead,allIntersectingHierarchyLevels:true},warnings:[...result.warnings,'This is a 2.5D topmost-point grid at the requested cell size, not enclosed-object volume. Empty cells remain missing; no interpolation or hidden point-budget subsampling is used.',...(vertical.verticalUnitBasis==='administrator-declared'?['Point-cloud vertical units were declared as metres by the requesting administrator.']:['Height units come from the encoded vertical CRS; vertical datum has not been independently verified.'])]};
+const result=accumulator.result();return{...result,...(sampledBoundary?{boundaryVertices:vertices.map(p=>p.slice())}:{}),method:'point-surface-cut-fill',calculationOrigin:'server-original-point-surface',preview:{previewOnly:true,samples,referencePatches:accumulator.reference.patches.map(patch=>patch.polygon.map(p=>[p[0],p[1],patch.sample(p[0],p[1])]))},source:{assetId:request.source.id,kind:'ept',sha256:request.source.sha256,manifestSha256:request.source.manifestSha256,modelVersionId:request.modelVersionId,crs:`EPSG:${expected}`,cellSizeM:request.cellSizeM,samplingGrid,...vertical,...(sampledBoundary?{boundaryElevationBasis:'point-grid'}:{}),classFilter:request.classFilter||'all',pointsRead,pointsUsed,nodesRead,allIntersectingHierarchyLevels:true},warnings:[...result.warnings,'This is a 2.5D topmost-point grid at the requested cell size, not enclosed-object volume. Empty cells remain missing; no interpolation or hidden point-budget subsampling is used.',...(vertical.verticalUnitBasis==='administrator-declared'?['Point-cloud vertical units were declared as metres by the requesting administrator.']:vertical.verticalUnitEvidence?['Height units use source-bound server evidence; vertical datum and accuracy have not been independently verified.']:['Height units come from the encoded vertical CRS; vertical datum has not been independently verified.'])]};
 }
