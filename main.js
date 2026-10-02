@@ -4316,6 +4316,11 @@ function bindUI() {
   const sidebar = document.getElementById('sidebar');
   const sidebarToggle = document.getElementById('sidebar-toggle');
   installSidebarResize({sidebar,handle:document.getElementById('sidebar-resize'),onResize});
+  // Timers can fire before a background tab's width animation finishes.
+  // Reconcile the canvas with the actual final layout, not just a guessed delay.
+  sidebar.addEventListener('transitionend', event => {
+    if (event.target === sidebar && event.propertyName === 'width') onResize();
+  });
   viewerPreferences=createViewerPreferences({
     token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
     apply:applyViewerPreferences,

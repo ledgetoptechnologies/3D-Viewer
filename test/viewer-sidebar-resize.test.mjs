@@ -1,6 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {sidebarWidth,installSidebarResize} from '../viewer-sidebar-resize.mjs';
+
+test('shipped sidebar width transition reconciles the final canvas layout only for its own width',()=>{
+  const source=readFileSync(new URL('../main.js',import.meta.url),'utf8');
+  const registration=source.match(/sidebar\.addEventListener\('transitionend',\s*event\s*=>\s*\{[\s\S]*?\n\s*\}\);/)?.[0];
+  assert.ok(registration,'the actual Viewer setup must register a final-layout transition listener');
+  let handler,notifications=0;
+  const sidebar={addEventListener(type,callback){assert.equal(type,'transitionend');handler=callback;}};
+  // Execute the shipped registration, rather than copying its filtering logic.
+  new Function('sidebar','onResize',registration)(sidebar,()=>notifications++);
+  for(const event of [
+    {target:{},propertyName:'width'}, // A descendant transition bubbles.
+    {target:sidebar,propertyName:'opacity'},
+    {target:sidebar,propertyName:'transform'},
+  ])handler(event);
+  assert.equal(notifications,0,'unrelated transitions must not resize the renderer');
+  handler({target:sidebar,propertyName:'width'});
+  assert.equal(notifications,1,'collapse must resize against its final layout');
+  handler({target:sidebar,propertyName:'width'});
+  assert.equal(notifications,2,'expansion must also reconcile the final layout');
+});
 test('sidebar width keeps a usable model viewport and bounded navigation panel',()=>{
   assert.equal(sidebarWidth(500,1920),500);
   assert.equal(sidebarWidth(900,1920),720);

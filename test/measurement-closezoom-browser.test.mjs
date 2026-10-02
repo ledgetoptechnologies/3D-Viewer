@@ -171,11 +171,18 @@ document.querySelector('#fixture-capture').onclick=()=>workspace.captureView();d
 window.editorFixture={draft:()=>workspace.getDraft(),saved:()=>[...workspace.store.records.values()][0],captures:()=>captureCount,nextFrame:()=>{frameColor='rgb(70,80,90)';},deny(){permission=false;workspace.tick();}};document.body.dataset.ready='true';
 </script></body></html>`;}
 
-function sidebarPage(){const styles=readFileSync(path.join(root,'index.html'),'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><style>${styles}</style></head><body><div id="app"><div id="main"><aside id="sidebar"><div id="sidebar-resize" role="separator" tabindex="0" aria-label="Resize navigation sidebar" aria-orientation="vertical" aria-valuemin="240"></div><div id="sidebar-custom">Synthetic sidebar</div></aside><div id="test-view" style="flex:1;min-width:0"></div></div></div><script type="module">
+function sidebarPage(){const styles=readFileSync(path.join(root,'index.html'),'utf8').match(/<style>([\s\S]*?)<\/style>/)[1];
+const mainSource=readFileSync(path.join(root,'main.js'),'utf8');
+const finalResize=mainSource.match(/sidebar\.addEventListener\('transitionend',\s*event\s*=>\s*\{[\s\S]*?\n\s*\}\);/)?.[0];
+assert.ok(finalResize,'fixture exercises the actual final-layout listener');
+return `<!doctype html><html><head><meta name="viewport" content="width=device-width"><style>${styles}</style></head><body><div id="app"><div id="main"><aside id="sidebar"><div id="sidebar-resize" role="separator" tabindex="0" aria-label="Resize navigation sidebar" aria-orientation="vertical" aria-valuemin="240"></div><div id="sidebar-custom">Synthetic sidebar</div></aside><div id="test-view" style="flex:1;min-width:0"><canvas style="width:100%;height:100%;display:block"></canvas></div></div></div><script type="module">
 import {installSidebarResize} from '/viewer-sidebar-resize.mjs';
 const sidebar=document.querySelector('#sidebar'),handle=document.querySelector('#sidebar-resize');let calls=0;
-const dispose=installSidebarResize({sidebar,handle,onResize:()=>calls++});
-window.sidebarFixture={dispose,collapse:()=>sidebar.classList.toggle('collapsed'),state:()=>({width:sidebar.getBoundingClientRect().width,view:document.querySelector('#test-view').getBoundingClientRect().width,scroll:document.documentElement.scrollWidth,handle:getComputedStyle(handle).display,calls,resizing:sidebar.classList.contains('resizing')})};document.body.dataset.ready='true';
+const view=document.querySelector('#test-view'),canvas=view.querySelector('canvas');
+const onResize=()=>{calls++;canvas.width=Math.round(view.getBoundingClientRect().width);};
+const dispose=installSidebarResize({sidebar,handle,onResize});
+${finalResize}
+window.sidebarFixture={dispose,slow:()=>{sidebar.style.transitionDuration='1s';},collapse:()=>{sidebar.classList.toggle('collapsed');setTimeout(onResize,300);},state:()=>({width:sidebar.getBoundingClientRect().width,view:view.getBoundingClientRect().width,canvas:canvas.width,scroll:document.documentElement.scrollWidth,handle:getComputedStyle(handle).display,calls,resizing:sidebar.classList.contains('resizing')})};document.body.dataset.ready='true';
 </script></body></html>`;}
 
 test('real sidebar CSS supports desktop drag, keyboard and mobile collapsed layout',{timeout:60000},async t=>{
@@ -192,6 +199,14 @@ test('real sidebar CSS supports desktop drag, keyboard and mobile collapsed layo
     let state=await client.evaluate('sidebarFixture.state()');assert.equal(state.view,700);assert.equal(state.resizing,false);assert.ok(state.calls>0);
     await client.evaluate("document.querySelector('#sidebar-resize').focus()");await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'End'});await waitFor(client,'sidebarFixture.state().width===720');
     await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'Home'});await waitFor(client,'sidebarFixture.state().width===240');
+    await client.evaluate('sidebarFixture.slow();sidebarFixture.collapse()');
+    await client.evaluate('new Promise(resolve=>setTimeout(resolve,400))');
+    state=await client.evaluate('sidebarFixture.state()');
+    assert.ok(state.width>1,'the deliberate slow transition outlasts the 300ms fallback');
+    assert.ok(state.canvas<1199,'fallback resized at an intermediate, not final, layout');
+    await waitFor(client,'sidebarFixture.state().width<=1&&sidebarFixture.state().canvas>=1199');
+    await client.evaluate('sidebarFixture.collapse()');
+    await waitFor(client,'sidebarFixture.state().width===240&&sidebarFixture.state().canvas===960');
     await client.evaluate('sidebarFixture.collapse()');await waitFor(client,"sidebarFixture.state().width<=1&&sidebarFixture.state().handle==='none'");assert.ok((await client.evaluate('sidebarFixture.state()')).view>=1199);
     await client.command('Emulation.setDeviceMetricsOverride',{width:390,height:800,deviceScaleFactor:1,mobile:true});await client.evaluate('sidebarFixture.collapse()');await waitFor(client,'sidebarFixture.state().width===240');state=await client.evaluate('sidebarFixture.state()');assert.equal(state.view,390);assert.ok(state.scroll<=390);
     await client.evaluate('sidebarFixture.collapse()');await waitFor(client,'sidebarFixture.state().width<=1');assert.equal((await client.evaluate('sidebarFixture.state()')).view,390);
