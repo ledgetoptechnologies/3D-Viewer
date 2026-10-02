@@ -832,6 +832,13 @@ PUBLIC_BASE_URL=https://192.168.50.90:8088
 STAGING_SMB_ALLOW_UNAVAILABLE_INODES=true
 ```
 
+For the same isolated deployment, the alternate exact origin pair is
+`EXPECTED_HOST=viewer-staging.ledgetopdroneservices.com` with
+`PUBLIC_BASE_URL=https://viewer-staging.ledgetopdroneservices.com`.
+The IP and hostname pairs cannot be mixed; neither admits a production
+deployment identity. This origin policy does not replace TLS, network, mount,
+proxy or authentication checks.
+
 These settings identify this isolated staging deployment; they are not host
 attestation and must never be copied into production. `NODE_ENV=production`
 alone is neither permission nor refusal: the deployment identity is checked

@@ -7,6 +7,7 @@ const {execFileSync}=require('node:child_process');
 const {StorageManager}=require('../server/storageManager');
 const gib=1024**3;
 const identified={deploymentId:'staging-192.168.50.90',expectedHost:'192.168.50.90',publicBaseUrl:'https://192.168.50.90:8088',stagingSmbAllowUnavailableInodes:true};
+const identifiedHostname={...identified,expectedHost:'viewer-staging.ledgetopdroneservices.com',publicBaseUrl:'https://viewer-staging.ledgetopdroneservices.com'};
 function fixture(t,{config={},stat={}}={}){
   t.mock.method(fs,'statSync',()=>({dev:1}));
   t.mock.method(fs,'statfsSync',()=>({type:0xfe534d42,bsize:4096,blocks:100*gib/4096,bavail:90*gib/4096,files:0,ffree:0,...stat}));
@@ -23,6 +24,19 @@ test('explicitly identified staging allows only SMB zero/zero, with honest diagn
   assert.equal(result.inodeAssessment,'unavailable-staging-smb-exception');assert.equal(result.required,5*gib);
   assert.equal(s.requireDerivativeSpace('models',{sourceBytes:gib,reservedBytes:8*gib,otherReservedBytes:2*gib,reservedDatasetBytes:[gib]}).required,14*gib);
 });
+test('exact private staging hostname tuple permits the same bounded SMB exception',t=>{
+  const result=admit(fixture(t,{config:identifiedHostname}));
+  assert.equal(result.files,0);assert.equal(result.ffree,0);assert.equal(result.inodeReserve,null);
+  assert.equal(result.inodeAssessment,'unavailable-staging-smb-exception');
+});
+for(const config of [
+  {...identified,expectedHost:identifiedHostname.expectedHost},
+  {...identifiedHostname,expectedHost:identified.expectedHost},
+  {...identifiedHostname,deploymentId:'production'},
+  {...identifiedHostname,publicBaseUrl:identifiedHostname.publicBaseUrl+'/'},
+  {...identifiedHostname,publicBaseUrl:'http://viewer-staging.ledgetopdroneservices.com'},
+])test(`mixed or non-staging hostname tuple is refused ${JSON.stringify(config)}`,t=>assert.throws(()=>admit(fixture(t,{config})),{code:'insufficient_storage'}));
+test('hostname tuple still refuses low byte space',t=>assert.throws(()=>admit(fixture(t,{config:identifiedHostname,stat:{bavail:24*gib/4096}})),{code:'insufficient_storage'}));
 for(const config of [{deploymentId:''},{deploymentId:'production'},{expectedHost:'viewer.ledgetopdroneservices.com'},{publicBaseUrl:'https://viewer.ledgetopdroneservices.com'}])
   test(`exception refuses non-staging identity ${JSON.stringify(config)}`,t=>assert.throws(()=>admit(fixture(t,{config:{...identified,...config}})),{code:'insufficient_storage'}));
 for(const stat of [{type:0xef53},{type:0x01021994},{files:1000000,ffree:0},{files:1000000,ffree:20000},{files:0,ffree:10},{files:-1,ffree:-1},{files:NaN,ffree:NaN}])
@@ -49,4 +63,6 @@ test('environment defaults off; enabled non-staging configuration is rejected re
   assert.equal(run({NODE_ENV:'development'}).enabled,false);
   for(const NODE_ENV of ['development','production'])assert.equal(run({NODE_ENV,STAGING_SMB_ALLOW_UNAVAILABLE_INODES:'true'}).problems.length,1);
   assert.equal(run({NODE_ENV:'production',STAGING_SMB_ALLOW_UNAVAILABLE_INODES:'true',VIEWER_DEPLOYMENT_ID:identified.deploymentId,EXPECTED_HOST:identified.expectedHost,PUBLIC_BASE_URL:identified.publicBaseUrl}).problems.length,0);
+  assert.equal(run({NODE_ENV:'production',STAGING_SMB_ALLOW_UNAVAILABLE_INODES:'true',VIEWER_DEPLOYMENT_ID:identifiedHostname.deploymentId,EXPECTED_HOST:identifiedHostname.expectedHost,PUBLIC_BASE_URL:identifiedHostname.publicBaseUrl}).problems.length,0);
+  assert.equal(run({NODE_ENV:'production',STAGING_SMB_ALLOW_UNAVAILABLE_INODES:'true',VIEWER_DEPLOYMENT_ID:identified.deploymentId,EXPECTED_HOST:identifiedHostname.expectedHost,PUBLIC_BASE_URL:identified.publicBaseUrl}).problems.length,1);
 });

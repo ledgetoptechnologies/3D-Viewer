@@ -4,8 +4,10 @@
 // production mode. This is not a general NAS or production admission override.
 function isIdentifiedSmbStaging(config) {
   return config.deploymentId === 'staging-192.168.50.90'
-    && config.expectedHost === '192.168.50.90'
-    && config.publicBaseUrl === 'https://192.168.50.90:8088';
+    && ((config.expectedHost === '192.168.50.90'
+      && config.publicBaseUrl === 'https://192.168.50.90:8088')
+      || (config.expectedHost === 'viewer-staging.ledgetopdroneservices.com'
+        && config.publicBaseUrl === 'https://viewer-staging.ledgetopdroneservices.com'));
 }
 
 function allowUnavailableSmbInodes(config, space) {
