@@ -20,7 +20,7 @@ const html = `<!doctype html><html><head><meta charset="utf-8"><title>Point-clou
 <h1>Point-cloud controls QA</h1><p>Shipped controller, synthetic decoded hits. No live assets or sessions.</p>
 <button id="deep">Reset deeper surface</button><button id="near">Reset near surface</button>
 <button id="collapsed">Reset collapsed radius</button><button id="sparse">Toggle sparse pick miss</button>
-<pre id="status">Loading</pre><script src="/navigation.js"></script><script type="module">
+<pre id="status">Loading</pre><script src="/navigation.js"></script><script src="/mouse-navigation-profiles.js"></script><script type="module">
 import * as THREE from '/three.module.js';
 import { PCPointerControls } from '/controls.js';
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -54,6 +54,7 @@ const routes = new Map([
   ['/', ['text/html', () => html]],
   ['/controls.js', ['text/javascript', () => controller]],
   ['/navigation.js', ['text/javascript', () => readFileSync(new URL('public/pointcloud-navigation.js', root))]],
+  ['/mouse-navigation-profiles.js', ['text/javascript', () => readFileSync(new URL('public/mouse-navigation-profiles.js', root))]],
   ['/three.module.js', ['text/javascript', () => readFileSync(new URL('node_modules/three/build/three.module.js', root))]],
   ['/three.core.js', ['text/javascript', () => readFileSync(new URL('node_modules/three/build/three.core.js', root))]],
 ]);

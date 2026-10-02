@@ -8,6 +8,7 @@ import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
+import { createViewerPreferences } from './viewer-preferences.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
 import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
@@ -751,6 +752,26 @@ function init() {
   }
   loadCameras();         // prepare camera positions (hidden until toggled); no-op if unavailable
   startLoop();
+}
+
+let viewerPreferences = null;
+let viewerMouseProfile = 'default';
+function applyViewerPreferences(preferences) {
+  viewerMouseProfile = preferences.mouseProfile;
+  controls?.setMouseProfile?.(viewerMouseProfile);
+  pcApi()?.setMouseProfile?.(viewerMouseProfile);
+  const select=document.getElementById('mouse-profile');
+  if(select)select.value=viewerMouseProfile;
+  const descriptions=viewerMouseProfile==='alternate'
+    ? ['Slide view any direction','Orbit around point under cursor','Pan / move the map']
+    : ['Orbit around point under cursor','Pan / move the map','Slide view any direction'];
+  document.querySelectorAll('[data-mouse-help]').forEach((element,index)=>{element.textContent=descriptions[index];});
+  const sidebar=document.getElementById('sidebar'),toggle=document.getElementById('sidebar-toggle');
+  sidebar.classList.toggle('collapsed',preferences.sidebarCollapsed);
+  sidebar.inert=preferences.sidebarCollapsed;
+  toggle.setAttribute('aria-expanded',String(!preferences.sidebarCollapsed));
+  toggle.setAttribute('aria-label',preferences.sidebarCollapsed?'Show tools sidebar':'Hide tools sidebar');
+  setTimeout(onResize,300);
 }
 
 // Hide tabs/buttons for layers this project doesn't have, and make sure the
@@ -3884,6 +3905,7 @@ window.addEventListener('message', (event) => {
       || (POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready');
     viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
     applyPcPanelState();
+    pcApi()?.setMouseProfile?.(viewerMouseProfile);
     if (pendingPointCloudView) pushViewToPointCloud(pendingPointCloudView);
     syncCameraLayer();
   } else if (message.type === 'camera-open') {
@@ -4294,14 +4316,16 @@ function bindUI() {
   const sidebar = document.getElementById('sidebar');
   const sidebarToggle = document.getElementById('sidebar-toggle');
   installSidebarResize({sidebar,handle:document.getElementById('sidebar-resize'),onResize});
-  if (window.matchMedia('(max-width: 1024px)').matches) {
-    sidebar.classList.add('collapsed');
-    sidebarToggle.setAttribute('aria-expanded', 'false');
-  }
+  viewerPreferences=createViewerPreferences({
+    token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):null,
+    apply:applyViewerPreferences,
+    notice:message=>{document.getElementById('mouse-profile-notice').textContent=message;},
+  });
+  viewerPreferences.change({sidebarCollapsed:window.matchMedia('(max-width: 1024px)').matches},{save:false});
+  if(VIEW_MODE==='session')void viewerPreferences.load();
+  document.getElementById('mouse-profile').addEventListener('change',event=>viewerPreferences.change({mouseProfile:event.target.value}));
   sidebarToggle.addEventListener('click', () => {
-    const collapsed = sidebar.classList.toggle('collapsed');
-    sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
-    setTimeout(onResize, 300);
+    viewerPreferences.change({sidebarCollapsed:!sidebar.classList.contains('collapsed')});
   });
 
   dom.photoClose.addEventListener('click', closePhoto);

@@ -47,6 +47,8 @@ function readHead(filePath,maxBytes=256*1024) { const fd=fs.openSync(filePath,'r
 function jpegMetadata(buffer) {
   const result = {};
   if (!Buffer.isBuffer(buffer) || buffer.length < 4 || buffer.readUInt16BE(0) !== 0xffd8) return result;
+  const captureEvidence = require('./photoCaptureMetadata').parsePhotoCaptureMetadata(buffer);
+  if (captureEvidence) result.captureEvidence = captureEvidence;
   let offset = 2;
   while (offset + 4 <= buffer.length) {
     if (buffer[offset] !== 0xff) break;

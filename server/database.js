@@ -2023,6 +2023,16 @@ const MIGRATIONS = [
       WHEN EXISTS(SELECT 1 FROM derivative_jobs WHERE id=OLD.job_id)
       BEGIN SELECT RAISE(ABORT,'EPT conversion receipts are immutable'); END;
   `},
+  {version:39,name:'viewer_account_navigation_preferences',sql:`
+    CREATE TABLE viewer_user_preferences (
+      audience TEXT NOT NULL CHECK(audience IN ('ops','client')),
+      subject TEXT NOT NULL,
+      mouse_profile TEXT NOT NULL CHECK(mouse_profile IN ('default','alternate')),
+      sidebar_collapsed INTEGER NOT NULL CHECK(sidebar_collapsed IN (0,1)),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(audience,subject)
+    );
+  `},
 ];
 
 function applyMigrations(database) {

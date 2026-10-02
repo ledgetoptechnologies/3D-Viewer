@@ -124,6 +124,7 @@
   <script src="/pointcloud-health.js"></script>
   <script src="/pointcloud-access.js"></script>
   <script src="/pointcloud-navigation.js"></script>
+  <script src="/mouse-navigation-profiles.js"></script>
   <script src="/pointcloud-elevation.js"></script>
   <script src="/pointcloud-display.js"></script>
   <script src="/pointcloud-cameras.js"></script>
@@ -354,6 +355,8 @@
       getMaterials: () => viewer.scene.pointclouds.map(pc => pc.material),
     });
     window.__pcApi = {
+      setMouseProfile(value) { return pcControls.setMouseProfile(value); },
+      getMouseProfile() { return pcControls.getMouseProfile(); },
       renewAccess(eptUrl) { pointCloudAccess?.renewed(eptUrl); },
       accessUnavailable() { pointCloudAccess?.unavailable(); },
       setBudget(m) {
@@ -484,6 +487,7 @@
         this.dom = viewer.renderer.domElement;
         this.pivot = new THREE.Vector3();
         this.enabled = true;
+        this._mouseProfile = 'default';
         this._inertia = { yaw: 0, pitch: 0, active: false };
         this._lastMoveTime = 0;
         this.pivotIndicator = this._buildIndicator();
@@ -705,6 +709,8 @@
 
       _pointerDown(e) {
         if (!this.enabled) return;
+        const action = window.LtdsMouseNavigationProfiles.actionForButton(this._mouseProfile, e.button);
+        if (e.pointerType !== 'touch' && action === 'none') return;
         this._inertia.active = false;
         this._inertia.yaw = 0;
         this._inertia.pitch = 0;
@@ -742,13 +748,16 @@
         this._downPx = { ...this._px(e), t: performance.now() };
         this._lastPx = this._px(e);
 
-        if (e.button === 0) {
+        // Right-click remains reserved for finishing an active insertion in
+        // both profiles; it must not unexpectedly orbit in alternate mode.
+        if (e.button !== 0 && this._inserting()) return;
+        if (action === 'orbit') {
           const pivot = this._surfaceAnchor(this._px(e));
           if (!pivot) { this._mode = 'none'; return; }
           this.pivot.copy(pivot);
           this._showPivot();
           this._mode = 'orbit';
-        } else if (e.button === 2) {
+        } else if (action === 'pan') {
           if (this._inserting()) return;            // right-click => finish insertion
           const a = this._anchor(this._px(e));
           this._panPlane.set(new THREE.Vector3(0, 0, 1), -a.z);
@@ -757,7 +766,7 @@
           this._panStart.copy(s);
           this._mode = 'pan';
           e.preventDefault();
-        } else if (e.button === 1) {
+        } else if (action === 'screenpan') {
           if (this._inserting()) return;
           const a = this._anchor(this._px(e));
           this._screenRef = Math.max(0.5, this.view.position.distanceTo(a));
@@ -933,6 +942,27 @@
         }
         this._mode = 'none';
         this._pointerId = null;
+      }
+
+      getMouseProfile() { return window.LtdsMouseNavigationProfiles.getProfile(this._mouseProfile); }
+
+      setMouseProfile(value) {
+        const next = window.LtdsMouseNavigationProfiles.normalizeProfile(value);
+        if (next === this._mouseProfile) return this.getMouseProfile();
+        this._mode = 'none';
+        this._inertia = { active: false, yaw: 0, pitch: 0 };
+        const captured = new Set(this._touch.pts.keys());
+        if (this._pointerId !== null) captured.add(this._pointerId);
+        this._touch.mode = 'none';
+        this._touch.pts.clear();
+        for (const id of captured) {
+          try { this.dom.releasePointerCapture?.(id); } catch { /* already released */ }
+        }
+        this._pointerId = null;
+        this.pivotIndicator.visible = false;
+        this.pivotIndicator.material.opacity = 0;
+        this._mouseProfile = next;
+        return this.getMouseProfile();
       }
 
       _zoomTowards(target, s) {

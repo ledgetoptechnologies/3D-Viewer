@@ -10,6 +10,7 @@ const { encrypt, idempotent } = require('./serviceIdempotency');
 const { publicDerivativeKind } = require('./processingSecurity');
 const { receiptVerifiedLodProvenance, verifiedLodProvenance, viewerEligibleAssets } = require('./lodDerivativePolicy');
 const { createMeasurementApi } = require('./measurementApi');
+const { createViewerPreferencesApi } = require('./viewerPreferencesApi');
 const { reviewedAssetUnitEvidence } = require('./measurementUnitEvidence');
 
 const VIEWER_COOKIE = 'ltds_viewer';
@@ -160,6 +161,7 @@ function createApiV1(repository) {
   const serviceOnly = requireService(repository);
   const idempotentService = idempotent(repository);
   router.use('/api/v1/measurements', createMeasurementApi(repository));
+  router.use('/api/v1/viewer-preferences', createViewerPreferencesApi(repository));
   if (config.publishedSessionSourceRevocationEnabled) repository.failClosedUnboundPublishedSessions({
     actorType: 'system',
     action: 'published_session.unbound_revoked',

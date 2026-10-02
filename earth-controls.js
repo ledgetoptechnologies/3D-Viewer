@@ -11,6 +11,9 @@
 // EarthControls (but with left/right buttons swapped per LTDS preference).
 
 import * as THREE from 'three';
+import './public/mouse-navigation-profiles.js';
+
+export const mouseNavigationProfiles = globalThis.LtdsMouseNavigationProfiles;
 
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -77,6 +80,8 @@ export class EarthLikeControls {
     this.maxDistance = opts.maxDistance ?? 8000;
     this.rotateSpeed = opts.rotateSpeed ?? 1.0;
     this.enabled = true;
+    this._mouseProfile = mouseNavigationProfiles.normalizeProfile(opts.mouseProfile);
+    this._pointerId = null;
 
     this._mode = 'none';          // none | orbit | pan
     this._pivot = new THREE.Vector3();
@@ -177,7 +182,9 @@ export class EarthLikeControls {
 
   _pointerDown(e) {
     if (!this.enabled) return;
+    if (e.pointerType !== 'touch' && mouseNavigationProfiles.actionForButton(this._mouseProfile, e.button) === 'none') return;
     this.dom.setPointerCapture?.(e.pointerId);
+    this._pointerId = e.pointerId;
     this._inertia.active = false;
 
     if (e.pointerType === 'touch') {
@@ -203,7 +210,8 @@ export class EarthLikeControls {
     const ndc = this._ndc(e);
     this._markInteraction(ndc, this._anchor(ndc));
 
-    if (e.button === 0 || e.pointerType === 'touch') {
+    const action = e.pointerType === 'touch' ? 'orbit' : mouseNavigationProfiles.actionForButton(this._mouseProfile, e.button);
+    if (action === 'orbit') {
       const surface = this.surfacePick(ndc);
       if (!surface) {
         this._mode = 'none';
@@ -214,15 +222,15 @@ export class EarthLikeControls {
       this.pivotIndicator.position.copy(this._pivot);
       this.pivotIndicator.material.opacity = 0;
       this._inertia.yaw = 0; this._inertia.pitch = 0;
-    } else if (e.button === 2) {
+    } else if (action === 'pan') {
       const a = this._anchor(ndc);
       this._panPlane.set(UP, -a.y);
       const start = this._planeHit(ndc, a.y);
       if (!start) { this._mode = 'none'; return; }
       this._panStart.copy(start);
       this._mode = 'pan';
-    } else if (e.button === 1) {
-      // middle = free screen-space pan: scene follows the mouse in any direction
+    } else if (action === 'screenpan') {
+      // Free screen-space pan: scene follows the mouse in any direction.
       const a = this._anchor(ndc);
       this._screenRef = Math.max(1, this.camera.position.distanceTo(a));
       this._mode = 'screenpan';
@@ -317,6 +325,29 @@ export class EarthLikeControls {
       return;
     }
     this._endDrag();
+    this._pointerId = null;
+  }
+
+  getMouseProfile() { return mouseNavigationProfiles.getProfile(this._mouseProfile); }
+
+  setMouseProfile(value) {
+    const next = mouseNavigationProfiles.normalizeProfile(value);
+    if (next === this._mouseProfile) return this.getMouseProfile();
+    // Do not reinterpret a held button or carry orbit inertia into a new mode.
+    this._mode = 'none';
+    this._inertia = { yaw: 0, pitch: 0, active: false };
+    const captured = new Set(this._touches.keys());
+    if (this._pointerId !== null) captured.add(this._pointerId);
+    this._touches.clear();
+    this._pinch = null;
+    for (const id of captured) {
+      try { this.dom.releasePointerCapture?.(id); } catch { /* already released */ }
+    }
+    this._pointerId = null;
+    this.pivotIndicator.visible = false;
+    this.pivotIndicator.material.opacity = 0;
+    this._mouseProfile = next;
+    return this.getMouseProfile();
   }
 
   _endDrag() {

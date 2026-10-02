@@ -8,6 +8,7 @@ import * as THREE from 'three';
 const require = createRequire(import.meta.url);
 const navigation = require('../public/pointcloud-navigation.js');
 const pointCloudPerformance = require('../public/pointcloud-performance.js');
+const mouseNavigationProfiles = require('../public/mouse-navigation-profiles.js');
 const shell = fs.readFileSync(new URL('../public/pointcloud.html', import.meta.url), 'utf8');
 const start = shell.indexOf('class PCPointerControls {');
 const end = shell.indexOf('// Replace Potree\'s EarthControls', start);
@@ -15,7 +16,7 @@ assert.ok(start >= 0 && end > start);
 // Exercise the shipped controller methods, rather than a second implementation.
 const Controls = vm.runInNewContext(`${shell.slice(start, end)}\nPCPointerControls`, {
   THREE, ...navigation, performance, Potree: { measureTimings: false },
-  window: { LtdsPointCloudPerformance: pointCloudPerformance },
+  window: { LtdsPointCloudPerformance: pointCloudPerformance, LtdsMouseNavigationProfiles: mouseNavigationProfiles },
 });
 
 function fixture(position = new THREE.Vector3(0, -200, 150), origin = new THREE.Vector3()) {
@@ -57,6 +58,37 @@ function fixture(position = new THREE.Vector3(0, -200, 150), origin = new THREE.
 function pointer(button, x = 500, y = 500) {
   return { pointerId: 1, pointerType: 'mouse', button, clientX: x, clientY: y, preventDefault() {} };
 }
+
+test('cloud alternate mode remaps all three actions and keeps default behavior intact', () => {
+  for (const profile of ['default', 'alternate']) {
+    for (const button of [0, 1, 2]) {
+      const { controls, view } = fixture();
+      controls._mouseProfile = profile;
+      const before = view.position.clone();
+      controls._pointerDown(pointer(button));
+      assert.equal(controls._mode, mouseNavigationProfiles.actionForButton(profile, button));
+      controls._pointerMove(pointer(button, 520, 510));
+      assert.ok(view.position.distanceTo(before) > 0);
+    }
+  }
+});
+
+test('cloud mode changes release active capture and discard drag/inertia without camera movement', () => {
+  const { controls, view } = fixture();
+  controls._touch = { mode: 'none', pts: new Map() };
+  controls.pivotIndicator = { visible: true, material: { opacity: 1 } };
+  const released = [];
+  controls.dom.releasePointerCapture = id => released.push(id);
+  controls._pointerDown(pointer(0));
+  controls._inertia.active = true;
+  const before = view.position.clone();
+  assert.equal(controls.setMouseProfile('alternate').id, 'alternate');
+  assert.equal(controls._mode, 'none');
+  assert.equal(controls._inertia.active, false);
+  assert.deepEqual(released, [1]);
+  controls._pointerMove(pointer(0, 530, 510));
+  assert.deepEqual(view.position.toArray(), before.toArray());
+});
 
 test('cloud orbit cannot cross top-down with large steps and off-centre pivots', () => {
   for (const pivot of [new THREE.Vector3(), new THREE.Vector3(40, 100, 0)]) {

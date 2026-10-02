@@ -18,7 +18,7 @@ const DISPLAY_SURFACE_RETRY_MS=500;
 
 export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
-  const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set();
+  const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set(),pendingRenameSaves=new Set();
   const metricCache=new WeakMap();
   let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null,loadFailed=false;
   const displayCache=new Map();
@@ -547,10 +547,14 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='delete'){await store.remove(id);selectedExports.delete(id);if(draft?.id===id)disarm();}
       if(action==='rename'){
         selected=id;
-        const row=event.target.closest('[data-record]'),editor=document.createElement('form');editor.className='measurement-rename';editor.innerHTML='<label>Measurement name <input name="name" maxlength="160" required></label><div class="measurement-actions"><button type="submit">Save name</button><button type="button" data-cancel>Cancel</button></div>';
+        const row=event.target.closest('[data-record]'),existing=row.querySelector('.measurement-rename');
+        if(existing){const input=existing.querySelector('input');input.focus();input.select();return;}
+        if(pendingRenameSaves.has(id)){tell('Saving measurement name…');return;}
+        const editor=document.createElement('form');editor.className='measurement-rename';editor.innerHTML='<label>Measurement name <input name="name" maxlength="160" required></label><div class="measurement-actions"><button type="submit">Save name</button><button type="button" data-cancel>Cancel</button></div>';
         const input=editor.querySelector('input');input.value=record.name;row.append(editor);input.focus();input.select();
-        editor.querySelector('[data-cancel]').onclick=()=>renderPanel();editor.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();renderPanel();}};
-        editor.onsubmit=async e=>{e.preventDefault();const name=input.value.trim();if(!name)return;editor.querySelector('[type=submit]').disabled=true;try{await store.patch(record,{name});tell('Measurement name saved.');}catch(error){tell(error.message);editor.querySelector('[type=submit]').disabled=false;}};
+        const cancel=editor.querySelector('[data-cancel]'),submit=editor.querySelector('[type=submit]');
+        cancel.onclick=()=>{if(!pendingRenameSaves.has(id))renderPanel();};editor.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();if(!pendingRenameSaves.has(id))renderPanel();}};
+        editor.onsubmit=async e=>{e.preventDefault();const name=input.value.trim();if(!name||pendingRenameSaves.has(id))return;pendingRenameSaves.add(id);submit.disabled=true;cancel.disabled=true;input.disabled=true;try{await store.patch(record,{name});tell('Measurement name saved.');}catch(error){tell(error.message);submit.disabled=false;cancel.disabled=false;input.disabled=false;}finally{pendingRenameSaves.delete(id);}};
       }
       if(action==='export'){const format=controls.querySelector('[data-m="format"]').value;download(exportMeasurements(exportRecords(),format,{toLonLat,units}),`measurements.${format}`,format==='json'||format==='geojson'?'application/json':'text/plain');}
       if(action==='screenshot'){const generation=viewGeneration,displayUnits=units;const canvas=await screenshot({allowIncomplete:true});const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(disposed||!allowed()||generation!==viewGeneration||displayUnits!==units)throw new Error('The view changed during capture. Capture the current view again.');if(!blob)throw new Error('View capture unavailable.');download(blob,'measured-view.png');tell('View PNG download requested.');}
