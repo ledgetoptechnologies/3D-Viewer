@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { hashTree } = require('./storageManager');
+const { hasDerivativeInodeHeadroom } = require('./stagingStoragePolicy');
 const { verifyLodProvenance } = require('./lodProvenance');
 const { verifyRecoveryCompanionPlan } = require('./lodRecoveryCompanions');
 const {
@@ -386,7 +387,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     try {
       const current = storage.space('models', 0);
       if (current.available <= current.reserve + 5 * 1024 ** 3
-        || !Number.isFinite(current.ffree) || current.ffree <= admission.inodeReserve) {
+        || !hasDerivativeInodeHeadroom(storage.config, current, admission)) {
         pressure.abort(Object.assign(new Error('derivative storage headroom fell below the safety reserve'), { code: 'insufficient_storage' }));
       }
     } catch (error) {

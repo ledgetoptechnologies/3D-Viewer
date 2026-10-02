@@ -5,6 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const {StorageManager}=require('../server/storageManager');
+const {hasDerivativeInodeHeadroom}=require('../server/stagingStoragePolicy');
 const gib=1024**3;
 const identified={deploymentId:'staging-192.168.50.90',expectedHost:'192.168.50.90',publicBaseUrl:'https://192.168.50.90:8088',stagingSmbAllowUnavailableInodes:true};
 const identifiedHostname={...identified,expectedHost:'viewer-staging.ledgetopdroneservices.com',publicBaseUrl:'https://viewer-staging.ledgetopdroneservices.com'};
@@ -14,6 +15,26 @@ function fixture(t,{config={},stat={}}={}){
   return new StorageManager({modelsMount:'/app/storage/models',cacheMount:'/app/storage/cache',storageReserveBytes:20*gib,storageReservePercent:10,...config});
 }
 const admit=s=>s.requireDerivativeSpace('models',{sourceBytes:gib,expectedFiles:10000});
+
+test('ongoing conversion revalidates the staging exception instead of coercing null reserve to zero',t=>{
+  const storage=fixture(t,{config:identifiedHostname}),admission=admit(storage);
+  const current=storage.space('models',0);
+  assert.equal(hasDerivativeInodeHeadroom(storage.config,current,admission),true);
+  for(const config of [{...identifiedHostname,stagingSmbAllowUnavailableInodes:false},{...identifiedHostname,deploymentId:'production'}])
+    assert.equal(hasDerivativeInodeHeadroom(config,current,admission),false);
+  for(const changed of [{filesystemType:0xef53},{files:NaN},{ffree:NaN},{files:0,ffree:1},{files:-1,ffree:-1}])
+    assert.equal(hasDerivativeInodeHeadroom(storage.config,{...current,...changed},admission),false);
+  assert.equal(hasDerivativeInodeHeadroom(storage.config,{...current,files:1000000,ffree:50000},admission),false);
+  assert.equal(hasDerivativeInodeHeadroom(storage.config,{...current,files:1000000,ffree:50001},admission),true);
+});
+
+test('ongoing known inode admission preserves its reserve and fails closed on malformed figures',()=>{
+  const current={filesystemType:0xef53,files:1000000,ffree:50001};
+  assert.equal(hasDerivativeInodeHeadroom({},current,{inodeReserve:50000}),true);
+  assert.equal(hasDerivativeInodeHeadroom({},{...current,ffree:50000},{inodeReserve:50000}),false);
+  for(const inodeReserve of [undefined,NaN,-1])assert.equal(hasDerivativeInodeHeadroom({},current,{inodeReserve}),false);
+  assert.equal(hasDerivativeInodeHeadroom({},{...current,ffree:1000001},{inodeReserve:50000}),false);
+});
 test('default refuses unavailable inode figures even on verified SMB staging',t=>{
   const s=fixture(t,{config:{...identified,stagingSmbAllowUnavailableInodes:false}});
   assert.throws(()=>admit(s),e=>e.code==='insufficient_storage'&&/unavailable/.test(e.message));

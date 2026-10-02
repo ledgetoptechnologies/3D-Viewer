@@ -18,4 +18,17 @@ function allowUnavailableSmbInodes(config, space) {
     && space.files === 0 && space.ffree === 0;
 }
 
-module.exports = {isIdentifiedSmbStaging, allowUnavailableSmbInodes};
+// Revalidate the actual filesystem on every conversion tick. An initial
+// admission is not permission to ignore later mount or configuration changes.
+function hasDerivativeInodeHeadroom(config, space, admission) {
+  if (allowUnavailableSmbInodes(config, space)) return true;
+  if (!Number.isFinite(space.files) || space.files <= 0
+    || !Number.isFinite(space.ffree) || space.ffree < 0
+    || space.ffree > space.files) return false;
+  const reserve = admission?.inodeReserve === null
+    ? Math.min(100000, Math.max(10000, Math.ceil(space.files * 0.05)))
+    : admission?.inodeReserve;
+  return Number.isFinite(reserve) && reserve >= 0 && space.ffree > reserve;
+}
+
+module.exports = {isIdentifiedSmbStaging, allowUnavailableSmbInodes, hasDerivativeInodeHeadroom};
