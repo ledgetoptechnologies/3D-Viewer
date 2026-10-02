@@ -3,7 +3,7 @@ name: Viewer image
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
 
 permissions:
@@ -56,6 +56,7 @@ jobs:
             type=sha,prefix=sha-
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=dev,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
 
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push'
