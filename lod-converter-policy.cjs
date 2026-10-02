@@ -30,7 +30,7 @@ const LEGACY_KTX2_CONVERTER = Object.freeze({
 const LEGACY_KTX2_CONVERTER_COMMAND_SHA256 = '8d0931aa44aae76b48832212cd6c649b73e9b9843d5d5f07462f167d0e8d5752';
 
 const OBJ2TILES_SOURCE_SHA256 = '79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5';
-const OBJ2TILES_PATCH_SHA256 = '6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b';
+const OBJ2TILES_PATCH_SHA256 = 'c4b7aea4f63b3171a88ed7c82c1e80c2245e56df038106a1a1124a6b1fd33370';
 
 const CONTROLLED_CONVERTER = Object.freeze({
   name: 'OpenDroneMap/Obj2Tiles',
@@ -142,6 +142,52 @@ const ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS = Object.freeze([
   }),
 ]);
 
+// Read compatibility only: independently rehashed from the immutable accepted
+// b9265ee image (0383a63c...). Never add this binary to generation trust above.
+const HISTORICAL_BOUNDED_CONVERTER = Object.freeze({
+  ...CONTROLLED_CONVERTER,
+  arguments: Object.freeze(['--octree', '--lods', '3', '--divisions', '2',
+    '--lod-texture-scale', '0.5', '--texture-format', 'Ktx2', '--ktx2-quality', '192',
+    '--max-parallelism', '2', '--image-parallelism', '1', '--local', SOURCE_PLACEHOLDER, OUTPUT_PLACEHOLDER]),
+  fork: Object.freeze({ sourceVersion: 'v1.6.2', sourceSha256: OBJ2TILES_SOURCE_SHA256,
+    patchSha256: '6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b' }),
+});
+const HISTORICAL_BOUNDED_SERIAL_CONVERTER = Object.freeze({
+  ...HISTORICAL_BOUNDED_CONVERTER,
+  arguments: Object.freeze(HISTORICAL_BOUNDED_CONVERTER.arguments.map((value, index, args) =>
+    args[index - 1] === '--max-parallelism' ? '1' : value)),
+  retry: Object.freeze({ reason: 'explicit-resource-pressure', attempt: 1 }),
+});
+const HISTORICAL_BOUNDED_BINARY_SHA256 = '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725';
+const HISTORICAL_READ_CONVERTER_CONTRACTS = Object.freeze([
+  Object.freeze({ converter: HISTORICAL_BOUNDED_CONVERTER,
+    commandSha256: '0280b96902e3614f4facd89e3d617c4a0cd86bf814c35a034b94a65d7c6842f0' }),
+  Object.freeze({ converter: HISTORICAL_BOUNDED_SERIAL_CONVERTER,
+    commandSha256: '2adcf63c0508c0d6a6b82445f77f3ea7de053af611b16f55a61bb3e280abb47b' }),
+]);
+
+function acceptedReadConverterIdentity(converter) {
+  if (!converter || converter.name !== 'OpenDroneMap/Obj2Tiles' || converter.version !== '1.6.2') return false;
+  const command = String(converter.commandSha256 || '').toLowerCase();
+  const binary = String(converter.binarySha256 || '').toLowerCase();
+  if (binary === HISTORICAL_BOUNDED_BINARY_SHA256) {
+    return HISTORICAL_READ_CONVERTER_CONTRACTS.some(contract => contract.commandSha256 === command);
+  }
+  return ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256.includes(command)
+    && CONTROLLED_CONVERTER_BINARY_SHA256.includes(binary);
+}
+
+function acceptedReadConverterContract(converter) {
+  if (!acceptedReadConverterIdentity(converter)) return false;
+  const contracts = converter.binarySha256?.toLowerCase() === HISTORICAL_BOUNDED_BINARY_SHA256
+    ? HISTORICAL_READ_CONVERTER_CONTRACTS : ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS;
+  return contracts.some(contract => converter.commandSha256 === contract.commandSha256
+    && stable(converter.arguments) === stable(contract.converter.arguments)
+    && (contracts !== HISTORICAL_READ_CONVERTER_CONTRACTS
+      || (stable(converter.fork) === stable(contract.converter.fork)
+        && stable(converter.retry) === stable(contract.converter.retry))));
+}
+
 function obj2TilesArguments(source, output, { serialRetry = false } = {}) {
   const converter = serialRetry ? SERIAL_RETRY_CONVERTER : CONTROLLED_CONVERTER;
   return converter.arguments.map((argument) => {
@@ -152,6 +198,10 @@ function obj2TilesArguments(source, output, { serialRetry = false } = {}) {
 }
 
 module.exports = {
+  HISTORICAL_BOUNDED_BINARY_SHA256,
+  HISTORICAL_READ_CONVERTER_CONTRACTS,
+  acceptedReadConverterIdentity,
+  acceptedReadConverterContract,
   ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256,
   ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
   CONTROLLED_CONVERTER,

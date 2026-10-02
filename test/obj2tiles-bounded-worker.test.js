@@ -56,6 +56,20 @@ test('runtime fork trust rejects build metadata that is not bound to the pinned 
   assert.throws(() => runtimeForkBuildInfo(file), /malformed/);
 });
 
+test('sealed intermediate copy regression runs against patched source during the SDK build', () => {
+  const docker = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
+  const patch = fs.readFileSync(path.join(root, 'third_party', 'obj2tiles', 'v1.6.2-bounded-concurrency.patch'), 'utf8');
+  assert.match(docker, /COPY third_party\/obj2tiles\/tests \/tmp\/obj2tiles-copy-tests/);
+  assert.match(docker, /git apply \/tmp\/obj2tiles\.patch[\s\S]*dotnet run --project \/tmp\/obj2tiles-copy-tests\/IntermediateFileCopyHarness\.csproj/);
+  assert.match(docker, /IntermediateFileCopySource=\/src\/obj2tiles\/Obj2Tiles\.Library\/IntermediateFileCopy\.cs/);
+  assert.match(patch, /new FileStream\(sourcePath, FileMode\.Open, FileAccess\.Read/);
+  assert.match(patch, /Mode = FileMode\.CreateNew/);
+  assert.match(patch, /Access = FileAccess\.Write/);
+  assert.match(patch, /File\.Move\(temporary, destinationPath, overwrite\)/);
+  assert.equal((patch.match(/^\+.*IntermediateFileCopy\.Copy\(/gm) || []).length, 4);
+  assert.doesNotMatch(patch, /^\+.*(?:SetUnixFileMode|SetAttributes|FileMode\.Create,)/m);
+});
+
 test('fork patch bounds all outer tile work at two and ImageSharp work at one', () => {
   const source = fs.readFileSync(path.join(root, 'third_party', 'obj2tiles', 'v1.6.2-bounded-concurrency.patch'), 'utf8');
   assert.match(source, /Default\.MaxDegreeOfParallelism = opts\.ImageParallelism/);

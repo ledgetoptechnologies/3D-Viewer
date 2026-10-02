@@ -3,12 +3,9 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const {
-  ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256,
-  CONTROLLED_CONVERTER_BINARY_SHA256,
+  acceptedReadConverterIdentity,
   stable,
 } = require('../lod-converter-policy.cjs');
-const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINARY_SHA256);
-const CONTROLLED_CONVERTER_COMMAND_SHA256_SET = new Set(ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256);
 const LOD_VERIFICATION_RECEIPT_VERSION = 1;
 const LEGACY_LOD_VERIFICATION_RECEIPT_KEYS = Object.freeze([
   'attemptId',
@@ -76,11 +73,10 @@ function verifiedLodProvenance(metadata, assets) {
     && provenance.audit?.algorithm === 'ltds-obj2tiles-surface-equivalence-v3'
     && provenance.converter?.name === 'OpenDroneMap/Obj2Tiles'
     && provenance.converter?.version === '1.6.2'
-    && CONTROLLED_CONVERTER_COMMAND_SHA256_SET.has(String(provenance.converter?.commandSha256 || '').toLowerCase())
+    && acceptedReadConverterIdentity(provenance.converter)
     && Boolean(obj?.sha256)
     && provenance.converter?.inputAsset === path.posix.basename(obj.relativePath || '')
-    && provenance.converter?.inputSha256 === obj.sha256
-    && CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(provenance.converter?.binarySha256 || '').toLowerCase());
+    && provenance.converter?.inputSha256 === obj.sha256;
   const controlledV4 = provenance.schemaVersion === 4
     && provenance.geometry === 'controlled-bidirectional-surface-equivalence'
     && provenance.textures === 'controlled-atlas-material-equivalence'
@@ -88,11 +84,10 @@ function verifiedLodProvenance(metadata, assets) {
     && provenance.audit?.policyRevision === 'ltds-controlled-surface-policy-v4'
     && provenance.converter?.name === 'OpenDroneMap/Obj2Tiles'
     && provenance.converter?.version === '1.6.2'
-    && CONTROLLED_CONVERTER_COMMAND_SHA256_SET.has(String(provenance.converter?.commandSha256 || '').toLowerCase())
+    && acceptedReadConverterIdentity(provenance.converter)
     && Boolean(obj?.sha256)
     && provenance.converter?.inputAsset === path.posix.basename(obj.relativePath || '')
-    && provenance.converter?.inputSha256 === obj.sha256
-    && CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(provenance.converter?.binarySha256 || '').toLowerCase());
+    && provenance.converter?.inputSha256 === obj.sha256;
   if ((!exactV2 && !controlledV3 && !controlledV4)
     || provenance.sourceSha256 !== glb.sha256
     || provenance.tilesManifestSha256 !== meshAsset(assets, 'tiles')?.manifestSha256

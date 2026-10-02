@@ -187,6 +187,21 @@ test('server verifies controlled Obj2Tiles v4 evidence, retains v3 compatibility
   assert.equal(checked.provenance.audit.leavesToSource.reversedNormalFraction,0);
   const original=JSON.parse(fs.readFileSync(outputPath,'utf8'));
 
+  const {HISTORICAL_READ_CONVERTER_CONTRACTS,HISTORICAL_BOUNDED_BINARY_SHA256}=require('../lod-converter-policy.cjs');
+  for(const contract of HISTORICAL_READ_CONVERTER_CONTRACTS){
+    const historical=structuredClone(original);
+    historical.converter={...historical.converter,...contract.converter,commandSha256:contract.commandSha256,binarySha256:HISTORICAL_BOUNDED_BINARY_SHA256};
+    rebindV4Digest(historical);
+    fs.writeFileSync(outputPath,JSON.stringify(historical));
+    const checkedHistorical=await verifyLodProvenance(outputPath,source);
+    assert.equal(checkedHistorical.verified,true,checkedHistorical.errors.join('\n'));
+    const tampered=structuredClone(historical);
+    tampered.converter.fork.patchSha256='a'.repeat(64);
+    rebindV4Digest(tampered);
+    fs.writeFileSync(outputPath,JSON.stringify(tampered));
+    assert.equal((await verifyLodProvenance(outputPath,source)).verified,false);
+  }
+
   const legacy=structuredClone(original);
   legacy.schemaVersion=3;
   legacy.audit.algorithm='ltds-obj2tiles-surface-equivalence-v3';

@@ -4,8 +4,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
-  CONTROLLED_CONVERTER_BINARY_SHA256,
+  acceptedReadConverterContract,
+  acceptedReadConverterIdentity,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   stable,
 } = require('../lod-converter-policy.cjs');
@@ -14,7 +14,6 @@ const digestCache = new Map();
 const AUDIT_ALGORITHM = 'ltds-glb-leaf-equivalence-v2';
 const CONTROLLED_AUDIT_ALGORITHM = 'ltds-obj2tiles-surface-equivalence-v3';
 const CONTROLLED_AUDIT_ALGORITHM_V4 = 'ltds-obj2tiles-surface-equivalence-v4';
-const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINARY_SHA256);
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIT_ARTIFACTS = 100_000;
 
@@ -81,18 +80,12 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
       if (hasLeafCounts && (!Number.isInteger(audit.duplicateLeafTriangleCount) || audit.duplicateLeafTriangleCount < 0 || audit.duplicateLeafTriangleCount !== audit.leafTriangleCount - audit.triangleCount)) errors.push('audit.duplicateLeafTriangleCount must match the bounded leaf overlap');
     } else if (controlled) {
       const converter = provenance.converter;
-      const contractMatches = ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS.some((contract) => (
-        converter
-        && converter.name === contract.converter.name
-        && converter.version === contract.converter.version
-        && stable(converter.arguments) === stable(contract.converter.arguments)
-        && converter.commandSha256 === contract.commandSha256
-      ));
+      const contractMatches = acceptedReadConverterContract(converter);
       if (!contractMatches) errors.push('converter must match the pinned Obj2Tiles command contract');
       for (const [key, value] of [['converter.inputSha256', converter?.inputSha256], ['converter.binarySha256', converter?.binarySha256]]) {
         if (!/^[a-f0-9]{64}$/i.test(String(value || ''))) errors.push(`${key} must be a SHA-256 digest`);
       }
-      if (!CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(converter?.binarySha256 || '').toLowerCase())) errors.push('converter.binarySha256 must match an approved Obj2Tiles 1.6.2 executable');
+      if (!acceptedReadConverterIdentity(converter)) errors.push('converter.binarySha256 must match an approved Obj2Tiles 1.6.2 executable and command pair');
       if (!/\.obj$/i.test(String(converter?.inputAsset || '')) || path.basename(converter?.inputAsset || '') !== converter?.inputAsset) errors.push('converter.inputAsset must name the exact OBJ input');
       if (!Number.isInteger(audit.sourceTriangleCount) || audit.sourceTriangleCount < 1 || !Number.isInteger(audit.leafTriangleCount) || audit.leafTriangleCount < 1) errors.push('controlled audit triangle counts must be positive integers');
       if (!Number.isFinite(audit.surfaceTolerance) || audit.surfaceTolerance <= 0 || !Number.isFinite(audit.diagonal) || audit.diagonal <= 0 || audit.surfaceTolerance > audit.diagonal * 1e-3) errors.push('controlled audit surface tolerance is invalid');

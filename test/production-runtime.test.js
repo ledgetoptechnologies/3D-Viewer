@@ -69,7 +69,7 @@ test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
   assert.match(dockerfile, /ARG OBJ2TILES_VERSION=1\.6\.2/);
   assert.match(dockerfile, /OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5/);
-  assert.match(dockerfile, /OBJ2TILES_PATCH_SHA256=6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b/);
+  assert.match(dockerfile, /OBJ2TILES_PATCH_SHA256=c4b7aea4f63b3171a88ed7c82c1e80c2245e56df038106a1a1124a6b1fd33370/);
   assert.match(dockerfile, /codeload\.github\.com\/OpenDroneMap\/Obj2Tiles\/tar\.gz\/refs\/tags\/v\$\{OBJ2TILES_VERSION\}/);
   assert.match(dockerfile, /sha256sum -c -[\s\S]*git apply --check \/tmp\/obj2tiles\.patch[\s\S]*git apply \/tmp\/obj2tiles\.patch/);
   assert.match(dockerfile, /dotnet publish[\s\S]*--self-contained true/);

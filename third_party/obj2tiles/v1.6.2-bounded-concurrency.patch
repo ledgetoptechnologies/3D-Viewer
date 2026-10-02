@@ -316,3 +316,120 @@ index 284870d..2136d4e 100644
      }
  
      // Duomo of Milan
+diff --git a/Obj2Tiles.Library/IntermediateFileCopy.cs b/Obj2Tiles.Library/IntermediateFileCopy.cs
+new file mode 100644
+--- /dev/null
++++ b/Obj2Tiles.Library/IntermediateFileCopy.cs
+@@ -0,0 +1,73 @@
++namespace Obj2Tiles.Library;
++
++/// <summary>
++/// Copy immutable input bytes into owned writable converter intermediates.
++/// File.Copy inherits source Unix permissions: creating a read/write SMB file
++/// with a sealed input's 0440 mode fails before any bytes can be copied.
++/// Never change the input's permissions or propagate its read-only attributes.
++/// </summary>
++public static class IntermediateFileCopy
++{
++    public static void Copy(string source, string destination, bool overwrite = true)
++    {
++        var sourcePath = Path.GetFullPath(source);
++        var destinationPath = Path.GetFullPath(destination);
++        var comparison = OperatingSystem.IsWindows()
++            ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
++        if (string.Equals(sourcePath, destinationPath, comparison))
++            throw new IOException("Intermediate copy cannot replace its source.");
++        RejectLinks(sourcePath);
++        RejectLinks(destinationPath);
++        if (!overwrite && File.Exists(destinationPath))
++            throw new IOException("Intermediate copy destination already exists.");
++
++        var directory = Path.GetDirectoryName(destinationPath)!;
++        var temporary = Path.Combine(directory, ".obj2tiles-copy-" + Guid.NewGuid().ToString("N"));
++        var created = false;
++        try
++        {
++            using (var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read))
++            {
++                var options = new FileStreamOptions
++                {
++                    Mode = FileMode.CreateNew,
++                    Access = FileAccess.Write,
++                    Share = FileShare.None,
++                    Options = FileOptions.SequentialScan
++                };
++                if (!OperatingSystem.IsWindows())
++                    options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
++                        | UnixFileMode.GroupRead | UnixFileMode.GroupWrite;
++                using (var output = new FileStream(temporary, options))
++                {
++                    created = true;
++                    input.CopyTo(output);
++                    output.Flush(flushToDisk: true);
++                }
++            }
++            RejectLinks(sourcePath);
++            RejectLinks(destinationPath);
++            // Replace the directory entry, never truncate an existing inode:
++            // a destination hard link to retained input must not mutate input.
++            File.Move(temporary, destinationPath, overwrite);
++            created = false;
++        }
++        finally
++        {
++            if (created) File.Delete(temporary);
++        }
++    }
++
++    private static void RejectLinks(string fullPath)
++    {
++        for (string? component = fullPath; !string.IsNullOrEmpty(component);
++             component = Path.GetDirectoryName(component))
++        {
++            FileSystemInfo info = Directory.Exists(component)
++                ? new DirectoryInfo(component) : new FileInfo(component);
++            if (info.LinkTarget != null || (info.Exists
++                && (info.Attributes & FileAttributes.ReparsePoint) != 0))
++                throw new IOException("Intermediate copy paths cannot contain links.");
++        }
++    }
++}
+diff --git a/Obj2Tiles/Stages/DecimationStage.cs b/Obj2Tiles/Stages/DecimationStage.cs
+--- a/Obj2Tiles/Stages/DecimationStage.cs
++++ b/Obj2Tiles/Stages/DecimationStage.cs
+@@ -20,7 +20,7 @@ public static partial class StagesFacade
+
+         var fileName = Path.GetFileName(sourcePath);
+         var originalSourceFile = Path.Combine(destPath, fileName);
+-        File.Copy(sourcePath, originalSourceFile, true);
++        Obj2Tiles.Library.IntermediateFileCopy.Copy(sourcePath, originalSourceFile, true);
+
+         var destFiles = new List<string> { originalSourceFile };
+
+diff --git a/Obj2Tiles/Utils.cs b/Obj2Tiles/Utils.cs
+--- a/Obj2Tiles/Utils.cs
++++ b/Obj2Tiles/Utils.cs
+@@ -202,5 +202,5 @@ public static class Utils
+             if (!File.Exists(mtlDestPath) && File.Exists(mtlSrcPath))
+             {
+-                File.Copy(mtlSrcPath, mtlDestPath, true);
++                Obj2Tiles.Library.IntermediateFileCopy.Copy(mtlSrcPath, mtlDestPath, true);
+                 Console.WriteLine($" -> Copied {mtlRelPath}");
+             }
+@@ -221,3 +221,3 @@ public static class Utils
+-                File.Copy(absPath, texDestPath, true);
++                Obj2Tiles.Library.IntermediateFileCopy.Copy(absPath, texDestPath, true);
+                 Console.WriteLine($" -> Copied {relPath}");
+             }
+diff --git a/Obj2Tiles.Library/Geometry/MeshT.cs b/Obj2Tiles.Library/Geometry/MeshT.cs
+--- a/Obj2Tiles.Library/Geometry/MeshT.cs
++++ b/Obj2Tiles.Library/Geometry/MeshT.cs
+@@ -1429,7 +1429,7 @@ public class MeshT : IMesh
+                                     folder != null ? Path.Combine(folder, textureFileName) : textureFileName;
+
+                                 if (!File.Exists(newTexturePath))
+-                                    File.Copy(material.Texture, newTexturePath, true);
++                                    Obj2Tiles.Library.IntermediateFileCopy.Copy(material.Texture, newTexturePath, true);
+
+                                 material.Texture = textureFileName;
+                                 break;

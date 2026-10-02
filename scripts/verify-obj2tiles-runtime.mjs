@@ -4,6 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import converterPolicy from '../lod-converter-policy.cjs';
 import { auditControlledObj2Tiles } from './lib/lod-equivalence.mjs';
+import { sealConverterFixture } from './lib/sealed-converter-fixture.mjs';
 
 function align4(value) {
   return (value + 3) & ~3;
@@ -119,6 +120,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-obj2tiles-smoke-'));
 const sourceObj = path.join(root, 'model.obj');
 const sourceGlb = path.join(root, 'model.glb');
 const output = path.join(root, 'tiles');
+let verifySealedSources;
 
 try {
   const texture = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4DwQNDgwODSAGAEJWCXkXUrf5AAAAAElFTkSuQmCC', 'base64');
@@ -145,6 +147,9 @@ try {
     '',
   ].join('\n'));
   fs.writeFileSync(sourceGlb, makeReferenceGlb(texture));
+  verifySealedSources = sealConverterFixture([
+    sourceObj, sourceGlb, path.join(root, 'model.mtl'), path.join(root, 'texture.png'),
+  ]);
 
   const conversion = spawnSync(obj2Tiles, converterPolicy.obj2TilesArguments(sourceObj, output), {
     encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 60_000, windowsHide: true,
@@ -176,7 +181,9 @@ try {
     schemaVersion: provenance.schemaVersion,
     artifacts: provenance.audit.artifacts.length,
     compressedTextures,
+    sealedSourceCount: verifySealedSources(),
   }));
 } finally {
-  fs.rmSync(root, { recursive: true, force: true });
+  try { verifySealedSources?.(); }
+  finally { fs.rmSync(root, { recursive: true, force: true }); }
 }

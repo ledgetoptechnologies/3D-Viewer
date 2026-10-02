@@ -18,6 +18,8 @@ const {
   CONTROLLED_CONVERTER_COMMAND_SHA256,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   OFFICIAL_CONVERTER_BINARY_SHA256,
+  HISTORICAL_READ_CONVERTER_CONTRACTS,
+  HISTORICAL_BOUNDED_BINARY_SHA256,
 } = require('../lod-converter-policy.cjs');
 
 function fixture(t) {
@@ -211,7 +213,8 @@ test('LOD authority is issued only by an exact durable receipt for a completed v
   assert.equal(viewer().lodProvenanceVerified, false, 'arbitrary shape is not accepted as a legacy receipt');
 });
 
-test('published v4 sessions validate with the unpublished OBJ proof without exposing it', async (t) => {
+for (const historical of [false, true]) {
+test(`published ${historical ? 'historical bounded' : 'current'} v4 sessions validate with the unpublished OBJ proof without exposing it`, async (t) => {
   const c = fixture(t);
   const item = candidate(c, { includeObj: true });
   const owner = 'v4-published-worker';
@@ -219,6 +222,10 @@ test('published v4 sessions validate with the unpublished OBJ proof without expo
   const job = c.processing.claimDerivative(owner);
   assert.ok(job);
   const provenance = v4Provenance();
+  if (historical) {
+    provenance.converter.commandSha256 = HISTORICAL_READ_CONVERTER_CONTRACTS[0].commandSha256;
+    provenance.converter.binarySha256 = HISTORICAL_BOUNDED_BINARY_SHA256;
+  }
   assert.ok(c.processing.registerVerifiedLodAsset(job.id, owner, {
     versionId: item.versionId,
     rootKey: 'models',
@@ -290,3 +297,4 @@ test('published v4 sessions validate with the unpublished OBJ proof without expo
   assert.equal(unsafeIssuance.status, 409, 'a published session is not issued when the tileset root left its registered manifest');
   assert.equal((await unsafeIssuance.json()).code, 'asset_integrity_not_ready');
 });
+}
