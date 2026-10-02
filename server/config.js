@@ -7,6 +7,7 @@ const path = require('path');
 const { parseTrustedProxyAddresses } = require('./proxyGate');
 const { decodeKey } = require('./providerCredentials');
 const { parseProviderCidrs } = require('./providerAdmission');
+const { isIdentifiedSmbStaging } = require('./stagingStoragePolicy');
 
 function bool(value, fallback) {
   if (value === undefined || value === '') return fallback;
@@ -96,6 +97,8 @@ if (!serviceAuthKeys && (previousServiceKeyId || previousServiceSecret)) {
 }
 
 const config = {
+  deploymentId: String(process.env.VIEWER_DEPLOYMENT_ID || '').trim(),
+  stagingSmbAllowUnavailableInodes: bool(process.env.STAGING_SMB_ALLOW_UNAVAILABLE_INODES, false),
   measurementCalculationsEnabled: bool(process.env.MEASUREMENT_CALCULATIONS_ENABLED, true),
   measurementMaxCells: Math.min(16_000_000, positiveInteger(process.env.MEASUREMENT_MAX_CELLS, 2_000_000)),
   // Native rasters stream bounded windows; point grids retain their own limit.
@@ -188,6 +191,8 @@ const config = {
 
 function validate() {
   const problems = [];
+  if (config.stagingSmbAllowUnavailableInodes && !isIdentifiedSmbStaging(config))
+    problems.push('STAGING_SMB_ALLOW_UNAVAILABLE_INODES is restricted to the explicitly identified staging-192.168.50.90 deployment and exact staging host/origin');
   if (config.production && !config.publicBaseUrl)
     problems.push('PUBLIC_BASE_URL must be an exact HTTPS origin');
   if (config.production && !config.expectedHost)

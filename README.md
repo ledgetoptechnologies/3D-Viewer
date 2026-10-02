@@ -819,3 +819,39 @@ an entire client project. See [the implementation contract](docs/DIRECT_SHARING_
 - Headless CDP verification: connect websocket with `suppress_origin=True`,
   drive with Input.dispatchMouseEvent; vite HMR means always hard-navigate
   after editing main.js before measuring behavior.
+
+## Isolated SMB staging inode admission
+
+`STAGING_SMB_ALLOW_UNAVAILABLE_INODES` defaults to `false`. The only supported
+exception requires all of these settings together:
+
+```dotenv
+VIEWER_DEPLOYMENT_ID=staging-192.168.50.90
+EXPECTED_HOST=192.168.50.90
+PUBLIC_BASE_URL=https://192.168.50.90:8088
+STAGING_SMB_ALLOW_UNAVAILABLE_INODES=true
+```
+
+These settings identify this isolated staging deployment; they are not host
+attestation and must never be copied into production. `NODE_ENV=production`
+alone is neither permission nor refusal: the deployment identity is checked
+separately. Enabled non-staging configuration fails startup validation.
+
+Admission additionally checks the target root's live Linux SMB2 filesystem type
+and precisely `files=0`, `ffree=0`. Known exhausted inode figures, other
+filesystems and invalid figures remain refused. Missing mount/statfs errors
+propagate. Byte reserve, input limits, concurrent processing/derivative
+reservations and all existing mount/auth guards are unchanged. Successful
+exception diagnostics retain the real zero figures, use `inodeReserve:null`,
+and report `inodeAssessment:unavailable-staging-smb-exception`.
+
+Focused tests: `node --test test/staging-smb-inodes.test.js`. An optional
+read-only container check is `node test/helpers/staging-smb-live-check.cjs`;
+it expects this staging container's existing `/app/server/config` and mounted
+`/app/storage` roots. It clones configuration in memory, writes no NAS data,
+and starts no jobs. Admission alone is not full processing acceptance.
+
+Read the host's `NAS-STORAGE.md` before staging deployment. Preserve the systemd
+and container NAS guards, the local SQLite overlay and Docker restart policy.
+Use `sudo -n systemctl restart viewer-staging.service` if a staging deployment
+is subsequently approved; do not directly restart Docker containers.
