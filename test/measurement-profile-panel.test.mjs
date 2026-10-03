@@ -8,7 +8,7 @@ function payload(line,height=7){const lengthM=Math.hypot(line.end[0]-line.start[
 function fixture(t){
  t.mock.timers.enable({apis:['setTimeout']});
  const nodes=new Map(),downloads=[],created=[];
- function element(){const e={value:'0',hidden:false,disabled:false,textContent:'',width:300,height:300,clientWidth:300,clientHeight:300,setCustomValidity(value){this.validation=value;},setAttribute(k,v){this[k]=v;},removeAttribute(k){delete this[k];},getBoundingClientRect:()=>({left:0,width:300}),click(){downloads.push(this.download);},toBlob(fn){this.blobCallback=fn;}};let current=[];const ctx={paths:[],beginPath(){current=[];},moveTo(...p){current.push(p);},lineTo(...p){current.push(p);},stroke(){this.paths.push(current);},clearRect(){},fillRect(){},closePath(){},fill(){},fillText(){},arc(){},drawImage(){}};e.getContext=()=>ctx;return e;}
+ function element(){const e={value:'0',hidden:false,disabled:false,textContent:'',width:300,height:300,clientWidth:300,clientHeight:300,setCustomValidity(value){this.validation=value;},setAttribute(k,v){this[k]=v;},removeAttribute(k){delete this[k];},getBoundingClientRect:()=>({left:0,width:300}),click(){downloads.push(this.download);},toBlob(fn){this.blobCallback=fn;}};let current=[];const ctx={paths:[],labels:[],beginPath(){current=[];},moveTo(...p){current.push(p);},lineTo(...p){current.push(p);},stroke(){this.paths.push(current);},clearRect(){},fillRect(){},closePath(){},fill(){},fillText(value){this.labels.push(String(value));},arc(){},drawImage(){}};e.getContext=()=>ctx;return e;}
  const host={innerHTML:'',querySelector(key){if(!nodes.has(key))nodes.set(key,element());return nodes.get(key);},setAttribute(k,v){this[k]=v;},removeAttribute(k){delete this[k];},replaceChildren(){this.removed=true;}};
  const previous=globalThis.document;globalThis.document={createElement(){const next=element();created.push(next);return next;}};t.after(()=>{globalThis.document=previous;});
  const record={name:'Pile',vertices:[[0,0,0],[10,0,0],[10,10,0],[0,10,0]],results:{source:{kind:'dsm'}}},jobs=[];
@@ -30,6 +30,12 @@ test('retains a clearly marked previous chart and matching plan during changes a
  f.get('profile-chart').onkeydown({key:'Home',preventDefault(){}});assert.match(f.get('profile-readout').textContent,/Surface 7/);
  f.get('update').onclick();f.finish(2,9);await flush();assert.equal(f.get('profile-previous').hidden,true);assert.equal(f.get('profile-csv').disabled,false);assert.equal(f.get('cancel').hidden,true);
  f.get('profile-chart').onkeydown({key:'Home',preventDefault(){}});assert.match(f.get('profile-readout').textContent,/Surface 9/);
+});
+test('profile elevation and distance axes retain three display decimals',async t=>{
+ const f=fixture(t);f.finish(0,7.1234);await flush();
+ const labels=f.get('profile-chart').getContext('2d').labels;
+ assert.ok(labels.includes('3.562'),`elevation ticks do not collapse sub-foot/metre precision: ${labels.join('|')}`);
+ assert.ok(labels.includes('5.000'),`distance ticks keep a stable three-decimal format: ${labels.join('|')}`);
 });
 test('rapid inputs coalesce behind one in-flight request and superseded results never replace the last-good chart',async t=>{
  const f=fixture(t);f.finish();await flush();f.change(10);t.mock.timers.tick(350);assert.equal(f.jobs.length,2);

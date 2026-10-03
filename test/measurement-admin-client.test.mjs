@@ -64,9 +64,9 @@ test('reconstruction requires advertised method, explicit inference opt-in and n
   assert.throws(()=>adminCalculationRequest(record,fields,[{assetId:'ept',kind:'ept',methods:['point-surface-cut-fill']}]),/unavailable/);
 });
 
-test('admin results retain incomplete coverage and estimated status with default cubic feet',()=>{
+test('admin results retain incomplete coverage and estimated status with cubic-yard display units',()=>{
   const output=adminResultSummary({status:'complete',result:{status:'incomplete',cutM3:1,fillM3:0,netM3:1,coverage:.75,warnings:['Missing source samples.']}});
-  assert.match(output,/incomplete/);assert.match(output,/35.315 ft³/);assert.match(output,/75.000%/);assert.match(output,/Missing source samples/);
+  assert.match(output,/incomplete/);assert.match(output,/1.308 yd³/);assert.match(output,/75.000%/);assert.match(output,/Missing source samples/);
   assert.match(adminResultSummary({status:'complete',result:{status:'estimate',volumeM3:1}},'metric'),/estimate: Volume 1.000 m³/);
   assert.match(adminResultSummary({status:'failed',errorCode:'measurement_source_missing'}),/source missing/);
 });

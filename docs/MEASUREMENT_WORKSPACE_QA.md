@@ -51,11 +51,13 @@ Drawing and editing acceptance:
 
 ## Geometry, units, and accuracy
 
-Coordinates and numerical results are stored/exported at their available floating-point precision. Three decimal places apply to presentation, not to the stored geometry. Feet/inches is the default length presentation; default area/volume are square/cubic feet. Decimal feet, yards, meters, and centimeters are explicit options; yards are imperial, not metric. Unit changes convert values and inputs, not source coordinates.
+Coordinates and numerical results are stored/exported at their available floating-point precision. Three decimal places apply to presentation, not to the stored geometry or source accuracy. Elevation displays use three decimal places in the selected units. Feet/inches is the default length presentation; default area is square feet and default volume is cubic yards. Metric volume remains cubic metres. Unit changes convert values and inputs, not source coordinates.
 
 Vertex geometry provides segment lengths, perimeter, horizontal footprint area, elevation difference, and planar area when planarity is within the implemented tolerance. A nonplanar polygon does not masquerade as a known planar area. Degenerate/repeated adjacent points and crossing/overlapping polygons are rejected. A polygon alone produces **geometry-only** results, not an invented volume.
 
 Map boundary Z is sampled from the selected elevation raster for surface integration; spatial3d boundary Z comes from picked source geometry. A horizontal map distance is not a terrain-following path. Neither three decimal places nor “complete” computation establishes survey accuracy, photogrammetric accuracy, or solid-material volume. There is no automatic segmentation that can infer the inside of a car from its roof.
+
+The persistent volume inspector exposes the available DSM and DTM as explicit choices. Automatic selection preserves an existing source, prefers DSM for a new stockpile, and does not silently replace a missing DSM with DTM. A DTM may omit the pile; point-cloud/EPT volume remains a separate method with different assumptions. Imperial volume is presented in yd³ while canonical calculations and machine-readable exports remain in m³.
 
 ## Calculation methods and provenance
 

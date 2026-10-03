@@ -8,13 +8,13 @@ import {createServerSurfaceCalculator} from '../measurement-server-surface.mjs';
 
 const source=readFileSync(new URL('../measurement-volume-dialog.mjs',import.meta.url),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
-function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record,loadPreviousVolume=null}={}){
+function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record,loadPreviousVolume=null,availableSurfaces={dsm:true,dtm:true,ept:false}}={}){
   const nodes=new Map(),notices=[];let disposed=0,saved=0;
-  const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},append(){},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
+  const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},options:new Map(),append(){},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},querySelector(selector){if(!this.options.has(selector))this.options.set(selector,{disabled:false,hidden:false});return this.options.get(selector);},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
   const dialog={...element(),querySelector(s){if(!nodes.has(s)){const node=element();if(s==='[name=sectionWidth]')node.value='10';nodes.set(s,node);}return nodes.get(s);},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},remove(){this.removed=true;}};
   const scope=vm.createContext({document:{createElement:tag=>tag==='dialog'?dialog:{...element(),remove(){this.removed=true;}},body:{append(node){if(node.className==='measurement-job-notice')notices.push(node);}}},setTimeout,clearTimeout,AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
-  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord,loadPreviousVolume});
+  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord,loadPreviousVolume,availableSurfaces});
   if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';if(execution!=='server')dialog.querySelector('[name=source]').value='dsm';}
   return{dialog,handle,notices,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
@@ -36,7 +36,7 @@ test('client inspector has no specialist controls and keeps one native calculati
   assert.doesNotMatch(f.dialog.innerHTML,/name="metres"|I confirm source elevations/);
   assert.match(f.dialog.innerHTML,/value="boundary-triangulated">Ground from boundary/);
   assert.match(f.dialog.innerHTML,/<details class="surface-settings" hidden>/);
-  assert.equal(f.dialog.querySelector('[name=source]').disabled,true);
+  assert.equal(f.dialog.querySelector('[name=source]').disabled,false);
   assert.equal(f.dialog.querySelector('[name=reference]').disabled,true);
   f.handle.close();
 });
@@ -105,6 +105,16 @@ test('standard calculation cannot declare missing elevation units and surfaces r
 test('new client stockpile delegates source selection even when drawn on terrain',async()=>{
   let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{record:{name:'Terrain outline',source:{kind:'dtm'}},autoCalculate:true});
   await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.sourceKind,'auto');assert.equal(settings.confirmMeters,false);f.handle.close();
+});
+
+test('ordinary volume inspector lets the user explicitly select a registered DSM or DTM',async()=>{
+  let settings;const f=fixture(async(_record,options)=>{settings=options;return result;});
+  const source=f.dialog.querySelector('[name=source]');source.value='dtm';await f.calculate();
+  assert.equal(settings.sourceKind,'dtm');
+  f.handle.close();
+  const unavailable=fixture(()=>result,{availableSurfaces:{dsm:true,dtm:false,ept:false}});
+  assert.equal(unavailable.dialog.querySelector('[name=source]').querySelector('option[value="dtm"]').disabled,true);
+  unavailable.handle.close();
 });
 
 test('server inspector delegates a consistent automatic source for every new viewing-mode outline',async()=>{

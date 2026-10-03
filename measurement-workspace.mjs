@@ -16,7 +16,7 @@ const savedUnits = {imperial:'imperial',feet:'ft',yards:'yd',metric:'m',centimet
 const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yards',metric:'metric',m:'metric',cm:'centimeters'};
 const DISPLAY_SURFACE_RETRY_MS=500;
 
-export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
+export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, availableSurfaces=()=>({dsm:true,dtm:true,ept:false}), onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
   const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set(),pendingRenameSaves=new Set();
   const metricCache=new WeakMap();
@@ -271,7 +271,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     // Missing/expired authority must produce an error, never a browser fallback.
     const server=typeof surfaceRequest==='function'||preferServerSurface()||adminAllowed;
     const calculate=server?createServerSurfaceCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):calculateSurface;
-    activeDialog=openSurfaceDialog({record,units,autoCalculate,advancedSettings:adminAllowed,areaM2:measurementMetrics(record).horizontalAreaM2,execution:server?'server':'browser',getRecord:()=>snapshot,
+    activeDialog=openSurfaceDialog({record,units,autoCalculate,advancedSettings:adminAllowed,availableSurfaces:availableSurfaces(),areaM2:measurementMetrics(record).horizontalAreaM2,execution:server?'server':'browser',getRecord:()=>snapshot,
       loadPreviousVolume:server?async()=>{
         await capabilitiesReady;if(!isCurrent())throw new Error('Measurement access or view changed.');
         const request=adminAllowed&&typeof adminRequest==='function'?adminRequest:surfaceRequest;

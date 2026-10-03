@@ -18,7 +18,7 @@ export function mountNativeProfile(host, {record, getRecord = () => record, unit
   const chartImage=document.createElement('canvas'),planImage=document.createElement('canvas');chartImage.width=chart.width;chartImage.height=chart.height;planImage.width=plan.width;planImage.height=plan.height;
   const factor = {imperial: .3048, feet: .3048, metric: 1, yards: .9144, centimeters: .01}[units] || .3048;
   const suffix = {imperial: 'ft', feet: 'ft', metric: 'm', yards: 'yd', centimeters: 'cm'}[units] || 'ft';
-  const format = v => measurementValue(v, 1, units), tick = v => (v / factor).toLocaleString('en-US', {maximumFractionDigits: 1});
+  const format = v => measurementValue(v, 1, units), tick = v => (v / factor).toLocaleString('en-US', {minimumFractionDigits: 3, maximumFractionDigits: 3});
   let retired = false, controller = null, generation = 0, result = null, stale = false, inspected = null, scales = null, line = null, cancelJob = null, cancelling = false, cachedResult = null, pendingUpdate = false, debounce = null;
   const initialRecord = structuredClone(getRecord() || record);
   const vertices = initialRecord.vertices;

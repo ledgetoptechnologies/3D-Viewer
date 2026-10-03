@@ -73,6 +73,7 @@ export function measurementValue(value, power = 1, units = 'imperial') {
   if (!Number.isFinite(value)) return 'Unavailable';
   const decimal = n => measurementDecimal.format(n);
   const choices = { imperial: [1 / 0.3048, 'ft'], feet: [1 / 0.3048, 'ft'], yards: [1 / 0.9144, 'yd'], metric: [1, 'm'], centimeters: [100, 'cm'] };
+  if (power === 3 && ['imperial', 'feet', 'yards'].includes(units)) return `${decimal(value / 0.9144 ** 3)} yd³`;
   if (power === 1 && units === 'imperial') {
     const total = Math.round(Math.abs(value) / 0.0254 * 1000) / 1000;
     return `${value < 0 ? '−' : ''}${measurementInteger.format(Math.floor(total / 12))}′ ${decimal(total % 12)}″`;

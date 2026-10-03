@@ -40,13 +40,23 @@ test('DSM and DTM reuse the same stable camera layer as orthophoto with permissi
   context.SHARE_PERMISSIONS.cameras=false;assert.equal(context.refreshMapCameraLayer(),false);
 });
 
-test('DEM volume controls are hidden for browsing but remain available for real volume measurements',()=>{
+test('DEM volume controls stay hidden for browsing and follow the selected DSM or DTM for measurements',()=>{
   const fn=source.slice(source.indexOf('function syncMapVolumeAvailability()'),source.indexOf('\nfunction cancelMapMeasure',source.indexOf('function syncMapVolumeAvailability()')));
   const options={style:{}},surface={value:'auto',querySelector:()=>({disabled:false}),selectedOptions:[{disabled:false}]},button={};
   const context={state:{activeMode:'dsm',activeTool:'none'},demLayers:{dsm:{}},DSM_URL:'/dsm',DTM_URL:'/dtm',isMapMode:()=>true,document:{getElementById:id=>({'map-volume-options':options,'map-volume-surface':surface,'tool-volume':button}[id])}};
   vm.createContext(context);vm.runInContext(fn,context);context.syncMapVolumeAvailability();assert.equal(options.style.display,'none');
   context.state.activeTool='volume';context.syncMapVolumeAvailability();assert.equal(options.style.display,'block');assert.equal(surface.value,'dsm');
+  context.state.activeMode='dtm';context.demLayers.dtm={};context.syncMapVolumeAvailability();assert.equal(surface.value,'dtm');
   assert.match(source,/polygon, nodata: ds\.nodata, reference, customReference/,'reference-plane math is unchanged');
+});
+
+test('raster volume calculation resolves the explicitly selected DSM or DTM',()=>{
+  const extract=name=>{const start=source.indexOf(`function ${name}(`);return source.slice(start,source.indexOf('\nfunction ',start+1));};
+  const dsm={name:'dsm'},dtm={name:'dtm'},select={value:'dsm'};
+  const context={DSM_URL:'/dsm',DTM_URL:'/dtm',state:{activeMode:'ortho'},demLayers:{dsm:{ds:dsm},dtm:{ds:dtm}},geoDatasets:{},document:{getElementById:id=>id==='map-volume-surface'?select:null}};
+  vm.createContext(context);vm.runInContext(`${extract('selectedVolumeDataset')}\n${extract('requestedVolumeSurface')}`,context);
+  assert.equal(context.selectedVolumeDataset(),dsm);assert.equal(context.requestedVolumeSurface().type,'dsm');assert.equal(context.requestedVolumeSurface().url,'/dsm');
+  select.value='dtm';assert.equal(context.selectedVolumeDataset(),dtm);assert.equal(context.requestedVolumeSurface().type,'dtm');assert.equal(context.requestedVolumeSurface().url,'/dtm');
 });
 
 test('both real DEM pixel paths are opaque and remap colors without clipping out-of-range elevations',()=>{

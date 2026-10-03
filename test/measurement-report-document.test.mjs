@@ -30,6 +30,13 @@ test('report has readable identity and concise quantities before detailed append
   assert.match(html, /Missing coverage/);
 });
 
+test('imperial report volume quantities use cubic yards while metric remains cubic metres',()=>{
+  const imperial=renderMeasurementReport({...options,units:'imperial'});
+  assert.match(imperial,/4\.085 yd³/);
+  assert.doesNotMatch(imperial,/ft³/);
+  assert.match(renderMeasurementReport(options),/3\.123 m³/);
+});
+
 test('net volume does not substitute enclosed-object volume or sum overlapping records', () => {
   const html = renderMeasurementReport({...options, records: [record, {...record, id:'pile-2', results: {volumeM3:999, method:'closed-mesh', verified:false}}]});
   const summary = html.slice(html.indexOf('<tbody>'), html.indexOf('</tbody>'));

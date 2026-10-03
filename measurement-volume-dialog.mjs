@@ -6,14 +6,15 @@ import './measurement-volume-dialog.css';
 
 // Calculation is injected: scoped server work or an isolated browser fixture.
 // A sampled corridor is not a native-resolution elevation transect.
-export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,advancedSettings=false,areaM2=null,getRecord=()=>record,calculateProfile=null,loadPreviousVolume=null}){
+export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,advancedSettings=false,availableSurfaces={dsm:true,dtm:true,ept:false},areaM2=null,getRecord=()=>record,calculateProfile=null,loadPreviousVolume=null}){
   const unit={imperial:['ft',0.3048],feet:['ft',0.3048],yards:['yd',0.9144],metric:['m',1],centimeters:['cm',0.01]}[units]||['ft',0.3048];
   const dialog=document.createElement('dialog');dialog.className='measurement-volume-dialog surface-inspector';
   dialog.innerHTML=`<header class="surface-heading"><div><p class="surface-eyebrow">Measurement inspector</p><h2>Calculate volume</h2><p data-name></p></div><button data-close aria-label="Close measurement inspector">Close</button></header><div data-surface-content>
   <p class="surface-description">Draw around the bottom of the pile on surrounding ground, then calculate its volume above a reference ground surface. This does not measure solid material inside a car or building.</p>
   <div class="surface-area"><span>Outline area</span><strong data-area></strong></div>
+  <label class="surface-source-control">Elevation surface<select name="source"><option value="auto">Automatic (recommended)</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground only</option><option value="ept" hidden>Point cloud · topmost-point surface</option></select></label>
+  <p class="hint surface-source-hint">Automatic keeps a saved source; for a new stockpile it prefers DSM and may use a compatible point surface if no DSM exists. DTM represents bare earth and may omit the pile.</p>
   <details class="surface-settings" ${advancedSettings?'':'hidden'}><summary>Advanced settings · staff only</summary><div class="surface-settings-grid">
-  <label>Elevation surface<select name="source"><option value="auto">Current surface</option><option value="dsm">DSM · objects and ground</option><option value="dtm">DTM · ground</option><option value="ept" hidden>Original point surface</option></select></label>
   <label>Reference base<select name="reference"><option value="boundary-triangulated">Ground from boundary</option><option value="fitted-plane">Fitted sloping plane</option><option value="lowest-boundary">Lowest boundary</option><option value="highest-boundary">Highest boundary</option><option value="average-boundary">Average boundary</option><option value="custom">Custom horizontal elevation</option></select></label>
   <label data-custom hidden>Custom elevation (${unit[0]})<input name="elevation" type="number" step="any" value="0"></label><label>Base offset (${unit[0]})<input name="offset" type="number" step="any" value="0"></label></div>
   <p class="hint">For Ground from boundary, place the outline around the pile toe on surrounding ground. This estimates a base; it is not surveyed ground. Choose a custom elevation only when that height is known. A DTM may remove the pile itself.</p>
@@ -35,12 +36,18 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     const card=dialog.querySelector(`[data-result=${name}]`).parentElement;
     if(card){const tip=document.createElement('details');tip.className='volume-help';tip.innerHTML=`<summary aria-label="Explain ${name}" title="${text}">?</summary><p>${text}</p>`;card.append(tip);}
   }
+  const sourceSelect=dialog.querySelector('[name=source]');
+  sourceSelect.querySelector('option[value="dsm"]').disabled=availableSurfaces.dsm!==true;
+  sourceSelect.querySelector('option[value="dtm"]').disabled=availableSurfaces.dtm!==true;
+  const pointOption=sourceSelect.querySelector('option[value="ept"]');
+  pointOption.hidden=!advancedSettings||availableSurfaces.ept!==true;
+  pointOption.disabled=pointOption.hidden;
   dialog.querySelector('[data-area]').textContent=Number.isFinite(areaM2)&&areaM2>=0?measurementValue(areaM2,2,units):'Available in your measurement list';
   if(!advancedSettings){
-    // New client stockpiles use the pile-containing surface in every view.
-    // restoreSavedResult below still preserves an explicitly saved source/base.
+    // Ordinary users may choose registered DSM/DTM surfaces, but not specialist
+    // point methods or reference-plane overrides. Saved source choices survive.
     dialog.querySelector('[name=source]').value='auto';
-    for(const name of ['source','reference','elevation','offset'])dialog.querySelector(`[name=${name}]`).disabled=true;
+    for(const name of ['reference','elevation','offset'])dialog.querySelector(`[name=${name}]`).disabled=true;
     dialog.querySelector('[data-status]').textContent='Your outline is ready. Calculate volume when you are ready; your area is already available.';
   }
   if(execution==='server'){
@@ -88,7 +95,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
       if(reference.type==='custom')field('elevation').value=String(reference.elevationM/unit[1]);
     }
     if(Number.isFinite(reference.offsetM))field('offset').value=String(reference.offsetM/unit[1]);
-    const source=saved.sourceKind||saved.source?.kind;if(['dsm','dtm','ept'].includes(source))field('source').value=source;
+    const source=saved.sourceKind||saved.source?.kind;if(['dsm','dtm'].includes(source)||(source==='ept'&&advancedSettings))field('source').value=source;
     if(hasSurface){
       for(const [name,key]of [['cut','cutM3'],['fill','fillM3'],['net','netM3']])dialog.querySelector(`[data-result=${name}]`).textContent=Number.isFinite(saved[key])?measurementValue(saved[key],3,units):'Unavailable';
       dialog.querySelector('[data-result=coverage]').textContent=Number.isFinite(saved.coverage)&&saved.coverage>=0&&saved.coverage<=1?`${(saved.coverage*100).toFixed(3)}%`:'Unavailable';dialog.querySelector('[data-results]').hidden=false;

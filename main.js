@@ -2450,6 +2450,7 @@ function installMeasurementWorkspace() {
       token:()=>VIEW_MODE==='session'&&sessionStorageKey?sessionStorage.getItem(sessionStorageKey):measurementAssetBearer(DSM_URL||DTM_URL||TILES_URL||EPT_URL||ORTHO_URL),
       context:()=>({modelId:PROJECT?.id,modelVersionId:PROJECT?.activeVersion?.id,audience:activeViewerSession?.audience,subject:activeViewerSession?.subject,temporary:VIEW_MODE!=='session'||(activeViewerSession?.audience!=='ops'&&activeViewerSession?.permissions?.personalMeasurements!==true)}),
     }),
+    availableSurfaces:()=>({dsm:!!DSM_URL,dtm:!!DTM_URL,ept:!!EPT_URL}),
     onAccessLost:measurementAccessLost,
   });
   viewerProductDownloads?.destroy();
