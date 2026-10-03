@@ -36,7 +36,8 @@ test('client inspector has no specialist controls and keeps one native calculati
   assert.doesNotMatch(f.dialog.innerHTML,/name="metres"|I confirm source elevations/);
   assert.match(f.dialog.innerHTML,/value="boundary-triangulated">Ground from boundary/);
   assert.match(f.dialog.innerHTML,/<details class="surface-settings" hidden>/);
-  assert.equal(f.dialog.querySelector('[name=source]').disabled,false);
+  assert.equal(f.dialog.querySelector('[name=source]').disabled,true);
+  assert.equal(f.dialog.querySelector('.surface-source-control').hidden,true);
   assert.equal(f.dialog.querySelector('[name=reference]').disabled,true);
   f.handle.close();
 });
@@ -107,12 +108,12 @@ test('new client stockpile delegates source selection even when drawn on terrain
   await new Promise(resolve=>setImmediate(resolve));assert.equal(settings.sourceKind,'auto');assert.equal(settings.confirmMeters,false);f.handle.close();
 });
 
-test('ordinary volume inspector lets the user explicitly select a registered DSM or DTM',async()=>{
-  let settings;const f=fixture(async(_record,options)=>{settings=options;return result;});
+test('staff volume inspector lets the operator explicitly select a registered DSM or DTM',async()=>{
+  let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{advancedSettings:true});
   const source=f.dialog.querySelector('[name=source]');source.value='dtm';await f.calculate();
   assert.equal(settings.sourceKind,'dtm');
   f.handle.close();
-  const unavailable=fixture(()=>result,{availableSurfaces:{dsm:true,dtm:false,ept:false}});
+  const unavailable=fixture(()=>result,{advancedSettings:true,availableSurfaces:{dsm:true,dtm:false,ept:false}});
   assert.equal(unavailable.dialog.querySelector('[name=source]').querySelector('option[value="dtm"]').disabled,true);
   unavailable.handle.close();
 });

@@ -37,6 +37,12 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     if(card){const tip=document.createElement('details');tip.className='volume-help';tip.innerHTML=`<summary aria-label="Explain ${name}" title="${text}">?</summary><p>${text}</p>`;card.append(tip);}
   }
   const sourceSelect=dialog.querySelector('[name=source]');
+  // Surface selection is an internal operator control. Client/public viewers
+  // use the registered automatic choice and do not learn which private assets
+  // the task exposes.
+  dialog.querySelector('.surface-source-control').hidden=!advancedSettings;
+  dialog.querySelector('.surface-source-hint').hidden=!advancedSettings;
+  sourceSelect.disabled=!advancedSettings;
   sourceSelect.querySelector('option[value="dsm"]').disabled=availableSurfaces.dsm!==true;
   sourceSelect.querySelector('option[value="dtm"]').disabled=availableSurfaces.dtm!==true;
   const pointOption=sourceSelect.querySelector('option[value="ept"]');
