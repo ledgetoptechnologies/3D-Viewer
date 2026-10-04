@@ -54,10 +54,10 @@ const fixtures = {
   ],
   providers: [
     {
-      id: 'provider-nodeodm', displayName: 'TrueNAS NodeODM', type: 'nodeodm', endpoint: 'https://nodeodm.example.test',
+      id: 'provider-nodeodm', displayName: 'TrueNAS ClusterODM', type: 'clusterodm', endpoint: 'https://nodeodm.example.test',
       enabled: true, admissionLimit: 2, runtimeHealth: 'healthy', capabilityFingerprint: 'browser-fingerprint', credential: { configured: true, mode: 'token' },
       capabilities: {
-        providerType: 'nodeodm', apiVersion: '2.2.3', engine: 'ODM', engineVersion: '3.5.0', taskQueueCount: 1,
+        providerType: 'clusterodm', apiVersion: '1.5.3', engine: 'ODM', engineVersion: '3.5.6', taskQueueCount: 0,
         maxParallelTasks: 99999999999, options: [
           { name: 'orthophoto-resolution', type: 'float', value: 5, domain: 'float > 0', help: 'Orthophoto resolution in cm/pixel.' },
           { name: 'dsm', type: 'bool', value: false, help: 'Generate a digital surface model.' },
@@ -67,7 +67,7 @@ const fixtures = {
       },
     },
   ],
-  presets: [{ id: 'preset-fast', displayName: 'Fast', description: '', providerType: 'nodeodm', capabilityFingerprint: 'browser-fingerprint', options: {}, enabled: true, builtIn: false }],
+  presets: [{ id: 'preset-fast', displayName: 'Fast', description: '', providerType: 'clusterodm', capabilityFingerprint: 'browser-fingerprint', options: {}, enabled: true, builtIn: false }],
   outputs: [{
     id: 'output-johnson', taskId: 'task-johnson', modelId: 'model-johnson', displayName: 'Johnson output',
     status: 'published', activePublished: true, byteSize: 4096, assetCount: 3, assetKinds: ['glb', 'ortho', 'report'],
@@ -819,13 +819,22 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-section="providers"]').click()`);
     await waitFor(client, "document.querySelector('.provider-workspace [data-action=\"select-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: provider section did not render`);
+    await client.evaluate(`document.querySelector('[data-action="provider-new"]').click()`);
+    await waitFor(client, "document.querySelector('#provider-form input[name=\"endpoint\"]') !== null", `${viewport.name}: provider endpoint form did not open`);
+    assert.equal(await client.evaluate(`document.querySelector('#provider-form input[name="endpoint"]')?.previousElementSibling?.textContent`), 'NodeODM / ClusterODM URL', `${viewport.name}: endpoint label should not imply HTTPS is mandatory`);
+    assert.match(await client.evaluate(`document.querySelector('#provider-form').textContent`), /HTTP is supported for trusted private networks/);
+    assert.match(await client.evaluate(`document.querySelector('#provider-form').textContent`), /Viewer API must be able to reach the endpoint/);
+    await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').click()`);
+    await waitFor(client, "document.querySelector('[data-action=\"select-provider\"][data-id=\"provider-nodeodm\"]') !== null", `${viewport.name}: selecting an existing provider after viewing the add form failed`);
     assert.equal(await client.evaluate(`Number(document.querySelector('#background-work-count')?.textContent) >= 1`), true, `${viewport.name}: background count did not persist across navigation`);
     await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === false && document.querySelector('#provider-inline-detail .provider-detail') !== null", `${viewport.name}: provider selection must show inline, not in a modal`);
-    assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider inline selection`);
+    assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS ClusterODM', `${viewport.name}: provider inline selection`);
     assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Cluster-managed capacity/);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Cluster-managed scheduling · live queue count unavailable/);
+    assert.equal(await client.evaluate(`document.querySelector('.provider-detail').textContent.includes('0 queued')`), false, `${viewport.name}: do not present ClusterODM's placeholder queue count as live data`);
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail').textContent.includes('99999999999')`), false, `${viewport.name}: cluster sentinel must not imply real upstream slots`);
-    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Viewer admission2 concurrent jobs/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Provider-managed · no Viewer job limit/, `${viewport.name}: provider owns queue admission`);
     assert.equal(await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').getAttribute('aria-pressed')`), 'true');
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.provider-workspace .provider-list')).overflowY`), 'auto', `${viewport.name}: node list must scroll independently`);
     assert.equal(await client.evaluate(`(()=>{const left=document.querySelector('.provider-workspace>aside').getBoundingClientRect(),right=document.querySelector('#provider-inline-detail').getBoundingClientRect();return innerWidth>720?left.right<right.left:right.top>=left.bottom;})()`),true,`${viewport.name}: node list/detail must be side-by-side on desktop and stacked on mobile`);
@@ -837,7 +846,8 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await client.evaluate(`document.querySelector('[data-action="edit-provider"]').click()`);
     await waitFor(client, "document.querySelector('#provider-edit-form') !== null", `${viewport.name}: provider edit form did not open`);
     await client.evaluate(`window.__providerBeforeChange=document.querySelector('#provider-inline-detail')`);
-    await client.evaluate(`(() => { const form=document.querySelector('#provider-edit-form'); form.elements.admissionLimit.value='3'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('#provider-edit-form [name="admissionLimit"]'))`), false);
+    await client.evaluate(`(() => { const form=document.querySelector('#provider-edit-form'); form.elements.displayName.value='Updated Cluster'; form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); return true })()`);
     await waitFor(client, "!window.__providerBeforeChange.isConnected && document.querySelector('#workspace-modal')?.open === false && document.querySelector('[data-action=\"replace-provider-token\"]') !== null", `${viewport.name}: provider edit did not return to refreshed node detail`);
     await client.evaluate(`document.querySelector('[data-action="replace-provider-token"]').click()`);
     await waitFor(client, "document.querySelector('#provider-token-form') !== null", `${viewport.name}: provider token form did not open`);

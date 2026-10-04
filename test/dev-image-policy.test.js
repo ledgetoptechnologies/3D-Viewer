@@ -13,5 +13,5 @@ test('dev publication preserves production tag scope and all exact-image verific
   assert.ok(check>=0&&build>check&&verify>build&&promote>verify);
   assert.match(source,/PUBLISHED_IMAGE:.*@\$\{\{ steps\.build\.outputs\.digest \}\}/);
   assert.match(source,/viewer-image-attestation-\$\{\{ github\.sha \}\}/);
-  assert.equal([...source.matchAll(/EXPECTED_SCHEMA_VERSION: "39"/g)].length,2);
+  assert.equal([...source.matchAll(/EXPECTED_SCHEMA_VERSION: "40"/g)].length,2);
 });

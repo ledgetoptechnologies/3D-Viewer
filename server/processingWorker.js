@@ -47,17 +47,21 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   let known=null;try{known=await adapter.status(attempt.providerTaskId,{signal});}catch(error){if(error.code!=='provider_task_not_found')throw error;}
   const freshTaskMissing=!known&&attempt.submissionPhase==='new';
   const save=(phase,count=attempt.uploadedFileCount)=>{if(!processing.setSubmissionStateForJob(job.id,job.lease_owner,phase,count))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});attempt={...attempt,submissionPhase:phase,uploadedFileCount:count};};
-  const restart=async()=>{if(known){await adapter.remove(attempt.providerTaskId,{signal});known=null;}save('new',0);};
-  if(known&&attempt.submissionPhase==='new')await restart();
-  if(known&&attempt.submissionPhase==='initializing'){if(processing.markAttemptInitializationAmbiguous&&!processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});save('initialized',0);}
-  if(known&&attempt.submissionPhase==='uploading'){
-    const providerCount=Number(known.imagesCount);
-    if(!Number.isSafeInteger(providerCount)||providerCount<attempt.uploadedFileCount||providerCount>photoFiles.length)await restart();else save('uploading',providerCount);
+  // NodeODM/ClusterODM task-info exposes the accepted task table, not their
+  // temporary upload directories. QUEUED therefore proves acceptance too.
+  // A lost commit response must never remove/re-upload this same task UUID.
+  if(known){
+    if(!['queued_upstream','running','completed','failed','cancelled'].includes(known.status))throw Object.assign(new Error('Provider task acceptance is not yet authoritative; retaining the dataset for reconciliation'),{code:'provider_submission_ambiguous'});
+    save('committed',files.length);
+    transition(processing,job,known.status==='running'?'running':'queued_upstream',{progress:known.progress||0});
+    if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+    return;
   }
-  if(known&&attempt.submissionPhase==='uploading_auxiliary')await restart();
-  if(known&&attempt.submissionPhase==='committing'){if(['running','completed'].includes(known.status))save('committed',files.length);else await restart();}
-  if(!known&&attempt.submissionPhase!=='new')save('new',0);
-  if(!known){
+  // Upload endpoints rename duplicate basenames, and task-info cannot tell us
+  // how many temporary files arrived. Keep uncertainty durable rather than
+  // re-uploading a partial batch or deleting an accepted task hidden by outage.
+  if(['uploading','uploading_auxiliary','committing','committed'].includes(attempt.submissionPhase))throw Object.assign(new Error('Provider submission response was lost; retaining the dataset and task UUID while awaiting authoritative reconciliation'),{code:'provider_submission_ambiguous'});
+  if(['new','initializing'].includes(attempt.submissionPhase)){
     const initialization=processing.beginAttemptInitialization?.(job.id,job.lease_owner,{freshTaskMissing});
     if(processing.beginAttemptInitialization&&!initialization)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     transition(processing,job,'initializing');save('initializing',0);
@@ -65,9 +69,20 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
     if(initialization&&!initialization.historical){const recorded=initialized?.uuid===attempt.providerTaskId?processing.acknowledgeAttemptInitialization(job.id,job.lease_owner,initialization.generation,initialized.uuid):processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner);if(!recorded)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
     save('initialized',0);
   }
-  if(attempt.uploadedFileCount<photoFiles.length){transition(processing,job,'uploading');for(let index=attempt.uploadedFileCount;index<photoFiles.length;index+=20){save('uploading',index);const batch=photoFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('uploading',index+batch.length);}}
-  if(auxiliaryFiles.length&&attempt.uploadedFileCount<files.length){transition(processing,job,'uploading');for(let index=Math.max(0,attempt.uploadedFileCount-photoFiles.length);index<auxiliaryFiles.length;index+=20){save('uploading_auxiliary',photoFiles.length+index);const batch=auxiliaryFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('uploading_auxiliary',photoFiles.length+index+batch.length);}}
-  if(attempt.submissionPhase!=='committed'){save('uploaded',files.length);transition(processing,job,'committed');save('committing',files.length);await adapter.commit(attempt.providerTaskId,{signal});save('committed',files.length);}
+  if(attempt.uploadedFileCount<photoFiles.length){transition(processing,job,'uploading');for(let index=attempt.uploadedFileCount;index<photoFiles.length;index+=20){save('uploading',index);const batch=photoFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('initialized',index+batch.length);}}
+  if(auxiliaryFiles.length&&attempt.uploadedFileCount<files.length){transition(processing,job,'uploading');for(let index=Math.max(0,attempt.uploadedFileCount-photoFiles.length);index<auxiliaryFiles.length;index+=20){save('uploading_auxiliary',photoFiles.length+index);const batch=auxiliaryFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('initialized',photoFiles.length+index+batch.length);}}
+  if(attempt.submissionPhase!=='committed'){
+    save('uploaded',files.length);transition(processing,job,'committed');save('committing',files.length);
+    try{await adapter.commit(attempt.providerTaskId,{signal});}
+    catch(error){
+      // The ClusterODM JSON capacity gate explicitly rejects before creating
+      // its task entry and cleans the temporary directory. HTTP 429 alone
+      // lacks that proof and must remain ambiguous after a commit request.
+      if(error.code==='provider_busy'&&error.explicitCapacityRejection)save('new',0);
+      throw error;
+    }
+    save('committed',files.length);
+  }
   known=known&&['running','completed'].includes(known.status)?known:null;
   transition(processing,job,known?.status==='running'?'running':'queued_upstream',{progress:known?.progress||0});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
 }
@@ -75,6 +90,7 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
 async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
   const attempt=processing.getAttempt(job.attempt_id),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
   const status=await adapter.status(attempt.providerTaskId,{signal});
+  if(!['queued_upstream','running','completed','failed','cancelled'].includes(status.status))throw Object.assign(new Error('Provider returned an unknown task state; retaining the task for reconciliation'),{code:'provider_submission_ambiguous'});
   let output=null;
   try{output=await adapter.output(attempt.providerTaskId,attempt.providerOutputCursor,{signal});}
   catch(error){
@@ -89,7 +105,12 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
   if(output){for(const line of output.lines)processing.appendLog(attempt.id,'provider',line);processing.setOutputCursor(attempt.id,output.nextLine);}
   else processing.appendLog(attempt.id,'warn','Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.');
   if(status.status==='completed'){if(processing.recordAttemptProviderResult&&!processing.recordAttemptProviderResult(job.id,job.lease_owner,status))throw Object.assign(new Error('processing result identity or lease was lost'),{code:'lease_lost'});transition(processing,job,'ingesting',{progress:1,upstreamCompletedAt:new Date().toISOString()});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'ingest'))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
-  else if(status.status==='failed'||status.status==='cancelled'){const task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),code=`provider_${status.status}`,message=`ODM processing ${status.status}`,terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'});if(!terminal)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
+  else if(status.status==='failed'||status.status==='cancelled'){
+    const task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),message=`ODM processing ${status.status}`;
+    const event={eventId:`processing-${status.status}-${attempt.id}`,schemaVersion:1,type:status.status==='cancelled'?'processing.cancelled':'processing.failed',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:status.status};
+    const terminal=status.status==='cancelled'?processing.cancelJobFromProvider(job.id,job.lease_owner,message,event):processing.failJobTerminal(job.id,job.lease_owner,'provider_failed',message,event);
+    if(!terminal)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+  }
   else{transition(processing,job,status.status,{progress:status.progress});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+15000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
 }
 
@@ -163,7 +184,26 @@ async function processOne(deps,owner=crypto.randomUUID()){
   const job=deps.processing.claimJob(owner);if(!job)return false;
   const controller=new AbortController();const heartbeat=setInterval(()=>{const attempt=deps.processing.getAttempt(job.attempt_id);if(!deps.processing.heartbeatJob(job.id,owner)||attempt?.status==='cancelled')controller.abort();},20000);heartbeat.unref?.();
   try{const work={...deps,signal:controller.signal};if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
-  catch(error){const safe=sanitizeLogMessage(error.message).slice(0,1000);if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),retry=!permanent&&job.attempt_count<5?new Date(Date.now()+Math.min(300000,5000*2**job.attempt_count)).toISOString():null;if(retry)deps.processing.failJob(job.id,job.lease_owner,error.code||'processing_failed',safe,retry);else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'});}return true;}
+  catch(error){
+    const safe=sanitizeLogMessage(error.message).slice(0,1000);
+    if(error.code==='lease_lost'||controller.signal.aborted)return true;
+    if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}
+    if(error.code==='provider_busy'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner,error.retryAfterMs,{errorCode:'provider_busy',errorMessage:'waiting for upstream provider capacity'});return true;}
+    if(error.code==='provider_authentication_failed'){
+      deps.processing.deferProviderAuthentication(job.id,job.lease_owner,'Provider rejected credentials; waiting for corrected credentials and a successful health check');return true;
+    }
+    const durable=new Set(['provider_unreachable','provider_unavailable','provider_tls_failed','provider_submission_ambiguous','provider_busy','provider_task_not_found']).has(error.code);
+    const delay=error.retryAfterMs||Math.min(300000,5000*2**Math.min(Number(job.attempt_count)||0,6));
+    if(durable){
+      deps.processing.appendLog(job.attempt_id,'warn',safe);
+      deps.processing.failJob(job.id,job.lease_owner,error.code,safe,new Date(Date.now()+delay).toISOString());return true;
+    }
+    deps.processing.appendLog(job.attempt_id,'error',safe);
+    const permanent=new Set(['duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),retry=!permanent&&job.attempt_count<5?new Date(Date.now()+delay).toISOString():null;
+    if(retry)deps.processing.failJob(job.id,job.lease_owner,error.code||'processing_failed',safe,retry);
+    else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'});}
+    return true;
+  }
   finally{clearInterval(heartbeat);}
 }
 module.exports={adapterFor,discoverOutputs,verifyProviderMeshClosure,processIngest,processOne,processReconcile,processSubmit};

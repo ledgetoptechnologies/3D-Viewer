@@ -6,15 +6,24 @@ const path = require('node:path');
 const { sanitizeLogMessage } = require('./processingSecurity');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
+function providerRetryDelay(value,now=Date.now()) {
+  if(value==null)return null;
+  const raw=String(value).trim();let delay=Number(raw);
+  if(Number.isFinite(delay))delay*=1000;
+  else{const date=Date.parse(raw);if(!Number.isFinite(date))return null;delay=date-now;}
+  return Number.isFinite(delay)&&delay>0?Math.max(5_000,Math.min(5*60_000,delay)):null;
+}
 
-async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
+async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){let next;try{next=await reader.read();}catch(cause){throw Object.assign(new Error('ODM response transfer was interrupted'),{code:'provider_unreachable',cause});}const {done,value}=next;if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
 async function boundedJson(response,maxBytes=1024*1024){if(!String(response.headers.get('content-type')||'').includes('json'))throw new Error('provider returned an unexpected content type');return JSON.parse(await boundedText(response,maxBytes));}
 
 function checkedAction(value, action, uuid=null) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error(`ODM ${action} returned an invalid response`), {code:'provider_request_failed'});
   if (Object.hasOwn(value,'error') || value.success === false) {
     const detail=typeof value.error==='string'?sanitizeLogMessage(value.error).slice(0,1000):'The provider rejected the request';
-    throw Object.assign(new Error(`ODM ${action} failed: ${detail}`), {code:'provider_request_failed'});
+    const busy=/maximum number of concurrent tasks|maximum concurrent tasks/i.test(detail);
+    const unavailable=/no nodes are online|no nodes available|no processing nodes/i.test(detail);
+    throw Object.assign(new Error(`ODM ${action} failed: ${detail}`), {code:busy?'provider_busy':unavailable?'provider_unavailable':'provider_request_failed',...((busy||unavailable)?{retryAfterMs:30_000}:{}),...(busy?{explicitCapacityRejection:true}:{})});
   }
   if(uuid && Object.hasOwn(value,'uuid') && value.uuid!==uuid)throw Object.assign(new Error(`ODM ${action} returned a different task UUID`),{code:'provider_request_failed'});
   return value;
@@ -70,12 +79,23 @@ class NodeOdmProvider {
 
   async request(route, init = {}, query = {}, { timeoutMs=this.timeoutMs, signal=null } = {}) {
     const timeout=AbortSignal.timeout(timeoutMs),combined=signal?AbortSignal.any([timeout,signal]):timeout;
-    const response = await this.fetch(this.url(route, query), { ...init, redirect:'error', signal:combined });
+    let response;
+    try { response = await this.fetch(this.url(route, query), { ...init, redirect:'error', signal:combined }); }
+    catch(cause) {
+      if(signal?.aborted)throw cause;
+      const transportCode=cause?.cause?.code||cause?.code||'';
+      const tls=/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(transportCode);
+      throw Object.assign(new Error(tls?'ODM TLS verification failed':'ODM endpoint is temporarily unreachable'),{code:tls?'provider_tls_failed':'provider_unreachable',cause});
+    }
     if (!response.ok) {
       try { await response.body?.cancel(); } catch { /* best effort */ }
       const error = new Error(`ODM request failed with HTTP ${response.status}`);
-      error.code = response.status === 404 ? 'provider_task_not_found' : 'provider_request_failed';
-      error.status = response.status; throw error;
+      error.code = response.status === 404 ? 'provider_task_not_found' :
+        [401,403].includes(response.status)?'provider_authentication_failed':
+        response.status===429?'provider_busy':response.status>=500?'provider_unavailable':'provider_request_failed';
+      error.status = response.status;
+      if(['provider_busy','provider_unavailable'].includes(error.code))error.retryAfterMs=providerRetryDelay(response.headers.get('retry-after'))||30_000;
+      throw error;
     }
     return response;
   }
@@ -158,4 +178,4 @@ class NodeOdmProvider {
   async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
 }
 
-module.exports = { NodeOdmProvider, STATUS, boundedJson, boundedText, optionArray, typedDefault, detectProviderType };
+module.exports = { NodeOdmProvider, STATUS, boundedJson, boundedText, checkedAction, optionArray, typedDefault, detectProviderType, providerRetryDelay };

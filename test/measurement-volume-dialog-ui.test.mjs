@@ -8,13 +8,13 @@ import {createServerSurfaceCalculator} from '../measurement-server-surface.mjs';
 
 const source=readFileSync(new URL('../measurement-volume-dialog.mjs',import.meta.url),'utf8');
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
-function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record,loadPreviousVolume=null,availableSurfaces={dsm:true,dtm:true,ept:false}}={}){
+function fixture(calculate,{autoCalculate=false,record={name:'Pile A'},execution='browser',openSpecialist=null,getRecord=()=>record,loadPreviousVolume=null,availableSurfaces={dsm:true,dtm:true,ept:false},advancedSettings=false}={}){
   const nodes=new Map(),notices=[];let disposed=0,saved=0;
   const element=()=>({dataset:{},hidden:false,disabled:false,value:'0',checked:false,textContent:'',width:850,height:380,attributes:{},options:new Map(),append(){},setAttribute(k,v){this.attributes[k]=v;},removeAttribute(k){delete this.attributes[k];},querySelector(selector){if(!this.options.has(selector))this.options.set(selector,{disabled:false,hidden:false});return this.options.get(selector);},getContext:()=>new Proxy({},{get:()=>()=>{},set:()=>true})});
   const dialog={...element(),querySelector(s){if(!nodes.has(s)){const node=element();if(s==='[name=sectionWidth]')node.value='10';nodes.set(s,node);}return nodes.get(s);},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},remove(){this.removed=true;}};
   const scope=vm.createContext({document:{createElement:tag=>tag==='dialog'?dialog:{...element(),remove(){this.removed=true;}},body:{append(node){if(node.className==='measurement-job-notice')notices.push(node);}}},setTimeout,clearTimeout,AbortController,structuredClone,measurementValue,buildSampledCrossSection,nearestSectionSample,initialSectionOffsetPercent,mountMeasurementRegionPreview:()=>({dispose(){disposed++;}})});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function openSurfaceDialog','function openSurfaceDialog'),scope);
-  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord,loadPreviousVolume,availableSurfaces});
+  const handle=scope.openSurfaceDialog({record,units:'metric',calculate,save:async()=>{saved++;},autoCalculate,execution,openSpecialist,getRecord,loadPreviousVolume,availableSurfaces,advancedSettings});
   if(!record.results){dialog.querySelector('[name=reference]').value='boundary-triangulated';if(execution!=='server')dialog.querySelector('[name=source]').value='dsm';}
   return{dialog,handle,notices,saved:()=>saved,disposed:()=>disposed,calculate:()=>dialog.querySelector('[data-calculate]').onclick()};
 }
@@ -170,6 +170,22 @@ test('reopening an existing surface result shows saved totals honestly without a
   assert.equal(f.dialog.querySelector('[data-results]').hidden,false);assert.equal(f.dialog.querySelector('[data-result=cut]').textContent,'12,345.679 m³');assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,true);assert.match(f.dialog.querySelector('[data-preview-empty]').textContent,/saved calculation settings/);
   assert.equal(f.dialog.querySelector('[name=reference]').value,'custom');assert.equal(f.dialog.querySelector('[name=elevation]').value,'100');assert.equal(f.dialog.querySelector('[name=offset]').value,'0.5');assert.equal(f.dialog.querySelector('[name=source]').value,'dtm');assert.doesNotMatch(f.dialog.innerHTML,/name="metres"/);
   f.handle.close();
+});
+
+test('staff volume inspector exposes registered point-cloud surface as an explicit volume source',async()=>{
+  let settings;const f=fixture(async(_record,options)=>{settings=options;return result;},{advancedSettings:true,availableSurfaces:{dsm:true,dtm:true,ept:true}});
+  const source=f.dialog.querySelector('[name=source]'),pointOption=source.querySelector('option[value="ept"]');
+  assert.equal(pointOption.hidden,false);
+  assert.equal(pointOption.disabled,false);
+  source.value='ept';await f.calculate();
+  assert.equal(settings.sourceKind,'ept');
+  f.handle.close();
+
+  const unavailable=fixture(()=>result,{advancedSettings:true,availableSurfaces:{dsm:true,dtm:true,ept:false}});
+  const unavailablePoint=unavailable.dialog.querySelector('[name=source]').querySelector('option[value="ept"]');
+  assert.equal(unavailablePoint.hidden,true);
+  assert.equal(unavailablePoint.disabled,true);
+  unavailable.handle.close();
 });
 
 test('saved incomplete or object calculations are not presented as a new complete surface calculation',()=>{

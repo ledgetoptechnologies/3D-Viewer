@@ -2033,6 +2033,17 @@ const MIGRATIONS = [
       PRIMARY KEY(audience,subject)
     );
   `},
+  {version:40,name:'durable_processing_dispatch_order',sql:`
+    CREATE TABLE processing_job_order (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL UNIQUE REFERENCES processing_jobs(id) ON DELETE CASCADE
+    );
+    INSERT INTO processing_job_order(job_id)
+      SELECT id FROM processing_jobs ORDER BY created_at,id;
+    CREATE TRIGGER processing_jobs_assign_dispatch_order
+      AFTER INSERT ON processing_jobs
+      BEGIN INSERT INTO processing_job_order(job_id) VALUES (NEW.id); END;
+  `},
 ];
 
 function applyMigrations(database) {

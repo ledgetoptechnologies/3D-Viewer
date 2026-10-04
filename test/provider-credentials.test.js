@@ -74,6 +74,14 @@ async function request(context, route, { method = 'GET', body, key } = {}) {
   });
 }
 
+test('provider API exposes managed dispatch and rejects obsolete admission settings',async t=>{
+ const odm=await odmServer(t),c=await fixture(t,{providerFetch:odm.fetchImpl});
+ const oldCidrs=[...config.processingProviderAllowedCidrs];config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...parseProviderCidrs('192.168.50.0/24'));t.after(()=>config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...oldCidrs));
+ const created=await request(c,'/api/v1/processing/providers',{method:'POST',key:'managed-dispatch-create',body:{displayName:'Provider-led',endpoint:odm.origin}});assert.equal(created.status,201);
+ const provider=(await created.json()).provider;assert.equal(provider.dispatchMode,'provider_managed');assert.equal(provider.submissionConcurrency,1);assert.equal(Object.hasOwn(provider,'admissionLimit'),false);
+ const response=await request(c,`/api/v1/processing/providers/${provider.id}`,{method:'PATCH',key:'obsolete-admission-setting',body:{admissionLimit:4}});assert.equal(response.status,400);assert.equal((await response.json()).code,'provider_dispatch_managed');
+});
+
 test('read-only capability refresh observes an existing node without permitting configuration changes',async t=>{
  const odm=await odmServer(t),c=await fixture(t,{providerFetch:odm.fetchImpl});
  const oldCidrs=[...config.processingProviderAllowedCidrs];config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...parseProviderCidrs('192.168.50.0/24'));t.after(()=>config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...oldCidrs));
@@ -219,7 +227,8 @@ test('provider creation detects ClusterODM and stores nothing for an ambiguous c
   assert.equal(detected.status, 201);
   const detectedBody = await detected.json();
   assert.equal(detectedBody.provider.type, 'clusterodm');
-  assert.equal(detectedBody.provider.admissionLimit, 4);
+  assert.equal(detectedBody.provider.dispatchMode, 'provider_managed');
+  assert.equal(Object.hasOwn(detectedBody.provider,'admissionLimit'), false);
   assert.equal(detectedBody.provider.capabilities.providerType, 'clusterodm');
   assert.equal(detectedBody.detection.apiVersion, '1.5.3');
   assert.doesNotMatch(JSON.stringify(detectedBody), /cluster-secret-token/);
@@ -230,6 +239,30 @@ test('provider creation detects ClusterODM and stores nothing for an ambiguous c
   assert.equal(rejectedBody.code, 'provider_probe_ambiguous');
   assert.doesNotMatch(JSON.stringify(rejectedBody), /ambiguous-secret-token/);
   assert.equal(ambiguousContext.processing.listProviders().length, 0);
+});
+
+test('provider setup distinguishes server-side reachability and authentication failures without exposing upstream details', async (t) => {
+  const odm = await odmServer(t);
+  const networkError = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('private route detail'), { code: 'ENETUNREACH' }) });
+  const unreachable = await fixture(t, { providerFetch: async () => { throw networkError; } });
+  const unauthorized = await fixture(t, { providerFetch: async () => new Response('upstream response body', { status: 401 }) });
+  const oldOrigins = [...config.processingProviderOrigins];
+  config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, odm.origin);
+  t.after(() => config.processingProviderOrigins.splice(0, config.processingProviderOrigins.length, ...oldOrigins));
+
+  const unreachableResponse = await request(unreachable, '/api/v1/processing/providers', { method: 'POST', key: 'provider-route-error', body: { displayName: 'Unreachable node', endpoint: odm.origin } });
+  assert.equal(unreachableResponse.status, 422);
+  const unreachableBody = await unreachableResponse.json();
+  assert.equal(unreachableBody.code, 'provider_unreachable');
+  assert.match(unreachableBody.error, /server-side routing or firewall/);
+  assert.doesNotMatch(JSON.stringify(unreachableBody), /private route detail|ENETUNREACH/);
+
+  const authResponse = await request(unauthorized, '/api/v1/processing/providers', { method: 'POST', key: 'provider-auth-error', body: { displayName: 'Unauthorized node', endpoint: odm.origin } });
+  assert.equal(authResponse.status, 422);
+  const authBody = await authResponse.json();
+  assert.equal(authBody.code, 'provider_authentication_failed');
+  assert.match(authBody.error, /API token/);
+  assert.doesNotMatch(JSON.stringify(authBody), /upstream response body/);
 });
 
 test('credential mutation blocks every nonterminal attempt and tampering fails closed', async (t) => {
