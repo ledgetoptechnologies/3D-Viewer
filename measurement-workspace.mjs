@@ -5,7 +5,7 @@ import './measurement-report-document.css';
 import {renderMeasurementReport} from './measurement-report-document.mjs';
 import {openSurfaceDialog} from './measurement-volume-dialog.mjs';
 import {openAdminCalculationDialog,availableAdminSources} from './measurement-admin-dialog.mjs';
-import {createServerSurfaceCalculator} from './measurement-server-surface.mjs';
+import {createServerSurfaceCalculator,createSavedSurfacePreviewLoader} from './measurement-server-surface.mjs';
 import {createServerProfileCalculator} from './measurement-server-profile.mjs';
 import {createMeasurementListLayout} from './measurement-list-layout.mjs';
 import {retainedDisplayBoundary} from './measurement-display-elevations.mjs';
@@ -16,10 +16,23 @@ const savedUnits = {imperial:'imperial',feet:'ft',yards:'yd',metric:'m',centimet
 const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yards',metric:'metric',m:'metric',cm:'centimeters'};
 const DISPLAY_SURFACE_RETRY_MS=500;
 
+// Page-local previews are never written into measurement documents or storage.
+// The small FIFO cap bounds public-page memory; identity ignores display-only
+// rename revisions but includes all geometry and saved calculation evidence.
+function createSurfacePreviewCache(getScope=()=>null){
+  const entries=new Map(),identity=record=>JSON.stringify([record?.id,record?.modelVersionId,record?.collection,record?.vertices,record?.coordinateReference,record?.results?.calculationJobId,record?.results?.method,record?.results?.source,record?.results?.reference,...['cutM3','fillM3','netM3','coverage'].map(key=>record?.results?.[key])]);
+  let scope=getScope();const synchronize=()=>{const current=getScope();if(scope!==current){entries.clear();scope=current;}};
+  return{clear(){entries.clear();},put(record,preview){
+    synchronize();if(record?.results?.volumeInvalidated||!record?.results?.calculationJobId||!Array.isArray(preview?.samples)||!preview.samples.length||preview.samples.length>20000||JSON.stringify(preview).length>2*1024*1024)return;
+    entries.delete(record.id);entries.set(record.id,{identity:identity(record),preview:structuredClone(preview)});while(entries.size>4)entries.delete(entries.keys().next().value);
+  },get(record){synchronize();const entry=entries.get(record?.id);if(!entry||record?.results?.volumeInvalidated||entry.identity!==identity(record)){entries.delete(record?.id);return null;}return structuredClone(entry.preview);}};
+}
+
 export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, availableSurfaces=()=>({dsm:true,dtm:true,ept:false}), onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
   const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set(),pendingRenameSaves=new Set();
   const metricCache=new WeakMap();
+  const surfacePreviewCache=createSurfacePreviewCache(()=>JSON.stringify([token(),accessGeneration()]));
   let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null,loadFailed=false;
   const displayCache=new Map();
   let displayRequests=0;
@@ -252,6 +265,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function closeReports(){for(const capture of reportCaptures)capture.abort();reportCaptures.clear();for(const dialog of [...reportDialogs])dialog.retire();}
   function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;closeReports();}
   function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
+    surfacePreviewCache.clear();
     if(invalidated)return;invalidated=true;viewGeneration++;clearDisplayRequests({all:true});recordSnapshot=[];orderedRecords=[];ready=false;adminAllowed=false;selected=null;selectedExports.clear();disarm();closeDialogs();store.invalidate?.();svg.innerHTML='';lastSvg='';controls.hidden=true;tell(reason);if(notify)onAccessLost();
   }
   function showSurface(record,{autoCalculate=false}={}){
@@ -264,14 +278,26 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const attach=async results=>{
       if(!isCurrent())throw new Error('Measurement access or view changed.');
       const pending=store.attachResults(snapshot,results);attachmentPending=pending;
-      try{await pending;if(isCurrent())snapshot=structuredClone(store.records.get(record.id));}
+      try{await pending;if(isCurrent()){snapshot=structuredClone(store.records.get(record.id));if(pendingSurfacePreview){surfacePreviewCache.put(snapshot,pendingSurfacePreview);pendingSurfacePreview=null;}}}
       finally{if(attachmentPending===pending)attachmentPending=null;}
     };
     // Server routing is independent of the asynchronous capability indicator.
     // Missing/expired authority must produce an error, never a browser fallback.
     const server=typeof surfaceRequest==='function'||preferServerSurface()||adminAllowed;
+    let pendingSurfacePreview=null;
     const calculate=server?createServerSurfaceCalculator({request:surfaceRequest||adminRequest,isCurrent,getRecord:()=>snapshot}):calculateSurface;
     activeDialog=openSurfaceDialog({record,units,autoCalculate,advancedSettings:adminAllowed,availableSurfaces:availableSurfaces(),areaM2:measurementMetrics(record).horizontalAreaM2,execution:server?'server':'browser',getRecord:()=>snapshot,
+      loadSavedPreview:async(...args)=>{
+        if(attachmentPending)await attachmentPending;
+        await capabilitiesReady;if(!isCurrent())throw new Error('Measurement access or view changed.');
+        if(args[1]?.signal?.aborted)throw new DOMException('Preview loading stopped.','AbortError');
+        if(!store.persistent()){
+          const cached=surfacePreviewCache.get(snapshot);if(cached)return cached;
+          throw new Error('This temporary preview is no longer available in this page. Your saved-in-tab totals are unchanged.');
+        }
+        const staffPreview=snapshot.results?.method==='point-surface-cut-fill'&&snapshot.results?.source?.verticalUnitBasis==='administrator-declared'&&adminAllowed&&typeof adminRequest==='function';
+        return createSavedSurfacePreviewLoader({request:staffPreview?adminRequest:surfaceRequest||adminRequest,isCurrent:()=>isCurrent()&&(!staffPreview||adminAllowed),getRecord:()=>snapshot})(...args);
+      },
       loadPreviousVolume:server?async()=>{
         await capabilitiesReady;if(!isCurrent())throw new Error('Measurement access or view changed.');
         const request=adminAllowed&&typeof adminRequest==='function'?adminRequest:surfaceRequest;
@@ -306,7 +332,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
           return snapshot;
         }});
       }:null,
-      calculate:async(...args)=>{if(attachmentPending)await attachmentPending;if(!isCurrent())throw new Error('Measurement access or view changed.');const result=await calculate(...args);if(!isCurrent())throw new Error('Measurement access or view changed.');return result;},
+      calculate:async(...args)=>{if(attachmentPending)await attachmentPending;if(!isCurrent())throw new Error('Measurement access or view changed.');const result=await calculate(...args);if(!isCurrent())throw new Error('Measurement access or view changed.');pendingSurfacePreview=result.preview||null;return result;},
       save:async r=>attach(r.results),
       onClose:()=>{if(dialogId===dialogGeneration)activeDialog=null;}
     });
@@ -588,5 +614,5 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(candidate.collection==='map'&&measurementCollection(context()?.mode)==='spatial3d'&&!display)return false;
     draft=structuredClone(candidate);editing=snapshot.editing===true;editBaseline=editing?snapshot.baseline:null;draftDisplayVertices=display?structuredClone(display):null;selected=draft.id;selectedVertex=-1;gesture=null;pendingPick=null;cursor=null;hoverHandle=false;updateCursor();renderPanel();toolChanged(editing?'edit':draft.kind==='distance'?'distance':'area');tell('Your unfinished measurement was restored after access renewed. Enter, Esc or Finish saves and exits.');return true;
   }
-  return {setTool,store,tick:draw,invalidate,exportDraft,restoreDraft,showRecoveryNotice:retry=>{if(!disposed&&allowed())tell(retry?'Your unfinished measurement is kept in this tab, but could not be restored while saved measurements are unavailable. It will retry on the next access renewal. Keep this tab open; nothing has been saved.':'Your unfinished measurement could not be restored because the saved outline or view changed. No draft changes were saved; review the current measurement before editing again.');},captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){cancelGesture();viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
+  return {setTool,store,tick:draw,invalidate,exportDraft,restoreDraft,showRecoveryNotice:retry=>{if(!disposed&&allowed())tell(retry?'Your unfinished measurement is kept in this tab, but could not be restored while saved measurements are unavailable. It will retry on the next access renewal. Keep this tab open; nothing has been saved.':'Your unfinished measurement could not be restored because the saved outline or view changed. No draft changes were saved; review the current measurement before editing again.');},captureView:()=>controls.querySelector('[data-m="screenshot"]').click(),openReport:()=>controls.querySelector('[data-m="report"]').click(),isInvalidated:()=>invalidated||store.isInvalidated?.(),modeChanged(){surfacePreviewCache.clear();cancelGesture();viewGeneration++;clearDisplayRequests({all:true});void finish({openVolume:false});closeDialogs();volumeAbort?.abort();bind(null);renderPanel();},isDrawing:()=>!!draft,dispose(){surfacePreviewCache.clear();disposed=true;clearDisplayRequests({all:true});listLayout.dispose();viewGeneration++;clearInterval(timer);closeDialogs();volumeAbort?.abort();bind(null);controls.remove();message.remove();store.invalidate?.();},getDraft:()=>draft&&draftRecord()};
 }

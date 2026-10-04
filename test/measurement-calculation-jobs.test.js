@@ -104,6 +104,31 @@ test('runtime repository attests attached results across save revisions but reje
   f.database.prepare('UPDATE model_assets SET sha256=? WHERE id=?').run('b'.repeat(64),f.request.source.id);assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,null);f.database.prepare('UPDATE model_assets SET sha256=? WHERE id=?').run(f.request.source.sha256,f.request.source.id);
   current=f.measurements.update(f.principal,current.id,{...f.document,revision:current.revision,results:current.results,vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]]});assert.equal(f.jobs.get(current.id,queued.id).attachmentRevision,null);
 });
+
+test('saved preview loader uses authorized status attachment after real rename revisions, and rejects changed source or geometry',async t=>{
+  const {createSavedSurfacePreviewLoader}=await import('../measurement-server-surface.mjs');
+  const f=fixture(t),queued=f.jobs.enqueue(f.measurement,f.request),claimed=f.jobs.claim('preview-worker');
+  const preview={previewOnly:true,samples:[[0,0,12,0],[1,1,12,0]]},result={status:'calculated',method:'surface-cut-fill',cutM3:12,fillM3:0,netM3:12,coverage:1,source:{assetId:f.request.source.id,kind:'dsm',sha256:f.request.source.sha256,modelVersionId:f.request.modelVersionId},reference:f.request.reference,preview};
+  assert.equal(f.jobs.finish(claimed,'preview-worker',result),true);
+  const {preview:omitted,...persisted}=result;
+  let current=f.measurements.update(f.principal,f.measurement.id,{...f.document,revision:1,results:{...persisted,calculationJobId:queued.id}});
+  const app=express();app.use('/measurements',createMeasurementApi(f.repository));
+  const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const operations=[],load=createSavedSurfacePreviewLoader({getRecord:()=>current,request:async(operation,payload)=>{
+    operations.push(operation);assert.equal(operation,'status');
+    const response=await fetch(`http://127.0.0.1:${server.address().port}/measurements/${payload.measurementId}/calculations/${payload.jobId}`,{headers:{Authorization:`Bearer ${f.viewerToken}`}});assert.equal(response.status,200);return response.json();
+  }});
+  for(const name of ['A','Renamed pile','Renamed again']){
+    if(name!=='A')current=f.measurements.update(f.principal,current.id,{...f.document,name,revision:current.revision,results:current.results});
+    assert.deepEqual(await load(current),preview);
+    const actual=f.jobs.get(current.id,queued.id);assert.equal(actual.revision,1);assert.equal(actual.attachmentRevision,current.revision);
+    assert.equal(current.results.preview,undefined);
+  }
+  assert.equal(current.revision,4);assert.deepEqual(operations,['status','status','status']);assert.equal(f.jobs.list(current.id).length,1);
+  f.database.prepare('UPDATE model_assets SET sha256=? WHERE id=?').run('b'.repeat(64),f.request.source.id);await assert.rejects(load(current),/no longer matches/);
+  f.database.prepare('UPDATE model_assets SET sha256=? WHERE id=?').run(f.request.source.sha256,f.request.source.id);
+  current=f.measurements.update(f.principal,current.id,{...f.document,name:current.name,revision:current.revision,results:current.results,vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]]});await assert.rejects(load(current),/no longer matches/);
+});
 test('job queue snapshots revision, enforces singleton, cancels on edit, hides private request', t => {
   const f = fixture(t), queued = f.jobs.enqueue(f.measurement, f.request);
   assert.equal(queued.status, 'queued'); assert.equal(queued.request, undefined);

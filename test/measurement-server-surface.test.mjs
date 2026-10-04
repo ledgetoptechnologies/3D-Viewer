@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createServerSurfaceCalculator,surfaceCalculationError} from '../measurement-server-surface.mjs';
+import {createServerSurfaceCalculator,createSavedSurfacePreviewLoader,surfaceCalculationError} from '../measurement-server-surface.mjs';
 import {measurementGeometryHash} from '../measurement-surface-client.mjs';
 
 const record={id:'polygon',modelVersionId:'version',revision:2,kind:'polygon',source:{kind:'ortho'}};
@@ -8,6 +8,33 @@ const options={reference:{type:'boundary-triangulated',offsetM:0},sourceKind:'au
 const capabilities={capabilities:{serverCalculations:true},calculationSources:[{assetId:'dsm-source',kind:'dsm',methods:['surface-cut-fill']},{assetId:'dtm-source',kind:'dtm',methods:['surface-cut-fill']}]};
 const result={method:'surface-cut-fill',status:'calculated',cutM3:10,fillM3:2,netM3:8,coverage:1,source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:{type:'boundary-triangulated',offsetM:0},preview:{samples:[[1,2,3,0]]}};
 const job=(status='complete',extra={})=>({id:'job',measurementId:'polygon',revision:2,status,result,...extra});
+
+test('saved preview loads only the attached server result without capability/create/save work, including renamed revisions',async()=>{
+  for(const revision of [3,7]){
+    const saved={...record,revision,results:{...result,preview:undefined,calculationJobId:'job',calculationOrigin:'browser'}},calls=[];
+    const load=createSavedSurfacePreviewLoader({getRecord:()=>saved,request:async(op,payload)=>{calls.push([op,payload]);return{calculation:job('complete',{method:result.method,attachmentRevision:revision})};}});
+    assert.deepEqual(await load(saved),result.preview);
+    assert.deepEqual(calls,[['status',{measurementId:'polygon',jobId:'job'}]]);
+  }
+});
+
+test('saved preview rejects stale jobs, geometry attachment, changed source/base/totals and denied access',async()=>{
+  const saved={...record,revision:3,results:{...result,preview:undefined,calculationJobId:'job'}};
+  const valid=job('complete',{method:result.method,attachmentRevision:3});
+  for(const response of [{...valid,id:'other'},{...valid,measurementId:'other'},{...valid,status:'cancelled'},{...valid,attachmentRevision:null},{...valid,result:{...result,source:{...result.source,sha256:'changed'}}},{...valid,result:{...result,reference:{type:'custom',elevationM:20}}},{...valid,result:{...result,cutM3:100}},{...valid,result:{...result,preview:null}}]){
+    const load=createSavedSurfacePreviewLoader({request:async()=>({calculation:response})});await assert.rejects(load(saved));
+  }
+  const denied=createSavedSurfacePreviewLoader({request:async()=>{throw Object.assign(new Error('denied'),{code:'measurement_surface_access_unavailable'});}});
+  await assert.rejects(denied(saved),/access is unavailable/);
+});
+
+test('saved preview discards responses after abort, access loss or document change',async()=>{
+  for(const change of ['abort','access','edit']){
+    let current=true,saved={...record,revision:3,results:{...result,preview:undefined,calculationJobId:'job'}};const initial=structuredClone(saved),controller=new AbortController();
+    const load=createSavedSurfacePreviewLoader({isCurrent:()=>current,getRecord:()=>saved,request:async()=>{if(change==='abort')controller.abort();if(change==='access')current=false;if(change==='edit')saved={...saved,revision:4};return{calculation:job('complete',{method:result.method,attachmentRevision:3})};}});
+    await assert.rejects(load(initial,{signal:controller.signal}));
+  }
+});
 function setup({responses=[],existing=[],caps=capabilities,current=()=>true,getRecord,wait=async()=>{}}={}){
   const calls=[];const calculate=createServerSurfaceCalculator({isCurrent:current,getRecord,wait,request:async(operation,payload)=>{calls.push([operation,payload]);if(operation==='capabilities')return caps;if(operation==='list')return{calculations:existing};return{calculation:responses.shift()||job()};}});
   return{calculate,calls};

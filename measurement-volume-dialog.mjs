@@ -6,7 +6,7 @@ import './measurement-volume-dialog.css';
 
 // Calculation is injected: scoped server work or an isolated browser fixture.
 // A sampled corridor is not a native-resolution elevation transect.
-export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,advancedSettings=false,availableSurfaces={dsm:true,dtm:true,ept:false},areaM2=null,getRecord=()=>record,calculateProfile=null,loadPreviousVolume=null}){
+export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},autoCalculate=false,execution='browser',openSpecialist=null,advancedSettings=false,availableSurfaces={dsm:true,dtm:true,ept:false},areaM2=null,getRecord=()=>record,calculateProfile=null,loadPreviousVolume=null,loadSavedPreview=null}){
   const unit={imperial:['ft',0.3048],feet:['ft',0.3048],yards:['yd',0.9144],metric:['m',1],centimeters:['cm',0.01]}[units]||['ft',0.3048];
   const dialog=document.createElement('dialog');dialog.className='measurement-volume-dialog surface-inspector';
   dialog.innerHTML=`<header class="surface-heading"><div><p class="surface-eyebrow">Measurement inspector</p><h2>Calculate volume</h2><p data-name></p></div><button data-close aria-label="Close measurement inspector">Close</button></header><div data-surface-content>
@@ -114,6 +114,16 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
     dialog.querySelector('[data-preview-content]').hidden=true;dialog.querySelector('[data-preview-empty]').hidden=false;
     dialog.querySelector('[data-preview-empty]').textContent=valid?'Your saved result is shown above.':'This historical result may need recalculation. Calculate volume to update it using the saved calculation settings.';
     dialog.querySelector('.surface-settings').open=false;dialog.setAttribute('data-calculated','true');showNativeProfile();
+    if(valid&&typeof loadSavedPreview==='function'){
+      abort?.abort();abort=new AbortController();const mine=abort;
+      dialog.querySelector('[data-preview-empty]').hidden=false;dialog.querySelector('[data-preview-empty]').textContent='Loading the retained surface preview for your saved calculation…';
+      Promise.resolve().then(()=>loadSavedPreview(record,{signal:mine.signal})).then(retained=>{
+        if(retired||mine.signal.aborted||history!==historyGeneration)return;
+        buildSampledCrossSection(retained.samples,{width:1});preview=retained;
+        dialog.querySelector('[data-preview-content]').hidden=false;dialog.querySelector('[data-preview-empty]').hidden=true;rebuild({initial:true});
+        if(dialog.querySelector('.region-disclosure').open)regionPreview=mountMeasurementRegionPreview(dialog.querySelector('[data-region-preview]'),{preview,units});
+      }).catch(error=>{if(!retired&&!mine.signal.aborted&&history===historyGeneration){dialog.querySelector('[data-preview-empty]').hidden=false;dialog.querySelector('[data-preview-empty]').textContent=`Saved volume is unchanged. Preview unavailable. ${error.message}`;}});
+    }
   }
   function plot(){
     const ctx=canvas.getContext('2d'),pc=plan.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);pc.clearRect(0,0,plan.width,plan.height);if(!section)return;
@@ -146,6 +156,7 @@ export function openSurfaceDialog({record,units,calculate,save,onClose=()=>{},au
   canvas.onpointerleave=()=>inspect(null);
   canvas.onkeydown=event=>{if(!section?.points.length||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;event.preventDefault();let index=selected?section.points.indexOf(selected):-1;if(event.key==='Home')index=0;else if(event.key==='End')index=section.points.length-1;else index=Math.max(0,Math.min(section.points.length-1,index+(event.key==='ArrowRight'?1:-1)));inspect(section.points[index]);};
   function invalidateSettings(){
+    historyGeneration++;
     setResultMode(false);
     clearNativeProfile();
     abort?.abort();preview=null;section=null;selected=null;chartBounds=null;regionPreview?.dispose();regionPreview=null;

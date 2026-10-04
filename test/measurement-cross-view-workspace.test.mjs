@@ -33,7 +33,7 @@ class Element {
   setPointerCapture(){} releasePointerCapture(){} focus(){} click(){}
 }
 
-function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2),onBeforeAccessLost=()=>{},token=()=>null,storeFactory=createMeasurementStore}={}){
+function fixture({resolveDisplayVertices=async record=>({vertices:record.vertices.map(([e,n])=>[e,n,145]),basis:'Fixture DSM samples'}),resolveRenderedDisplayVertices,displaySurfaceRevision='surface-1',viewCrs='EPSG:32616',surfaceRequest,adminRequest,calculateSurface,pick=event=>[event.clientX,event.clientY,0],project=point=>point.slice(0,2),onBeforeAccessLost=()=>{},token=()=>null,storeFactory=createMeasurementStore}={}){
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
@@ -49,7 +49,7 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
     setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>now},
     openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
-  const workspace=scope.createMeasurementWorkspace({panel,context,token,permitted:()=>permission,toolChanged(){},onBeforeAccessLost,coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:()=>{calculationCalls.push('calculate');},surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
+  const workspace=scope.createMeasurementWorkspace({panel,context,token,permitted:()=>permission,toolChanged(){},onBeforeAccessLost,coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:calculateSurface||(()=>{calculationCalls.push('calculate');}),surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
   return{workspace,controls,panel,canvas,window,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
@@ -65,6 +65,28 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
 }
 
 const document=(collection,name)=>({id:crypto.randomUUID(),name,collection,kind:'distance',vertices:collection==='map'?[[250,200,0],[390,230,0]]:[[20,40,132.123456789],[100,60,139.987654321]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true,source:{kind:collection==='map'?'ortho':'mesh'},results:{status:'geometry-only',method:'vertex-geometry',...(collection==='map'?{elevationBasis:'not-sampled'}:{})}});
+
+test('public same-page saved volume reopens memory preview without authenticated job reads and clears on view/access changes',async t=>{
+  const preview={samples:[[0,0,2,0],[1,1,2,0]]},result={status:'calculated',method:'surface-cut-fill',cutM3:4,fillM3:0,netM3:4,coverage:1,source:{modelVersionId:'version',kind:'dsm'},reference:{type:'custom',elevationM:0},calculationJobId:'job',preview};
+  let calculations=0;const f=fixture({calculateSurface:async()=>{calculations++;return result;}});t.after(()=>f.workspace.dispose());
+  const record={...document('map','Public pile'),modelVersionId:'version',kind:'polygon',vertices:[[0,0,0],[2,0,0],[2,2,0],[0,2,0]]};await f.workspace.store.save(record);
+  await f.action('volume',record.id);const opened=f.calculationCalls.at(-1),calculated=await opened.calculate(record,{});const {preview:discard,...persisted}=calculated;await opened.save({...record,results:persisted});
+  await f.action('volume',record.id);const reopened=f.calculationCalls.at(-1);assert.deepEqual(await reopened.loadSavedPreview(),preview);assert.equal(calculations,1);
+  await f.workspace.store.patch(f.workspace.store.records.get(record.id),{name:'Renamed public pile'});await f.action('volume',record.id);assert.deepEqual(await f.calculationCalls.at(-1).loadSavedPreview(),preview);
+  const stale=f.calculationCalls.at(-1);await f.switchTo('pointCloud');await assert.rejects(stale.loadSavedPreview(),/access or view changed/);
+  await f.action('volume',record.id);await assert.rejects(f.calculationCalls.at(-1).loadSavedPreview(),/temporary preview is no longer available/);
+  f.deny();await assert.rejects(f.calculationCalls.at(-1).loadSavedPreview(),/access or view changed/);
+});
+
+test('page preview cache bounds memory and rejects edited geometry/base/source/job and replaced session scopes',()=>{
+  const scope=vm.createContext({structuredClone});vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
+  let access='session-a';const cache=scope.createSurfacePreviewCache(()=>access),preview={samples:[[0,0,2,0]]},record={...document('map','Pile'),results:{calculationJobId:'job',method:'surface-cut-fill',source:{kind:'dsm'},reference:{type:'custom',elevationM:0}}};
+  cache.put(record,preview);assert.deepEqual(cache.get({...record,name:'Renamed',revision:9}),preview);
+  for(const change of [{vertices:[[1,0,0]]},{results:{...record.results,reference:{type:'custom',elevationM:1}}},{results:{...record.results,source:{kind:'dtm'}}},{results:{...record.results,calculationJobId:'other'}},{results:{...record.results,volumeInvalidated:true}}]){cache.put(record,preview);assert.equal(cache.get({...record,...change}),null);}
+  cache.put(record,preview);access='session-b';assert.equal(cache.get(record),null);
+  for(let i=0;i<5;i++)cache.put({...record,id:String(i)},preview);assert.equal(cache.get({...record,id:'0'}),null);assert.ok(cache.get({...record,id:'4'}));
+  cache.clear();assert.equal(cache.get({...record,id:'4'}),null);cache.put(record,{samples:Array(20001).fill([0,0,2,0])});assert.equal(cache.get(record),null);
+});
 
 test('public page-only measurements clearly distinguish temporary records and exports from saved project data',async t=>{
   const f=fixture();t.after(()=>f.workspace.dispose());
