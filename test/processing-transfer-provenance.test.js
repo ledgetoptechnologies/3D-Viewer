@@ -70,14 +70,22 @@ test('ack loss, repeated initialization, observed existing task, mismatched comp
 });
 test('worker records fresh create receipt but recovery of lost acknowledgement is ambiguous',async t=>{
   for(const lost of [false,true]){
-    const f=fixture(t);let exists=false;
-    const adapter={status:async()=>{if(!exists)throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});return{status:'queued',imagesCount:0};},
-      initialize:async()=>{exists=true;if(lost)throw new Error('ack lost');return{uuid:f.attempt.providerTaskId};},upload:async()=>{},commit:async()=>{}};
+    const f=fixture(t);let committed=false,initCalls=0;
+    const adapter={status:async()=>{if(!committed)throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});return{status:'queued_upstream',imagesCount:1};},
+      initialize:async()=>{initCalls++;if(lost&&initCalls===1)throw new Error('ack lost');return{uuid:f.attempt.providerTaskId};},upload:async()=>{},commit:async()=>{committed=true;}};
     const deps={processing:f.processing,storage:f.storage,config:{},providerCredentials:{},adapterFactory:()=>adapter};
     if(lost){await assert.rejects(processSubmit(f.job,deps),/ack lost/);await processSubmit(f.job,deps);}
     else await processSubmit(f.job,deps);
     const proof=f.processing.getAttemptTransferProvenance(f.attempt.id).initialization;
-    assert.equal(proof.ambiguous,lost);assert.equal(proof.state,lost?'intent':'acknowledged');
+    assert.equal(proof.ambiguous,lost);assert.equal(proof.state,'acknowledged');
+    assert.equal(proof.generation,lost?2:1);
+    f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE attempt_id=? AND status='pending'").run(f.attempt.id);
+    f.job=f.processing.claimJob('owner');
+    assert.ok(f.job);
+    const receipt=f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',archive(f));
+    assert.ok(receipt);
+    if(lost)assert.equal(f.processing.getVerifiedAttemptProducerReceipt(f.attempt.id),null);
+    else assert.ok(f.processing.getVerifiedAttemptProducerReceipt(f.attempt.id));
   }
 });
 

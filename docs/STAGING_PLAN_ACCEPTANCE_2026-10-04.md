@@ -25,6 +25,8 @@ This record covers the current candidate. It does not close the active goal.
 
 ## Deployment gates still open
 
+The first candidate (`884537e`, CI run `37240119477`) failed its Linux test gate: 2,162 passed, one legacy transfer-provenance fixture failed, 15 skipped. No image was published or deployed. The fixture now models accepted tasks separately from temporary initialization; recovery acknowledges the second initialization reply but retains generation-two ambiguity and cannot acquire trusted producer provenance. Focused receipt/recovery/firewall tests pass 23/23 after the correction. Full Linux CI remains required.
+
 - Exact candidate Linux CI/runtime verification and immutable dev image publication.
 - Fresh backup, paired proxy-secret rotation, supervised recreation and restrictive network acceptance.
 - Fresh authenticated provider probe and approved 10–15-photo round trip.
