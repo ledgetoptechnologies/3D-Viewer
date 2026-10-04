@@ -69,11 +69,12 @@ export function validateMeasurementGeometry(record) {
 }
 const measurementDecimal = new Intl.NumberFormat('en-US',{minimumFractionDigits:3,maximumFractionDigits:3});
 const measurementInteger = new Intl.NumberFormat('en-US',{maximumFractionDigits:0});
+const volumeDisplay = units => ({metric:[1,'m³'],centimeters:[100 ** 3,'cm³']}[units] || [1 / 0.9144 ** 3,'yd³']);
 export function measurementValue(value, power = 1, units = 'imperial') {
   if (!Number.isFinite(value)) return 'Unavailable';
   const decimal = n => measurementDecimal.format(n);
   const choices = { imperial: [1 / 0.3048, 'ft'], feet: [1 / 0.3048, 'ft'], yards: [1 / 0.9144, 'yd'], metric: [1, 'm'], centimeters: [100, 'cm'] };
-  if (power === 3 && ['imperial', 'feet', 'yards'].includes(units)) return `${decimal(value / 0.9144 ** 3)} yd³`;
+  if (power === 3) { const [factor,label]=volumeDisplay(units);return `${decimal(value * factor)} ${label}`; }
   if (power === 1 && units === 'imperial') {
     const total = Math.round(Math.abs(value) / 0.0254 * 1000) / 1000;
     return `${value < 0 ? '−' : ''}${measurementInteger.format(Math.floor(total / 12))}′ ${decimal(total % 12)}″`;
@@ -86,12 +87,15 @@ export function exportMeasurements(records, format, { toLonLat, units = 'imperia
   const documents = records.map(r => ({ ...r, metrics: measurementMetrics(r) }));
   if (format === 'json') return JSON.stringify({ schemaVersion: 1, coordinateUnits: 'metres', displayUnits: units, measurements: documents }, null, 2);
   if (format === 'csv') {
-    const headers=['id','name','collection','crs','length_m','horizontal_area_m2','planar_area_m2','cut_m3','fill_m3','net_m3','method','status','warnings','volume_m3','coverage','source_json','reference_json','provenance_json'];
+    // Keep canonical quantities and provenance stable for data consumers. Add
+    // unrounded, explicitly labelled display quantities for client summaries.
+    const [volumeFactor,volumeUnit]=volumeDisplay(units);
+    const headers=['id','name','collection','crs','length_m','horizontal_area_m2','planar_area_m2','cut_m3','fill_m3','net_m3','method','status','warnings','volume_m3','coverage','source_json','reference_json','provenance_json','display_volume_unit','cut_display_volume','fill_display_volume','net_display_volume','object_display_volume'];
     const rows=documents.map(r=>{
       const result=r.results||{};
       const provenance={...result.provenance,...Object.fromEntries(['calculationOrigin','verified','calculationJobId','numericalModel','checks'].filter(key=>result[key]!==undefined).map(key=>[key,result[key]]))};
       const source=result.source||(result.sourceKind?{kind:result.sourceKind,resolutionM:result.sourceResolutionM,modelVersionId:result.modelVersionId}:r.source)||{};
-      return [r.id,r.name,r.collection,r.coordinateReference.crs,r.metrics.lengthM,r.metrics.horizontalAreaM2,r.metrics.planarAreaM2,result.cutM3,result.fillM3,result.netM3,result.method,result.status,JSON.stringify(result.warnings||[]),result.volumeM3,result.coverage,JSON.stringify(source),JSON.stringify(result.reference||{}),JSON.stringify(provenance)];
+      return [r.id,r.name,r.collection,r.coordinateReference.crs,r.metrics.lengthM,r.metrics.horizontalAreaM2,r.metrics.planarAreaM2,result.cutM3,result.fillM3,result.netM3,result.method,result.status,JSON.stringify(result.warnings||[]),result.volumeM3,result.coverage,JSON.stringify(source),JSON.stringify(result.reference||{}),JSON.stringify(provenance),volumeUnit,...['cutM3','fillM3','netM3','volumeM3'].map(key=>Number.isFinite(result[key])?result[key]*volumeFactor:'')];
     });
     return [headers,...rows].map(row=>row.map(csvCell).join(',')).join('\r\n');
   }
