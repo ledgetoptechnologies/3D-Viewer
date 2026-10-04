@@ -67,6 +67,51 @@ test('legacy auto-role input images remain countable without loading file record
   assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, 1);
 });
 
+for (const role of ['image', 'auto']) test(`registered elevation products are not camera inputs even with legacy ${role} roles`, t => {
+  const f = fixture(t, [{ relativePath: 'odm_dem/dsm.tif' }, { relativePath: 'odm_dem/dtm.tif' }, { relativePath: 'camera-original.tiff' }]);
+  f.db.prepare('UPDATE dataset_files SET processing_role=? WHERE dataset_id=?').run(role, f.dataset.id);
+  const output = f.output();
+  for (const kind of ['dsm', 'dtm']) f.processing.addModelAsset({ versionId: output.versionId, kind, rootKey: 'datasets', relativePath: `${f.dataset.relativePath}/odm_dem/${kind}.tif`, contentType: 'image/tiff', byteSize: 1, sha256: 'a'.repeat(64), attemptId: output.attempt.id });
+  assert.deepEqual(taskImageInventory(f.db, f.task.id, output.versionId), { sourceImageCount: 1, sourceImageCountSource: 'dataset_inputs' });
+});
+
+test('matching raster names in another task or with changed bytes do not exclude camera TIFFs', t => {
+  const f = fixture(t, [{ relativePath: 'dsm.tif' }]);
+  const output = f.output();
+  f.processing.addModelAsset({ versionId: output.versionId, kind: 'dsm', rootKey: 'datasets', relativePath: `${f.dataset.relativePath}/dsm.tif`, contentType: 'image/tiff', byteSize: 1, sha256: 'b'.repeat(64), attemptId: output.attempt.id });
+  assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, 1);
+  f.db.prepare("UPDATE model_assets SET sha256=? WHERE version_id=? AND kind='dsm'").run('a'.repeat(64), output.versionId);
+  const other = f.processing.createTask({ projectId: f.project.id, datasetId: f.dataset.id, displayName: 'Other TIFF task' });
+  assert.equal(taskImageInventory(f.db, other.id).sourceImageCount, 1);
+  assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, null);
+});
+
+test('same-name and same-hash raster assets in a different storage root do not exclude camera TIFFs', t => {
+  const f = fixture(t, [{ relativePath: 'dsm.tif' }]), output = f.output();
+  f.processing.addModelAsset({ versionId: output.versionId, kind: 'dsm', rootKey: 'models', relativePath: `${f.dataset.relativePath}/dsm.tif`, contentType: 'image/tiff', byteSize: 1, sha256: 'a'.repeat(64), attemptId: output.attempt.id });
+  assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, 1);
+  f.db.prepare("UPDATE model_assets SET root_key='datasets' WHERE version_id=? AND kind='dsm'").run(output.versionId);
+  assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, null);
+});
+
+test('registered catalog raster products match their dataset-specific external-root alias', t => {
+  const f = fixture(t, [{ relativePath: 'dsm.tif' }]), output = f.output();
+  f.db.prepare("UPDATE datasets SET root_key=?,storage_mode='external_reference' WHERE id=?").run(`webodm@${f.dataset.id}`, f.dataset.id);
+  f.processing.addModelAsset({ versionId: output.versionId, kind: 'dsm', rootKey: 'webodm', relativePath: `${f.dataset.relativePath}/dsm.tif`, contentType: 'image/tiff', byteSize: 1, sha256: 'a'.repeat(64), attemptId: output.attempt.id });
+  assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, null);
+});
+
+test('retained manifest product roles exclude legacy image rows without excluding source TIFFs', t => {
+  const f = fixture(t, [{ relativePath: 'images/original.tiff' }, { relativePath: 'odm_dem/dsm.tif' }, { relativePath: 'odm_texturing/texture.png' }]);
+  const operation = f.processing.createWebodmTaskImportOperation({ request: { sourceRelativePath: 'import-fixture', projectId: f.project.id, taskDisplayName: 'Retained role fixture' }, subject: 'ops:fixture', sessionId: 'session' });
+  assert.equal(f.processing.claimDatasetOperation('role-worker').id, operation.id);
+  const files = [['images/original.tiff', 'source_photo'], ['odm_dem/dsm.tif', 'dsm'], ['odm_texturing/texture.png', 'mesh_texture']].map(([relativePath, role]) => ({ relativePath, sourceRelativePath: relativePath, role, byteSize: 1, sha256: 'a'.repeat(64) }));
+  assert.ok(f.processing.recordRetainedImportManifest(operation.id, 'role-worker', { attemptId: null, datasetId: f.dataset.id, sourceKind: 'server_folder', sourceRelativePath: 'import-fixture', stagingRelativePath: 'fixture', manifestSha256: 'a'.repeat(64), extractedTreeSha256: 'a'.repeat(64), files }));
+  assert.deepEqual(taskImageInventory(f.db, f.task.id), { sourceImageCount: 1, sourceImageCountSource: 'dataset_inputs' });
+  f.db.prepare("UPDATE retained_import_files SET sha256=? WHERE role='dsm'").run('b'.repeat(64));
+  assert.equal(taskImageInventory(f.db, f.task.id).sourceImageCount, 2, 'only hash-matching manifest evidence overrides legacy inference');
+});
+
 test('task list and detail expose archive photo counts with inventory provenance', async t => {
   const f = fixture(t, [{ relativePath: 'backup.zip' }]);
   const selected = f.output(['a.jpg', 'b.jpg']);

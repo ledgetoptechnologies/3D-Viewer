@@ -7,6 +7,17 @@ function fixture(t,{datasetsParent=null}={}){const root=fs.mkdtempSync(path.join
 
 test('capabilities are derived from whichever supported artifacts are present',()=>{assert.deepEqual(capabilitySummary([{kind:'ortho'},{kind:'dsm'}]),{assetKinds:['dsm','ortho'],capabilities:['dsm','orthophoto']});assert.deepEqual(capabilitySummary([{kind:'glb'}]),{assetKinds:['glb'],capabilities:['3d_model']});assert.deepEqual(capabilitySummary([{kind:'pointCloud'}]),{assetKinds:['pointCloud'],capabilities:['point_cloud']});});
 
+test('retained elevation products are registered as products, not source images', { skip: process.platform !== 'linux' }, async t => {
+  const c=fixture(t),source=path.join(c.config.datasetImportMount,'raster-inventory');
+  for(const relative of ['odm_dem/dsm.tif','odm_dem/dtm.tif','images/source.tiff']){const target=path.join(source,...relative.split('/'));fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,'fixture');}
+  const project=c.processing.createProject({displayName:'Raster inventory'}),operation=c.processing.createWebodmTaskImportOperation({request:{sourceRelativePath:'raster-inventory',projectId:project.id,taskDisplayName:'Raster inventory'},subject:'ops:one',sessionId:'session'});
+  await processOneDatasetOperation(c,'raster-inventory-worker');
+  const complete=c.processing.getDatasetOperation(operation.id,'ops:one');assert.equal(complete.status,'succeeded',complete.errorMessage);
+  const files=c.processing.getDataset(complete.result.task.datasetId,true).files;
+  assert.deepEqual(files.map(file=>[file.relativePath,file.processingRole]).sort(),[['images/source.tiff','image'],['odm_dem/dsm.tif','administrative'],['odm_dem/dtm.tif','administrative']]);
+  assert.equal(require('../server/taskImageInventory').taskImageInventory(c.db,complete.result.task.id).sourceImageCount,1);
+});
+
 for(const scenario of[
   {name:'queues verified OBJ plus GLB LOD generation when imported tiles are absent',files:['assets/odm_texturing/odm_textured_model_geo.obj','assets/odm_texturing/odm_textured_model_geo.glb'],type:'mesh_tiles'},
   {name:'queues the standard WebODM georeferenced mesh plus EPT backup layout when tiles are absent',files:['assets/odm_texturing/odm_textured_model_geo.obj','assets/odm_texturing/odm_textured_model_geo.mtl','assets/odm_texturing/odm_textured_model_geo.glb','assets/odm_texturing/odm_textured_model_geo_0.png','assets/entwine_pointcloud/ept.json'],type:'mesh_tiles'},

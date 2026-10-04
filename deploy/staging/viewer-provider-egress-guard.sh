@@ -5,6 +5,7 @@
 set -eu
 
 readonly EDGE_NETWORK='viewer-staging_viewer-edge'
+readonly PRIVATE_NETWORK='viewer-staging_viewer-private'
 readonly EDGE_SUBNET='172.23.0.0/16'
 readonly VIEWER_PROXY='172.23.0.2'
 readonly VIEWER_API='172.23.0.3'
@@ -19,6 +20,16 @@ readonly V4_INPUT_CHAIN='LTDS_VW_STG_IN'
 readonly V6_GUARD_CHAIN='LTDS_VW_STG_V6'
 
 die() { printf '%s\n' "viewer staging egress guard: $*" >&2; exit 1; }
+
+assert_edge_members() {
+  members=$(docker network inspect "$EDGE_NETWORK" --format '{{range .Containers}}{{println .Name .IPv4Address}}{{end}}') || die 'edge network missing'
+  printf '%s\n' "$members" | while read -r name address remainder; do
+    case "$name:$address:$remainder" in
+      ::|viewer-staging-viewer-proxy-1:172.23.0.2/16:|viewer-staging-viewer-api-1:172.23.0.3/16:|viewer-staging-viewer-worker-1:172.23.0.4/16:) ;;
+      *) die 'edge bridge has an unexpected member or address; refusing policy changes' ;;
+    esac
+  done
+}
 
 ensure_v4_jump() {
   parent=$1 chain=$2
@@ -51,6 +62,7 @@ remove_v6_jump() {
 }
 
 remove_rules() {
+  assert_edge_members
   attached=$(docker network inspect "$EDGE_NETWORK" --format '{{range .Containers}}{{println .Name}}{{end}}') || die 'edge network missing'
   printf '%s\n' "$attached" | grep -Eq 'viewer-staging-viewer-(api|worker)-' \
     && die 'refusing to remove egress rules while Viewer API/worker remain attached to the edge bridge'
@@ -81,6 +93,7 @@ apply_rules() {
   # Existing stopped containers may remain attached to the preserved bridge.
   running=$(docker ps --filter label=com.docker.compose.project=viewer-staging --format '{{.Names}}')
   [ -z "$running" ] || die 'stop the supervised Viewer staging stack before applying policy'
+  assert_edge_members
   command -v iptables >/dev/null 2>&1 || die 'iptables is unavailable'
   command -v ip6tables >/dev/null 2>&1 || die 'ip6tables is required for staging IPv6 containment'
   iptables -w 5 -nL DOCKER-USER >/dev/null 2>&1 || die 'Docker DOCKER-USER chain is unavailable'
@@ -92,6 +105,19 @@ apply_rules() {
     || die 'staging edge bridge IPv6 must remain disabled'
   [ "$(sysctl -n net.ipv4.ip_forward)" = '1' ] || die 'IPv4 forwarding is not enabled'
   [ "$(sysctl -n net.ipv6.conf.all.forwarding)" = '0' ] || die 'host IPv6 forwarding must remain disabled'
+  [ "$(docker network inspect "$PRIVATE_NETWORK" --format '{{.Internal}}')" = 'true' ] || die 'Viewer private bridge must remain internal'
+  [ "$(docker network inspect "$PRIVATE_NETWORK" --format '{{.EnableIPv6}}')" = 'false' ] || die 'Viewer private bridge IPv6 must remain disabled'
+  [ "$(docker network inspect "$PRIVATE_NETWORK" --format '{{(index .IPAM.Config 0).Subnet}}')" = '172.22.0.0/16' ] || die 'Viewer private subnet changed'
+  private_members=$(docker network inspect "$PRIVATE_NETWORK" --format '{{range .Containers}}{{println .Name}}{{end}}') || die 'Viewer private bridge missing'
+  printf '%s\n' "$private_members" | while read -r name; do
+    case "$name" in
+      ''|viewer-staging-viewer-api-1|viewer-staging-viewer-worker-1|viewer-staging-viewer-proxy-1) ;;
+      *) die 'Viewer private bridge has an unexpected member' ;;
+    esac
+  done
+  private_id=$(docker network inspect "$PRIVATE_NETWORK" --format '{{.Id}}' | cut -c1-12)
+  private_bridge="br-$private_id"
+  ip link show "$private_bridge" >/dev/null 2>&1 || die 'Viewer private bridge interface unavailable'
 
   iptables -w 5 -N "$V4_EGRESS_CHAIN" 2>/dev/null || true
   iptables -w 5 -F "$V4_EGRESS_CHAIN"
@@ -139,6 +165,10 @@ apply_rules() {
   iptables -w 5 -A "$V4_INPUT_CHAIN" -s "$VIEWER_API" -j REJECT --reject-with icmp-port-unreachable
   iptables -w 5 -A "$V4_INPUT_CHAIN" -s "$VIEWER_WORKER" -j REJECT --reject-with icmp-port-unreachable
   iptables -w 5 -A "$V4_INPUT_CHAIN" -s "$VIEWER_PROXY" -m conntrack --ctstate NEW,INVALID,UNTRACKED -j REJECT --reject-with icmp-port-unreachable
+  # Internal Docker bridges still permit host-gateway access via INPUT.
+  # Block container-initiated host access through that path as well; ordinary
+  # proxy-to-API communication remains on FORWARD and is unaffected.
+  iptables -w 5 -A "$V4_INPUT_CHAIN" -i "$private_bridge" -m conntrack --ctstate NEW,INVALID,UNTRACKED -j REJECT --reject-with icmp-port-unreachable
   iptables -w 5 -A "$V4_INPUT_CHAIN" -j RETURN
   ensure_v4_jump INPUT "$V4_INPUT_CHAIN"
 
@@ -150,6 +180,8 @@ apply_rules() {
     ip6tables -w 5 -F "$V6_GUARD_CHAIN"
     ip6tables -w 5 -A "$V6_GUARD_CHAIN" -i "$bridge" -j DROP
     ip6tables -w 5 -A "$V6_GUARD_CHAIN" -o "$bridge" -j DROP
+    ip6tables -w 5 -A "$V6_GUARD_CHAIN" -i "$private_bridge" -j DROP
+    ip6tables -w 5 -A "$V6_GUARD_CHAIN" -o "$private_bridge" -j DROP
     ip6tables -w 5 -A "$V6_GUARD_CHAIN" -j RETURN
     ensure_v6_jump INPUT "$V6_GUARD_CHAIN"
     ensure_v6_jump FORWARD "$V6_GUARD_CHAIN"

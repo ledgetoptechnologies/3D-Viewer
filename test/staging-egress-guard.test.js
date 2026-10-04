@@ -8,7 +8,7 @@ const {spawnSync}=require('node:child_process');
 const script=path.resolve(__dirname,'../deploy/staging/viewer-provider-egress-guard.sh');
 const bash=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'/bin/sh';
 function shellPath(value){return process.platform==='win32'?value.replace(/\\/g,'/').replace(/^([A-Za-z]):/,(_,drive)=>`/${drive.toLowerCase()}`):value;}
-function fixture(t,running){
+function fixture(t,running,members='viewer-staging-viewer-proxy-1 172.23.0.2/16'){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-egress-test-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const stub=`#!/bin/sh
 name=\${0##*/}
@@ -17,6 +17,11 @@ case "$name" in
  docker)
   case "$*" in
    'ps '*) printf '%s' "$GUARD_TEST_RUNNING";;
+   *viewer-private*Containers*) printf 'viewer-staging-viewer-api-1\\nviewer-staging-viewer-worker-1\\nviewer-staging-viewer-proxy-1';;
+   *viewer-private*Subnet*) printf '172.22.0.0/16';;
+   *viewer-private*Id*) printf 'aabbccddeeffffffffff';;
+   *Internal*) printf 'true';;
+   *Containers*) printf '%s' "$GUARD_TEST_MEMBERS";;
    *Subnet*) printf '172.23.0.0/16';;
    *Gateway*) printf '172.23.0.1';;
    *EnableIPv6*) printf 'false';;
@@ -28,13 +33,21 @@ esac
 `;
  for(const name of ['docker','iptables','ip6tables','sysctl','ip'])fs.writeFileSync(path.join(root,name),stub,{mode:0o755});
  const log=path.join(root,'calls.log');
- const result=spawnSync(bash,['-c','PATH="$GUARD_TEST_BIN:$PATH"; export PATH; exec sh "$GUARD_TEST_SCRIPT" apply'],{encoding:'utf8',env:{...process.env,GUARD_TEST_BIN:shellPath(root),GUARD_TEST_LOG:shellPath(log),GUARD_TEST_SCRIPT:shellPath(script),GUARD_TEST_RUNNING:running}});
+ const result=spawnSync(bash,['-c','PATH="$GUARD_TEST_BIN:$PATH"; export PATH; exec sh "$GUARD_TEST_SCRIPT" apply'],{encoding:'utf8',env:{...process.env,GUARD_TEST_BIN:shellPath(root),GUARD_TEST_LOG:shellPath(log),GUARD_TEST_SCRIPT:shellPath(script),GUARD_TEST_RUNNING:running,GUARD_TEST_MEMBERS:members}});
  return{result,calls:fs.existsSync(log)?fs.readFileSync(log,'utf8'):''};
 }
 test('egress guard refuses policy rebuild while supervised containers are running',t=>{
  const{result,calls}=fixture(t,'viewer-staging-viewer-api-1');assert.notEqual(result.status,0);assert.match(result.stderr,/stop the supervised Viewer staging stack/);assert.doesNotMatch(calls,/^iptables /m);
 });
+
+test('egress guard rejects shared bridge members and drifted fixed addresses before touching firewall',t=>{
+ for(const members of ['another-project-1 172.23.0.5/16','viewer-staging-viewer-api-1 172.23.0.8/16']){
+  const{result,calls}=fixture(t,'',members);assert.notEqual(result.status,0);assert.match(result.stderr,/unexpected member or address/);assert.doesNotMatch(calls,/^iptables /m);
+ }
+});
 test('stopped-stack policy scopes cluster flows and IPv6 guards without flushing unrelated chains',t=>{
  const{result,calls}=fixture(t,'');assert.equal(result.status,0,result.stderr);assert.match(calls,/-s 172\.23\.0\.3 -d 192\.168\.50\.89 -p tcp --dport 4000/);assert.match(calls,/-s 172\.23\.0\.4 -d 192\.168\.50\.89 -p tcp --dport 4000/);assert.match(calls,/-s 172\.23\.0\.2 -d 172\.23\.0\.3 -p tcp --dport 8088/);assert.match(calls,/-A LTDS_VW_STG_IN -s 172\.23\.0\.3 -j REJECT/);assert.match(calls,/ip6tables .* -A LTDS_VW_STG_V6 -i br-bb6e8d4ba0c4 -j DROP/);assert.doesNotMatch(calls,/-F (?:DOCKER-USER|INPUT|FORWARD)(?:\s|$)/);assert.doesNotMatch(calls,/-D (?:INPUT|FORWARD) -[io] /);
  assert.match(calls,/-A LTDS_VW_STG_IN -s 172\.23\.0\.2 -m conntrack --ctstate NEW,INVALID,UNTRACKED -j REJECT/);
+ assert.match(calls,/-A LTDS_VW_STG_IN -i br-aabbccddeeff -m conntrack --ctstate NEW,INVALID,UNTRACKED -j REJECT/);
+ assert.match(calls,/ip6tables .* -A LTDS_VW_STG_V6 -i br-aabbccddeeff -j DROP/);
 });
