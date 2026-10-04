@@ -132,11 +132,13 @@ apply_rules() {
   ensure_v4_jump DOCKER-USER "$V4_EGRESS_CHAIN"
 
   # Docker's DOCKER-USER chain is FORWARD-only; prevent API/worker access to
-  # host-local ports using the separate INPUT chain.
+  # host-local ports using the separate INPUT chain. The proxy may reply to
+  # host-initiated health/browser connections, but cannot initiate host access.
   iptables -w 5 -N "$V4_INPUT_CHAIN" 2>/dev/null || true
   iptables -w 5 -F "$V4_INPUT_CHAIN"
   iptables -w 5 -A "$V4_INPUT_CHAIN" -s "$VIEWER_API" -j REJECT --reject-with icmp-port-unreachable
   iptables -w 5 -A "$V4_INPUT_CHAIN" -s "$VIEWER_WORKER" -j REJECT --reject-with icmp-port-unreachable
+  iptables -w 5 -A "$V4_INPUT_CHAIN" -s "$VIEWER_PROXY" -m conntrack --ctstate NEW,INVALID,UNTRACKED -j REJECT --reject-with icmp-port-unreachable
   iptables -w 5 -A "$V4_INPUT_CHAIN" -j RETURN
   ensure_v4_jump INPUT "$V4_INPUT_CHAIN"
 

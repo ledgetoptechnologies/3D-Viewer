@@ -36,4 +36,5 @@ test('egress guard refuses policy rebuild while supervised containers are runnin
 });
 test('stopped-stack policy scopes cluster flows and IPv6 guards without flushing unrelated chains',t=>{
  const{result,calls}=fixture(t,'');assert.equal(result.status,0,result.stderr);assert.match(calls,/-s 172\.23\.0\.3 -d 192\.168\.50\.89 -p tcp --dport 4000/);assert.match(calls,/-s 172\.23\.0\.4 -d 192\.168\.50\.89 -p tcp --dport 4000/);assert.match(calls,/-s 172\.23\.0\.2 -d 172\.23\.0\.3 -p tcp --dport 8088/);assert.match(calls,/-A LTDS_VW_STG_IN -s 172\.23\.0\.3 -j REJECT/);assert.match(calls,/ip6tables .* -A LTDS_VW_STG_V6 -i br-bb6e8d4ba0c4 -j DROP/);assert.doesNotMatch(calls,/-F (?:DOCKER-USER|INPUT|FORWARD)(?:\s|$)/);assert.doesNotMatch(calls,/-D (?:INPUT|FORWARD) -[io] /);
+ assert.match(calls,/-A LTDS_VW_STG_IN -s 172\.23\.0\.2 -m conntrack --ctstate NEW,INVALID,UNTRACKED -j REJECT/);
 });
