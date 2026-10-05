@@ -1559,6 +1559,29 @@ function scheduleSessionRenewal(session) {
   sessionRenewalTimer = setTimeout(() => requestSessionRenewal('timer'), delay);
 }
 
+let rasterAccessRecovery = null;
+
+function recoverActiveRasterAccess() {
+  const mode = state.activeMode;
+  const url = mode === 'ortho' ? ORTHO_URL : mode === 'dsm' ? DSM_URL : mode === 'dtm' ? DTM_URL : null;
+  if (!url || (mode === 'ortho' ? orthoLayers : demLayers[mode])) return;
+  if (rasterAccessRecovery?.mode === mode && rasterAccessRecovery.url === url
+      && rasterAccessRecovery.epoch === modeEpoch && !rasterAccessRecovery.signal.aborted) return;
+  // Only an unfinished raster initializer is retired. Resident render resources,
+  // measurement tools and settings are not rebuilt during credential renewal.
+  modeAbortController?.abort();
+  modeAbortController = new AbortController();
+  modeEpoch += 1;
+  const attempt = { mode, url, epoch: modeEpoch, signal: modeAbortController.signal };
+  rasterAccessRecovery = attempt;
+  const loading = mode === 'ortho'
+    ? showOrtho(attempt.epoch, attempt.signal, { preserveView: true })
+    : showDEM(mode, attempt.epoch, attempt.signal, { preserveView: true });
+  void Promise.resolve(loading).finally(() => {
+    if (rasterAccessRecovery === attempt) rasterAccessRecovery = null;
+  });
+}
+
 function applyViewerSession(session, { initialize = false } = {}) {
   const previousTilesUrl = TILES_URL;
   setDisplayUnits(session.displayUnits);
@@ -1588,6 +1611,7 @@ function applyViewerSession(session, { initialize = false } = {}) {
       disposeTiles();
       loadTiles();
     }
+    recoverActiveRasterAccess();
   }
   if (state.meshSource === 'lod-required') scheduleLodAvailabilityRefresh();
   else stopLodAvailabilityRefresh();
@@ -3436,7 +3460,7 @@ async function overviewCanvas(ds, renderFn, maxDim = 1400, signal = null) {
   return { canvas, bounds: [[minLat, minLon], [maxLat, maxLon]] };
 }
 
-async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal) {
+async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal, { preserveView = false } = {}) {
   updateStatus('Mode: Orthophoto');
   try {
     if (!orthoLayers) {
@@ -3456,7 +3480,7 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
     orthoLayers.grid.setAbortSignal(signal);
     orthoLayers.overlay.addTo(map);
     orthoLayers.grid.addTo(map);
-    restoreOrFit('ortho', orthoLayers.ds.llBounds);
+    if (!preserveView) restoreOrFit('ortho', orthoLayers.ds.llBounds);
     applyOrthoOpacity();
   } catch (err) {
     if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== 'ortho') return;
@@ -3466,7 +3490,7 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
   }
 }
 
-async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.signal) {
+async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.signal, { preserveView = false } = {}) {
   updateStatus(`Mode: ${type.toUpperCase()}`);
   const url = type === 'dsm' ? DSM_URL : DTM_URL;
   try {
@@ -3489,7 +3513,7 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
     dl.grid.setAbortSignal(signal);
     dl.overlay.addTo(map);
     dl.grid.addTo(map);
-    restoreOrFit(type, dl.ds.llBounds);
+    if (!preserveView) restoreOrFit(type, dl.ds.llBounds);
     dom.demLegend.style.display = 'flex';
     applyDemOpacity();
     refreshLegendFor(dl.ds);

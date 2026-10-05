@@ -245,6 +245,98 @@ function tileFailureListener(f) {
   return listener;
 }
 
+function rasterFixture(mode = 'dtm') {
+  const f = fixture(), c = f.context;
+  const observations = { reads: [], attachments: [], views: [], errors: [], pending: [] };
+  const center = { lat: 42, lng: -88 }, zoom = 22;
+  Object.assign(c, {
+    ORTHO_URL: '/old/ortho', DSM_URL: '/old/dsm', DTM_URL: '/old/dtm',
+    orthoLayers: null, demLayers: { dsm: null, dtm: null }, mapViews: {},
+    modeAbortController: new AbortController(),
+    map: { getCenter: () => center, getZoom: () => zoom,
+      setView: (p, z) => observations.views.push({ center: p, zoom: z }),
+      fitBounds: () => observations.views.push('unexpected-fit') },
+    updateStatus() {}, updateLoading() {}, hideLoading() {},
+    showError: message => observations.errors.push(message), console: { error() {} },
+    getDataset: async (url, _isDem, { signal }) => {
+      observations.reads.push(url);
+      if (observations.reads.length === 1) throw new Error('HTTP 401');
+      if (c.deferRaster) await new Promise(resolve => observations.pending.push(resolve));
+      if (signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      return { llBounds: [[41, -89], [43, -87]] };
+    },
+    overviewCanvas: async ds => ({ canvas: { toDataURL: () => 'fixture' }, bounds: ds.llBounds }),
+    L: { imageOverlay: () => ({ addTo: () => observations.attachments.push('overlay') }), latLngBounds: x => x },
+    GeoTiffGridLayer: function () { this.setAbortSignal = () => {}; this.addTo = () => observations.attachments.push('grid'); },
+    renderDemTile() {}, renderOrthoTile() {}, syncMapVolumeAvailability() {},
+    applyDemOpacity() {}, applyOrthoOpacity() {}, refreshLegendFor() {},
+    demSettings: { cmap: 'viridis', shade: 0.5 },
+    applyProjectConfig(model) { c.ORTHO_URL = model.assets.ortho; c.DSM_URL = model.assets.dsm; c.DTM_URL = model.assets.dtm; },
+  });
+  c.state.activeMode = mode;
+  c.dom.demLegend = { style: { display: 'none' } };
+  const start = source.indexOf('async function showOrtho('), end = source.indexOf('\nfunction refreshLegendFor(', start);
+  vm.runInContext(source.slice(start, end), c);
+  const load = () => mode === 'ortho' ? c.showOrtho() : c.showDEM(mode);
+  const renew = suffix => c.applyViewerSession({ ...c.activeViewerSession, model: { ...c.PROJECT,
+    assets: { ortho: `/renewed${suffix}/ortho`, dsm: `/renewed${suffix}/dsm`, dtm: `/renewed${suffix}/dtm` } } });
+  return { ...f, observations, load, renew, center, zoom };
+}
+
+const settleRaster = () => new Promise(resolve => setImmediate(resolve));
+
+for (const mode of ['dsm', 'dtm', 'ortho']) {
+  test(`same-model renewal retries failed ${mode} initialization with current credentials and preserves view`, async () => {
+    const f = rasterFixture(mode), c = f.context;
+    await f.load();
+    assert.equal(f.observations.attachments.length, 0);
+    const settings = JSON.stringify(c.demSettings), records = [...f.measurements.records.entries()];
+    f.renew('one');
+    await settleRaster();
+    assert.deepEqual(f.observations.reads, [`/old/${mode}`, `/renewedone/${mode}`]);
+    assert.deepEqual(f.observations.attachments, ['overlay', 'grid']);
+    assert.deepEqual(f.observations.views, [], 'renewal does not recenter or fit the map');
+    assert.equal(JSON.stringify(c.demSettings), settings);
+    assert.deepEqual([...f.measurements.records.entries()], records);
+    assert.equal(c.state.activeMode, mode);
+    f.renew('two'); await settleRaster();
+    assert.equal(f.observations.reads.length, 2, 'resident layers are not reloaded');
+    assert.equal(f.observations.attachments.length, 2);
+  });
+}
+
+test('raster recovery coalesces repeated renewal and rejects a superseded credential response', async () => {
+  const f = rasterFixture(); await f.load(); f.context.deferRaster = true;
+  f.renew('one'); f.renew('one');
+  assert.equal(f.observations.reads.length, 2, 'same active attempt is single-flight');
+  f.renew('two');
+  assert.equal(f.observations.reads.length, 3);
+  f.observations.pending.shift()(); await settleRaster();
+  assert.equal(f.observations.attachments.length, 0, 'old renewed credentials cannot attach');
+  f.observations.pending.shift()(); await settleRaster();
+  assert.deepEqual(f.observations.attachments, ['overlay', 'grid']);
+});
+
+test('raster recovery cannot attach after a concurrent mode departure', async () => {
+  const f = rasterFixture(); await f.load(); f.context.deferRaster = true; f.renew('one');
+  f.context.state.activeMode = 'model'; f.context.modeEpoch += 1; f.context.modeAbortController.abort();
+  f.observations.pending.shift()(); await settleRaster();
+  assert.equal(f.observations.attachments.length, 0);
+  assert.equal(f.context.demLayers.dtm, null);
+  assert.equal(f.context.dom.demLegend.style.display, 'none');
+});
+
+test('map navigation during raster recovery is not reset when the raster arrives', async () => {
+  const f = rasterFixture(); await f.load(); f.context.deferRaster = true; f.renew('one');
+  const navigatedCenter = { lat: 42.1, lng: -88.2 };
+  f.context.map.getCenter = () => navigatedCenter; f.context.map.getZoom = () => 24;
+  f.observations.pending.shift()(); await settleRaster();
+  assert.deepEqual(f.observations.attachments, ['overlay', 'grid']);
+  assert.deepEqual(f.observations.views, []);
+  assert.equal(f.context.map.getCenter(), navigatedCenter);
+  assert.equal(f.context.map.getZoom(), 24);
+});
+
 test('additional denied tiles do not replace a blocked-access warning with fictitious renewal', () => {
   const f = fixture();
   f.context.activeViewerSession.expiresAt = new Date(Date.now() + 1_800_000).toISOString();
