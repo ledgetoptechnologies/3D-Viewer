@@ -267,7 +267,10 @@ test('controlled surface audit retains large GLB geometry under a bounded V8 hea
   const run = spawnSync(process.execPath, [
     '--max-old-space-size=192', '--input-type=module', '-e', childCode,
     directory, source, converterInput, converterBinary, trustedConverterBinarySha256[0],
-  ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 1_000_000 });
+  // This is intentionally a large, memory-constrained subprocess. GitHub's
+  // serial full-suite run can take longer than local focused runs, so leave
+  // enough wall time for slower CI hosts without weakening the heap limit.
+  ], { encoding: 'utf8', timeout: 300_000, maxBuffer: 1_000_000 });
   assert.equal(run.status, 0, run.stderr || run.error?.message);
   assert.deepEqual(JSON.parse(run.stdout), { sourceTriangleCount: halfCount * 2, leafTriangleCount: halfCount * 2 });
 });
