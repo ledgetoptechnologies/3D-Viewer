@@ -7,6 +7,7 @@ const {copyRetainedClosure}=require('./webodmTaskImport');
 const {fsyncDirectory,fsyncDirectoryTree}=require('./durableFs');
 const {LOD_DERIVATIVE_RECOVERY_REVISION}=require('./lodRecoveryPolicy');
 const {collectRecoveryCompanions,companionCopyManifests,ownedRecoveryCompanions,verifyRecoveryCompanionDestination,verifyRecoveryCompanionPlan}=require('./lodRecoveryCompanions');
+const {recoveryScratchRelative,withRecoveryMaterializationLease}=require('./recoveryMaterializationLease');
 
 function publicManifest(manifest){return{manifestSha256:manifest.manifestSha256,files:manifest.files.map(({relativePath,sourceRelativePath,role,byteSize,sha256})=>({relativePath,sourceRelativePath,role,byteSize,sha256}))};}
 function sameManifest(left,right){return left?.manifestSha256===right?.manifestSha256&&JSON.stringify(left?.files||[])===JSON.stringify(right?.files||[]);}
@@ -47,7 +48,7 @@ async function processLodRecovery(operation,{processing,repository,storage,confi
   const meshPaths=new Set(inspected.publicManifest.files.map(file=>file.relativePath));
   if(copyPlans.some(plan=>plan.files.some(file=>meshPaths.has(file.relativePath))))throw Object.assign(new Error('recovery companion destination conflicts with the mesh closure'),{code:'lod_recovery_companion_changed'});
   await progress(0.35);
-  const destination=storage.resolve('models',payload.targetRelativePath),incomplete=storage.resolve('models',`${payload.targetRelativePath}.recovery-${operation.id}.incomplete`);
+  const destination=storage.resolve('models',payload.targetRelativePath),incomplete=storage.resolve('models',recoveryScratchRelative(operation,payload.targetRelativePath));
   if(fs.existsSync(destination)){
     const existing=publicManifest(await buildMeshRecoveryManifest(destination,{signal}));
     if(!sameManifest(existing,persisted))throw Object.assign(new Error('the recovery destination conflicts with its authorized source manifest'),{code:'lod_recovery_destination_conflict'});
@@ -65,7 +66,7 @@ async function processLodRecovery(operation,{processing,repository,storage,confi
       fsyncDirectoryTree(incomplete,{code:'retained_materialization_failed'});
       fs.mkdirSync(path.dirname(destination),{recursive:true});
       if(fs.statSync(incomplete).dev!==fs.statSync(path.dirname(destination)).dev)throw Object.assign(new Error('LOD recovery materialization crossed filesystems'),{code:'invalid_storage_location'});
-      fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'lod_recovery_materialization_failed'});
+      withRecoveryMaterializationLease(operation,processing,()=>{fs.renameSync(incomplete,destination);fsyncDirectory(path.dirname(destination),{code:'lod_recovery_materialization_failed'});});
     }catch(error){if(fs.existsSync(incomplete))fs.rmSync(incomplete,{recursive:true,force:true});throw error;}
   }
   await progress(0.75);
@@ -73,6 +74,7 @@ async function processLodRecovery(operation,{processing,repository,storage,confi
   if(!source||source.id!==payload.sourceVersionId||sourceModel.id!==payload.sourceModelId)throw Object.assign(new Error('the source model version is unavailable'),{code:'lod_recovery_source_changed'});
   const task=processing.getTask(ids.taskId),project=task&&processing.getProject(task.projectId),dataset=processing.getDataset(ids.datasetId,true);
   if(!task||!project||!dataset||dataset.status!=='finalized')throw Object.assign(new Error('the recovery task source is unavailable'),{code:'lod_recovery_source_changed'});
+  const {attempt,model}=withRecoveryMaterializationLease(operation,processing,()=>{
   const attempt=processing.createImportedAttempt({id:ids.attemptId,taskId:task.id,datasetId:dataset.id,providerTaskId:`lod-recovery:${operation.id}`,createdBy:operation.subject,displayName:task.displayName,metadata:{lodRecoveryOperationId:operation.id,lodRecoverySourceVersionId:payload.sourceVersionId},staged:true,expectedActiveAttemptId:payload.sourceAttemptId});
   const manifestByRole=new Map(inspected.publicManifest.files.map(file=>[file.role,file])),glb=manifestByRole.get('mesh_glb'),obj=manifestByRole.get('mesh_obj'),assets=[{kind:'glb',rootKey:'models',relativePath:`${payload.targetRelativePath}/${glb.relativePath}`,format:'glb',contentType:'model/gltf-binary',byteSize:glb.byteSize,sha256:glb.sha256,storageMode:'managed',published:false,sourceAttemptId:attempt.id},{kind:'obj',rootKey:'models',relativePath:`${payload.targetRelativePath}/${obj.relativePath}`,format:'obj',contentType:'text/plain',byteSize:obj.byteSize,sha256:obj.sha256,storageMode:'managed',published:false,sourceAttemptId:attempt.id}];
   const owned=ownedRecoveryCompanions(companions,payload.targetRelativePath,attempt.id);assets.push(...owned.assets);
@@ -81,11 +83,13 @@ async function processLodRecovery(operation,{processing,repository,storage,confi
   processing.setAttemptResult(attempt.id,model.id,ids.versionId);
   processing.registerModelOutput({versionId:ids.versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:'models',relativePath:payload.targetRelativePath,storageMode:'managed',status:'staged',byteSize:totalBytes,assetCount:assets.length});
   processing.recordProcessingEvent({attemptId:attempt.id,operationId:operation.id,eventType:'lod_recovery.materialized',phase:'registering',details:{recoveryRevision:payload.recoveryRevision,sourceOutputId:payload.sourceOutputId,sourceVersionId:payload.sourceVersionId,targetVersionId:ids.versionId,manifestSha256:payload.sourceManifestSha256}});
+  return{attempt,model};
+  });
   await progress(0.98);
   const requiredDerivatives=reusedTiles?[{type:'lod_audit',request:{optional:false,reuseVerifiedProvenance:true,tilesRootKey:'models',tilesRelativePath:`${payload.targetRelativePath}/recovery-companions/tiles`}}]:[{type:'mesh_tiles',request:{optional:false}}];
   return{project,task:processing.getTask(task.id),attempt:processing.getAttempt(attempt.id),model:repository.getModelVersion(model.id,ids.versionId),recovery:{operationId:operation.id,recoveryRevision:payload.recoveryRevision,sourceOutputId:payload.sourceOutputId,sourceVersionId:payload.sourceVersionId,targetVersionId:ids.versionId,manifestSha256:payload.sourceManifestSha256},requiredDerivatives};
 }
 
-function cleanupLodRecoveryMaterialization(operation,{processing,storage}){const payload=JSON.parse(operation.payload_json||'{}'),ids=payload.ids||{};if(!payload.lodRecovery||processing.getModelOutput(ids.versionId))return false;for(const relative of[`${payload.targetRelativePath}.recovery-${operation.id}.incomplete`,payload.targetRelativePath]){const absolute=storage.resolve('models',relative);if(fs.existsSync(absolute))fs.rmSync(absolute,{recursive:true,force:true});}return true;}
+function cleanupLodRecoveryMaterialization(operation,{processing,storage}){return withRecoveryMaterializationLease(operation,processing,()=>{const payload=JSON.parse(operation.payload_json||'{}'),ids=payload.ids||{};if(!payload.lodRecovery||processing.getModelOutput(ids.versionId))return false;for(const relative of[recoveryScratchRelative(operation,payload.targetRelativePath),payload.targetRelativePath]){const absolute=storage.resolve('models',relative);if(fs.existsSync(absolute))fs.rmSync(absolute,{recursive:true,force:true});}return true;});}
 
 module.exports={cleanupLodRecoveryMaterialization,inspectLodRecoverySource,processLodRecovery,publicManifest,sameManifest};

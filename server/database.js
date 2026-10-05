@@ -2096,17 +2096,23 @@ function openDatabase(databasePath) {
   if (!databasePath) throw new Error('databasePath is required');
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const database = new DatabaseSync(databasePath);
-  // Set the lock wait before journal-mode initialization so two first-boot
-  // processes do not fail while one establishes the WAL files.
-  database.exec('PRAGMA busy_timeout=5000');
-  database.exec('PRAGMA foreign_keys=ON');
-  // SQLite's journal-mode transition may return SQLITE_BUSY without invoking
-  // the configured busy handler during simultaneous first boot. Retry only
-  // that bounded initialization transition; migration locking remains native.
-  withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
-  database.exec('PRAGMA synchronous=NORMAL');
-  applyMigrations(database);
-  return database;
+  try {
+    // Set the lock wait before journal-mode initialization so two first-boot
+    // processes do not fail while one establishes the WAL files.
+    database.exec('PRAGMA busy_timeout=5000');
+    database.exec('PRAGMA foreign_keys=ON');
+    // SQLite's journal-mode transition may return SQLITE_BUSY without invoking
+    // the configured busy handler during simultaneous first boot. Retry only
+    // that bounded initialization transition; migration locking remains native.
+    withBusyRetry(() => database.exec('PRAGMA journal_mode=WAL'));
+    database.exec('PRAGMA synchronous=NORMAL');
+    applyMigrations(database);
+    return database;
+  } catch (error) {
+    // A rejected migration must not retain its SQLite/WAL handles.
+    try { database.close(); } catch { /* Preserve the initialization error. */ }
+    throw error;
+  }
 }
 
 module.exports = { MIGRATIONS, applyMigrations, openDatabase };

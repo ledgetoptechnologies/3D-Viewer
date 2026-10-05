@@ -13,7 +13,7 @@ const { discoverAssets } = require('./catalogImport');
 const { validateImportSelection } = require('./importBrowser');
 const { hashTree } = require('./storageManager');
 const { readOdmTaskMetadata } = require('./odmTaskMetadata');
-const { lodDerivativeSpecs } = require('./lodDerivativePolicy');
+const { assertPointCloudImportCapability, importedDerivativeSpecs } = require('./pointCloudImportPolicy');
 const { compareUtf8 } = require('./processingSecurity');
 const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
 
@@ -130,12 +130,13 @@ async function importWebodmTask(operation, { processing, repository, storage, co
     const assets=rediscovered.assets.map((asset)=>({...asset,rootKey:'datasets',relativePath:`${dataset.relativePath}/${asset.relativePath}`,storageMode:'adopted',published:false,sourceAttemptId:attempt.id})),summary=capabilitySummary(assets);
     if(JSON.stringify(summary.assetKinds)!==JSON.stringify(replay.assetKinds))throw Object.assign(new Error('WebODM import replay assets changed'),{code:'webodm_import_replay_conflict'});
     await recordImportedSourceUnits(operation, { processing, repository, storage }, model.id, replay.modelVersionId, { signal });
-    const requiredDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
+    const requiredDerivatives=importedDerivativeSpecs(model.activeVersion.assets,config);
     return{project,task,attempt,model,import:replay,requiredDerivatives,retainedLeaseToken:retainedImport.leaseToken,...summary};
   }
   const { payload, request, staging, stagingRelative, stagingCleanupRelative } = await stageSource(operation, { processing, storage, config }, signal, progress);
   const ids = payload.ids || {}, sourceDiscovered = await discoverAssets(staging), sourceSummary = capabilitySummary(sourceDiscovered.assets);
   if (!sourceSummary.assetKinds.length) throw Object.assign(new Error('No supported WebODM task artifacts were found'), { code: 'no_supported_assets' });
+  assertPointCloudImportCapability(sourceDiscovered.assets,config);
   const retainedManifest=await buildRetainedManifest(staging,{signal});
   const retained=processing.recordRetainedImportManifest(operation.id,operation.lease_owner,{attemptId:ids.attemptId,datasetId:ids.datasetId,sourceKind:payload.importSource?.kind==='server_zip'?'backup_zip':'server_folder',sourceRelativePath:request.sourceRelativePath,sourceSnapshot:payload.sourceSnapshot,extractedTreeSha256:sourceDiscovered.sourceFingerprint,stagingRelativePath:stagingCleanupRelative,manifestSha256:retainedManifest.manifestSha256,files:retainedManifest.files});
   if(!retained)throw Object.assign(new Error('task import lease was lost before retained manifest persistence'),{code:'operation_lease_lost'});
@@ -172,10 +173,7 @@ async function importWebodmTask(operation, { processing, repository, storage, co
   // Existing accounting assigns adopted/reference trees to the output and
   // excludes their source dataset from the project dataset subtotal.
   processing.registerModelOutput({ versionId: ids.versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: request.projectId, rootKey: 'datasets', relativePath: dataset.relativePath, storageMode: 'adopted', status: 'staged', byteSize: dataset.byteSize, assetCount: registeredAssets.length });
-  const lodDerivatives = lodDerivativeSpecs(assets, {
-    meshDerivativesEnabled: config.meshDerivativesEnabled,
-    required: true,
-  });
+  const lodDerivatives = importedDerivativeSpecs(assets, config);
   const imported = processing.recordWebodmTaskImport({ id: operation.id, sourceFingerprint: retainedDiscovered.sourceFingerprint, sourceRelativePath: request.sourceRelativePath, projectId: request.projectId, taskId: task.id, datasetId: dataset.id, attemptId: attempt.id, modelId: model.id, modelVersionId: ids.versionId, assetKinds: summary.assetKinds, createdBy: operation.subject });
   await progress(0.98);
   return { project: processing.getProject(request.projectId), task: processing.getTask(task.id), attempt: processing.getAttempt(attempt.id), model: repository.getModelVersion(model.id, ids.versionId), import: imported, requiredDerivatives: lodDerivatives, retainedLeaseToken: retained.leaseToken, ...summary };

@@ -5,6 +5,8 @@ const { sanitizeLogMessage } = require('./processingSecurity');
 const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
 const { importWebodmTask } = require('./webodmTaskImport');
 const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
+const { processPointCloudRecovery } = require('./pointCloudRecovery');
+const { withRecoveryMaterializationLease } = require('./recoveryMaterializationLease');
 const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
 
@@ -102,8 +104,11 @@ async function processOneDatasetOperation(deps, owner) {
   let progress = Number(operation.progress) || 0;
   let lostLease = false;
   const controller = new AbortController();
+  const recovery=Boolean(JSON.parse(operation.payload_json||'{}').lodRecovery);
   const heartbeat = () => {
-    if (!deps.processing.heartbeatDatasetOperation(operation.id, owner, progress)) { lostLease = true; controller.abort(); }
+    let renewed=false;
+    try{renewed=recovery?withRecoveryMaterializationLease(operation,deps.processing,()=>deps.processing.heartbeatDatasetOperation(operation.id, owner, progress)):deps.processing.heartbeatDatasetOperation(operation.id, owner, progress);}catch(error){if(error.code!=='operation_lease_lost')throw error;}
+    if (!renewed) { lostLease = true; controller.abort(); }
   };
   const timer = setInterval(heartbeat, 2_000);
   timer.unref?.();
@@ -132,12 +137,15 @@ async function processOneDatasetOperation(deps, owner) {
     }
     else if (operation.operation_type === 'catalog_map') {
       const payload=JSON.parse(operation.payload_json||'{}');
-      if(payload.lodRecovery){result=await processLodRecovery(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'lod_recovery.materialized',entityType:'dataset_operation',entityId:operation.id,details:{sourceVersionId:result.recovery.sourceVersionId,targetVersionId:result.recovery.targetVersionId,recoveryRevision:result.recovery.recoveryRevision}});}
+      if(payload.pointCloudRecovery){result=await processPointCloudRecovery(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'point_cloud_recovery.materialized',entityType:'dataset_operation',entityId:operation.id,details:{sourceVersionId:result.recovery.sourceVersionId,targetVersionId:result.recovery.targetVersionId}});}
+      else if(payload.lodRecovery){result=await processLodRecovery(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'lod_recovery.materialized',entityType:'dataset_operation',entityId:operation.id,details:{sourceVersionId:result.recovery.sourceVersionId,targetVersionId:result.recovery.targetVersionId,recoveryRevision:result.recovery.recoveryRevision}});}
       else if(payload.webodmTaskImport){result=await importWebodmTask(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'webodm_task_import.completed',entityType:'dataset_operation',entityId:operation.id,details:{projectId:result.project.id,taskId:result.task.id,assetKinds:result.assetKinds}});}
       else{result=await mapCatalogCandidate(operation,deps,updateProgress,controller.signal);deps.repository.audit({actorType:'admin',actorId:operation.subject,action:'catalog_import.mapped',entityType:'catalog_import_candidate',entityId:result.candidate.id,details:{projectId:result.project.id,taskId:result.task.id,modelId:result.model.id}});}
     }
     else throw Object.assign(new Error('dataset operation type is unsupported'), { code: 'unsupported_operation' });
+    if(lostLease)throw Object.assign(new Error('dataset operation lease was lost'),{code:'operation_lease_lost'});
     let completed;
+    const finish=()=>{
     if(operation.operation_type==='catalog_map'){
       if(!result?.attempt?.id||!Array.isArray(result.requiredDerivatives))throw Object.assign(new Error('catalog import returned an invalid readiness result'),{code:'invalid_import_result'});
       if(result.requiredDerivatives.length){
@@ -149,6 +157,8 @@ async function processOneDatasetOperation(deps, owner) {
         completed=deps.processing.completeDatasetOperationWithImportReadiness(operation.id,owner,result,processingReadyEvent(deps.processing,deps.config,result.attempt),result.retainedLeaseToken);
       }
     }else completed=deps.processing.completeDatasetOperation(operation.id,owner,result);
+    };
+    if(recovery)withRecoveryMaterializationLease(operation,deps.processing,finish);else finish();
     if (lostLease || !completed)
       throw Object.assign(new Error('dataset operation lease was lost'), { code: 'operation_lease_lost' });
     if(operation.operation_type==='catalog_map'){deps.processing.clearCatalogAdoptionIntent(operation.id);await reconcileCatalogSourceCleanups(deps.processing,deps.storage,1);reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);}
@@ -156,10 +166,11 @@ async function processOneDatasetOperation(deps, owner) {
     if(error?.code==='retained_import_busy'&&deps.processing.deferDatasetOperation(operation.id,owner,5_000))return true;
     if(operation.operation_type==='catalog_map'){
       const payload=JSON.parse(operation.payload_json||'{}');
-      if(payload.lodRecovery){try{deps.processing.rollbackLodRecoveryProvisional(operation.id,owner);cleanupLodRecoveryMaterialization(operation,deps);}catch{/* the operation remains failed and retryable with the same stable IDs */}}
+      if(payload.lodRecovery){try{withRecoveryMaterializationLease(operation,deps.processing,()=>{if(deps.processing.rollbackLodRecoveryProvisional(operation.id,owner))cleanupLodRecoveryMaterialization(operation,deps);});}catch{/* lease losers never remove successor-owned materializations */}}
       else try{deps.processing.rollbackCatalogMapProvisional(operation.id,owner);}catch{/* the operation remains failed and retryable with the same stable IDs */}
     }
-    deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
+    if(recovery){try{withRecoveryMaterializationLease(operation,deps.processing,()=>deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message)));}catch{/* a reclaimed generation alone controls its failure state */}}
+    else deps.processing.failDatasetOperation(operation.id, owner, error.code || 'dataset_operation_failed', sanitizeLogMessage(error.message));
     if(operation.operation_type==='catalog_map')reconcileCatalogAdoptionRecoveries(deps.processing,deps.storage,1);
   } finally {
     clearInterval(timer);

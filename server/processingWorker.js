@@ -11,7 +11,7 @@ const {inspectRegisteredSourceUnits}=require('./importSourceUnitEvidence');
 const {hashFile,hashFileChunks,hashTree}=require('./storageManager');
 const {sanitizeLogMessage}=require('./processingSecurity');
 const {readOdmTaskMetadata}=require('./odmTaskMetadata');
-const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
+const {importedDerivativeSpecs}=require('./pointCloudImportPolicy');
 const {buildMeshRecoveryManifest}=require('./retainedManifest');
 const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
 
@@ -133,18 +133,15 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   // A historical directory (or a crash after promotion but before receipt commit)
   // may retain the existing ingestion behavior, but never acquires invented proof.
   const found=discoverOutputs(destination);if(!found.some((asset)=>['glb','obj','pointCloud','ortho','ept'].includes(asset.kind)))throw Object.assign(new Error('provider archive has no supported outputs'),{code:'missing_required_output'});
-  if(!found.some((asset)=>asset.kind==='ept'))throw Object.assign(new Error('provider did not generate required EPT output'),{code:'missing_required_output'});
+  if(!found.some((asset)=>asset.kind==='ept')&&(!config.localDerivativesEnabled||!found.some(asset=>asset.kind==='pointCloud')))throw Object.assign(new Error('provider did not generate required EPT output; verified local point-cloud indexing is unavailable'),{code:'missing_required_output'});
   const meshManifest=await verifyProviderMeshClosure(destination,found,{signal});
   const nativeTiles=found.find((asset)=>asset.kind==='nativeTiles'),candidateAssets=found.filter((asset)=>asset.kind!=='nativeTiles');
   const assets=[];for(const asset of candidateAssets){let integrity;if(asset.kind==='ept'){const tree=await hashTree(path.dirname(asset.absolutePath),{signal}),header=tree.files.find(file=>file.relativePath===path.basename(asset.absolutePath));if(!header)throw Object.assign(new Error('EPT header missing from verified tree'),{code:'invalid_asset_tree'});integrity={sha256:header.sha256,manifestSha256:tree.manifestSha256,manifestFiles:tree.files};}else integrity=await hashFileChunks(asset.absolutePath,{signal});assets.push({...asset,rootKey:'models',relativePath:`${relative}/${asset.relativePath}`,storageMode:'managed',published:false,sourceAttemptId:attempt.id,...integrity});}
   const derivatives=[];
-  derivatives.push(...lodDerivativeSpecs([
+  derivatives.push(...importedDerivativeSpecs([
     ...assets,
     ...(nativeTiles?[{...nativeTiles,rootKey:'models',relativePath:`${relative}/${nativeTiles.relativePath}`}]:[]),
-  ],{
-    meshDerivativesEnabled:config.meshDerivativesEnabled,
-    required:true,
-  }));
+  ],config));
   const obj=found.find((asset)=>asset.kind==='obj'),meshDirectory=path.posix.dirname(obj.relativePath),meshFiles=meshManifest.files.map((file)=>({
     role:file.role,
     rootKey:'models',
@@ -155,7 +152,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   for(const spec of derivatives){
     if(spec.type==='ept'){
       const point=assets.find((asset)=>asset.kind==='pointCloud'&&/\.la[sz]$/i.test(asset.relativePath));
-    if(!point)throw Object.assign(new Error('provider archive has no LAS or LAZ source for the EPT derivative'),{code:'missing_required_output'});
+      if(!point)throw Object.assign(new Error('provider archive has no supported raw source for the EPT derivative'),{code:'missing_required_output'});
       trustedInputFilesByType.ept=canonicalDerivativeInput('ept',[{role:'point_cloud_source',rootKey:point.rootKey,relativePath:point.relativePath,byteSize:point.byteSize,sha256:point.sha256}]).files;
     }else if(['mesh_tiles','lod_audit'].includes(spec.type))trustedInputFilesByType[spec.type]=canonicalDerivativeInput(spec.type,meshFiles).files;
   }

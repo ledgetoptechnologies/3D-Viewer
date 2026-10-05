@@ -109,6 +109,7 @@ class ViewerRepository {
   }
 
   transaction(callback) {
+    if(this.database.isTransaction){const savepoint=`nested_${crypto.randomBytes(8).toString('hex')}`;this.database.exec(`SAVEPOINT ${savepoint}`);try{const result=callback();this.database.exec(`RELEASE SAVEPOINT ${savepoint}`);return result;}catch(error){this.database.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);this.database.exec(`RELEASE SAVEPOINT ${savepoint}`);throw error;}}
     this.database.exec('BEGIN IMMEDIATE');
     try {
       const result = callback();

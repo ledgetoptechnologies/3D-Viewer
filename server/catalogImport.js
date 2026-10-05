@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { hashFile, hashFileChunks, hashTree } = require('./storageManager');
-const { lodDerivativeSpecs } = require('./lodDerivativePolicy');
+const { assertPointCloudImportCapability, importedDerivativeSpecs } = require('./pointCloudImportPolicy');
 const { CUTLINE_PATTERN, validateCutlineFile } = require('./orthophotoCutline');
 const { recordImportedSourceUnits } = require('./importSourceUnitEvidence');
 
@@ -120,8 +120,9 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   if (!candidate) throw Object.assign(new Error('catalog candidate is unavailable'), { code: 'candidate_unavailable' });
   if(candidate.sourceFingerprint!==payload.sourceFingerprint)throw Object.assign(new Error('catalog source changed after mapping approval'),{code:'catalog_source_changed'});
   const approvedFingerprint=payload.sourceFingerprint;
-  if (candidate.mapping && candidate.state === 'mapped') { processing.clearCatalogAdoptionIntent(operation.id);return {project:processing.getProject(candidate.mapping.projectId),task:processing.getTask(candidate.mapping.taskId),attempt:processing.getAttempt(candidate.mapping.attemptId),model:repository.getModelVersion(candidate.mapping.modelId,candidate.mapping.modelVersionId),candidate,requiredDerivatives:lodDerivativeSpecs(candidate.assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true})}; }
+  if (candidate.mapping && candidate.state === 'mapped') { processing.clearCatalogAdoptionIntent(operation.id);const model=repository.getModelVersion(candidate.mapping.modelId,candidate.mapping.modelVersionId);return {project:processing.getProject(candidate.mapping.projectId),task:processing.getTask(candidate.mapping.taskId),attempt:processing.getAttempt(candidate.mapping.attemptId),model,candidate,requiredDerivatives:importedDerivativeSpecs(model.activeVersion.assets,config)}; }
   if (candidate.provider === 'webodm' && request.storageMode !== 'external_reference') throw Object.assign(new Error('WebODM media is reference-only'), { code: 'invalid_storage_mode' });
+  assertPointCloudImportCapability(candidate.assets,config);
 
   let project = processing.getProject(request.projectId || ids.projectId);
   if (!project) project = processing.createProject({id:ids.projectId,displayName:request.newProject.displayName,description:request.newProject.description,defaultUnits:request.newProject.defaultUnits||'imperial',createdBy:operation.subject,metadata:{catalogImportProvider:candidate.provider,catalogImportOperationId:operation.id}});
@@ -158,7 +159,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   await recordImportedSourceUnits(operation, { processing, repository, storage }, model.id, ids.versionId, { signal });
   processing.setAttemptResult(attempt.id,model.id,ids.versionId);
   processing.registerModelOutput({versionId:ids.versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:request.storageMode==='external_reference'?`${assetRootKey}@${ids.versionId}`:assetRootKey,relativePath:sourceRelativePath,storageMode:request.storageMode,status:'staged',byteSize:dataset.byteSize,assetCount:registeredAssets.length});
-  const lodDerivatives=lodDerivativeSpecs(assets,{meshDerivativesEnabled:config.meshDerivativesEnabled,required:true});
+  const lodDerivatives=importedDerivativeSpecs(assets,config);
   const currentCandidate=processing.getCatalogCandidate(candidate.id);if(currentCandidate.sourceFingerprint!==approvedFingerprint)throw Object.assign(new Error('catalog source changed while mapping'),{code:'catalog_source_changed'});
   await progress(0.98);
   return {project,task:processing.getTask(task.id),attempt:processing.getAttempt(attempt.id),model:repository.getModelVersion(model.id,ids.versionId),candidate:currentCandidate,requiredDerivatives:lodDerivatives};

@@ -46,7 +46,7 @@ async function recordImportedSourceUnits(operation, { processing, repository, st
     signal?.throwIfAborted();
     const live = processing.database.prepare(`SELECT 1 FROM dataset_operations
       WHERE id=? AND operation_type='catalog_map' AND status='leased'
-      AND lease_owner=? AND lease_expires_at>?`).get(operation.id, operation.lease_owner, new Date().toISOString());
+      AND lease_owner=? AND lease_expires_at>? AND (? IS NULL OR attempt_count=?)`).get(operation.id, operation.lease_owner, new Date().toISOString(), operation.attempt_count ?? null, operation.attempt_count ?? null);
     if (!live) throw Object.assign(new Error('import lease was lost before unit evidence persistence'), { code: 'operation_lease_lost' });
     const registry = new MeasurementSourceUnitEvidence(processing.database);
     return pending.map(({ request, inspection }) => registry.recordExplicitMetadata(request, inspection));

@@ -26,12 +26,17 @@ async function ingest(t,mode='fresh'){
     {path:'log.json',data:JSON.stringify(log)},
     {path:'images.json',data:JSON.stringify([{filename:'a.jpg',latitude:43,longitude:-88,altitude:200}])},
     {path:'odm_georeferencing/coords.txt',data:'WGS84 UTM 16N\n100 200\n1 2 200\n'},
-  ],zip=makeZip(entries),requests=[];
+  ];
+  if(mode==='local-cloud'||mode==='disabled-cloud'){
+    entries.splice(entries.findIndex(entry=>entry.path==='entwine_pointcloud/ept.json'),1);
+    entries.push({path:'odm_georeferencing/odm_georeferenced_model.laz',data:'registered-raw-source'});
+  }
+  const zip=makeZip(entries),requests=[];
   const server=http.createServer((req,res)=>{requests.push(req.url);res.writeHead(200,{'content-type':'application/zip','content-length':zip.length});res.end(zip);});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ingest-unit-evidence-'));
-  const config={datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'};
+  const config={datasetsMount:path.join(root,'datasets'),modelsMount:path.join(root,'models'),cacheMount:path.join(root,'cache'),trashMount:path.join(root,'trash'),storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,localDerivativesEnabled:mode==='local-cloud',processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'};
   for(const directory of [config.datasetsMount,config.modelsMount,config.cacheMount,config.trashMount])fs.mkdirSync(directory,{recursive:true});
   const db=openDatabase(path.join(root,'viewer.sqlite')),processing=new ProcessingRepository(db),repository=new ViewerRepository(db),storage=new StorageManager(config);storage.initialize();
   t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
@@ -80,6 +85,16 @@ test('processIngest persists exact native DSM/DTM metre evidence from real fresh
     assert.equal(f.evidence.get({...request,source:{...source,sha256:'0'.repeat(64)}}),null);
   }
   for(const source of f.assets.filter(asset=>!['dsm','dtm'].includes(asset.kind)))assert.equal(f.evidence.summary(f.completed.resultModelId,f.completed.resultModelVersionId,source),null,'native raster proof must not authorize derived geometry');
+});
+
+test('node archive without EPT queues mandatory local indexing alongside existing mesh work',{skip:process.platform!=='linux'},async t=>{
+  const f=await ingest(t,'local-cloud');assert.equal(f.completed.status,'derivatives');assert.equal(f.assets.some(asset=>asset.kind==='ept'),false);
+  const jobs=f.db.prepare('SELECT id,derivative_type,request_json FROM derivative_jobs WHERE attempt_id=?').all(f.attempt.id),ept=jobs.find(job=>job.derivative_type==='ept');
+  assert.ok(ept);assert.equal(JSON.parse(ept.request_json).optional,false);assert.ok(jobs.some(job=>job.derivative_type==='mesh_tiles'));
+  const input=f.processing.derivativeInputSnapshot(ept.id);assert.equal(input.files.length,1);assert.equal(input.files[0].role,'point_cloud_source');assert.equal(input.files[0].sha256,sha('registered-raw-source'));
+});
+test('node archive without EPT refuses false readiness when local indexing policy is disabled',{skip:process.platform!=='linux'},async t=>{
+  await assert.rejects(()=>ingest(t,'disabled-cloud'),{code:'missing_required_output'});
 });
 for(const mode of ['missing-init','missing-archive','unknown-engine'])test(`processIngest preserves output but never asserts metres for ${mode}`,{skip:process.platform!=='linux'},async t=>{
   const f=await ingest(t,mode);assert.ok(f.assets.some(asset=>asset.kind==='dsm'));assert.ok(f.assets.some(asset=>asset.kind==='dtm'));
