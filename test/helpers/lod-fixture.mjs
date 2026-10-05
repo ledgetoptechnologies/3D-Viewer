@@ -199,6 +199,7 @@ export const TRIANGLE_A = [[0, 0, 0], [1, 0, 0], [0, 1, 0]];
 export const TRIANGLE_B = [[1, 0, 0], [1, 1, 0], [0, 1, 0]];
 
 export function writeAuditableFixture(directory, {
+  sourceTriangles = [TRIANGLE_A, TRIANGLE_B],
   leafATriangles = [TRIANGLE_A],
   leafARtc,
   leafATexcoordTransform,
@@ -215,7 +216,7 @@ export function writeAuditableFixture(directory, {
   const imageOptions = externalTexture ? { imageUri: 'texture.png' } : {};
   if (externalTexture) fs.writeFileSync(path.join(directory, 'texture.png'), Buffer.from('fixture-texture'));
   const source = path.join(directory, 'model.glb');
-  fs.writeFileSync(source, makeGlb([TRIANGLE_A, TRIANGLE_B], Buffer.from('fixture-texture'), imageOptions));
+  fs.writeFileSync(source, makeGlb(sourceTriangles, Buffer.from('fixture-texture'), imageOptions));
   fs.writeFileSync(path.join(directory, 'leaf-a.b3dm'), leafABytes || makeB3dm(makeGlb(leafATriangles, Buffer.from('fixture-texture'), {
     ...imageOptions,
     basisu: leafABasisu,

@@ -12,12 +12,18 @@ const {
   runtimeForkBuildInfo,
 } = require('../lod-converter-policy.cjs');
 const {
+  isExplicitResourcePressure,
   obj2TilesDiagnostics,
   run,
   runObj2TilesWithResourceRetry,
 } = require('../server/derivativeWorker');
 
 const root = path.resolve(__dirname, '..');
+
+test('classifies Node.js heap exhaustion as resource pressure without widening semantic errors', () => {
+  assert.equal(isExplicitResourcePressure(new Error('Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory')), true);
+  assert.equal(isExplicitResourcePressure(new Error('invalid texture coordinates')), false);
+});
 
 test('Obj2Tiles source and fork patch are pinned fail-closed at image build and attested in CI', () => {
   const docker = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');

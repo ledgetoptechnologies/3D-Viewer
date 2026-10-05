@@ -21,7 +21,7 @@ const {
   obj2TilesArguments,
 } = require('../lod-converter-policy.cjs');
 
-const RESOURCE_PRESSURE_PATTERN = /(?:taskschedulerexception|an exception was thrown by a taskscheduler|outofmemoryexception|insufficientmemoryexception|cannot allocate memory|resource temporarily unavailable|failed to (?:create|start).{0,24}thread|pthread_create)/i;
+const RESOURCE_PRESSURE_PATTERN = /(?:taskschedulerexception|an exception was thrown by a taskscheduler|outofmemoryexception|insufficientmemoryexception|javascript heap out of memory|ineffective mark-compacts near heap limit|cannot allocate memory|resource temporarily unavailable|failed to (?:create|start).{0,24}thread|pthread_create)/i;
 const DIAGNOSTIC_PREFIX = 'OBJ2TILES_DIAGNOSTIC ';
 
 function readResourceMetric(file) {
@@ -525,7 +525,15 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
             }
             reusedManifest = verifyRecoveryCompanionPlan(processing.database, payload.sourceVersionId, payload.reusedTiles, { meshTilesOnly: true });
           } else {
-            await run(process.execPath, [audit, tiles, source, '--external-source'], { signal: controller.signal });
+            try {
+              await run(process.execPath, [audit, tiles, source, '--external-source'], { signal: controller.signal });
+            } catch (error) {
+              if (isExplicitResourcePressure(error)) {
+                error.resourceComponent = 'lod_equivalence_audit';
+                error.resourcePhase = 'auditing';
+              }
+              throw error;
+            }
           }
           derivativePhase(processing, job, owner, 'verifying');
           const verified = await verifiedLodAsset({
@@ -654,17 +662,24 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
     } : null);
     if (job.derivative_type === 'mesh_tiles' && error.code !== 'lease_lost' && pressureEvidence) {
       try {
+        const auditPressure = error.resourceComponent === 'lod_equivalence_audit';
         processing.recordProcessingEvent({
           attemptId: attempt.id,
           derivativeJobId: job.id,
-          eventType: 'obj2tiles.resource_pressure',
-          phase: 'generating',
+          eventType: auditPressure ? 'lod_audit.resource_pressure' : 'obj2tiles.resource_pressure',
+          phase: auditPressure ? 'auditing' : 'generating',
           severity: 'error',
-          errorCode: 'obj2tiles_resource_pressure',
-          message: error.serialRetryAttempted
-            ? 'Obj2Tiles encountered scheduler or memory pressure and its one serial retry did not complete.'
-            : 'Obj2Tiles encountered scheduler or memory pressure.',
-          details: { derivativeType: 'mesh_tiles', ...pressureEvidence },
+          errorCode: auditPressure ? 'lod_audit_resource_pressure' : 'obj2tiles_resource_pressure',
+          message: auditPressure
+            ? 'LOD equivalence audit exceeded the available Node.js heap or system resources.'
+            : error.serialRetryAttempted
+              ? 'Obj2Tiles encountered scheduler or memory pressure and its one serial retry did not complete.'
+              : 'Obj2Tiles encountered scheduler or memory pressure.',
+          details: {
+            derivativeType: 'mesh_tiles',
+            ...(auditPressure ? { component: 'lod_equivalence_audit' } : {}),
+            ...pressureEvidence,
+          },
         });
       } catch (diagnosticError) {
         console.error(`[derivative] type=mesh_tiles outcome=diagnostic_persist_failed code=${String(diagnosticError.code || 'processing_event_failed').replace(/[^a-z0-9_-]/gi, '').slice(0, 80)}`);

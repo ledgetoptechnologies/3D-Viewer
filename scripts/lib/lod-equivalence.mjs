@@ -175,7 +175,7 @@ function normalizeComponent(value, type, normalized) {
   return value / 65535;
 }
 
-async function dracoPrimitiveValues(asset, primitive, label) {
+async function dracoPrimitiveValues(asset, primitive, label, { compactSurface = false } = {}) {
   const extension = primitive.extensions?.KHR_draco_mesh_compression;
   if (!extension) return null;
   const view = asset.json.bufferViews?.[extension.bufferView];
@@ -226,13 +226,28 @@ async function dracoPrimitiveValues(asset, primitive, label) {
       try {
         if (!decoder[method[1]](mesh, attribute, values)) throw new Error(`${label}: Draco attribute ${semantic} could not be decoded`);
         if (values.size() !== accessor.count * componentCount) throw new Error(`${label}: Draco attribute ${semantic} has the wrong decoded length`);
-        attributes[semantic] = Array.from({ length: accessor.count }, (_, row) => (
-          Array.from({ length: componentCount }, (_, component) => normalizeComponent(
-            values.GetValue(row * componentCount + component),
-            accessor.componentType,
-            accessor.normalized,
-          ))
-        ));
+        if (compactSurface) {
+          if (semantic === 'POSITION') {
+            const flat = new Float64Array(accessor.count * componentCount);
+            for (let index = 0; index < flat.length; index += 1) {
+              flat[index] = normalizeComponent(values.GetValue(index), accessor.componentType, accessor.normalized);
+            }
+            attributes[semantic] = flat;
+          } else {
+            // Decode and validate the full render attribute, but discard its
+            // samples immediately; the controlled surface proof needs only
+            // positions plus proof that the required render data is present.
+            attributes[semantic] = true;
+          }
+        } else {
+          attributes[semantic] = Array.from({ length: accessor.count }, (_, row) => (
+            Array.from({ length: componentCount }, (_, component) => normalizeComponent(
+              values.GetValue(row * componentCount + component),
+              accessor.componentType,
+              accessor.normalized,
+            ))
+          ));
+        }
       } finally {
         module.destroy(values);
       }
@@ -248,13 +263,17 @@ async function dracoPrimitiveValues(asset, primitive, label) {
       throw new Error(`${label}: Draco indices accessor is missing or inconsistent`);
     }
     const face = new module.DracoInt32Array();
-    const indices = [];
+    const indices = compactSurface ? new Int32Array(indexAccessor.count) : [];
     try {
       for (let faceIndex = 0; faceIndex < mesh.num_faces(); faceIndex += 1) {
         if (!decoder.GetFaceFromMesh(mesh, faceIndex, face) || face.size() !== 3) {
           throw new Error(`${label}: Draco face ${faceIndex} could not be decoded`);
         }
-        for (let component = 0; component < 3; component += 1) indices.push(face.GetValue(component));
+        for (let component = 0; component < 3; component += 1) {
+          const index = (faceIndex * 3) + component;
+          if (compactSurface) indices[index] = face.GetValue(component);
+          else indices.push(face.GetValue(component));
+        }
       }
     } finally {
       module.destroy(face);
@@ -268,7 +287,7 @@ async function dracoPrimitiveValues(asset, primitive, label) {
   }
 }
 
-function accessorValues(asset, index, label) {
+function accessorDescriptor(asset, index, label) {
   const accessor = asset.json.accessors?.[index];
   if (!accessor) throw new Error(`${label}: accessor ${index} is missing`);
   if (accessor.sparse) throw new Error(`${label}: sparse accessors are not supported by the exact audit`);
@@ -287,11 +306,38 @@ function accessorValues(asset, index, label) {
   const start = (view.byteOffset || 0) + (accessor.byteOffset || 0);
   const end = accessor.count ? start + (accessor.count - 1) * stride + packed : start;
   if (start < 0 || end > asset.bin.length) throw new Error(`${label}: accessor ${index} exceeds the GLB buffer`);
+  return {
+    accessor,
+    componentCount,
+    count: accessor.count,
+    read(row, component) {
+      if (!Number.isInteger(row) || row < 0 || row >= accessor.count
+        || !Number.isInteger(component) || component < 0 || component >= componentCount) {
+        throw new Error(`${label}: accessor ${index} index is out of bounds`);
+      }
+      return readComponent(asset.bin, start + row * stride + component * componentBytes, accessor.componentType, accessor.normalized);
+    },
+  };
+}
+
+function compactAccessorValues(asset, index, label) {
+  const descriptor = accessorDescriptor(asset, index, label);
+  const values = new Float64Array(descriptor.count * descriptor.componentCount);
+  for (let row = 0; row < descriptor.count; row += 1) {
+    for (let component = 0; component < descriptor.componentCount; component += 1) {
+      values[(row * descriptor.componentCount) + component] = descriptor.read(row, component);
+    }
+  }
+  return { values, count: descriptor.count, componentCount: descriptor.componentCount };
+}
+
+function accessorValues(asset, index, label) {
+  const descriptor = accessorDescriptor(asset, index, label);
   const values = [];
-  for (let row = 0; row < accessor.count; row += 1) {
+  for (let row = 0; row < descriptor.count; row += 1) {
     const item = [];
-    for (let component = 0; component < componentCount; component += 1) {
-      item.push(readComponent(asset.bin, start + row * stride + component * componentBytes, accessor.componentType, accessor.normalized));
+    for (let component = 0; component < descriptor.componentCount; component += 1) {
+      item.push(descriptor.read(row, component));
     }
     values.push(item);
   }
@@ -430,7 +476,7 @@ function triangleCompare(a, b, tolerance = 0) {
   return 0;
 }
 
-async function extractTriangles(asset, rootTransform, label) {
+async function extractTriangles(asset, rootTransform, label, { compactSurface = false } = {}) {
   const triangles = [];
   const nodes = asset.json.nodes || [];
   const childNodes = new Set(nodes.flatMap((node) => node.children || []));
@@ -464,33 +510,74 @@ async function extractTriangles(asset, rootTransform, label) {
         ));
         const unsupported = suppliedAttributeNames.filter((name) => !attributeNames.includes(name) && !name.startsWith('_'));
         if (unsupported.length) throw new Error(`${label}: unsupported render attribute ${unsupported[0]}`);
-        const draco = await dracoPrimitiveValues(asset, primitive, label);
-        const attributes = draco?.attributes || Object.fromEntries(attributeNames.map((name) => [name, accessorValues(asset, primitive.attributes[name], label)]));
-        const vertexCount = attributes.POSITION.length;
-        if (Object.values(attributes).some((values) => values.length !== vertexCount)) throw new Error(`${label}: primitive attributes have different counts`);
-        const indices = draco?.indices || (Number.isInteger(primitive.indices)
-          ? accessorValues(asset, primitive.indices, label).map((value) => value[0])
-          : Array.from({ length: vertexCount }, (_, index) => index));
-        if (indices.length % 3) throw new Error(`${label}: triangle index count is not divisible by three`);
+        const draco = await dracoPrimitiveValues(asset, primitive, label, { compactSurface });
+        let attributes;
+        let vertexCount;
+        let compactPositions;
+        if (compactSurface) {
+          if (draco) {
+            compactPositions = draco.attributes.POSITION;
+            vertexCount = asset.json.accessors[primitive.attributes.POSITION].count;
+          } else {
+            const descriptors = Object.fromEntries(attributeNames.map((name) => [
+              name,
+              accessorDescriptor(asset, primitive.attributes[name], label),
+            ]));
+            vertexCount = descriptors.POSITION.count;
+            if (Object.values(descriptors).some((descriptor) => descriptor.count !== vertexCount)) {
+              throw new Error(`${label}: primitive attributes have different counts`);
+            }
+            compactPositions = compactAccessorValues(asset, primitive.attributes.POSITION, label).values;
+          }
+        } else {
+          attributes = draco?.attributes || Object.fromEntries(attributeNames.map((name) => [name, accessorValues(asset, primitive.attributes[name], label)]));
+          vertexCount = attributes.POSITION.length;
+          if (Object.values(attributes).some((values) => values.length !== vertexCount)) throw new Error(`${label}: primitive attributes have different counts`);
+        }
+        const compactIndices = compactSurface && !draco && Number.isInteger(primitive.indices)
+          ? compactAccessorValues(asset, primitive.indices, label).values
+          : null;
+        const indices = compactSurface
+          ? (draco?.indices || compactIndices)
+          : (draco?.indices || (Number.isInteger(primitive.indices)
+            ? accessorValues(asset, primitive.indices, label).map((value) => value[0])
+            : Array.from({ length: vertexCount }, (_, index) => index)));
+        const indexCount = compactSurface
+          ? (indices?.length ?? vertexCount)
+          : indices.length;
+        if (indexCount % 3) throw new Error(`${label}: triangle index count is not divisible by three`);
         const determinant = world.determinant();
         if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-15) throw new Error(`${label}: singular or invalid geometry transform`);
         const normalMatrix = new Matrix3().getNormalMatrix(world);
         const material = materialSignature(asset, primitive.material, label);
-        for (let offset = 0; offset < indices.length; offset += 3) {
+        const attributeKeys = attributeNames.join('|');
+        for (let offset = 0; offset < indexCount; offset += 3) {
           const vertices = [];
-          for (const index of indices.slice(offset, offset + 3)) {
+          for (let corner = 0; corner < 3; corner += 1) {
+            const index = indices ? indices[offset + corner] : offset + corner;
             if (!Number.isInteger(index) || index < 0 || index >= vertexCount) throw new Error(`${label}: primitive index is out of bounds`);
-            const values = [];
-            let position = null;
-            for (const name of attributeNames) {
-              const transformed = transformAttribute(name, attributes[name][index], world, normalMatrix);
-              values.push(...transformed);
-              if (name === 'POSITION') position = transformed.slice(0, 3);
+            if (compactSurface) {
+              const position = transformAttribute('POSITION', [
+                compactPositions[(index * 3)],
+                compactPositions[(index * 3) + 1],
+                compactPositions[(index * 3) + 2],
+              ], world, normalMatrix).slice(0, 3);
+              vertices.push(position);
+            } else {
+              const values = [];
+              let position = null;
+              for (const name of attributeNames) {
+                const transformed = transformAttribute(name, attributes[name][index], world, normalMatrix);
+                values.push(...transformed);
+                if (name === 'POSITION') position = transformed.slice(0, 3);
+              }
+              vertices.push({ keys: attributeKeys, values, position });
             }
-            vertices.push({ keys: attributeNames.join('|'), values, position });
           }
           if (determinant < 0) [vertices[1], vertices[2]] = [vertices[2], vertices[1]];
-          triangles.push({ material, vertices: rotateCanonical(vertices) });
+          triangles.push(compactSurface
+            ? { material, keys: attributeKeys, positions: vertices }
+            : { material, vertices: rotateCanonical(vertices) });
         }
       }
     }
@@ -524,7 +611,7 @@ function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null
   return { ...parsed, root, baseDir: path.dirname(filePath), bindExternal, applyCesiumRtc, allowCompressedTextureSources };
 }
 
-async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedTextureSources = false } = {}) {
+async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedTextureSources = false, compactSurface = false } = {}) {
   const triangles = [];
   const visitedTilesets = new Set();
 
@@ -589,6 +676,7 @@ async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedT
         loadGlbAsset(contentPath, derivativeDir, glb, bindArtifact, true, allowCompressedTextureSources),
         contentTransform,
         uri,
+        { compactSurface },
       ));
     }
 
@@ -670,6 +758,13 @@ function compareAudits(source, leaves, tolerance) {
 }
 
 function trianglePositions(triangle) {
+  if (Array.isArray(triangle.positions)) {
+    if (triangle.positions.length !== 3 || triangle.positions.some((position) => !Array.isArray(position) || position.length !== 3
+      || position.some((value) => !Number.isFinite(value)))) {
+      throw new Error('controlled surface audit encountered a non-finite position');
+    }
+    return triangle.positions;
+  }
   const positions = triangle.vertices.map((vertex) => vertex.position);
   if (positions.some((position) => !Array.isArray(position) || position.length !== 3
     || position.some((value) => !Number.isFinite(value)))) {
@@ -697,7 +792,7 @@ function assertControlledRenderCoverage(triangles, label) {
   let uv = 0;
   let normals = 0;
   for (const triangle of triangles) {
-    const keys = triangle.vertices[0]?.keys?.split('|') || [];
+    const keys = triangle.keys?.split('|') || triangle.vertices[0]?.keys?.split('|') || [];
     if (keys.includes('TEXCOORD_0')) uv += 1;
     if (keys.includes('NORMAL')) normals += 1;
     const traits = materialTraits(triangle.material);
@@ -1075,9 +1170,11 @@ export async function auditControlledObj2Tiles({
     loadGlbAsset(sourceGlb, derivativeDir, sourceBytes, bindExternal, false),
     IDENTITY,
     path.basename(sourceGlb),
+    { compactSurface: true },
   );
   const { triangles: leaves } = await collectLeafTriangles(derivativeDir, artifactMap, {
     allowCompressedTextureSources: true,
+    compactSurface: true,
   });
   const artifacts = [...artifactMap.values()].sort((a, b) => a.uri.localeCompare(b.uri));
   const comparison = controlledSurfaceComparison(source, leaves, sourceDigest);

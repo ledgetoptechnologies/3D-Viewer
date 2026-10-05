@@ -248,6 +248,44 @@ test('terminal Obj2Tiles pressure preserves initial retry evidence in attempt di
   assert.equal(JSON.stringify(diagnostics).includes('private'), false);
 });
 
+test('controlled LOD audit heap exhaustion is recorded against the auditing phase, not Obj2Tiles', async (t) => {
+  const context = fixture(t);
+  const source = readyMeshSource(context, 'LOD audit heap pressure');
+  const jobId = context.processing.enqueueDerivative(source.attempt.id, 'mesh_tiles', { optional: false });
+  const storage = modelStorage(context), sourceDirectory = storage.resolve('models', source.relativePath);
+  fs.mkdirSync(sourceDirectory, { recursive: true });
+  fs.writeFileSync(path.join(sourceDirectory, 'model.obj'), source.obj);
+  fs.writeFileSync(path.join(sourceDirectory, 'model.glb'), source.glb);
+  context.processing.persistDerivativeInputSnapshot(jobId, 'mesh_tiles', [
+    { role: 'mesh_obj', rootKey: 'models', relativePath: `${source.relativePath}/model.obj`, byteSize: source.obj.length, sha256: digest(source.obj) },
+    { role: 'mesh_glb', rootKey: 'models', relativePath: `${source.relativePath}/model.glb`, byteSize: source.glb.length, sha256: digest(source.glb) },
+  ]);
+  const heapError = Object.assign(new Error('Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory'), {
+    code: 'derivative_failed', exitCode: 134, resourcePressure: true,
+    resourceComponent: 'lod_equivalence_audit', resourcePhase: 'auditing',
+    resourceDiagnostics: { rssBytes: 12_345, heapUsedBytes: 9_876 },
+  });
+  await processOneDerivative({
+    processing: context.processing,
+    storage,
+    config: {},
+    generateMeshTilesImpl: async () => { throw heapError; },
+  }, 'derivative-worker:audit-heap-test');
+
+  const events = context.processing.attemptDiagnostics(source.attempt.id).events;
+  const event = events.find((item) => item.type === 'lod_audit.resource_pressure');
+  assert.ok(event);
+  assert.equal(event.phase, 'auditing');
+  assert.equal(event.errorCode, 'lod_audit_resource_pressure');
+  assert.equal(event.message, 'LOD equivalence audit exceeded the available Node.js heap or system resources.');
+  assert.deepEqual(event.details, {
+    derivativeType: 'mesh_tiles', component: 'lod_equivalence_audit',
+    resourcePressure: true, exitCode: 134, converterDiagnostics: [],
+    workerResources: { rssBytes: 12_345, heapUsedBytes: 9_876 },
+  });
+  assert.equal(events.some((item) => item.type === 'obj2tiles.resource_pressure'), false);
+});
+
 test('diagnostic run pagination is deterministic and the cursor advances without duplicates', (t) => {
   const context = fixture(t);
   const first = readyMeshSource(context, 'Page A');

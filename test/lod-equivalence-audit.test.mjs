@@ -11,7 +11,8 @@ import {
   auditLodEquivalence,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
 } from '../scripts/lib/lod-equivalence.mjs';
-import { TRIANGLE_A, TRIANGLE_B, writeAuditableFixture } from './helpers/lod-fixture.mjs';
+import { makeDracoGlb, makeGlb, TRIANGLE_A, TRIANGLE_B, writeAuditableFixture } from './helpers/lod-fixture.mjs';
+import { pathToFileURL } from 'node:url';
 
 const cli = path.join(import.meta.dirname, '..', 'scripts', 'audit-lod-equivalence.mjs');
 
@@ -222,6 +223,62 @@ test('controlled Obj2Tiles audit accepts boundary retriangulation and texture at
   assert.ok(provenance.audit.sourceToLeaves.sampleCount >= 4);
   assert.ok(provenance.audit.leavesToSource.maximumDistance <= provenance.audit.surfaceTolerance);
 });
+
+test('controlled surface audit compactly decodes Draco positions while retaining render-attribute checks', async (t) => {
+  const { directory, source } = fixture(t);
+  fs.writeFileSync(source, await makeDracoGlb([TRIANGLE_A, TRIANGLE_B]));
+  const provenance = await auditControlledObj2Tiles({ derivativeDir: directory, sourceGlb: source, ...controlledInputs(directory) });
+  assert.equal(provenance.audit.sourceTriangleCount, 2);
+  assert.equal(provenance.audit.sourceRender.uvTriangleCount, 2);
+  assert.equal(provenance.audit.sourceRender.normalTriangleCount, 2);
+  assert.equal(provenance.audit.sourceRender.texturedTriangleCount, 2);
+});
+
+test('controlled surface audit retains large GLB geometry under a bounded V8 heap', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-lod-bounded-heap-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const halfCount = 30_000;
+  const sourceTriangles = Array.from({ length: halfCount * 2 }, (_, index) => index % 2 ? TRIANGLE_B : TRIANGLE_A);
+  const source = path.join(directory, 'model.glb');
+  fs.writeFileSync(source, makeGlb(sourceTriangles));
+  fs.writeFileSync(path.join(directory, 'leaf-a.b3dm'), writeLargeLeaf(makeGlb(Array(halfCount).fill(TRIANGLE_A))));
+  fs.writeFileSync(path.join(directory, 'leaf-b.glb'), makeGlb(Array(halfCount).fill(TRIANGLE_B)));
+  fs.writeFileSync(path.join(directory, 'tileset.json'), JSON.stringify({
+    asset: { version: '1.1' },
+    root: {
+      refine: 'REPLACE', geometricError: 8, boundingVolume: { sphere: [0.5, 0.5, 0, 2] },
+      children: [
+        { geometricError: 0, boundingVolume: { sphere: [0.25, 0.25, 0, 1] }, content: { uri: 'leaf-a.b3dm' } },
+        { geometricError: 0, boundingVolume: { sphere: [0.75, 0.75, 0, 1] }, content: { uri: 'leaf-b.glb' } },
+      ],
+    },
+  }));
+  const { converterInput, converterBinary, trustedConverterBinarySha256 } = controlledInputs(directory);
+  const moduleUrl = pathToFileURL(path.join(import.meta.dirname, '..', 'scripts', 'lib', 'lod-equivalence.mjs')).href;
+  const childCode = `
+    import { auditControlledObj2Tiles } from ${JSON.stringify(moduleUrl)};
+    const [directory, sourceGlb, converterInput, converterBinary, trustedHash] = process.argv.slice(1);
+    const result = await auditControlledObj2Tiles({
+      derivativeDir: directory, sourceGlb, converterInput, converterBinary,
+      allowExternalSource: true, trustedConverterBinarySha256: [trustedHash],
+    });
+    process.stdout.write(JSON.stringify({ sourceTriangleCount: result.audit.sourceTriangleCount, leafTriangleCount: result.audit.leafTriangleCount }));
+  `;
+  const run = spawnSync(process.execPath, [
+    '--max-old-space-size=192', '--input-type=module', '-e', childCode,
+    directory, source, converterInput, converterBinary, trustedConverterBinarySha256[0],
+  ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 1_000_000 });
+  assert.equal(run.status, 0, run.stderr || run.error?.message);
+  assert.deepEqual(JSON.parse(run.stdout), { sourceTriangleCount: halfCount * 2, leafTriangleCount: halfCount * 2 });
+});
+
+function writeLargeLeaf(glb) {
+  const header = Buffer.alloc(28);
+  header.write('b3dm', 0, 'ascii');
+  header.writeUInt32LE(1, 4);
+  header.writeUInt32LE(header.length + glb.length, 8);
+  return Buffer.concat([header, glb]);
+}
 
 function scaleTriangleForTotalAreaDelta(triangle, areaRelativeDelta) {
   // controlledSurfaceComparison normalizes this fixture by diagonal^2 = 2.
