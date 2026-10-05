@@ -1508,6 +1508,49 @@ test('every staging rmdir keeps the exact target descriptor open through deletio
   assert.equal(row(c, cleanupId).status, 'complete');
 });
 
+test('staging cleanup tolerates CIFS invalidating a directory descriptor after rmdir', async (t) => {
+  const c = fixture(t), retainedId = 'staging-cifs-rmdir-fstat';
+  const cleanupId = insertCleanup(c, retainedId);
+  const staging = path.join(c.config.cacheMount, 'webodm-task-imports', retainedId);
+  fs.mkdirSync(path.join(staging, 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(staging, 'nested', 'discard.txt'), 'discard');
+  const lease = c.processing.claimImportCleanup('cleanup-worker', { at: START });
+  const realRmdir = fs.rmdirSync;
+  const realFstat = fs.fstatSync;
+  const removedDirectories = new Set();
+  const identity = (stat) => `${stat.dev}:${stat.ino}:${stat.mode}`;
+
+  fs.rmdirSync = (target, ...args) => {
+    const named = fs.lstatSync(target, { bigint: true });
+    const result = realRmdir(target, ...args);
+    removedDirectories.add(identity(named));
+    return result;
+  };
+  fs.fstatSync = (fd, ...args) => {
+    const stat = realFstat(fd, ...args);
+    if (stat.isDirectory() && removedDirectories.has(identity(stat))) {
+      throw Object.assign(new Error('synthetic CIFS post-rmdir fstat ENOENT'), { code: 'ENOENT', syscall: 'fstat' });
+    }
+    return stat;
+  };
+  try {
+    await executeStagingCleanup(
+      { processing: c.processing, storage: c.storage },
+      lease,
+      'cleanup-worker',
+      { now: () => START + 1 },
+    );
+  } finally {
+    fs.rmdirSync = realRmdir;
+    fs.fstatSync = realFstat;
+  }
+
+  assert.equal(row(c, cleanupId).status, 'complete', row(c, cleanupId).last_error || 'cleanup did not complete');
+  assert.equal(fs.existsSync(staging), false);
+  const quarantine = path.join(c.config.cacheMount, ...row(c, cleanupId).quarantine_relative_path.split('/'));
+  assert.equal(fs.existsSync(quarantine), false);
+});
+
 test('ZIP quarantine rmdir keeps the exact target descriptor open through deletion authorization', async (t) => {
   const c = fixture(t);
   const cleanup = insertZipCleanup(c, 'zip-held-rmdir', 'incoming/held-rmdir.zip', Buffer.from('held ZIP bytes'));

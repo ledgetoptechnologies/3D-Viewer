@@ -48,6 +48,14 @@ function lstatOptional(directoryFd, name) {
   }
 }
 
+// Some CIFS servers invalidate an open directory handle immediately after rmdir,
+// making fstat on the held descriptor fail with ENOENT. Callers verify the held
+// descriptor and live name before removal, then confirm the name stayed absent.
+// This preserves the identity check without requiring post-rmdir fstat support.
+function requireNameAbsent(directoryFd, name, message) {
+  if (lstatOptional(directoryFd, name)) throw cleanupError('cleanup_path_changed', message);
+}
+
 function quarantineIsEmpty(directoryFd) {
   return fs.readdirSync(`/proc/self/fd/${directoryFd}`).length === 0;
 }
@@ -65,9 +73,7 @@ function removeEmptyQuarantine(parentFd, name, heldFd) {
     }
     requirePrivateDirectory(held);
     fs.rmdirSync(procEntry(parentFd, name));
-    if (!sameNode(held, fs.fstatSync(heldFd, { bigint: true }))) {
-      throw cleanupError('cleanup_path_changed', 'deleted cleanup quarantine descriptor changed');
-    }
+    requireNameAbsent(parentFd, name, 'cleanup quarantine reappeared after deletion');
   } catch (error) {
     if (error?.code === 'ENOTEMPTY' || error?.code === 'EEXIST') {
       throw cleanupError('cleanup_quarantine_conflict', 'cleanup quarantine contains unexpected entries', error);
@@ -267,9 +273,7 @@ function removePrivateTree(directoryFd, expectedMountId, processing, job, owner,
           }
           requireOwned(held, 'directory');
           fs.rmdirSync(entryPath);
-          if (!sameNode(held, fs.fstatSync(opened.fd, { bigint: true }))) {
-            throw cleanupError('cleanup_path_changed', 'deleted cleanup directory descriptor changed');
-          }
+          requireNameAbsent(directoryFd, entry.name, 'cleanup directory reappeared after deletion');
         });
       } finally {
         fs.closeSync(opened.fd);
@@ -408,9 +412,7 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
           }
           requireOwned(held, 'directory');
           fs.rmdirSync(procEntry(quarantineFd, QUARANTINE_PAYLOAD));
-          if (!sameNode(held, fs.fstatSync(payload.fd, { bigint: true }))) {
-            throw cleanupError('cleanup_path_changed', 'deleted staging payload descriptor changed');
-          }
+          requireNameAbsent(quarantineFd, QUARANTINE_PAYLOAD, 'staging payload reappeared after deletion');
         });
         guardedFilesystemMutation(processing, job, owner, now, () => fs.fsyncSync(quarantineFd));
       } finally {
