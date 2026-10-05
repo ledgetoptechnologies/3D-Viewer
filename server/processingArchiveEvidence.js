@@ -22,6 +22,23 @@ function limits(options) {
 function same(a, b) {
   return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
 }
+function sameFileIdentity(a, b) {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size;
+}
+async function hashDescriptor(fd, byteSize, signal) {
+  const sha = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(1024 * 1024);
+  let offset = 0;
+  while (offset < byteSize) {
+    cancelled(signal);
+    const requested = Math.min(buffer.length, byteSize - offset);
+    const bytesRead = fs.readSync(fd, buffer, 0, requested, offset);
+    if (bytesRead !== requested) throw changed();
+    sha.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
+    // Keep long-running hashing responsive to lease cancellation and heartbeats.
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  return sha.digest('hex');
+}
 function safeDirectory(directory) {
   const resolved = path.resolve(directory), stat = fs.lstatSync(resolved, { bigint: true });
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw invalid();
@@ -129,18 +146,24 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     } });
     await pipeline(readable, meter, fs.createWriteStream(spool, { flags: 'wx', mode: 0o600 }), ...(signal ? [{ signal }] : []));
     cancelled(signal);
+    const archiveSha256 = archiveHash.digest('hex');
     fd = fs.openSync(spool, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
     const initial = fs.fstatSync(fd, { bigint: true });
     if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed();
     const expansionBytes = Math.min(bounds.maxBytes, bounds.maxDiskBytes - archiveByteSize);
     if (expansionBytes < 1) throw invalid();
     await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
-    if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
+    // SMB may refresh mtime/ctime when a closed file is subsequently read.
+    // Check stable descriptor identity and then compare exact bytes to the
+    // digest calculated while streaming, rather than trusting timestamps.
+    if (!sameFileIdentity(initial, fs.fstatSync(fd, { bigint: true })) ||
+        await hashDescriptor(fd, archiveByteSize, signal) !== archiveSha256 ||
+        !sameFileIdentity(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
     cancelled(signal);
     const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
     if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
-    const receipt = { archiveSha256: archiveHash.digest('hex'), archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
+    const receipt = { archiveSha256, archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
     fs.renameSync(staged, target);
     return receipt;
   } finally {

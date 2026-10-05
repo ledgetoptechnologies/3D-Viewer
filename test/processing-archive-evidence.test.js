@@ -31,6 +31,36 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
 });
+test('capture tolerates timestamp refresh on a stable descriptor but still hashes exact archive bytes', linux, async t => {
+  const { destination } = setup(t), zip = bytes(), original = fs.fstatSync;
+  let calls = 0;
+  fs.fstatSync = function (...args) {
+    const stats = original.apply(this, args);
+    if (++calls !== 2) return stats;
+    return new Proxy(stats, { get(target, key) {
+      if (key === 'mtimeNs' || key === 'ctimeNs') return target[key] + 1n;
+      return Reflect.get(target, key, target);
+    } });
+  };
+  let receipt;
+  try { receipt = await capture(Readable.from([zip]), destination, options); }
+  finally { fs.fstatSync = original; }
+  assert.equal(receipt.archiveSha256, hash(zip));
+  assert.equal(await verify(destination, receipt, options), true);
+});
+test('capture rejects spool content mutation even when device, inode and size are unchanged', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes(); let mutated = false;
+  await assert.rejects(() => capture(Readable.from([zip]), destination, { ...options, onProgress: async () => {
+    if (mutated) return;
+    const name = fs.readdirSync(parent).find(entry => entry.startsWith('.processing-archive-'));
+    assert.ok(name);
+    const fd = fs.openSync(path.join(parent, name, 'response.zip'), 'r+');
+    try { fs.writeSync(fd, Buffer.from('x'), 0, 1, 0); } finally { fs.closeSync(fd); }
+    mutated = true;
+  } }), error => error.code === 'processing_archive_changed');
+  assert.equal(mutated, true);
+  assert.deepEqual(fs.readdirSync(parent), []);
+});
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {
     const { destination } = setup(t), receipt = await capture(Readable.from([bytes()]), destination, options);
