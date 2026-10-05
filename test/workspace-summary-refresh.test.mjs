@@ -104,10 +104,10 @@ test('completion reload checks authorization, navigation and editing safety agai
 test('safe completion reload still refreshes full collections, shares and rendering', async () => {
   const source = readFileSync(new URL('../workspace-projects.js', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   const start = source.indexOf('async function load(background=false)'), code = source.slice(start, source.indexOf('\n}\n', start) + 2);
-  const state = { token: 'token', section: 'dashboard', adminSession: { subject: 'operator' }, storage: null };
+  const state = { token: 'token', section: 'dashboard', adminSession: { subject: 'operator' }, storage: null, outputs:[{id:'stale-published',activePublished:true}] };
   let renders=0, scheduled=0; const paths=[];
   const context = vm.createContext({ state, summaryContext: () => ['token', 'dashboard'], canApplyCompletionReload: () => true, can: () => false,
-    pagedApi: async (_path,key) => ({ [key]: [{ id: key, ...(key==='outputs'?{activePublished:true}:{}) }] }), pagedStorage: async () => ({usage:'fresh'}),
+    pagedApi: async (_path,key) => ({ [key]: key==='outputs'?[{id:'outputs',activePublished:true},{id:'unpublished',activePublished:false}]:[{id:key}] }), pagedStorage: async () => ({usage:'fresh'}),
     api: async path => { paths.push(path);return path.endsWith('/shares')?{shares:[{id:'share'}]}:{ok:true}; },
     validateWorkspaceView: () => {}, syncWorkspaceView: () => {}, document: {querySelector: () => ({})}, render: () => {renders++}, hydrateExpandedTask: () => {}, scheduleOperationRefresh: () => {scheduled++} });
   vm.runInContext(code,context);
@@ -115,6 +115,8 @@ test('safe completion reload still refreshes full collections, shares and render
   assert.equal(state.projects[0].id,'projects');assert.equal(state.datasets[0].id,'datasets');assert.equal(state.tasks[0].id,'tasks');
   assert.equal(state.shares.outputs[0].id,'share');assert.equal(state.storage.usage,'fresh');
   assert.ok(paths.some(path=>path.endsWith('/outputs/outputs/shares')));assert.equal(renders,1);assert.equal(scheduled,1);
+  assert.equal(paths.some(path=>path.includes('/stale-published/shares')||path.includes('/unpublished/shares')),false);
+  assert.deepEqual(Object.keys(state.shares),['outputs']);
 });
 
 test('summary-first expanded status transition redraws detail, or retains a deferred redraw while editing', async () => {

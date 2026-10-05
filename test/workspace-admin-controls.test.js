@@ -32,7 +32,9 @@ test('staff output actions exchange the admin bearer for streamed narrow downloa
   assert.match(source,/sessionMode:'published',outputId:id,modelId:result\.modelId,modelVersionId:result\.modelVersionId/);
   assert.doesNotMatch(source,/launch\.navigate\(result\.embedUrl,\{renewable:false\}\)/);
   assert.match(source,/output\.activePublished.*button\('share-output'/);
-  assert.match(source,/state\.outputs\.filter\(output=>output\.activePublished\)/);
+  // Share reads use the freshly fetched output snapshot before it is installed;
+  // context checks prevent stale reads from replacing a renewed workspace.
+  assert.match(source,/\(results\[5\]\.value\?\.outputs\|\|\[\]\)\.filter\(output=>output\.activePublished\)/);
   assert.doesNotMatch(source,/<a[^>]+href="\$\{esc\(output\.(?:download|report)Url\)\}/);
 });
 
