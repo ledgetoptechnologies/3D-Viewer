@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createReference, createSurfaceAccumulator, integrateSurfaceVolume, triangulatePolygon, polygonArea } from '../measurement-volume.mjs';
+import {estimateMeasurementInventory} from '../measurement-density.mjs';
 const square = [[0, 0, 10], [2, 0, 10], [2, 2, 10], [0, 2, 10]];
 const grid = { width: 2, height: 2, bounds: { minE: 0, minN: 0, maxE: 2, maxN: 2 }, vertices: square };
 const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-8, `${a} != ${b}`);
@@ -60,4 +61,52 @@ test('work limits apply cumulatively across streamed grids independently of cell
   assert.throws(()=>a.addGrid({values:[12,12],width:2,height:1,bounds:{minE:0,minN:0,maxE:2,maxN:1}}),{code:'measurement_limit'});
   const result=integrateSurfaceVolume({...grid,values:[12,12,12,12],maxWork:8});
   near(result.cutM3,8);
+});
+
+const inventory=result=>estimateMeasurementInventory({results:result,materialDensity:{value:1000,unit:'kg/m3',basis:'as_fed'}});
+test('owned staging fractional DSM fixture certifies full coverage without changing cut',()=>{
+  const vertices=[[500001.05875944503,4800001.574141548,0],[500001.058759551,4800000.897280903,0],[500001.6701048866,4800000.897281026,0],[500001.67010471947,4800001.574141671,0]];
+  const result=integrateSurfaceVolume({vertices,reference:{type:'custom',elevationM:100.125},values:Array(9).fill(101.125),width:3,height:3,bounds:{minE:500000,minN:4800000,maxE:500003,maxN:4800003}});
+  assert.equal(result.coverage,1);assert.equal(result.status,'complete');
+  near(result.cutM3,0.41379557771655207);
+  assert.ok(result.coverageEvidence.rawCoverage<1);assert.ok(inventory(result));
+});
+test('fully partitioned fractional UTM grid normalizes roundoff without changing integrated volume',()=>{
+  const x=600000.12345,y=4900000.23456,s=.1124;
+  const result=integrateSurfaceVolume({vertices:[[x,y,0],[x+s,y,0],[x+s,y+s,0],[x,y+s,0]],reference:{type:'custom',elevationM:0},values:Array(9).fill(1),width:3,height:3,bounds:{minE:x,minN:y,maxE:x+s,maxN:y+s}});
+  assert.equal(result.status,'complete');assert.equal(result.coverage,1);assert.equal(result.missingAreaM2,0);
+  assert.ok(result.coverageEvidence.rawCoverage<1);assert.equal(result.coverageEvidence.gridPartitionCoversFootprint,true);
+  assert.equal(result.cutM3,result.validAreaM2);assert.ok(inventory(result));
+  assert.equal(inventory({...result,coverage:result.coverageEvidence.rawCoverage}),null,'legacy near-one coverage is not accepted by the density consumer');
+});
+test('tiny intersecting NoData slivers remain unavailable below the integration area threshold',()=>{
+  const result=integrateSurfaceVolume({vertices:[[0,0,0],[1+5e-11,0,0],[1+5e-11,1,0],[0,1,0]],reference:{type:'custom',elevationM:0},values:[1,NaN],width:2,height:1,bounds:{minE:0,minN:0,maxE:2,maxN:1}});
+  assert.ok(result.coverage>=1-1e-8);assert.equal(result.coverageEvidence.invalidSurfaceIntersection,true);
+  assert.equal(result.status,'incomplete');assert.equal(inventory(result),null);
+});
+test('tiny outside-source strips never become a complete surface through numeric tolerance',()=>{
+  const result=integrateSurfaceVolume({vertices:[[0,0,0],[1+5e-11,0,0],[1+5e-11,1,0],[0,1,0]],reference:{type:'custom',elevationM:0},values:[1],width:1,height:1,bounds:{minE:0,minN:0,maxE:1,maxN:1}});
+  assert.ok(result.coverage>=1-1e-8);assert.equal(result.coverageEvidence.gridPartitionCoversFootprint,false);
+  assert.equal(result.status,'incomplete');assert.equal(inventory(result),null);
+});
+test('tiny window gaps and overlaps refuse completeness independently of summed area',()=>{
+  for(const start of [.5-5e-11,.5+5e-11]){
+    const accumulator=createSurfaceAccumulator({vertices:[[0,0,0],[1,0,0],[1,1,0],[0,1,0]],reference:{type:'custom',elevationM:0}});
+    accumulator.addGrid({values:[1],width:1,height:1,bounds:{minE:0,minN:0,maxE:.5,maxN:1}});
+    accumulator.addGrid({values:[1],width:1,height:1,bounds:{minE:start,minN:0,maxE:1,maxN:1}});
+    const result=accumulator.result();assert.equal(result.coverageEvidence.gridPartitionCoversFootprint,false);assert.equal(result.status,'incomplete');assert.equal(inventory(result),null);
+  }
+});
+test('NoData outside the footprint does not invalidate an otherwise complete grid',()=>{
+  const result=integrateSurfaceVolume({vertices:[[0,0,0],[1,0,0],[1,1,0],[0,1,0]],reference:{type:'custom',elevationM:0},values:[1,NaN],width:2,height:1,bounds:{minE:0,minN:0,maxE:2,maxN:1}});
+  assert.equal(result.coverageEvidence.invalidSurfaceIntersection,false);assert.equal(result.status,'complete');assert.ok(inventory(result));
+});
+test('empty point-style grid cells refuse complete inventory even at full source extent',()=>{
+  const result=integrateSurfaceVolume({...grid,values:[1,1,NaN,1],reference:{type:'custom',elevationM:0}});
+  assert.equal(result.coverageEvidence.gridPartitionCoversFootprint,true);assert.equal(result.status,'incomplete');assert.equal(inventory(result),null);
+});
+test('completeness certification is bounded and refuses excessive window fragmentation',()=>{
+  const accumulator=createSurfaceAccumulator({vertices:[[0,0,0],[1,0,0],[1,1,0],[0,1,0]],reference:{type:'custom',elevationM:0}});
+  for(let i=0;i<4097;i++)accumulator.addGrid({values:[1],width:1,height:1,bounds:{minE:i/4097,minN:0,maxE:(i+1)/4097,maxN:1}});
+  const result=accumulator.result();assert.equal(result.coverageEvidence.gridPartitionCoversFootprint,false);assert.equal(result.status,'incomplete');assert.equal(inventory(result),null);
 });

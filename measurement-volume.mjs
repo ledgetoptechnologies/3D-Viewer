@@ -120,6 +120,36 @@ function patchGridSpans(patches, {width,height,bounds}) {
 export function estimateSurfacePatchWork(patches, grid) {
   return patchGridSpans(patches,grid).reduce((sum,s)=>sum+(s.right-s.left)*(s.bottom-s.top),0);
 }
+// A numerical area ratio cannot distinguish roundoff from a real narrow gap.
+// Certify the stronger, conservative condition that nonoverlapping grid windows
+// exactly partition the polygon's bounding rectangle. No coordinate tolerance
+// is used: even a tiny source gap or overlap refuses this certificate.
+function gridPartitionCoversFootprint(rectangles, polygon) {
+  if (!rectangles || !rectangles.length) return false;
+  const minE=Math.min(...polygon.map(p=>p[0])),maxE=Math.max(...polygon.map(p=>p[0]));
+  const minN=Math.min(...polygon.map(p=>p[1])),maxN=Math.max(...polygon.map(p=>p[1]));
+  const events=[];
+  for(let id=0;id<rectangles.length;id++){
+    const r=rectangles[id],left=Math.max(minE,r.minE),right=Math.min(maxE,r.maxE);
+    const bottom=Math.max(minN,r.minN),top=Math.min(maxN,r.maxN);
+    if(right>left&&top>bottom){events.push({x:left,id,interval:[bottom,top]},{x:right,id,interval:null});}
+  }
+  events.sort((a,b)=>a.x-b.x);
+  const active=new Map();let cursor=minE,index=0,work=0;
+  while(cursor<maxE){
+    while(index<events.length&&events[index].x===cursor){const e=events[index++];if(e.interval)active.set(e.id,e.interval);else active.delete(e.id);}
+    const next=index<events.length?events[index].x:maxE;
+    if(!(next>cursor))return false;
+    // Bounded independent of the number of native cells. Unusually fragmented
+    // partitions remain conservative rather than spending unbounded sweep work.
+    work+=active.size;if(work>1_000_000)return false;
+    const intervals=[...active.values()].sort((a,b)=>a[0]-b[0]);let north=minN;
+    for(const [bottom,top]of intervals){if(bottom!==north)return false;north=top;}
+    if(north!==maxN)return false;
+    cursor=next;
+  }
+  return cursor===maxE;
+}
 export function createSurfaceAccumulator({ vertices, reference = {}, referenceBase, spatialPatchCulling = false, maxCells = 16_000_000, maxWork = 30_000_000 }) {
   const polygon = validatePolygon(vertices), base = referenceBase || createReference(polygon, reference), footprintM2 = Math.abs(polygonArea(polygon));
   const patches = base.patches.map(patch => ({ ...patch,
@@ -128,6 +158,7 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
     edges: patch.polygon.map((a, i) => { const b = patch.polygon[(i + 1) % patch.polygon.length]; return { x: -(b[1] - a[1]), y: b[0] - a[0], origin: a }; })
   }));
   let cutM3 = 0, fillM3 = 0, coveredAreaM2 = 0, validAreaM2 = 0, cellsVisited = 0, sampleCount = 0, workVisited = 0;
+  let gridRectangles=[],invalidSurfaceIntersection=false;
   function addGrid({ values, width, height, bounds, nodata = NaN }) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || values?.length !== width * height) invalid('Invalid native raster grid.');
     if (!bounds || !Object.values(bounds).every(Number.isFinite)) invalid('Raster bounds must be finite.');
@@ -139,6 +170,7 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
     if (workVisited + work > maxWork) invalid('Selection and boundary complexity exceed the calculation work limit.', 'measurement_limit');
     workVisited += work;
     cellsVisited += width * height;
+    if(gridRectangles){if(gridRectangles.length>=4096)gridRectangles=null;else gridRectangles.push({...bounds});}
     for (let row = 0; row < height; row++) {
       const events=spans?spans.filter(s=>row>=s.top&&row<s.bottom).flatMap(s=>[{col:s.left,patch:s.patch,add:true},{col:s.right,patch:s.patch,add:false}]).sort((a,b)=>a.col-b.col):null;
       const active=events?new Set():patches;let eventIndex=0;
@@ -162,7 +194,7 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
         // boundary cells and cells crossing zero need polygon allocation.
         if (interior) {
           const area = dx * dy;
-          if (!valid) { coveredAreaM2 += area; continue; }
+          if (!valid) { invalidSurfaceIntersection=true; coveredAreaM2 += area; continue; }
           const d0 = value - patch.sample(minX, maxY), d1 = value - patch.sample(minX + dx, maxY);
           const d2 = value - patch.sample(minX, maxY - dy), d3 = value - patch.sample(minX + dx, maxY - dy);
           if (Math.min(d0, d1, d2, d3) >= 0 || Math.max(d0, d1, d2, d3) <= 0) {
@@ -174,6 +206,9 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
         }
         const clipped = clipRectangle(patch.polygon, minX, maxY - dy, minX + dx, maxY);
         const area = Math.abs(polygonArea(clipped));
+        // Missing elevations remain missing even when their intersecting sliver
+        // is smaller than the integration allocation threshold.
+        if(!valid&&area>0)invalidSurfaceIntersection=true;
         if (area <= EPS) continue;
         coveredAreaM2 += area;
         if (!valid) continue;
@@ -187,8 +222,14 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
     }
   }
   function result() {
-    const coverage = Math.min(1, validAreaM2 / footprintM2), complete = coverage >= 1 - 1e-8;
-    return { method: 'surface-cut-fill', status: complete ? 'complete' : 'incomplete', cutM3, fillM3, netM3: cutM3 - fillM3, footprintM2, validAreaM2, missingAreaM2: Math.max(0, footprintM2 - validAreaM2), coverage, sampleCount, cellsVisited, reference: { ...reference, type: base.type }, numericalModel: base.numericalModel || 'native-cell-constant surface; fractional boundary cells; piecewise-linear reference', warnings: complete ? [] : ['Missing or out-of-raster elevations are not treated as zero; totals cover valid samples only.'] };
+    const rawCoverage=validAreaM2/footprintM2,partitioned=gridPartitionCoversFootprint(gridRectangles,polygon);
+    const complete=partitioned&&!invalidSurfaceIntersection&&Number.isFinite(rawCoverage)&&Math.abs(rawCoverage-1)<=1e-8;
+    const coverage=complete?1:Math.min(1,rawCoverage);
+    // Preserve the actual integrated quantities. Only the completeness ratio is
+    // normalized after geometric/source evidence independently proves no holes.
+    return { method: 'surface-cut-fill', status: complete ? 'complete' : 'incomplete', cutM3, fillM3, netM3: cutM3 - fillM3, footprintM2, validAreaM2, missingAreaM2:complete?0:Math.max(0, footprintM2 - validAreaM2), coverage,
+      coverageEvidence:{version:1,gridPartitionCoversFootprint:partitioned,invalidSurfaceIntersection,rawCoverage,numericalAreaResidualM2:footprintM2-validAreaM2},
+      sampleCount, cellsVisited, reference: { ...reference, type: base.type }, numericalModel: base.numericalModel || 'native-cell-constant surface; fractional boundary cells; piecewise-linear reference', warnings: complete ? [] : ['Missing or out-of-raster elevations are not treated as zero; totals cover valid samples only.',...(!partitioned?['Complete footprint coverage could not be certified from bounded nonoverlapping grid windows.']:[])] };
   }
   return { addGrid, result, reference: base };
 }
