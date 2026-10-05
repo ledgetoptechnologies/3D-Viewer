@@ -10,7 +10,7 @@ const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
-  const timers = new Map(), posts = [], resets = [], measurements = {invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
+  const timers = new Map(), posts = [], resets = [], measurements = {invalidations:0,installs:0,invalidated:false,displayAborts:0,previewClears:0,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
   window.parent = window;
@@ -56,6 +56,7 @@ function fixture({ controller = true } = {}) {
     let recordSnapshot=['private'],orderedRecords=['private'],lastOverlayFrame={};
     const displayCache=new Map([['private',{state:'pending',controller:{abort(){measurementFixture.displayAborts++;}}}]]);
     const selectedExports=new Set(),svg={innerHTML:'private'},controls={hidden:false};
+    const surfacePreviewCache={clear(){measurementFixture.previewClears++;}};
     const disarm=()=>{},closeDialogs=()=>{},tell=()=>{},onAccessLost=measurementAccessLost;
     const store={invalidate(){measurementFixture.invalidations++;measurementFixture.invalidated=true;measurementFixture.records.clear();}};
     ${clearDisplaySource}
@@ -89,6 +90,7 @@ test('current-access denial far before expiry is visible without requesting a co
   assert.equal(f.context.sessionRenewalPending, false);
   assert.equal(f.context.sessionRenewalBlocked, true);
   assert.match(f.context.sessionAccessLabel(), /reopen this model/);
+  assert.ok(f.measurements.previewClears>0,'denied access also retires page-local surface previews');
   assert.equal(f.context.tilesRenderer !== null, true);
 });
 
@@ -97,6 +99,7 @@ test('missing controller preserves still-valid personal access and retries trans
   assert.equal(f.context.requestSessionRenewal('tile-authorization'), false);
   assert.match(f.context.dom.lodStatus.textContent, /retrying access/);
   assert.equal(f.measurements.records.size,1);
+  assert.equal(f.measurements.previewClears,0,'still-valid access retains page-local previews while transport retries');
   assert.equal(f.context.sessionDiagnostics().reason, 'controller-unavailable');
   assert.equal(f.context.tilesRenderer !== null, true);
   assert.equal(f.context.lodTileRecoveryPending, true);
@@ -200,6 +203,7 @@ test('renewal changing person, audience or immutable version fails closed before
     await f.context.handleSessionRenewalMessage({version:1,type:'ltds-viewer:renew-session',requestId:REQUEST,grant:'11111111-2222-4333-8444-555555555555'},{reviewChannel:true});
     assert.equal(f.context.sessionAccessState,'unavailable',scope);assert.equal(f.context.sessionRenewalBlocked,true,scope);
     assert.equal(f.measurements.records.size,0,scope);assert.equal(f.measurements.installs,0,scope);assert.deepEqual(f.resets,['unavailable'],scope);
+    assert.ok(f.measurements.previewClears>0,scope);
     assert.equal(f.context.activeViewerSession,current,scope);assert.equal(f.context.sessionAccessGeneration,0,scope);
   }
 });

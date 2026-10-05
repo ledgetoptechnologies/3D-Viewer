@@ -212,12 +212,15 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
 
 test('runtime image is rootless as the TrueNAS Apps service identity', () => {
   const dockerfile = fs.readFileSync(path.join(repositoryRoot, 'Dockerfile'), 'utf8');
-
-  assert.match(dockerfile, /groupmod --gid 568 node/);
-  assert.match(dockerfile, /usermod --uid 568 --gid 568 node/);
-  assert.match(dockerfile, /chown -R 568:568 \/app\/storage/);
-  assert.match(dockerfile, /USER 568:568/);
-  assert.doesNotMatch(dockerfile, /ENTRYPOINT|USER root/);
+  const runtimeStart=dockerfile.indexOf('FROM node:24-bookworm-slim AS runtime');
+  assert.ok(runtimeStart>=0,'the final application runtime must be explicit');
+  const runtime=dockerfile.slice(runtimeStart);
+  // Build-only package installation may run as root; the final service may not.
+  assert.match(runtime, /groupmod --gid 568 node/);
+  assert.match(runtime, /usermod --uid 568 --gid 568 node/);
+  assert.match(runtime, /chown -R 568:568 \/app\/storage/);
+  assert.match(runtime, /USER 568:568/);
+  assert.doesNotMatch(runtime, /ENTRYPOINT|USER root/);
 });
 
 test('release-candidate image tags cannot move latest', () => {

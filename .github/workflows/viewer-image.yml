@@ -166,6 +166,9 @@ jobs:
               if(info.schemaVersion!==1||info.sourceVersion!=="v1.6.2"||info.sourceSha256!==process.env.EXPECTED_OBJ2TILES_SOURCE_SHA256||info.patchSha256!==process.env.EXPECTED_OBJ2TILES_PATCH_SHA256||info.binarySha256!==binary)process.exit(1);
             '
           docker run --rm "$VERIFY_IMAGE" node scripts/verify-obj2tiles-runtime.mjs
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus 2 --memory 1g \
+            "$VERIFY_IMAGE" node scripts/verify-entwine-runtime.mjs
           docker run --rm --network none "$VERIFY_IMAGE" node scripts/verify-potree-visibility.mjs /app/dist/potree/build/potree/potree.js
           docker run --rm --entrypoint node "$VERIFY_IMAGE" -e '
             const fs=require("node:fs");

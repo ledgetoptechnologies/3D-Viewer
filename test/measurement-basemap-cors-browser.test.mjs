@@ -11,7 +11,7 @@ import {acquireBrowserHarnessLock} from './browser-lock.mjs';
 // Two synthetic loopback origins, fresh hidden browser, real Leaflet and shipped
 // map capture. Never attach to a user browser or weaken browser CORS enforcement.
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-const source=readFileSync(path.join(root,'main.js'),'utf8');
+const source=readFileSync(path.join(root,'main.js'),'utf8').replace(/\r\n/g,'\n');
 const layer=source.match(/L\.tileLayer\('https:\/\/server\.arcgisonline\.com[^']*',\s*(\{[\s\S]*?\})\)\.addTo\(map\);/)?.[1];
 const capture=source.match(/async capture\(\) \{([\s\S]*?)\n      \},\n    \};/)?.[1];
 assert.ok(layer&&capture,'shipped basemap options and map capture must be found');

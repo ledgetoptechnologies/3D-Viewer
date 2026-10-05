@@ -96,6 +96,30 @@ RUN curl -fsSL "https://codeload.github.com/mkazhdan/PoissonRecon/tar.gz/${POISS
     && cp LICENSE /opt/poisson/LICENSE \
     && printf '{"sourceCommit":"%s","sourceSha256":"%s","patchSha256":"%s","threads":2,"precision":"double"}\n' "$POISSON_SOURCE_COMMIT" "$POISSON_SOURCE_SHA256" "$POISSON_PATCH_SHA256" > /opt/poisson/build-info.json
 
+# Native Entwine/PDAL closure, independently locked for both supported CPUs.
+# The official conda-forge distribution is upstream's supported installation
+# path. The solver and package manager never enter the runtime image.
+FROM mambaorg/micromamba:2.3.3@sha256:800e7ade3ffe29c9a9ac2026163131495f8197c3852e572c5835beb4e8a33cd6 AS entwine
+ARG TARGETARCH
+USER root
+COPY third_party/entwine /tmp/entwine-locks
+RUN case "$TARGETARCH" in amd64|arm64) ;; *) echo "unsupported Entwine architecture: $TARGETARCH" >&2; exit 1 ;; esac \
+    && micromamba create -y -p /opt/entwine --file "/tmp/entwine-locks/$TARGETARCH.lock" \
+    && test -x /opt/entwine/bin/entwine && test -x /opt/entwine/bin/pdal \
+    && mkdir -p /opt/entwine/third-party-notices \
+    && for package_info in /opt/conda/pkgs/*/info; do \
+      test -d "$package_info" || continue; \
+      package_name="$(basename "$(dirname "$package_info")")"; \
+      notice_dir="/opt/entwine/third-party-notices/$package_name"; mkdir -p "$notice_dir"; \
+      for notice in licenses about.json index.json; do \
+        if test -e "$package_info/$notice"; then cp -R "$package_info/$notice" "$notice_dir/"; fi; \
+      done; \
+    done \
+    && lock_sha256="$(sha256sum /tmp/entwine-locks/$TARGETARCH.lock | cut -d ' ' -f1)" \
+    && binary_sha256="$(sha256sum /opt/entwine/bin/entwine | cut -d ' ' -f1)" \
+    && printf '{"schemaVersion":1,"version":"3.2.1","architecture":"%s","lockSha256":"%s","binarySha256":"%s"}\n' "$TARGETARCH" "$lock_sha256" "$binary_sha256" > /opt/entwine/build-info.json \
+    && micromamba clean --all --yes
+
 # ---------------------------------------------------------------------------
 # Stage 2: build the Vite frontend (bundles main.js, copies public/ incl.
 # the fetched Potree build into dist/).
@@ -121,6 +145,8 @@ ARG VIEWER_SOURCE_COMMIT=unknown
 ENV NODE_ENV=production
 ENV OBJ2TILES_BIN=/opt/obj2tiles/Obj2Tiles
 ENV MEASUREMENT_POISSON_BIN=/opt/poisson/PoissonRecon
+ENV ENTWINE_BIN=/opt/entwine/bin/entwine
+ENV PROJ_NETWORK=OFF
 LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
@@ -135,9 +161,11 @@ COPY server ./server
 COPY scripts ./scripts
 COPY lod-policy.mjs lod-memory-profile.mjs ./
 COPY measurement-volume.mjs raster-source-metadata.mjs raster-tiff-header.mjs raster-vertical-units.mjs ./
+COPY measurement-saved-surface-preview.mjs ./
 COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
 COPY --from=poisson /opt/poisson /opt/poisson
+COPY --from=entwine /opt/entwine /opt/entwine
 COPY --from=build /app/dist ./dist
 RUN printf '%s\n' "${VIEWER_SOURCE_COMMIT}" > /app/source-commit.txt \
     && chmod 0444 /app/source-commit.txt \

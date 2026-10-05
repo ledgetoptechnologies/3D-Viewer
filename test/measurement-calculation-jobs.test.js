@@ -106,7 +106,7 @@ test('runtime repository attests attached results across save revisions but reje
 });
 
 test('saved preview loader uses authorized status attachment after real rename revisions, and rejects changed source or geometry',async t=>{
-  const {createSavedSurfacePreviewLoader}=await import('../measurement-server-surface.mjs');
+  const {createSavedSurfacePreviewLoader}=await import('../measurement-saved-surface-preview.mjs');
   const f=fixture(t),queued=f.jobs.enqueue(f.measurement,f.request),claimed=f.jobs.claim('preview-worker');
   const preview={previewOnly:true,samples:[[0,0,12,0],[1,1,12,0]]},result={status:'calculated',method:'surface-cut-fill',cutM3:12,fillM3:0,netM3:12,coverage:1,source:{assetId:f.request.source.id,kind:'dsm',sha256:f.request.source.sha256,modelVersionId:f.request.modelVersionId},reference:f.request.reference,preview};
   assert.equal(f.jobs.finish(claimed,'preview-worker',result),true);
