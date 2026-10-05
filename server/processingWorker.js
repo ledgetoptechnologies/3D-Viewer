@@ -183,6 +183,7 @@ async function processOne(deps,owner=crypto.randomUUID()){
   try{const work={...deps,signal:controller.signal};if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
   catch(error){
     const safe=sanitizeLogMessage(error.message).slice(0,1000);
+    const archiveDiagnostic=typeof error.archivePhase==='string'&&/^[a-z0-9_.-]{1,64}$/.test(error.archivePhase)?` [phase=${error.archivePhase}]`:'';
     if(error.code==='lease_lost'||controller.signal.aborted)return true;
     if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}
     if(error.code==='provider_busy'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner,error.retryAfterMs,{errorCode:'provider_busy',errorMessage:'waiting for upstream provider capacity'});return true;}
@@ -192,10 +193,10 @@ async function processOne(deps,owner=crypto.randomUUID()){
     const durable=new Set(['provider_unreachable','provider_unavailable','provider_tls_failed','provider_submission_ambiguous','provider_busy','provider_task_not_found']).has(error.code);
     const delay=error.retryAfterMs||Math.min(300000,5000*2**Math.min(Number(job.attempt_count)||0,6));
     if(durable){
-      deps.processing.appendLog(job.attempt_id,'warn',safe);
+      deps.processing.appendLog(job.attempt_id,'warn',`${safe}${archiveDiagnostic}`);
       deps.processing.failJob(job.id,job.lease_owner,error.code,safe,new Date(Date.now()+delay).toISOString());return true;
     }
-    deps.processing.appendLog(job.attempt_id,'error',safe);
+    deps.processing.appendLog(job.attempt_id,'error',`${safe}${archiveDiagnostic}`);
     const permanent=new Set(['duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),retry=!permanent&&job.attempt_count<5?new Date(Date.now()+delay).toISOString():null;
     if(retry)deps.processing.failJob(job.id,job.lease_owner,error.code||'processing_failed',safe,retry);
     else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'});}

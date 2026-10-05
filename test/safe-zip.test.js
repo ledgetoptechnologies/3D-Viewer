@@ -26,6 +26,7 @@ for(const [name,entries] of[
   ['absolute path',[{path:'/escape.txt',data:'x'}]],
   ['backslash path',[{path:'dir\\escape.txt',data:'x'}]],
   ['case-colliding duplicate',[{path:'Photo.JPG',data:'a'},{path:'photo.jpg',data:'b'}]],
+  ['case-colliding ancestor',[{path:'Root/a.txt',data:'a'},{path:'root/b.txt',data:'b'}]],
   ['symbolic link entry',[{path:'link',data:'target',mode:0o120777}]],
   ['special entry',[{path:'device',data:'x',mode:0o020666}]],
 ])test(`descriptor ZIP extraction rejects ${name}`,async(t)=>{const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-safe-zip-reject-')),archive=path.join(root,'source.zip'),destination=path.join(root,'expanded'),bytes=makeZip(entries),fd=(fs.writeFileSync(archive,bytes),fs.openSync(archive,'r'));t.after(()=>{fs.closeSync(fd);fs.rmSync(root,{recursive:true,force:true});});await assert.rejects(()=>extractZipDescriptor(fd,bytes.length,destination,{workId:'reject'}),/archive/);assert.equal(fs.existsSync(destination),false);});

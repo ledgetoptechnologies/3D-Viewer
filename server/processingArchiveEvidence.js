@@ -12,19 +12,23 @@ const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const failure = (code, message) => Object.assign(new Error(message), { code });
 const invalid = () => failure('invalid_archive', 'processing archive evidence is invalid');
-const changed = () => failure('processing_archive_changed', 'processing archive no longer matches its receipt');
+const changed = phase => Object.assign(failure('processing_archive_changed', 'processing archive no longer matches its receipt'), { archivePhase: phase });
 function cancelled(signal) { if (signal?.aborted) throw failure('lease_lost', 'processing archive operation cancelled'); }
 function limits(options) {
   const result = { maxEntries: options.maxEntries ?? 100000, maxBytes: options.maxBytes ?? DEFAULT_BYTES, maxArchiveBytes: options.maxArchiveBytes ?? DEFAULT_BYTES, maxDiskBytes: options.maxDiskBytes ?? DEFAULT_BYTES };
   if (Object.values(result).some(value => !Number.isSafeInteger(value) || value < 1)) throw invalid();
   return result;
 }
-function same(a, b) {
-  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
-}
 function sameFileIdentity(a, b) {
   return a.dev === b.dev && a.ino === b.ino && a.size === b.size;
 }
+function sameDirectoryIdentity(a, b) {
+  return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+}
+function sameInventoryFileIdentity(a, b) {
+  return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.nlink === b.nlink && a.nlink === 1n;
+}
+function sameNames(a, b) { return a.length === b.length && a.every((name, index) => name === b[index]); }
 async function hashDescriptor(fd, byteSize, signal) {
   const sha = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(1024 * 1024);
   let offset = 0;
@@ -32,7 +36,7 @@ async function hashDescriptor(fd, byteSize, signal) {
     cancelled(signal);
     const requested = Math.min(buffer.length, byteSize - offset);
     const bytesRead = fs.readSync(fd, buffer, 0, requested, offset);
-    if (bytesRead !== requested) throw changed();
+    if (bytesRead !== requested) throw changed('archive.spool_short_read');
     sha.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
     // Keep long-running hashing responsive to lease cancellation and heartbeats.
     await new Promise(resolve => setImmediate(resolve));
@@ -85,8 +89,9 @@ async function inventoryDirectory(directory, { signal, maxEntries, maxBytes }) {
   async function walk(current, prefix) {
     cancelled(signal);
     const initial = fs.lstatSync(current, { bigint: true });
-    if (!initial.isDirectory() || initial.isSymbolicLink()) throw changed();
-    for (const name of fs.readdirSync(current).sort()) {
+    if (!initial.isDirectory() || initial.isSymbolicLink()) throw changed('tree.directory_type');
+    const namesBefore = fs.readdirSync(current).sort();
+    for (const name of namesBefore) {
       cancelled(signal);
       if (++entryCount > maxEntries) throw invalid();
       const relativePath = prefix ? `${prefix}/${name}` : name, folded = relativePath.toLowerCase();
@@ -100,23 +105,33 @@ async function inventoryDirectory(directory, { signal, maxEntries, maxBytes }) {
       if (!Number.isSafeInteger(total) || total > maxBytes) throw invalid();
       const fd = await fs.promises.open(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
       try {
-        if (!same(before, await fd.stat({ bigint: true }))) throw changed();
+        if (!sameInventoryFileIdentity(before, await fd.stat({ bigint: true }))) throw changed('tree.file_open_identity');
         const sha = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(1024 * 1024); let offset = 0;
         while (offset < Number(before.size)) {
           cancelled(signal);
           const requested = Math.min(buffer.length, Number(before.size) - offset);
           const { bytesRead } = await fd.read(buffer, 0, requested, offset);
-          if (bytesRead !== requested) throw changed();
+          if (bytesRead !== requested) throw changed('tree.file_short_read');
           sha.update(buffer.subarray(0, bytesRead)); offset += bytesRead;
         }
-        if (!same(before, await fd.stat({ bigint: true })) || !same(before, fs.lstatSync(absolute, { bigint: true }))) throw changed();
-        files.push({ relativePath, byteSize: offset, sha256: sha.digest('hex') });
+        const firstDigest = sha.digest('hex'), afterFd = await fd.stat({ bigint: true }), afterPath = fs.lstatSync(absolute, { bigint: true });
+        if (!sameInventoryFileIdentity(before, afterFd) || !sameInventoryFileIdentity(before, afterPath)) throw changed('tree.file_post_hash_identity');
+        // CIFS may refresh timestamps while a file is opened/read. If they
+        // changed, prove the held file still has the same exact bytes instead
+        // of treating mtime/ctime as object identity.
+        if (before.mtimeNs !== afterFd.mtimeNs || before.ctimeNs !== afterFd.ctimeNs || before.mtimeNs !== afterPath.mtimeNs || before.ctimeNs !== afterPath.ctimeNs) {
+          if (await hashDescriptor(fd.fd, offset, signal) !== firstDigest) throw changed('tree.file_digest_changed');
+          if (!sameInventoryFileIdentity(before, await fd.stat({ bigint: true })) || !sameInventoryFileIdentity(before, fs.lstatSync(absolute, { bigint: true }))) throw changed('tree.file_rehash_identity');
+        }
+        files.push({ relativePath, byteSize: offset, sha256: firstDigest });
       } finally { await fd.close(); }
     }
-    if (!same(initial, fs.lstatSync(current, { bigint: true }))) throw changed();
+    const afterDirectory = fs.lstatSync(current, { bigint: true }), namesAfter = fs.readdirSync(current).sort();
+    if (!sameDirectoryIdentity(initial, afterDirectory)) throw changed('tree.directory_identity');
+    if (!sameNames(namesBefore, namesAfter)) throw changed('tree.directory_entries');
   }
   await walk(root.resolved, '');
-  if (!same(root.stat, fs.lstatSync(root.resolved, { bigint: true }))) throw changed();
+  if (!sameDirectoryIdentity(root.stat, fs.lstatSync(root.resolved, { bigint: true }))) throw changed('tree.root_identity');
   cancelled(signal);
   return validateInventory(files, maxEntries, maxBytes);
 }
@@ -149,7 +164,7 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     const archiveSha256 = archiveHash.digest('hex');
     fd = fs.openSync(spool, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
     const initial = fs.fstatSync(fd, { bigint: true });
-    if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed();
+    if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed('archive.spool_initial_identity');
     const expansionBytes = Math.min(bounds.maxBytes, bounds.maxDiskBytes - archiveByteSize);
     if (expansionBytes < 1) throw invalid();
     await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
@@ -158,11 +173,11 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     // digest calculated while streaming, rather than trusting timestamps.
     if (!sameFileIdentity(initial, fs.fstatSync(fd, { bigint: true })) ||
         await hashDescriptor(fd, archiveByteSize, signal) !== archiveSha256 ||
-        !sameFileIdentity(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
+        !sameFileIdentity(initial, fs.fstatSync(fd, { bigint: true }))) throw changed('archive.spool_identity_or_digest');
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
     cancelled(signal);
     const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
-    if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
+    if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed('archive.promotion_race');
     const receipt = { archiveSha256, archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
     fs.renameSync(staged, target);
     return receipt;
@@ -182,7 +197,7 @@ async function verifyProcessingArchive(destination, receipt, options = {}) {
   const expected = validateInventory(receipt.archiveFiles, bounds.maxEntries, bounds.maxBytes);
   if (JSON.stringify(expected) !== JSON.stringify(receipt.archiveFiles) || hash(JSON.stringify(expected)) !== receipt.archiveManifestSha256) throw invalid();
   const actual = await inventoryDirectory(destination, { ...bounds, signal: options.signal });
-  if (JSON.stringify(expected) !== JSON.stringify(actual)) throw changed();
+  if (JSON.stringify(expected) !== JSON.stringify(actual)) throw changed('retry.inventory_mismatch');
   return true;
 }
 

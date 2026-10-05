@@ -48,6 +48,37 @@ test('capture tolerates timestamp refresh on a stable descriptor but still hashe
   assert.equal(receipt.archiveSha256, hash(zip));
   assert.equal(await verify(destination, receipt, options), true);
 });
+test('capture and retry verification tolerate CIFS timestamp refresh while preserving identities and exact hashes', linux, async t => {
+  const { destination } = setup(t), original = fs.lstatSync;
+  fs.lstatSync = function (...args) {
+    const stats = original.apply(this, args);
+    if (!stats.isFile() && !stats.isDirectory()) return stats;
+    return new Proxy(stats, { get(target, key) {
+      if (key === 'mtimeNs' || key === 'ctimeNs') return target[key] + 1000n;
+      return Reflect.get(target, key, target);
+    } });
+  };
+  try {
+    const receipt = await capture(Readable.from([bytes()]), destination, options);
+    assert.equal(await verify(destination, receipt, options), true);
+  } finally { fs.lstatSync = original; }
+});
+test('inventory rejects entries added while walking even if directory timestamps are unavailable', linux, async t => {
+  const { parent, destination } = setup(t), original = fs.promises.open;
+  let mutated = false;
+  fs.promises.open = async function (filePath, ...args) {
+    if (!mutated && String(filePath).includes('.processing-archive-')) {
+      fs.writeFileSync(path.join(path.dirname(String(filePath)), 'added-during-inventory.txt'), 'unexpected');
+      mutated = true;
+    }
+    return original.call(this, filePath, ...args);
+  };
+  try {
+    await assert.rejects(() => capture(Readable.from([bytes()]), destination, options), error => error.code === 'processing_archive_changed' && error.archivePhase === 'tree.directory_entries');
+  } finally { fs.promises.open = original; }
+  assert.equal(mutated, true);
+  assert.deepEqual(fs.readdirSync(parent), []);
+});
 test('capture rejects spool content mutation even when device, inode and size are unchanged', linux, async t => {
   const { parent, destination } = setup(t), zip = bytes(); let mutated = false;
   await assert.rejects(() => capture(Readable.from([zip]), destination, { ...options, onProgress: async () => {
@@ -103,16 +134,17 @@ test('compressed response cap, expansion cap, entry cap and truncated ZIP clean 
   }
 });
 test('duplicate case-folded paths, ambiguous ancestor spellings, links, special files and traversal fail', linux, async t => {
-  for (const entries of [
+  const cases = [
     [{ path: 'one', data: 'a' }, { path: 'ONE', data: 'b' }],
     [{ path: 'Root/a', data: 'a' }, { path: 'root/b', data: 'b' }],
     [{ path: 'link', data: 'target', mode: 0o120777 }],
     [{ path: 'special', data: 'x', mode: 0o020666 }],
     [{ path: '../escape', data: 'x' }],
     [{ path: 'one', data: 'x', crc: 1 }],
-  ]) {
+  ];
+  for (const [index, entries] of cases.entries()) {
     const { parent, destination } = setup(t);
-    await assert.rejects(() => capture(Readable.from([makeZip(entries)]), destination, options));
+    await assert.rejects(() => capture(Readable.from([makeZip(entries)]), destination, options), undefined, `archive validation case ${index}`);
     assert.deepEqual(fs.readdirSync(parent), []);
   }
 });
