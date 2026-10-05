@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { normalizeMeasurementDensity } = require('../measurement-density.mjs');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COLLECTIONS = new Set(['spatial3d', 'map']);
@@ -23,7 +24,7 @@ function stable(value) {
   return value;
 }
 function validateMeasurement(input, { update = false } = {}) {
-  if (!keys(input, ['id','name','collection','kind','vertices','coordinateReference','visible','source','results','displayPreferences', ...(update ? ['revision'] : [])])
+  if (!keys(input, ['id','name','collection','kind','vertices','coordinateReference','visible','source','results','displayPreferences','materialDensity', ...(update ? ['revision'] : [])])
       || !UUID.test(input.id || '') || typeof input.name !== 'string' || !input.name.trim() || input.name.length > 200
       || !COLLECTIONS.has(input.collection) || !['distance','polygon'].includes(input.kind)
       || !Array.isArray(input.vertices) || input.vertices.length < (input.kind === 'polygon' ? 3 : 2) || input.vertices.length > LIMITS.vertices
@@ -36,6 +37,11 @@ function validateMeasurement(input, { update = false } = {}) {
   const doc = { id: input.id.toLowerCase(), name: input.name.trim(), collection: input.collection, kind: input.kind,
     vertices: input.vertices.map((v) => [...v]), coordinateReference: { ...input.coordinateReference }, visible: input.visible !== false,
     source: input.source || {} };
+  if (input.materialDensity !== undefined) {
+    if (input.materialDensity !== null && !keys(input.materialDensity, ['value','unit','basis','dryMatterPercent','sourceNote','sampledOn'])) throw problem('invalid_material_density');
+    try { doc.materialDensity = normalizeMeasurementDensity(input.materialDensity); }
+    catch { throw problem('invalid_material_density'); }
+  }
   if (input.results !== undefined) {
     if (!plain(input.results)) throw problem('invalid_measurement_results');
     // Browser results are never attested server calculations, regardless of their supplied labels.
@@ -92,8 +98,17 @@ class MeasurementRepository {
       if (!old) throw problem('measurement_not_found', 404);
       if (old.revision !== input.revision) throw problem('measurement_revision_conflict', 409);
       if (old.collection !== doc.collection || old.kind !== doc.kind || JSON.stringify(stable(old.coordinateReference)) !== JSON.stringify(stable(doc.coordinateReference))) throw problem('measurement_identity_immutable', 409);
+      // Metadata edits may retain the already stored attestation, but supplied
+      // labels never establish a new one. Any changed result, geometry, source
+      // or reference keeps validateMeasurement's browser/unverified downgrade.
+      const same = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
+      if (old.results !== undefined && same(input.results, old.results)
+          && same(doc.vertices, old.vertices) && same(doc.source, old.source)
+          && same(doc.coordinateReference, old.coordinateReference)) doc.results = old.results;
       const now = new Date().toISOString();
       this.database.prepare('UPDATE private_measurements SET document_json=?,revision=revision+1,updated_at=? WHERE id=?').run(JSON.stringify(doc),now,id);
+      // Jobs are revision-bound; metadata edits still cancel active jobs so a
+      // density-only revision cannot silently attach an obsolete calculation.
       this.database.prepare("UPDATE measurement_calculation_jobs SET status='cancelled',updated_at=? WHERE measurement_id=? AND status IN ('queued','running')").run(now,id);
       return this.get(principal, id);
     });

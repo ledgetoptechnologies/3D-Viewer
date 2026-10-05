@@ -39,6 +39,26 @@ test('serialized UI patches retain cross-tab server conflict protection',async()
   await assert.rejects(store.patch(store.records.get(record.id),{name:'Conflict'}),error=>error.status===409);
   assert.match(store.statuses.get(record.id),/Not saved/);assert.equal(store.records.get(record.id).revision,1);
 });
+
+test('density patches persist separately from results, serialize with name edits, and retain null clears',async()=>{
+  const requests=[];
+  const store=createMeasurementStore({token:()=> 'token',fetcher:async(_url,options)=>{
+    const body=JSON.parse(options.body);requests.push(body);return response({...body,revision:(body.revision||0)+1});
+  }});
+  const density={value:48.4,unit:'lb/ft3',basis:'as_fed',dryMatterPercent:35.67};
+  const results={cutM3:123,verified:true,calculationOrigin:'server'};
+  await store.save({...record,results,materialDensity:density});
+  const snapshot=store.records.get(record.id);
+  await Promise.all([store.patch(snapshot,{materialDensity:{...density,value:49}}),store.patch(snapshot,{name:'Silage pile'})]);
+  assert.equal(store.records.get(record.id).materialDensity.value,49);
+  assert.equal(store.records.get(record.id).name,'Silage pile');
+  assert.deepEqual(store.records.get(record.id).results,results);
+  assert.deepEqual(requests.map(r=>r.revision),[undefined,1,2]);
+  await store.patch(store.records.get(record.id),{materialDensity:null});
+  assert.equal(requests.at(-1).materialDensity,null);
+  assert.equal(store.records.get(record.id).materialDensity,null);
+  await assert.rejects(store.patch(snapshot,{materialDensity:density}),error=>error.status===409);
+});
 test('invalidation clears data and fences an in-flight write and queued writes',async()=>{
   const wait=deferred(),started=deferred();let calls=0;
   const store=createMeasurementStore({token:()=> 'token',fetcher:async()=>{calls++;started.resolve();await wait.promise;return response({...record,revision:1});}});

@@ -93,3 +93,69 @@ test('calculation appendix retains base, estimate, coverage and height evidence 
   assert.match(html,/Vertical datum: unknown/);
   assert.doesNotMatch(html,/private\.example|secret/);
 });
+
+test('inventory appendix labels supplied density and estimates cut volume in correct mass units', () => {
+  const density = {value:600,unit:'kg/m3',basis:'as_fed',dryMatterPercent:35,sourceNote:'Client <script>sample</script>',sampledOn:'2026-06-19'};
+  const records = [{...record,materialDensity:density,results:{cutM3:10,fillM3:9,netM3:1,coverage:1,status:'complete'}}];
+  const metric = renderMeasurementReport({...options,records});
+  assert.match(metric,/600 kg\/m³ \(as-fed\)/);
+  assert.match(metric,/Above-base \(cut\) volume/);
+  assert.match(metric,/6\.000 metric tonnes/);
+  assert.match(metric,/2\.100 metric tonnes/);
+  assert.match(metric,/35%/);
+  assert.match(metric,/Dry-matter mass calculated from entered dry-matter percentage/);
+  assert.match(metric,/2026-06-19/);
+  assert.match(metric,/Client &lt;script&gt;sample&lt;\/script&gt;/);
+  assert.doesNotMatch(metric,/<script>/);
+  assert.match(metric,/material was not weighed/);
+  assert.match(metric,/representative density samples and volume\/base-surface accuracy/);
+  const imperial = renderMeasurementReport({...options,records,units:'imperial'});
+  assert.match(imperial,/6\.614 US short tons/);
+  assert.match(imperial,/2\.315 US short tons/);
+  const summary = metric.slice(metric.indexOf('<thead>'),metric.indexOf('</thead>'));
+  assert.equal((summary.match(/<th /g)||[]).length,4);
+});
+
+test('density report shows unavailable stale mass and retains the entered dry-matter basis', () => {
+  const materialDensity = {value:17.22,unit:'lb/ft3',basis:'dry_matter'};
+  const stale = renderMeasurementReport({...options,records:[{...record,materialDensity,results:{cutM3:100,volumeInvalidated:true,previousVolume:{cutM3:100}}}]});
+  assert.match(stale,/calculate a current material volume/);
+  assert.doesNotMatch(stale,/metric tonnes/);
+  const current = renderMeasurementReport({...options,units:'imperial',records:[{...record,materialDensity,results:{volumeM3:.9144**3,method:'closed-mesh',status:'complete',checks:{closed:true,edgeManifold:true,vertexManifold:true,orientationConsistent:true,selfIntersections:false}}}]});
+  assert.match(current,/17\.22 lb\/ft³ \(dry matter\)/);
+  assert.match(current,/Enclosed-object volume/);
+  assert.match(current,/0\.232 US short tons/);
+  assert.match(current,/Unavailable without dry-matter percentage/);
+  assert.doesNotMatch(renderMeasurementReport(options),/Estimated material inventory/);
+});
+
+test('reports suppress partial inventory and remain printable with overflow legacy inputs',()=>{
+  const materialDensity={value:48.4,unit:'lb/ft3',basis:'as_fed'};
+  for(const results of [{cutM3:10,coverage:.8},{cutM3:10,status:'incomplete'}]){
+    const html=renderMeasurementReport({...options,records:[{...record,materialDensity,results}]});
+    assert.match(html,/completed surface calculation|calculate a current material volume/);
+    assert.doesNotMatch(html,/metric tonnes/);
+  }
+  for(const r of [{...record,materialDensity:{...materialDensity,value:Number.MAX_VALUE},results:{cutM3:1}},{...record,materialDensity,results:{cutM3:Number.MAX_VALUE,status:'complete',coverage:1}}]){
+    const html=renderMeasurementReport({...options,records:[r,record]});
+    assert.match(html,/invalid numeric|exceed the supported numeric range/);
+    assert.match(html,/2\. North pile/);
+  }
+});
+
+test('report explains missing surface evidence instead of showing mass',()=>{
+  const materialDensity={value:48.4,unit:'lb/ft3',basis:'as_fed'};
+  for(const coverage of [undefined,null,'1',NaN]){
+    const html=renderMeasurementReport({...options,records:[{...record,materialDensity,results:{cutM3:10,status:'complete',coverage}}]});
+    assert.match(html,/confirmed 100% numeric surface coverage/);
+    assert.doesNotMatch(html,/metric tonnes|US short tons/);
+  }
+});
+
+test('reconstructed inventory report retains inferred enclosure caveat',()=>{
+  const materialDensity={value:48.4,unit:'lb/ft3',basis:'as_fed'};
+  const results={volumeM3:1,method:'reconstructed-estimate',status:'estimate',checks:{closed:true,edgeManifold:true,vertexManifold:true,orientationConsistent:true,selfIntersections:false}};
+  const html=renderMeasurementReport({...options,records:[{...record,materialDensity,results}]});
+  assert.match(html,/inferred geometry.*unseen underside/);
+  assert.match(html,/not validated observed-object volume/);
+});

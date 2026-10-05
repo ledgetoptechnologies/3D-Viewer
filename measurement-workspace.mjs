@@ -4,6 +4,7 @@ import './measurement-workspace.css';
 import './measurement-report-document.css';
 import {renderMeasurementReport} from './measurement-report-document.mjs';
 import {openSurfaceDialog} from './measurement-volume-dialog.mjs';
+import {openMeasurementDensityDialog,measurementMassSummary} from './measurement-density-dialog.mjs';
 import {openAdminCalculationDialog,availableAdminSources} from './measurement-admin-dialog.mjs';
 import {createServerSurfaceCalculator,createSavedSurfacePreviewLoader} from './measurement-server-surface.mjs';
 import {createServerProfileCalculator} from './measurement-server-profile.mjs';
@@ -245,7 +246,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const focusedRecord=focused?.closest?.('[data-record]')?.dataset.record;
     const focusedAction=focusedRecord&&focused?.dataset.m;
     const scrollTop=list.scrollTop;
-    list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''} ${r.visible===false?'measurement-hidden':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="rename" title="Rename ${escape(r.name)}">${escape(r.name)}</button></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([r.visible===false?'Hidden from view':'',store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="edit-record">Edit</button><button data-m="delete">Delete</button>${r.kind==='polygon'?`<button data-m="volume">${Number.isFinite(r.results?.cutM3)||Number.isFinite(r.results?.volumeM3)?'View volume':r.results?.volumeInvalidated?'Recalculate volume':'Calculate volume'}</button>`:''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">Net volume: ${escape(measurementValue(r.results.netM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">Volume: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
+    list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''} ${r.visible===false?'measurement-hidden':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="rename" title="Rename ${escape(r.name)}">${escape(r.name)}</button></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([r.visible===false?'Hidden from view':'',store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="edit-record">Edit</button><button data-m="delete">Delete</button>${r.kind==='polygon'?`<button data-m="volume">${Number.isFinite(r.results?.cutM3)||Number.isFinite(r.results?.volumeM3)?'View volume':r.results?.volumeInvalidated?'Recalculate volume':'Calculate volume'}</button><button data-m="density">Density / weight</button>`:''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">Net volume: ${escape(measurementValue(r.results.netM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">Volume: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}${r.materialDensity?`<small class="measurement-row-result measurement-row-mass">${escape(measurementMassSummary(r,units)||'Density saved · calculate current volume for weight')}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
     if(!visibleRecords.length&&temporary)list.innerHTML='<p class="hint measurement-list-empty">No temporary measurements yet.<br>Choose Distance or Polygon to start.</p>';
     listLayout.update(visibleRecords.length,listTitle);
     list.scrollTop=scrollTop;
@@ -267,6 +268,15 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
     surfacePreviewCache.clear();
     if(invalidated)return;invalidated=true;viewGeneration++;clearDisplayRequests({all:true});recordSnapshot=[];orderedRecords=[];ready=false;adminAllowed=false;selected=null;selectedExports.clear();disarm();closeDialogs();store.invalidate?.();svg.innerHTML='';lastSvg='';controls.hidden=true;tell(reason);if(notify)onAccessLost();
+  }
+  function showDensity(record){
+    if(!record||record.kind!=='polygon'||!allowed()||disposed)return;
+    closeDialogs();const generation=viewGeneration,dialogId=dialogGeneration;
+    activeDialog=openMeasurementDensityDialog({record:structuredClone(record),units,temporary:!store.persistent(),save:async materialDensity=>{
+      if(disposed||!allowed()||generation!==viewGeneration||dialogId!==dialogGeneration)throw new Error('Measurement access or view changed.');
+      await store.patch(record,{materialDensity});
+      if(!disposed&&allowed()&&generation===viewGeneration)tell(store.persistent()?'Density saved with your measurement.':'Temporary density — resets when the page is refreshed or closed.');
+    }});
   }
   function showSurface(record,{autoCalculate=false}={}){
     if(!record||record.kind!=='polygon'||!allowed()||disposed||typeof calculateSurface!=='function')return;
@@ -586,6 +596,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='screenshot'){const generation=viewGeneration,displayUnits=units;const canvas=await screenshot({allowIncomplete:true});const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(disposed||!allowed()||generation!==viewGeneration||displayUnits!==units)throw new Error('The view changed during capture. Capture the current view again.');if(!blob)throw new Error('View capture unavailable.');download(blob,'measured-view.png');tell('View PNG download requested.');}
       if(action==='report')await report();
       if(action==='volume')showSurface(record);
+      if(action==='density')showDensity(record);
     }catch(error){tell(error.message);}
   });
   initialLoad=store.load().then(notice=>{ready=true;loadFailed=false;renderPanel();if(notice)tell(notice);}).catch(error=>{loadFailed=true;renderPanel();tell(`Personal measurements unavailable: ${error.message}. Retry loading measurements when access is restored.`);});

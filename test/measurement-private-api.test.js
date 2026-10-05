@@ -96,6 +96,54 @@ test('validation rejects forged identity, oversized or nonfinite coordinates and
   assert.equal(result.results.volumeM3, 1.23456789); assert.equal(result.results.calculationOrigin, 'browser'); assert.equal(result.results.verified, false);
 });
 
+test('density validation requires explicit units and basis, valid moisture/date and known fields', () => {
+  const density = { value: 48.4, unit: 'lb/ft3', basis: 'as_fed', dryMatterPercent: 35.67, sourceNote: ' Core samples ', sampledOn: '2026-06-19' };
+  assert.equal(validateMeasurement(document({ materialDensity: density })).materialDensity.sourceNote, 'Core samples');
+  assert.equal(validateMeasurement(document({ materialDensity: null })).materialDensity, null);
+  for (const invalid of [0, [], {}, { ...density, value: 0 }, { ...density, value: Infinity }, { ...density, unit: 'lb/yd3' }, { ...density, basis: 'wet' }, { ...density, dryMatterPercent: 0 }, { ...density, dryMatterPercent: 101 }, { ...density, sampledOn: '2026-02-30' }, { ...density, sourceNote: 'x'.repeat(501) }, { ...density, verified: true }]) {
+    assert.throws(() => validateMeasurement(document({ materialDensity: invalid })), /invalid_(material_density|measurement)/);
+  }
+});
+
+test('density persists for its owner, updates with revisions and clears explicitly', async (t) => {
+  const f = await fixture(t), bearer = f.token(), density = { value: 48.4, unit: 'lb/ft3', basis: 'as_fed', dryMatterPercent: 35.67 }, doc = document({ materialDensity: density });
+  const created = await f.request(bearer, '', 'POST', doc);
+  assert.equal(created.status, 201);
+  const saved = (await created.json()).measurement;
+  assert.deepEqual(saved.materialDensity, density);
+  assert.deepEqual((await (await f.request(f.token(), `/${doc.id}`)).json()).measurement.materialDensity, density);
+  for (const other of [f.token({ subject: 'person-2' }), f.token({ audience: 'ops' })]) {
+    assert.equal((await f.request(other, `/${doc.id}`)).status, 404);
+    assert.equal((await f.request(other, `/${doc.id}`, 'PUT', { ...doc, revision: 1, materialDensity: null })).status, 404);
+  }
+  const edited = await f.request(bearer, `/${doc.id}`, 'PUT', { ...doc, revision: 1, materialDensity: { value: 775, unit: 'kg/m3', basis: 'as_fed' } });
+  assert.equal(edited.status, 200);
+  assert.equal((await edited.json()).measurement.materialDensity.value, 775);
+  assert.equal((await f.request(bearer, `/${doc.id}`, 'PUT', { ...doc, revision: 1, materialDensity: null })).status, 409);
+  const cleared = await f.request(bearer, `/${doc.id}`, 'PUT', { ...doc, revision: 2, materialDensity: null });
+  assert.equal(cleared.status, 200);
+  assert.equal((await cleared.json()).measurement.materialDensity, null);
+});
+
+test('density metadata retains exact stored results but cannot attest modified results or changed inputs', async (t) => {
+  const f = await fixture(t);
+  const serverResult = { cutM3: 123, fillM3: 1, netM3: 122, reference: { type: 'boundary-triangulated' }, calculationOrigin: 'server', verified: true };
+  for (const change of ['metadata', 'result', 'geometry', 'source', 'reference']) {
+    const created = f.measurements.create(f.principal, document()).measurement;
+    // Seed a result as a server job would: browser create cannot attest itself.
+    f.database.prepare('UPDATE private_measurements SET document_json=? WHERE id=?').run(JSON.stringify({ ...document({ id: created.id }), results: serverResult }), created.id);
+    const old = f.measurements.get(f.principal, created.id);
+    const edited = { ...document({ id: old.id }), revision: old.revision, results: structuredClone(serverResult), materialDensity: { value: 48.4, unit: 'lb/ft3', basis: 'as_fed' } };
+    if (change === 'result') edited.results.cutM3++;
+    if (change === 'geometry') edited.vertices[0][0]++;
+    if (change === 'source') edited.source = { kind: 'dtm' };
+    if (change === 'reference') edited.results.reference.type = 'fitted-plane';
+    const saved = f.measurements.update(f.principal, old.id, edited);
+    if (change === 'metadata') assert.deepEqual(saved.results, serverResult);
+    else { assert.equal(saved.results.verified, false); assert.equal(saved.results.calculationOrigin, 'browser'); }
+  }
+});
+
 test('advanced-job authority needs a matching live workspace write permission, never ordinary signed-in access', async (t) => {
   const f = await fixture(t), principal = { ...f.principal, audience: 'ops' }, adminToken = crypto.randomBytes(32).toString('base64url');
   const req = { get: (header) => header === 'X-Viewer-Admin-Authorization' ? `Bearer ${adminToken}` : undefined };
@@ -118,6 +166,15 @@ test('edits cancel obsolete jobs and delete clears saved result geometry', async
   assert.equal(f.database.prepare('SELECT status FROM measurement_calculation_jobs WHERE id=?').get('job').status, 'cancelled');
   f.measurements.delete(f.principal, doc.id, 2);
   assert.equal(f.database.prepare('SELECT document_json FROM private_measurements WHERE id=?').get(doc.id).document_json, '{}');
+});
+
+test('density-only edits cancel active jobs whose saved revision is now obsolete', async (t) => {
+  const f = await fixture(t), doc = document(), now = new Date().toISOString();
+  f.measurements.create(f.principal, doc);
+  for (const status of ['queued','running']) f.database.prepare("INSERT INTO measurement_calculation_jobs(id,measurement_id,revision,request_json,status,created_at,updated_at) VALUES(?,?,1,'{}',?,?,?)").run(status,doc.id,status,now,now);
+  const saved = f.measurements.update(f.principal, doc.id, { ...doc, revision: 1, materialDensity: { value: 48.4, unit: 'lb/ft3', basis: 'as_fed' } });
+  assert.equal(saved.revision, 2);
+  assert.deepEqual(f.database.prepare('SELECT status FROM measurement_calculation_jobs WHERE measurement_id=?').all(doc.id).map(row=>row.status), ['cancelled','cancelled']);
 });
 
 test('a client cannot use a staff-token header to launch, inspect or cancel calculation jobs', async (t) => {

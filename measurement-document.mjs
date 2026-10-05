@@ -1,3 +1,5 @@
+import { estimateMeasurementInventory, normalizeMeasurementDensity } from './measurement-density.mjs';
+
 // Renderer-independent measurement geometry. Coordinates are E/N/Z metres,
 // never screen coordinates or a renderer's movable local origin.
 export const measurementCollection = mode => ['ortho', 'dsm', 'dtm'].includes(mode) ? 'map' : 'spatial3d';
@@ -84,18 +86,24 @@ export function measurementValue(value, power = 1, units = 'imperial') {
 }
 const csvCell = value => { let s = String(value ?? ''); if (/^[=+@\-\t\r]/.test(s)) s = `'${s}`; return `"${s.replaceAll('"', '""')}"`; };
 export function exportMeasurements(records, format, { toLonLat, units = 'imperial' } = {}) {
-  const documents = records.map(r => ({ ...r, metrics: measurementMetrics(r) }));
+  const documents = records.map(r => {
+    // Legacy provenance remains available even when a numeric input cannot be normalized.
+    let density = r.materialDensity;
+    try { if (density) density = normalizeMeasurementDensity(density); } catch {}
+    return { ...r, ...(density ? {materialDensity:density} : {}), metrics: measurementMetrics(r), materialMassEstimate:estimateMeasurementInventory(r) };
+  });
   if (format === 'json') return JSON.stringify({ schemaVersion: 1, coordinateUnits: 'metres', displayUnits: units, measurements: documents }, null, 2);
   if (format === 'csv') {
     // Keep canonical quantities and provenance stable for data consumers. Add
     // unrounded, explicitly labelled display quantities for client summaries.
     const [volumeFactor,volumeUnit]=volumeDisplay(units);
-    const headers=['id','name','collection','crs','length_m','horizontal_area_m2','planar_area_m2','cut_m3','fill_m3','net_m3','method','status','warnings','volume_m3','coverage','source_json','reference_json','provenance_json','display_volume_unit','cut_display_volume','fill_display_volume','net_display_volume','object_display_volume'];
+    const headers=['id','name','collection','crs','length_m','horizontal_area_m2','planar_area_m2','cut_m3','fill_m3','net_m3','method','status','warnings','volume_m3','coverage','source_json','reference_json','provenance_json','display_volume_unit','cut_display_volume','fill_display_volume','net_display_volume','object_display_volume','density_value','density_unit','density_basis','dry_matter_percent','density_source_note','density_sampled_on','inventory_volume_basis','inventory_volume_m3','estimated_as_fed_kg','estimated_as_fed_lb','estimated_as_fed_us_short_tons','estimated_as_fed_metric_tonnes','estimated_dry_matter_kg','estimated_dry_matter_lb','estimated_dry_matter_us_short_tons','estimated_dry_matter_metric_tonnes','mass_estimate_notice'];
     const rows=documents.map(r=>{
       const result=r.results||{};
       const provenance={...result.provenance,...Object.fromEntries(['calculationOrigin','verified','calculationJobId','numericalModel','checks'].filter(key=>result[key]!==undefined).map(key=>[key,result[key]]))};
       const source=result.source||(result.sourceKind?{kind:result.sourceKind,resolutionM:result.sourceResolutionM,modelVersionId:result.modelVersionId}:r.source)||{};
-      return [r.id,r.name,r.collection,r.coordinateReference.crs,r.metrics.lengthM,r.metrics.horizontalAreaM2,r.metrics.planarAreaM2,result.cutM3,result.fillM3,result.netM3,result.method,result.status,JSON.stringify(result.warnings||[]),result.volumeM3,result.coverage,JSON.stringify(source),JSON.stringify(result.reference||{}),JSON.stringify(provenance),volumeUnit,...['cutM3','fillM3','netM3','volumeM3'].map(key=>Number.isFinite(result[key])?result[key]*volumeFactor:'')];
+      const density=r.materialDensity||{},estimate=r.materialMassEstimate;
+      return [r.id,r.name,r.collection,r.coordinateReference.crs,r.metrics.lengthM,r.metrics.horizontalAreaM2,r.metrics.planarAreaM2,result.cutM3,result.fillM3,result.netM3,result.method,result.status,JSON.stringify(result.warnings||[]),result.volumeM3,result.coverage,JSON.stringify(source),JSON.stringify(result.reference||{}),JSON.stringify(provenance),volumeUnit,...['cutM3','fillM3','netM3','volumeM3'].map(key=>Number.isFinite(result[key])?result[key]*volumeFactor:''),density.value,density.unit,density.basis,density.dryMatterPercent,density.sourceNote,density.sampledOn,estimate?.volumeBasis,estimate?.volumeM3,...['asFed','dryMatter'].flatMap(basis=>['kilograms','pounds','usShortTons','metricTonnes'].map(key=>estimate?.[basis]?.[key])),estimate?.estimateNotice];
     });
     return [headers,...rows].map(row=>row.map(csvCell).join(',')).join('\r\n');
   }
@@ -103,7 +111,7 @@ export function exportMeasurements(records, format, { toLonLat, units = 'imperia
     if (typeof toLonLat !== 'function') throw new Error('A verified geographic transform is required for GeoJSON.');
     return JSON.stringify({ type:'FeatureCollection', features:documents.map(r => {
       const coordinates=r.vertices.map(p=>{const v=toLonLat(p);if(!v||v.length<2||v.some(n=>!Number.isFinite(n))||Math.abs(v[0])>180||Math.abs(v[1])>90)throw new Error('Geographic coordinates unavailable.');return v.slice(0,2);});
-      return {type:'Feature',id:r.id,properties:{name:r.name,sourceCRS:r.coordinateReference.crs,elevationReference:'Source vertical datum; not assumed WGS84 ellipsoid',sourceVertices:r.vertices,metrics:r.metrics,results:r.results},geometry:r.kind==='polygon'?{type:'Polygon',coordinates:[[...coordinates,coordinates[0]]]}:{type:'LineString',coordinates}};
+      return {type:'Feature',id:r.id,properties:{name:r.name,sourceCRS:r.coordinateReference.crs,elevationReference:'Source vertical datum; not assumed WGS84 ellipsoid',sourceVertices:r.vertices,metrics:r.metrics,results:r.results,materialDensity:r.materialDensity,materialMassEstimate:r.materialMassEstimate},geometry:r.kind==='polygon'?{type:'Polygon',coordinates:[[...coordinates,coordinates[0]]]}:{type:'LineString',coordinates}};
     })},null,2);
   }
   if (format === 'dxf') {

@@ -3,6 +3,45 @@ import assert from 'node:assert/strict';
 import {measurementCollection,measurementMetrics,measurementValue,validateMeasurementGeometry,exportMeasurements} from '../measurement-document.mjs';
 import {createMeasurementStore} from '../measurement-store.mjs';
 const polygon={id:'0e439915-bcda-4c90-852a-9e0a7f48c7ce',name:'North face',collection:'spatial3d',kind:'polygon',coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},vertices:[[500000,4800000,2],[500010,4800000,2],[500010,4800010,2],[500000,4800010,2]],visible:true,source:{kind:'mesh'}};
+
+test('exports preserve density provenance and explicit estimated inventory bases',()=>{
+  const materialDensity={value:600,unit:'kg/m3',basis:'as_fed',dryMatterPercent:35,sourceNote:'Client cores',sampledOn:'2026-06-19'};
+  const r={...polygon,materialDensity,results:{cutM3:10,fillM3:9,netM3:1,coverage:1,status:'complete'}};
+  const document=JSON.parse(exportMeasurements([r],'json')).measurements[0];
+  assert.deepEqual(document.materialDensity,materialDensity);
+  assert.equal(document.materialMassEstimate.volumeBasis,'cut_above_base');
+  assert.equal(document.materialMassEstimate.asFed.kilograms,6000);
+  assert.equal(document.materialMassEstimate.dryMatter.kilograms,2100);
+  const feature=JSON.parse(exportMeasurements([r],'geojson',{toLonLat:()=>[-90,40]})).features[0];
+  assert.deepEqual(feature.properties.materialDensity,materialDensity);
+  assert.deepEqual(feature.properties.materialMassEstimate,document.materialMassEstimate);
+  const csv=exportMeasurements([r],'csv');
+  assert.match(csv,/"density_value","density_unit","density_basis"/);
+  assert.match(csv,/"estimated_as_fed_us_short_tons"/);
+  assert.match(csv,/"600","kg\/m3","as_fed","35","Client cores","2026-06-19","cut_above_base","10","6000"/);
+  assert.match(csv,/material was not weighed/);
+});
+
+test('exports leave mass blank or null when only historical or invalidated volume exists',()=>{
+  const materialDensity={value:48.4,unit:'lb/ft3',basis:'as_fed'};
+  for(const results of [{previousVolume:{cutM3:10}},{cutM3:10,volumeInvalidated:true},{cutM3:10,status:'geometry-only'}]){
+    const r={...polygon,materialDensity,results};
+    assert.equal(JSON.parse(exportMeasurements([r],'json')).measurements[0].materialMassEstimate,null);
+    assert.equal(JSON.parse(exportMeasurements([r],'geojson',{toLonLat:()=>[-90,40]})).features[0].properties.materialMassEstimate,null);
+    const row=exportMeasurements([r],'csv').split('\r\n')[1];
+    assert.ok(row.endsWith(',"","","","","","","","","","",""'));
+  }
+});
+
+test('exports tolerate legacy numeric overflow and omit incomplete inventory',()=>{
+  const materialDensity={value:48.4,unit:'lb/ft3',basis:'as_fed'};
+  const records=[{...polygon,materialDensity:{...materialDensity,value:Number.MAX_VALUE},results:{cutM3:1}},{...polygon,materialDensity,results:{cutM3:Number.MAX_VALUE}},{...polygon,materialDensity,results:{cutM3:10,coverage:.9}}];
+  const docs=JSON.parse(exportMeasurements(records,'json')).measurements;
+  assert.ok(docs.every(r=>r.materialMassEstimate===null));
+  assert.equal(docs[0].materialDensity.value,Number.MAX_VALUE);
+  assert.doesNotThrow(()=>exportMeasurements(records,'csv'));
+  assert.ok(JSON.parse(exportMeasurements(records,'geojson',{toLonLat:()=>[-90,40]})).features.every(f=>f.properties.materialMassEstimate===null));
+});
 test('renderer groups share coordinates without conflating map and model collections',()=>{assert.equal(measurementCollection('model'),measurementCollection('cloud'));assert.equal(measurementCollection('dsm'),measurementCollection('ortho'));assert.notEqual(measurementCollection('dtm'),measurementCollection('model'));});
 test('full precision areas, vertical planes and nonplanarity are explicit',()=>{const m=validateMeasurementGeometry(polygon);assert.equal(m.horizontalAreaM2,100);assert.equal(m.planarAreaM2,100);assert.equal(m.lengthM,40);const wall={...polygon,vertices:[[0,0,0],[0,10,0],[0,10,10],[0,0,10]]};assert.equal(validateMeasurementGeometry(wall).planarAreaM2,100);assert.equal(measurementMetrics(wall).horizontalAreaM2,0);assert.equal(measurementMetrics({...polygon,vertices:[[0,0,0],[10,0,0],[10,10,1],[0,10,0]]}).planarAreaM2,null);});
 test('invalid geometry rejected instead of plausible quantities',()=>{assert.throws(()=>validateMeasurementGeometry({...polygon,vertices:[[0,0,0],[1,1,0],[0,1,0],[1,0,0]]}));assert.throws(()=>validateMeasurementGeometry({...polygon,vertices:[[0,0,0],[1,0,0],[1,0,0]]}));});
@@ -14,12 +53,12 @@ test('CSV summaries add labelled full-precision display volumes without replacin
   for(const [units,label,factor] of [['imperial','yd³',1/0.9144**3],['feet','yd³',1/0.9144**3],['yards','yd³',1/0.9144**3],['metric','m³',1],['centimeters','cm³',1e6]]){
     const [header,row]=exportMeasurements([record],'csv',{units}).split('\r\n');
     assert.match(header,/"cut_m3","fill_m3","net_m3"/);
-    assert.ok(header.endsWith('"display_volume_unit","cut_display_volume","fill_display_volume","net_display_volume","object_display_volume"'));
+    assert.ok(header.includes('"display_volume_unit","cut_display_volume","fill_display_volume","net_display_volume","object_display_volume"'));
     assert.ok(row.includes(`"${result.volumeM3}"`),'canonical quantity remains unrounded');
-    assert.ok(row.endsWith(`"${label}","${result.cutM3*factor}","0","${result.netM3*factor}","${result.volumeM3*factor}"`));
+    assert.ok(row.includes(`"${label}","${result.cutM3*factor}","0","${result.netM3*factor}","${result.volumeM3*factor}"`));
     assert.equal(JSON.parse(exportMeasurements([record],'json',{units})).measurements[0].results.volumeM3,result.volumeM3);
   }
-  const empty=exportMeasurements([{...polygon,results:{}}],'csv');assert.ok(empty.endsWith('"yd³","","","",""'),'missing values are blank, not invented zero');
+  const empty=exportMeasurements([{...polygon,results:{}}],'csv');assert.ok(empty.includes('"yd³","","","",""'),'missing values are blank, not invented zero');
 });
 test('exports preserve source data, neutralize formula labels, use DXF metres and geographic XY',()=>{const r={...polygon,name:'=SUM(A1)'};assert.match(exportMeasurements([r],'csv'),/'=SUM/);assert.equal(JSON.parse(exportMeasurements([r],'json')).measurements[0].vertices[0][0],500000);assert.match(exportMeasurements([r],'dxf'),/\$INSUNITS\r\n70\r\n6/);assert.throws(()=>exportMeasurements([r],'geojson'));const geo=JSON.parse(exportMeasurements([r],'geojson',{toLonLat:()=>[-87,43]}));assert.equal(geo.features[0].geometry.coordinates[0].length,5);assert.deepEqual(geo.features[0].geometry.coordinates[0][0],[-87,43]);});
 test('public documents stay memory-only and new page has no documents',async()=>{let calls=0;const store=createMeasurementStore({token:()=>null,fetcher:()=>calls++});await store.load();await store.save(polygon);assert.equal(store.records.size,1);assert.equal(calls,0);assert.equal(createMeasurementStore({token:()=>null}).records.size,0);});

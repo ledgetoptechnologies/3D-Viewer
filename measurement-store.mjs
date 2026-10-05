@@ -14,7 +14,7 @@ export function createMeasurementStore({ token, accessGeneration = () => 0, fetc
     if(expected!==generation || (invalidated&&!allowReload))throw unavailable();
     if(authenticated&&!token()){invalidate();throw unavailable();}
   }
-  const bodyOf = record => Object.fromEntries(['id','name','collection','kind','vertices','coordinateReference','visible','source','results','displayPreferences','revision'].filter(k=>record[k]!==undefined).map(k=>[k,record[k]]));
+  const bodyOf = record => Object.fromEntries(['id','name','collection','kind','vertices','coordinateReference','visible','source','results','displayPreferences','materialDensity','revision'].filter(k=>record[k]!==undefined).map(k=>[k,record[k]]));
   const geometryOf = record => JSON.stringify([record.collection,record.kind,record.vertices,record.coordinateReference,record.source]);
   const conflict = () => Object.assign(new Error('This measurement changed or was deleted. Reload saved measurements before editing again.'), {status:409});
   async function request(path, method = 'GET', body, expected=generation) {
@@ -99,7 +99,7 @@ export function createMeasurementStore({ token, accessGeneration = () => 0, fetc
       const current=records.get(record.id);
       if(!current||tombstones.has(record.id)||current.revision!==record.revision)return Promise.reject(conflict());
       const changes=structuredClone(fields);
-      if(Object.keys(changes).some(key=>!['name','visible','displayPreferences'].includes(key)))return Promise.reject(new Error('Unsupported measurement field patch.'));
+      if(Object.keys(changes).some(key=>!['name','visible','displayPreferences','materialDensity'].includes(key)))return Promise.reject(new Error('Unsupported measurement field patch.'));
       return schedule(record.id,expected=>{
         const latest=records.get(record.id);
         if(!latest||tombstones.has(record.id))throw conflict();
