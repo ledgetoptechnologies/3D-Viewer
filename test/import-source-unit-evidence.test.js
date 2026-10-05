@@ -90,6 +90,10 @@ async function registered(t) {
 for (const provider of ['terra', 'webodm']) for (const [unit, expected, factor, conflict] of [[9001, 'm', 1], [9002, 'ft', .3048], [9003, 'us-ft', 1200 / 3937], [null, null], [9999, null], [9001, null, null, true]]) {
   test(`${provider} binary LAS import preserves explicit units or display-only metadata: ${unit}/${!!conflict}`, async t => {
     const c = fixture(t), project = c.processing.createProject({ displayName: 'Native units' });
+    // Raw LAS is retained for native-unit inspection, but cannot become ready
+    // until its required EPT derivative is built. This test exercises import
+    // planning/evidence, not the independently verified Entwine converter.
+    c.config.localDerivativesEnabled = true;
     const root = provider === 'terra' ? path.join(c.config.terraImportMount, 'Project', 'Task') : path.join(c.config.datasetImportMount, 'task');
     fs.mkdirSync(root, { recursive: true }); fs.writeFileSync(path.join(root, 'odm_georeferenced_model.las'), nativeLas(unit, conflict));
     let operation;
@@ -101,7 +105,13 @@ for (const provider of ['terra', 'webodm']) for (const [unit, expected, factor, 
     } else operation = c.processing.createWebodmTaskImportOperation({ subject: 'staff', request: { projectId: project.id, sourceRelativePath: 'task', sourceKind: 'folder', taskDisplayName: 'Native units' } });
     await processOneDatasetOperation(c, 'worker');
     const complete = c.processing.getDatasetOperation(operation.id);
-    assert.equal(complete.status, 'succeeded', complete.errorMessage);
+    assert.equal(complete.status, 'awaiting_derivatives', complete.errorMessage);
+    const jobs = c.db.prepare('SELECT derivative_type, request_json FROM derivative_jobs WHERE attempt_id=?').all(complete.processingAttemptId);
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0].derivative_type, 'ept');
+    assert.equal(JSON.parse(jobs[0].request_json).optional, false);
+    assert.equal(c.processing.getAttempt(complete.processingAttemptId).status, 'derivatives');
+    assert.equal(c.processing.getModelOutput(complete.result.model.activeVersion.id).status, 'staged');
     const source = complete.result.model.activeVersion.assets.find(a => a.kind === 'pointCloud');
     assert.ok(source, 'native asset remains registered for display');
     const rows = c.db.prepare('SELECT evidence_json FROM measurement_source_unit_evidence').all();
