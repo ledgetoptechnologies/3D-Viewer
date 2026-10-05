@@ -162,6 +162,7 @@ COPY scripts ./scripts
 COPY lod-policy.mjs lod-memory-profile.mjs ./
 COPY measurement-volume.mjs raster-source-metadata.mjs raster-tiff-header.mjs raster-vertical-units.mjs ./
 COPY measurement-saved-surface-preview.mjs ./
+COPY measurement-density.mjs ./
 COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles
 COPY --from=poisson /opt/poisson /opt/poisson

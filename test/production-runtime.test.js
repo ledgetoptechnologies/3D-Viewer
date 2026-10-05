@@ -42,11 +42,9 @@ function runtimeTestImportGuard({ sourceOverrides = new Map() } = {}) {
       const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), match[1]));
       assert.ok(shipped.some(item => target === item.target || (item.directory && target.startsWith(item.target + '/'))),
         `${file} imports ${match[1]}, which is not copied into the final runtime or mounted test tree; move source-only integration to a separate test`);
-      if (target.startsWith('test/')) {
-        const resolved = [target, target + '.js', target + '.mjs'].find(candidate => fs.existsSync(path.join(repositoryRoot, candidate)) && /\.(?:mjs|js)$/.test(candidate));
-        assert.ok(resolved, `${file}: cannot resolve mounted test dependency ${match[1]}`);
-        inspect(resolved);
-      }
+      const resolved = [target, target + '.js', target + '.mjs'].find(candidate => fs.existsSync(path.join(repositoryRoot, candidate)) && /\.(?:mjs|js)$/.test(candidate));
+      if (target.startsWith('test/')) assert.ok(resolved, `${file}: cannot resolve mounted test dependency ${match[1]}`);
+      if (resolved) inspect(resolved);
     }
   }
   entries.forEach(inspect);
@@ -63,6 +61,13 @@ test('runtime import guard rejects raw frontend integration while allowing copie
     assert.throws(() => runtimeTestImportGuard({ sourceOverrides: new Map([[entry, source + '\n' + injected]]) }), /measurement-store\.mjs.*not copied/);
   }
   assert.doesNotThrow(() => runtimeTestImportGuard({ sourceOverrides: new Map([[entry, source + "\nimport('../measurement-volume.mjs')"]]) }));
+});
+
+test('runtime import guard follows server dependencies instead of stopping at copied directories', () => {
+  const repository = 'server/measurementRepository.js';
+  const source = fs.readFileSync(path.join(repositoryRoot, repository), 'utf8');
+  assert.throws(() => runtimeTestImportGuard({sourceOverrides:new Map([[repository, source + "\nrequire('../measurement-store.mjs')"]])}), /measurementRepository\.js imports .*measurement-store\.mjs.*not copied/);
+  assert.doesNotThrow(() => runtimeTestImportGuard({sourceOverrides:new Map([[repository, source + "\nrequire('../measurement-density.mjs')"]])}));
 });
 
 test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT constructor contract', () => {
