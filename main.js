@@ -4435,7 +4435,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   if (isMapMode(prevMode) && prevMode !== mode) removeMapOverlays();
 
   state.activeMode = mode;
-  document.querySelectorAll('.tab-btn').forEach((button) => {
+  document.querySelectorAll('.tab-btn[data-mode]').forEach((button) => {
     button.classList.toggle('active', button.dataset.mode === mode);
   });
   if (updateHistory) {
