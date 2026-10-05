@@ -476,8 +476,120 @@ function triangleCompare(a, b, tolerance = 0) {
   return 0;
 }
 
+// Controlled v4 audits need only positions plus the render/material coverage
+// signature. Keeping a JS object and nested arrays for every triangle amplified
+// a modest GLB into hundreds of MiB of V8 heap. Store those records in flat
+// typed arrays instead; the older v2/v3 canonical-attribute path keeps its
+// existing representation and semantics.
+class CompactTriangleSurface {
+  constructor(positions, materialIds, keyIds, materials, keys, length) {
+    this.positions = positions;
+    this.materialIds = materialIds;
+    this.keyIds = keyIds;
+    this.materials = materials;
+    this.keys = keys;
+    this.length = length;
+  }
+
+  positionsAt(index) {
+    const offset = index * 9;
+    return [
+      [this.positions[offset], this.positions[offset + 1], this.positions[offset + 2]],
+      [this.positions[offset + 3], this.positions[offset + 4], this.positions[offset + 5]],
+      [this.positions[offset + 6], this.positions[offset + 7], this.positions[offset + 8]],
+    ];
+  }
+
+  materialAt(index) { return this.materials[this.materialIds[index]]; }
+  keysAt(index) { return this.keys[this.keyIds[index]]; }
+}
+
+class CompactTriangleSurfaceBuilder {
+  constructor(initialCapacity = 4096) {
+    this.capacity = initialCapacity;
+    this.length = 0;
+    this.positions = new Float64Array(initialCapacity * 9);
+    this.materialIds = new Uint32Array(initialCapacity);
+    this.keyIds = new Uint32Array(initialCapacity);
+    this.materials = [];
+    this.keys = [];
+    this.materialLookup = new Map();
+    this.keyLookup = new Map();
+  }
+
+  #intern(value, lookup, values) {
+    let id = lookup.get(value);
+    if (id === undefined) {
+      id = values.length;
+      lookup.set(value, id);
+      values.push(value);
+    }
+    return id;
+  }
+
+  #ensureCapacity(required) {
+    if (required <= this.capacity) return;
+    let nextCapacity = this.capacity;
+    while (nextCapacity < required) nextCapacity *= 2;
+    const positions = new Float64Array(nextCapacity * 9);
+    positions.set(this.positions.subarray(0, this.length * 9));
+    const materialIds = new Uint32Array(nextCapacity);
+    materialIds.set(this.materialIds.subarray(0, this.length));
+    const keyIds = new Uint32Array(nextCapacity);
+    keyIds.set(this.keyIds.subarray(0, this.length));
+    this.capacity = nextCapacity;
+    this.positions = positions;
+    this.materialIds = materialIds;
+    this.keyIds = keyIds;
+  }
+
+  add(points, material, keys) {
+    if (points.length !== 3 || points.some((point) => point.length !== 3
+      || point.some((value) => !Number.isFinite(value)))) {
+      throw new Error('controlled surface audit encountered a non-finite position');
+    }
+    if (this.length >= 0xffffffff) throw new Error('controlled surface audit exceeded its triangle limit');
+    this.#ensureCapacity(this.length + 1);
+    const offset = this.length * 9;
+    for (let corner = 0; corner < 3; corner += 1) {
+      for (let axis = 0; axis < 3; axis += 1) this.positions[offset + corner * 3 + axis] = points[corner][axis];
+    }
+    this.materialIds[this.length] = this.#intern(material, this.materialLookup, this.materials);
+    this.keyIds[this.length] = this.#intern(keys, this.keyLookup, this.keys);
+    this.length += 1;
+  }
+
+  finish() {
+    return new CompactTriangleSurface(
+      // Copy to exact-sized backing stores. subarray() would keep the builder's
+      // power-of-two capacity alive for the full audit, sometimes nearly
+      // doubling the retained surface memory after extraction.
+      this.positions.slice(0, this.length * 9),
+      this.materialIds.slice(0, this.length),
+      this.keyIds.slice(0, this.length),
+      this.materials,
+      this.keys,
+      this.length,
+    );
+  }
+}
+
+function surfaceTrianglePositions(surface, index) {
+  return surface instanceof CompactTriangleSurface ? surface.positionsAt(index) : trianglePositions(surface[index]);
+}
+
+function surfaceTriangleMaterial(surface, index) {
+  return surface instanceof CompactTriangleSurface ? surface.materialAt(index) : surface[index].material;
+}
+
+function surfaceTriangleKeys(surface, index) {
+  return surface instanceof CompactTriangleSurface
+    ? surface.keysAt(index)
+    : (surface[index].keys || surface[index].vertices[0]?.keys || '');
+}
+
 async function extractTriangles(asset, rootTransform, label, { compactSurface = false } = {}) {
-  const triangles = [];
+  const triangles = compactSurface ? new CompactTriangleSurfaceBuilder() : [];
   const nodes = asset.json.nodes || [];
   const childNodes = new Set(nodes.flatMap((node) => node.children || []));
   const scene = asset.json.scenes?.[asset.json.scene ?? 0];
@@ -575,9 +687,8 @@ async function extractTriangles(asset, rootTransform, label, { compactSurface = 
             }
           }
           if (determinant < 0) [vertices[1], vertices[2]] = [vertices[2], vertices[1]];
-          triangles.push(compactSurface
-            ? { material, keys: attributeKeys, positions: vertices }
-            : { material, vertices: rotateCanonical(vertices) });
+          if (compactSurface) triangles.add(vertices, material, attributeKeys);
+          else triangles.push({ material, vertices: rotateCanonical(vertices) });
         }
       }
     }
@@ -594,7 +705,7 @@ async function extractTriangles(asset, rootTransform, label, { compactSurface = 
     assetTransform = rootTransform.clone().multiply(new Matrix4().makeTranslation(...cesiumRtc));
   }
   for (const root of roots) await visit(root, assetTransform);
-  return triangles;
+  return compactSurface ? triangles.finish() : triangles;
 }
 
 function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null, applyCesiumRtc = true, allowCompressedTextureSources = false) {
@@ -612,7 +723,7 @@ function loadGlbAsset(filePath, root, embeddedBuffer = null, bindExternal = null
 }
 
 async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedTextureSources = false, compactSurface = false } = {}) {
-  const triangles = [];
+  const triangles = compactSurface ? new CompactTriangleSurfaceBuilder() : [];
   const visitedTilesets = new Set();
 
   function bindArtifact(filePath, knownBytes = null) {
@@ -672,12 +783,17 @@ async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedT
       else if (!/\.glb$/i.test(contentPath)) throw new Error(`unsupported leaf content type (${uri})`);
       const tileContentTransform = rtc ? world.clone().multiply(new Matrix4().makeTranslation(...rtc)) : world;
       const contentTransform = TILE_TO_GLTF.clone().multiply(tileContentTransform).multiply(GLTF_TO_TILE);
-      triangles.push(...await extractTriangles(
+      const extracted = await extractTriangles(
         loadGlbAsset(contentPath, derivativeDir, glb, bindArtifact, true, allowCompressedTextureSources),
         contentTransform,
         uri,
         { compactSurface },
-      ));
+      );
+      if (compactSurface) {
+        for (let index = 0; index < extracted.length; index += 1) {
+          triangles.add(extracted.positionsAt(index), extracted.materialAt(index), extracted.keysAt(index));
+        }
+      } else triangles.push(...extracted);
     }
 
     await walkTile(tileset.root, inheritedTransform);
@@ -685,7 +801,7 @@ async function collectLeafTriangles(derivativeDir, artifacts, { allowCompressedT
   }
 
   await walkTileset(path.join(derivativeDir, 'tileset.json'));
-  return { triangles, artifacts: [...artifacts.values()].sort((a, b) => a.uri.localeCompare(b.uri)) };
+  return { triangles: compactSurface ? triangles.finish() : triangles, artifacts: [...artifacts.values()].sort((a, b) => a.uri.localeCompare(b.uri)) };
 }
 
 function compareAudits(source, leaves, tolerance) {
@@ -791,11 +907,11 @@ function assertControlledRenderCoverage(triangles, label) {
   let opaque = 0;
   let uv = 0;
   let normals = 0;
-  for (const triangle of triangles) {
-    const keys = triangle.keys?.split('|') || triangle.vertices[0]?.keys?.split('|') || [];
+  for (let index = 0; index < triangles.length; index += 1) {
+    const keys = surfaceTriangleKeys(triangles, index).split('|');
     if (keys.includes('TEXCOORD_0')) uv += 1;
     if (keys.includes('NORMAL')) normals += 1;
-    const traits = materialTraits(triangle.material);
+    const traits = materialTraits(surfaceTriangleMaterial(triangles, index));
     if (traits.textured) textured += 1;
     if (traits.alphaMode === 'OPAQUE') opaque += 1;
   }
@@ -829,8 +945,8 @@ function surfaceStatisticsPass(triangles, origin, reverse = false) {
   const secondMomentAccumulators = Array.from({ length: 6 }, compensatedAccumulator);
   let degenerateTriangleCount = 0;
   for (let position = 0; position < triangles.length; position += 1) {
-    const triangle = triangles[reverse ? triangles.length - position - 1 : position];
-    const points = trianglePositions(triangle).map((point) => point.map((value, axis) => value - origin[axis]));
+    const triangleIndex = reverse ? triangles.length - position - 1 : position;
+    const points = surfaceTrianglePositions(triangles, triangleIndex).map((point) => point.map((value, axis) => value - origin[axis]));
     for (const point of points) {
       for (let axis = 0; axis < 3; axis += 1) {
         minimum[axis] = Math.min(minimum[axis], point[axis]);
@@ -919,8 +1035,8 @@ function deterministicTriangleIndices(count, requested, seed) {
 function makeSurfaceBvh(triangles, origin) {
   const positions = new Float32Array(triangles.length * 9);
   let offset = 0;
-  for (const triangle of triangles) {
-    for (const point of trianglePositions(triangle)) {
+  for (let index = 0; index < triangles.length; index += 1) {
+    for (const point of surfaceTrianglePositions(triangles, index)) {
       positions[offset++] = point[0] - origin[0];
       positions[offset++] = point[1] - origin[1];
       positions[offset++] = point[2] - origin[2];
@@ -933,7 +1049,7 @@ function makeSurfaceBvh(triangles, origin) {
 }
 
 function faceNormal(triangle) {
-  const [a, b, c] = trianglePositions(triangle).map((point) => new Vector3(...point));
+  const [a, b, c] = triangle.map((point) => new Vector3(...point));
   return b.sub(a).cross(c.sub(a)).normalize();
 }
 
@@ -966,9 +1082,8 @@ function auditSurfaceDirection(source, targetSurface, origin, seed, tolerance) {
   let reversedNormalSampleCount = 0;
   let sampleCount = 0;
   for (const index of indices) {
-    const sourceTriangle = source[index];
-    const points = trianglePositions(sourceTriangle).map((point) => point.map((value, axis) => value - origin[axis]));
-    const sourceNormal = faceNormal(sourceTriangle);
+    const points = surfaceTrianglePositions(source, index).map((point) => point.map((value, axis) => value - origin[axis]));
+    const sourceNormal = faceNormal(points);
     for (let sample = 0; sample < 4; sample += 1) {
       const closest = targetSurface.bvh.closestPointToPoint(samplePoint(points, sample), {});
       if (!closest || !Number.isFinite(closest.distance) || !Number.isInteger(closest.faceIndex)) {
@@ -991,8 +1106,8 @@ function controlledSurfaceComparison(source, leaves, sourceSha256) {
   const leafRender = assertControlledRenderCoverage(leaves, 'controlled Obj2Tiles frontier');
   const absoluteMinimum = [Infinity, Infinity, Infinity];
   const absoluteMaximum = [-Infinity, -Infinity, -Infinity];
-  for (const triangle of source) {
-    for (const point of trianglePositions(triangle)) {
+  for (let index = 0; index < source.length; index += 1) {
+    for (const point of surfaceTrianglePositions(source, index)) {
       for (let axis = 0; axis < 3; axis += 1) {
         absoluteMinimum[axis] = Math.min(absoluteMinimum[axis], point[axis]);
         absoluteMaximum[axis] = Math.max(absoluteMaximum[axis], point[axis]);
