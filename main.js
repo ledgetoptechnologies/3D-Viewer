@@ -760,8 +760,11 @@ function applyViewerPreferences(preferences) {
   viewerMouseProfile = preferences.mouseProfile;
   controls?.setMouseProfile?.(viewerMouseProfile);
   pcApi()?.setMouseProfile?.(viewerMouseProfile);
-  const select=document.getElementById('mouse-profile');
-  if(select)select.value=viewerMouseProfile;
+  document.querySelectorAll('[data-mouse-profile]').forEach(button=>{
+    const selected=button.dataset.mouseProfile===viewerMouseProfile;
+    button.classList.toggle('active',selected);
+    button.setAttribute('aria-pressed',String(selected));
+  });
   const descriptions=viewerMouseProfile==='alternate'
     ? ['Slide view any direction','Orbit around point under cursor','Pan / move the map']
     : ['Orbit around point under cursor','Pan / move the map','Slide view any direction'];
@@ -4329,7 +4332,9 @@ function bindUI() {
   });
   viewerPreferences.change({sidebarCollapsed:window.matchMedia('(max-width: 1024px)').matches},{save:false});
   if(VIEW_MODE==='session')void viewerPreferences.load();
-  document.getElementById('mouse-profile').addEventListener('change',event=>viewerPreferences.change({mouseProfile:event.target.value}));
+  document.querySelectorAll('[data-mouse-profile]').forEach(button=>button.addEventListener('click',()=>{
+    viewerPreferences.change({mouseProfile:button.dataset.mouseProfile});
+  }));
   sidebarToggle.addEventListener('click', () => {
     viewerPreferences.change({sidebarCollapsed:!sidebar.classList.contains('collapsed')});
   });

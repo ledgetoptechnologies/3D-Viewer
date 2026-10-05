@@ -75,7 +75,8 @@
     #sidebar.collapsed #sidebar-resize { display:none; }
 
     #sidebar-custom { padding: 14px; gap: 14px; display: flex; flex-direction: column; overflow-y: auto; }
-    #mouse-profile { min-width:0; max-width:100%; flex:1; }
+    #mouse-profile-toggle { display:flex; align-items:center; gap:4px; margin-top:8px; padding:3px; width:100%; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:999px; }
+    #mouse-profile-toggle .mouse-profile-btn { flex:1; justify-content:center; min-width:0; padding:7px 6px; font-size:11px; white-space:nowrap; }
     .panel { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius); padding: 14px; }
     .panel h3 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--brand-orange); margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
     .panel h3 svg { width: 14px; height: 14px; }
@@ -466,9 +467,11 @@
         </div>
 
         <div class="panel" id="panel-nav">
-          <label class="slider-row" for="mouse-profile">Mouse mode
-            <select id="mouse-profile"><option value="default">Default — orbit-first</option><option value="alternate">Alternate — pan-first</option></select>
-          </label>
+          <div class="hint" id="mouse-profile-label">Mouse mode</div>
+          <div id="mouse-profile-toggle" role="group" aria-labelledby="mouse-profile-label">
+            <button class="tab-btn mouse-profile-btn active" id="mouse-profile-default" type="button" data-mouse-profile="default" aria-pressed="true">Default</button>
+            <button class="tab-btn mouse-profile-btn" id="mouse-profile-alternate" type="button" data-mouse-profile="alternate" aria-pressed="false">Alternate</button>
+          </div>
           <p class="hint" id="mouse-profile-notice" role="status">Changes apply to this page only.</p>
           <h3><svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20" stroke="currentColor" stroke-width="2" fill="none"/></svg> Navigation</h3>
           <div class="navhelp">
