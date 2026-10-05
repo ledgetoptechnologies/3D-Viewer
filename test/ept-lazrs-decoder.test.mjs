@@ -12,6 +12,24 @@ function close(actual, expected, tolerance = 1e-5) {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} is not within ${tolerance} of ${expected}`);
 }
 
+function nativeRgbLas(colors, multiplier) {
+  const header = Buffer.alloc(227);
+  header.write('LASF'); header[24] = 1; header[25] = 2;
+  header.writeUInt16LE(227, 94); header.writeUInt32LE(227, 96);
+  header[104] = 3; header.writeUInt16LE(34, 105);
+  header.writeUInt32LE(colors.length, 107); header.writeUInt32LE(colors.length, 111);
+  for (const offset of [131, 139, 147]) header.writeDoubleLE(0.01, offset);
+  header.writeDoubleLE(colors.length - 1, 179);
+  const records = colors.map((rgb, index) => {
+    const point = Buffer.alloc(34); point.writeInt32LE(index * 100, 0);
+    point[14] = 9; // first and only return
+    rgb.forEach((value, channel) => point.writeUInt16LE(value * multiplier, 28 + channel * 2));
+    return point;
+  });
+  const bytes = Buffer.concat([header, ...records]);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
 test('LAZ-RS decodes a standalone EPT LAZ node into Potree-ready relative buffers', async (t) => {
   assert.equal(existsSync(decoderPath), true, 'the EPT LAZ-RS decoder module exists');
   assert.equal(existsSync(fixturePath), true, 'the synthetic EPT LAZ fixture exists');
@@ -57,4 +75,18 @@ test('LAZ-RS decodes a standalone EPT LAZ node into Potree-ready relative buffer
   assert.deepEqual(decoded.ranges['return number'], [0, 0]);
   assert.deepEqual(decoded.ranges['number of returns'], [0, 0]);
   assert.deepEqual(decoded.ranges['source id'], [0, 0]);
+
+  // Real binary LAS RGB fields use uint16 even when the samples are only
+  // eight-bit. Verify both conventions through the native loader, not a mock.
+  const rgb = [[13, 90, 255], [81, 96, 73], [0, 1, 127]];
+  for (const multiplier of [1, 256]) {
+    const input = nativeRgbLas(rgb, multiplier);
+    const original = new Uint8Array(input).slice();
+    const colored = await decodeEptLazNode(input, [0, 0, 0]);
+    assert.equal(colored.pointCount, rgb.length);
+    assert.deepEqual(Array.from(new Uint8Array(colored.color)), rgb.flatMap(color => [...color, 255]),
+      `native RGB multiplier ${multiplier} preserves visible color and alpha`);
+    assert.deepEqual(new Uint8Array(input), original, 'native input remains unchanged');
+    assert.deepEqual(Array.from(new Float32Array(colored.position)), [0, 0, 0, 1, 0, 0, 2, 0, 0]);
+  }
 });

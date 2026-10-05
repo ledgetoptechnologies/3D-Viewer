@@ -42,7 +42,11 @@ export async function decodeEptLazNode(compressed, nodemin) {
   if (!(compressed instanceof ArrayBuffer)) throw new TypeError('EPT node payload must be an ArrayBuffer');
   const origin = finiteOrigin(nodemin);
   const mesh = await LAZRsLoader.parse(compressed, {
-    las: { shape: 'mesh', fp64: true, skip: 1, colorDepth: 8 },
+    // LAS stores RGB in uint16 fields. Some producers use 0..255, while
+    // Terra/Entwine commonly retain expanded 16-bit samples (value * 256).
+    // Forcing 8-bit wraps those samples to black when loaders.gl writes its
+    // Uint8 output. Its auto mode preserves native 8-bit or scales 16-bit RGB.
+    las: { shape: 'mesh', fp64: true, skip: 1, colorDepth: 'auto' },
   });
   const sourcePositions = mesh?.attributes?.POSITION?.value;
   const pointCount = Number(mesh?.header?.vertexCount);
