@@ -90,7 +90,7 @@ test('accepted terminal statuses survive submit recovery and reconciliation',asy
 });
 
 test('temporary endpoint errors and auth rejection have distinct classifications',async()=>{
-  for(const [status,code] of [[401,'provider_authentication_failed'],[403,'provider_authentication_failed'],[429,'provider_busy'],[503,'provider_unavailable'],[502,'provider_unavailable']]){
+  for(const [status,code] of [[401,'provider_authentication_failed'],[403,'provider_authentication_failed'],[429,'provider_rate_limited'],[503,'provider_unavailable'],[502,'provider_unavailable']]){
     const adapter=new NodeOdmProvider({endpoint:'http://127.0.0.1:3000',fetchImpl:async()=>new Response(null,{status})});await assert.rejects(adapter.request('/info'),error=>error.code===code);
   }
   const adapter=new NodeOdmProvider({endpoint:'http://127.0.0.1:3000',fetchImpl:async()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ENETUNREACH'}});}});

@@ -37,7 +37,7 @@ test('Retry-After parses seconds and HTTP dates with five-second floor and five-
 test('capacity and outage responses use bounded Retry-After and malformed values fall back to thirty seconds',async()=>{
   for(const status of [429,503])for(const [header,expected] of [['1',5000],['1000',300000],['bad-value',30000],['-1',30000],['0',30000],[null,30000],[new Date(Date.now()+3600000).toUTCString(),300000]]){
     const provider=new NodeOdmProvider({endpoint:'http://private.example.test',fetchImpl:async()=>new Response(null,{status,headers:header===null?{}:{'retry-after':header}})});
-    await assert.rejects(provider.request('/info'),error=>error.code===(status===429?'provider_busy':'provider_unavailable')&&error.retryAfterMs===expected,`${status}: ${header}`);
+    await assert.rejects(provider.request('/info'),error=>error.code===(status===429?'provider_rate_limited':'provider_unavailable')&&error.retryAfterMs===expected,`${status}: ${header}`);
   }
 });
 
@@ -55,11 +55,27 @@ test('worker durable outage exponential retry remains between five and three hun
 
 test('rendered ClusterODM detail suppresses placeholder queue and sentinel capacity while NodeODM retains real counts',()=>{
   const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
-  const start=source.indexOf('function providerDetail(provider){'),end=source.indexOf('\nfunction providerForm()',start);
+  const start=source.indexOf('function providerHealthExplanation(provider){'),end=source.indexOf('\nfunction providerForm()',start);
   assert.ok(start>=0&&end>start,'execute the current rendering function, not a duplicate fixture implementation');
-  const context={state:{presets:[]},can:()=>false,esc:String,providerName:String,providerCapabilityNotice:()=>'',available:String,badge:String,empty:String};
-  vm.createContext(context);vm.runInContext(`${source.slice(start,end)}; this.render=providerDetail;`,context);
+  const context={state:{presets:[]},can:()=>false,esc:String,providerName:String,providerCapabilityNotice:()=>'',available:String,badge:String,empty:String,dateTime:String};
+  vm.createContext(context);vm.runInContext(`${source.slice(start,end)}; this.explain=providerHealthExplanation; this.render=providerDetail;`,context);
   const provider={id:'owned-node',displayName:'Node',endpoint:'http://private.example.test',type:'clusterodm',capabilities:{taskQueueCount:0,maxParallelTasks:99999999999}};
   const cluster=context.render(provider);assert.match(cluster,/Cluster-managed scheduling · live queue count unavailable/);assert.match(cluster,/Cluster-managed capacity/);assert.doesNotMatch(cluster,/0 queued|99999999999/);assert.match(cluster,/Provider-managed · no Viewer job limit/);
   const node=context.render({...provider,type:'nodeodm',capabilities:{taskQueueCount:7,maxParallelTasks:2}});assert.match(node,/7 queued · 2 upstream slots/);assert.doesNotMatch(node,/live queue count unavailable/);
+  const reasons=[
+    ['provider_authentication_failed','rejected its API token'],
+    ['provider_credential_unavailable','could not read the configured API token'],
+    ['provider_tls_failed','could not verify the provider’s TLS certificate'],
+    ['provider_unreachable','could not reach the provider endpoint'],
+    ['provider_busy','cannot accept work right now'],
+    ['provider_rate_limited','does not confirm that its processing queue is full'],
+    ['provider_unavailable','temporarily unavailable'],
+    ['unrecognized','unclassified reason'],
+  ];
+  for(const [code,copy]of reasons){
+    const unhealthy={...provider,runtimeHealth:'unhealthy',runtimeHealthErrorCode:code,runtimeHealthAt:'2026-10-05T12:00:00Z',runtimeHealthError:'secret or upstream detail must not render'};
+    const detail=context.render(unhealthy),explanation=context.explain(unhealthy);
+    assert.match(detail,/role="alert"/);assert.match(detail,new RegExp(copy));assert.doesNotMatch(detail,/secret or upstream detail/);assert.match(detail,/Last checked/);
+  }
+  assert.equal(context.explain({...provider,runtimeHealth:'healthy'}),'','healthy providers do not show a stale failure message');
 });

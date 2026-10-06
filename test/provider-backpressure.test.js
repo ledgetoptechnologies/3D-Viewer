@@ -13,7 +13,7 @@ const {processOne}=require('../server/processingWorker');
 test('provider rate limits and temporary unavailability have separate retryable classifications',async()=>{
   for(const status of [429,503]){
     const provider=new NodeOdmProvider({endpoint:'http://127.0.0.1:3000',fetchImpl:async()=>new Response(null,{status,headers:status===429?{'retry-after':'12'}:{}})});
-    await assert.rejects(provider.request('/task/new/init'),error=>error.code===(status===429?'provider_busy':'provider_unavailable')&&error.status===status&&error.retryAfterMs===(status===429?12_000:30_000));
+    await assert.rejects(provider.request('/task/new/init'),error=>error.code===(status===429?'provider_rate_limited':'provider_unavailable')&&error.status===status&&error.retryAfterMs===(status===429?12_000:30_000));
   }
 });
 
@@ -24,17 +24,21 @@ test('unrelated provider errors keep their existing classification',async()=>{
 });
 
 test('ClusterODM concurrent-task limit returned in a successful JSON response is retryable',()=>{
-  assert.throws(()=>checkedAction({error:'Reached maximum number of concurrent tasks: 4. Please wait until other tasks have finished, then restart the task.'},'initialize'),error=>error.code==='provider_busy'&&error.retryAfterMs===30_000);
-  assert.throws(()=>checkedAction({error:'Reached maximum number of concurrent tasks, please wait until other tasks have finished, then restart the task.'},'commit'),error=>error.code==='provider_busy'&&error.retryAfterMs===30_000);
+  assert.throws(()=>checkedAction({error:'Reached maximum number of concurrent tasks: 4. Please wait until other tasks have finished, then restart the task.'},'initialize'),error=>error.code==='provider_busy'&&error.retryAfterMs===30_000&&error.explicitCapacityRejection===true);
+  assert.throws(()=>checkedAction({error:'Reached maximum number of concurrent tasks, please wait until other tasks have finished, then restart the task.'},'commit'),error=>error.code==='provider_busy'&&error.retryAfterMs===30_000&&error.explicitCapacityRejection===true);
 });
 
-test('worker defers temporary provider capacity errors without consuming retry budget',async()=>{
+test('ClusterODM flood/rate limit JSON is not treated as confirmed capacity',()=>{
+  assert.throws(()=>checkedAction({error:'Uuh, slow down! It seems like you are sending a lot of tasks. Please wait 15 minutes.'},'initialize'),error=>error.code==='provider_rate_limited'&&error.retryAfterMs===300_000&&error.explicitCapacityRejection!==true);
+});
+
+test('worker durably backs off generic rate limits instead of treating them as capacity',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'provider-backpressure-')),image=path.join(root,'one.jpg'),body=Buffer.from('synthetic image');fs.writeFileSync(image,body);
-  const job={id:'submit-job',attempt_id:'attempt-1',job_type:'submit',lease_owner:'worker-1'},calls=[];
-  const processing={claimJob:()=>job,heartbeatJob:()=>true,getAttempt:()=>({id:'attempt-1',taskId:'task-1',datasetId:'dataset-1',providerId:'provider-1',providerTaskId:'remote-1',options:{},status:'admitted'}),getAttemptSubmission:()=>({submissionPhase:'new',uploadedFileCount:0}),getTask:()=>({id:'task-1',datasetId:'dataset-1',displayName:'Synthetic'}),getDataset:()=>({id:'dataset-1',rootKey:'datasets',relativePath:'fixture',files:[{relativePath:'one.jpg',byteSize:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex'),processingRole:'image'}]}),getProvider:()=>({id:'provider-1',type:'clusterodm',capabilities:{}}),activeProcessingReservationBytes:()=>[],activeDerivativeReservationBytes:()=>[],validateAttemptInputInventory:()=>true,deferSubmitAdmission:(...args)=>{calls.push(args);return true;},appendLog:()=>{throw new Error('temporary capacity should not be logged as a terminal error');}};
+  const job={id:'submit-job',attempt_id:'attempt-1',job_type:'submit',lease_owner:'worker-1'},calls=[],failed=[];
+  const processing={claimJob:()=>job,heartbeatJob:()=>true,getAttempt:()=>({id:'attempt-1',taskId:'task-1',datasetId:'dataset-1',providerId:'provider-1',providerTaskId:'remote-1',options:{},status:'admitted'}),getAttemptSubmission:()=>({submissionPhase:'new',uploadedFileCount:0}),getTask:()=>({id:'task-1',datasetId:'dataset-1',displayName:'Synthetic'}),getDataset:()=>({id:'dataset-1',rootKey:'datasets',relativePath:'fixture',files:[{relativePath:'one.jpg',byteSize:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex'),processingRole:'image'}]}),getProvider:()=>({id:'provider-1',type:'clusterodm',capabilities:{}}),activeProcessingReservationBytes:()=>[],activeDerivativeReservationBytes:()=>[],validateAttemptInputInventory:()=>true,deferSubmitAdmission:(...args)=>{calls.push(args);return true;},failJob:(id,owner,code,message,retryAt)=>{failed.push({id,owner,code,message,retryAt});return true;},appendLog:()=>{}};
   const storage={resolve:()=>image,requireProcessingHeadroom:()=>({})};
-  const deps={processing,storage,config:{},adapterFactory:()=>({async status(){throw Object.assign(new Error('ODM request failed with HTTP 429'),{code:'provider_busy',status:429,retryAfterMs:15_000});}})};
-  try{assert.equal(await processOne(deps,'worker-1'),true);assert.equal(calls.length,1);assert.equal(calls[0][0],job.id);assert.equal(calls[0][1],job.lease_owner);assert.equal(calls[0][2],15_000);assert.deepEqual(calls[0][3],{errorCode:'provider_busy',errorMessage:'waiting for upstream provider capacity'});}
+  const deps={processing,storage,config:{},adapterFactory:()=>({async status(){throw Object.assign(new Error('ODM request failed with HTTP 429'),{code:'provider_rate_limited',status:429,retryAfterMs:15_000});}})};
+  try{const before=Date.now();assert.equal(await processOne(deps,'worker-1'),true);assert.equal(calls.length,0);assert.equal(failed.length,1);assert.equal(failed[0].code,'provider_rate_limited');assert.ok(Date.parse(failed[0].retryAt)>before+10_000);}
   finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 

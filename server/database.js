@@ -2044,6 +2044,18 @@ const MIGRATIONS = [
       AFTER INSERT ON processing_jobs
       BEGIN INSERT INTO processing_job_order(job_id) VALUES (NEW.id); END;
   `},
+  {version:41,name:'provider_health_diagnostic_codes',sql:`
+    ALTER TABLE processing_providers ADD COLUMN runtime_health_error_code TEXT CHECK(runtime_health_error_code IS NULL OR runtime_health_error_code IN (
+      'provider_authentication_failed',
+      'provider_credential_unavailable',
+      'provider_tls_failed',
+      'provider_unreachable',
+      'provider_busy',
+      'provider_rate_limited',
+      'provider_unavailable',
+      'provider_probe_failed'
+    ));
+  `},
 ];
 
 function applyMigrations(database) {

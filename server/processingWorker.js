@@ -190,7 +190,7 @@ async function processOne(deps,owner=crypto.randomUUID()){
     if(error.code==='provider_authentication_failed'){
       deps.processing.deferProviderAuthentication(job.id,job.lease_owner,'Provider rejected credentials; waiting for corrected credentials and a successful health check');return true;
     }
-    const durable=new Set(['provider_unreachable','provider_unavailable','provider_tls_failed','provider_submission_ambiguous','provider_busy','provider_task_not_found']).has(error.code);
+    const durable=new Set(['provider_unreachable','provider_unavailable','provider_tls_failed','provider_submission_ambiguous','provider_busy','provider_rate_limited','provider_task_not_found']).has(error.code);
     const delay=error.retryAfterMs||Math.min(300000,5000*2**Math.min(Number(job.attempt_count)||0,6));
     if(durable){
       deps.processing.appendLog(job.attempt_id,'warn',`${safe}${archiveDiagnostic}`);

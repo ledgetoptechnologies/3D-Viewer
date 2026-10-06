@@ -22,8 +22,9 @@ function checkedAction(value, action, uuid=null) {
   if (Object.hasOwn(value,'error') || value.success === false) {
     const detail=typeof value.error==='string'?sanitizeLogMessage(value.error).slice(0,1000):'The provider rejected the request';
     const busy=/maximum number of concurrent tasks|maximum concurrent tasks/i.test(detail);
+    const rateLimited=/uuh,\s*slow down|sending a lot of tasks|too many requests|rate limit/i.test(detail);
     const unavailable=/no nodes are online|no nodes available|no processing nodes/i.test(detail);
-    throw Object.assign(new Error(`ODM ${action} failed: ${detail}`), {code:busy?'provider_busy':unavailable?'provider_unavailable':'provider_request_failed',...((busy||unavailable)?{retryAfterMs:30_000}:{}),...(busy?{explicitCapacityRejection:true}:{})});
+    throw Object.assign(new Error(`ODM ${action} failed: ${detail}`), {code:busy?'provider_busy':rateLimited?'provider_rate_limited':unavailable?'provider_unavailable':'provider_request_failed',...((busy||rateLimited||unavailable)?{retryAfterMs:rateLimited?300_000:30_000}:{}),...(busy?{explicitCapacityRejection:true}:{})});
   }
   if(uuid && Object.hasOwn(value,'uuid') && value.uuid!==uuid)throw Object.assign(new Error(`ODM ${action} returned a different task UUID`),{code:'provider_request_failed'});
   return value;
@@ -92,9 +93,9 @@ class NodeOdmProvider {
       const error = new Error(`ODM request failed with HTTP ${response.status}`);
       error.code = response.status === 404 ? 'provider_task_not_found' :
         [401,403].includes(response.status)?'provider_authentication_failed':
-        response.status===429?'provider_busy':response.status>=500?'provider_unavailable':'provider_request_failed';
+        response.status===429?'provider_rate_limited':response.status>=500?'provider_unavailable':'provider_request_failed';
       error.status = response.status;
-      if(['provider_busy','provider_unavailable'].includes(error.code))error.retryAfterMs=providerRetryDelay(response.headers.get('retry-after'))||30_000;
+      if(['provider_rate_limited','provider_busy','provider_unavailable'].includes(error.code))error.retryAfterMs=providerRetryDelay(response.headers.get('retry-after'))||30_000;
       throw error;
     }
     return response;
