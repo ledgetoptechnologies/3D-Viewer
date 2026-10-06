@@ -154,11 +154,19 @@ function compoundParts(root){
     if(root.args[1]!==horizontal||root.args[2]!==vertical)verticalInvalid();
     verticalIdentifier(root,wkt2?'ID':'AUTHORITY');if(wkt2)descriptiveMetadata(root);
     shape(vertical,1,wkt2?['VDATUM','CS','AXIS','LENGTHUNIT','ID','USAGE','REMARK']:['VERT_DATUM','UNIT','AXIS','AUTHORITY']);
-    if(!verticalText(vertical.args[0]))verticalInvalid();
+    const unnamedVertical=vertical.args[0]==='';
+    if(!unnamedVertical&&!verticalText(vertical.args[0]))verticalInvalid();
     const datum=one(vertical,wkt2?'VDATUM':'VERT_DATUM');shape(datum,wkt2?1:2,[wkt2?'ID':'AUTHORITY']);
     if(!verticalText(datum.args[0])||(!wkt2&&datum.args[1]!==2005))verticalInvalid();
-    verticalIdentifier(datum,wkt2?'ID':'AUTHORITY');
+    const datumId=verticalIdentifier(datum,wkt2?'ID':'AUTHORITY');
     const id=verticalIdentifier(vertical,wkt2?'ID':'AUTHORITY');
+    // Compatibility with observed GDAL/Entwine GeoTIFF/LAS conversion output:
+    // a missing vertical citation can leave exactly an empty descriptive name
+    // while encoding unknown datum, explicit length units and an upward axis.
+    // This is not strictly conformant WKT2; never infer a datum or rewrite WKT.
+    // Permit only the observed unclaimed-datum case. All structural, unit,
+    // authority, axis and horizontal checks below and at the caller still apply.
+    if(unnamedVertical&&(datum.args[0]!=='unknown'||datumId!==null||id!==null))verticalInvalid();
     if(wkt2){descriptiveMetadata(vertical);const cs=one(vertical,'CS');if(cs.args.length!==2||cs.args[0]?.symbol!=='VERTICAL'||cs.args[1]!==1)verticalInvalid();}
     const axis=one(vertical,'AXIS');shape(axis,2,wkt2?['ORDER','LENGTHUNIT']:[]);
     if(!verticalText(axis.args[0])||axis.args[1]?.symbol!=='UP')verticalInvalid();
