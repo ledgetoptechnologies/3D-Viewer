@@ -24,6 +24,14 @@ class Cdp{
   close(){for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('Fixture closed'));}this.pending.clear();this.socket.close();}
 }
 const project='County Road D — Stockpile Survey — A deliberately long accessible project name';
+const measurementCss=readFileSync(path.join(root,'measurement-workspace.css'),'utf8');
+const sidebarToggle=source.match(/<button id="sidebar-toggle"[\s\S]*?<\/button>/)?.[0];
+assert.ok(sidebarToggle);
+function overlayPage(){return `<!doctype html><meta name="viewport" content="width=device-width"><style>${css}\n${measurementCss}</style><div id="app"><div id="main"><aside id="sidebar"><div id="sidebar-custom"><button id="sidebar-action">Saved measurement</button></div></aside><div id="viewer-wrap">${sidebarToggle}<div id="three-container"></div><div id="cloud-container"></div><div id="floating-controls"><button id="fixture-control">View control</button></div></div></div></div><script>
+window.sidebarClicks=0;document.querySelector('#sidebar-action').onclick=()=>sidebarClicks++;
+document.querySelector('#sidebar-toggle').onclick=()=>document.querySelector('#sidebar').classList.toggle('collapsed');
+window.showHost=id=>{for(const host of document.querySelectorAll('#three-container,#cloud-container')){host.style.display=host.id===id?'block':'none';host.innerHTML='<svg class="measurement-overlay"><line x1="100" y1="200" x2="600" y2="200" stroke="white" stroke-width="8"/><circle cx="100" cy="200" r="8" fill="orange"/></svg>';}};
+document.body.dataset.ready='true';</script>`;}
 function page(){const logo=`data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="38" height="38"><rect width="38" height="38" fill="orange"/></svg>').toString('base64')}`;return `<!doctype html><meta name="viewport" content="width=device-width"><style>${css}</style><div id="app">${header.replace(/src="[^"]+"/,`src="${logo}"`)}<div id="main">Viewer fixture</div></div><script>document.querySelector('#brand-project').textContent=${JSON.stringify(project)};window.clicked=[];for(const button of document.querySelectorAll('.tab-btn'))button.onclick=()=>clicked.push(button.dataset.mode);document.body.dataset.ready='true';</script>`;}
 
 test('shipped Viewer header fits phone, narrow desktop and full desktop with named navigation',{timeout:60000},async t=>{
@@ -46,5 +54,34 @@ test('shipped Viewer header fits phone, narrow desktop and full desktop with nam
   }finally{
     client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-viewer-header-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained isolated temporary profile lock: ${absolute}`);}}
+  }
+});
+
+test('shipped mesh/cloud overlays stay below the narrow-screen sidebar while toggle and controls remain usable',{timeout:60000},async t=>{
+  const executable=binary();if(!executable){t.skip('Chromium-family browser required for rendered stacking regression.');return;}
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
+  try{
+    server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(overlayPage());});await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-overlay-sidebar-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
+    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:785,height:884,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}`});
+    const readyUntil=Date.now()+8000;while(Date.now()<readyUntil){if(await client.evaluate("document.body?.dataset.ready==='true'"))break;await delay(25);}
+    const click=async selector=>{const point=await client.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2,top:document.elementFromPoint(r.left+r.width/2,r.top+r.height/2)?.closest('button')?.id};})()`);assert.equal(point.top,selector.slice(1),'control must be the actual hit target');for(const type of ['mousePressed','mouseReleased'])await client.command('Input.dispatchMouseEvent',{type,x:point.x,y:point.y,button:'left',clickCount:1});};
+    for(const host of ['three-container','cloud-container'])await t.test(host,async()=>{
+      await client.evaluate(`showHost(${JSON.stringify(host)});document.querySelector('#sidebar').classList.remove('collapsed')`);await delay(400);
+      const inspect=()=>client.evaluate(`(()=>{const host=document.querySelector('#${host}'),svg=host.querySelector('svg'),r=host.getBoundingClientRect();const original=getComputedStyle(svg).pointerEvents;
+        // Enable SVG hit testing only to query Chromium's actual paint order;
+        // this does not change geometry, z-index, or any stacking context.
+        svg.style.pointerEvents='auto';const top=(x)=>document.elementFromPoint(r.left+x,r.top+200);const behind=top(100),visible=top(500);svg.style.pointerEvents='';return{original,behindSidebar:!!behind?.closest('#sidebar'),behindOverlay:!!behind?.closest('svg'),visibleOverlay:!!visible?.closest('svg')};})()`);
+      const open=await inspect();assert.equal(open.original,'none');assert.equal(open.behindSidebar,true,'sidebar must occlude line and endpoint');assert.equal(open.behindOverlay,false);assert.equal(open.visibleOverlay,true,'canvas-side segment remains visible');
+      await click('#sidebar-action');await click('#fixture-control');await click('#sidebar-toggle');await delay(400);
+      const closed=await inspect();assert.equal(closed.behindSidebar,false);assert.equal(closed.behindOverlay,true,'collapse reveals retained overlay endpoint');await click('#sidebar-toggle');await delay(400);assert.equal((await inspect()).behindSidebar,true);
+    });
+    assert.equal(await client.evaluate('sidebarClicks'),2);
+  }finally{
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-viewer-overlay-sidebar-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained isolated temporary profile lock: ${absolute}`);}}
   }
 });

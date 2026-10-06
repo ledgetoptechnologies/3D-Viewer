@@ -123,9 +123,9 @@
 
     #viewer-wrap { flex: 1; position: relative; min-width: 0; background: #050505; }
     #three-container, #leaflet-map, #cloud-container { position: absolute; inset: 0; display: none; }
-    /* isolate Leaflet's internal pane z-indexes (200-700) so app UI like the
-       DEM legend (z 120) isn't buried under map tiles */
-    #leaflet-map { z-index: 0; }
+    /* Keep each view's overlays inside its stacking context, below the tools
+       sidebar and floating controls, including the narrow-screen sidebar. */
+    #three-container, #leaflet-map, #cloud-container { z-index: 0; }
     #leaflet-map.measuring { cursor: crosshair; }
     .map-measure-label {
       background: rgba(10,10,12,0.92); color: #fff; border: 1px solid var(--brand-orange);
