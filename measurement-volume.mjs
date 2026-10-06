@@ -1,6 +1,8 @@
 // Shared, renderer-independent measurement arithmetic. Coordinates and results
 // are metres; display rounding must never feed back into these calculations.
 const EPS = 1e-10;
+// Completed-job reuse must track the producer contract, not rounded coverage.
+export const SURFACE_COVERAGE_EVIDENCE_VERSION = 1;
 function invalid(message, code = 'invalid_measurement_geometry') { throw Object.assign(new Error(message), { code }); }
 const cross = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 export function polygonArea(points) {
@@ -228,7 +230,7 @@ export function createSurfaceAccumulator({ vertices, reference = {}, referenceBa
     // Preserve the actual integrated quantities. Only the completeness ratio is
     // normalized after geometric/source evidence independently proves no holes.
     return { method: 'surface-cut-fill', status: complete ? 'complete' : 'incomplete', cutM3, fillM3, netM3: cutM3 - fillM3, footprintM2, validAreaM2, missingAreaM2:complete?0:Math.max(0, footprintM2 - validAreaM2), coverage,
-      coverageEvidence:{version:1,gridPartitionCoversFootprint:partitioned,invalidSurfaceIntersection,rawCoverage,numericalAreaResidualM2:footprintM2-validAreaM2},
+      coverageEvidence:{version:SURFACE_COVERAGE_EVIDENCE_VERSION,gridPartitionCoversFootprint:partitioned,invalidSurfaceIntersection,rawCoverage,numericalAreaResidualM2:footprintM2-validAreaM2},
       sampleCount, cellsVisited, reference: { ...reference, type: base.type }, numericalModel: base.numericalModel || 'native-cell-constant surface; fractional boundary cells; piecewise-linear reference', warnings: complete ? [] : ['Missing or out-of-raster elevations are not treated as zero; totals cover valid samples only.',...(!partitioned?['Complete footprint coverage could not be certified from bounded nonoverlapping grid windows.']:[])] };
   }
   return { addGrid, result, reference: base };

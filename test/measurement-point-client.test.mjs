@@ -15,6 +15,18 @@ function volumeFixture({response=result,capabilities=caps}={}){
   const calculate=createServerSurfaceCalculator({request:async(op,payload)=>{calls.push([op,payload]);if(op==='capabilities')return capabilities;if(op==='list')return{calculations:[]};return{calculation:{id:'volume',measurementId:'polygon',revision:2,status:'complete',result:response}};}});
   return{calculate,calls};
 }
+
+test('current point coverage evidence reuses an attached job; legacy point contract calculates afresh',async()=>{
+  for(const version of [1,undefined,0,2]){
+    const completed={...result,coverageEvidence:version===undefined?undefined:{version}},saved={...record,revision:3,results:{...completed,calculationJobId:'volume'}},calls=[];
+    const parameters={method:'point-surface-cut-fill',sourceAssetId:'points',reference,sourceVerticalUnit:null,cellSizeM:.1,classFilter:'all'};
+    const old={id:'volume',measurementId:'polygon',revision:2,attachmentRevision:3,status:'complete',parameters,result:completed};
+    const calculate=createServerSurfaceCalculator({request:async(op,payload)=>{calls.push(op);if(op==='capabilities')return caps;if(op==='list')return{calculations:[old]};if(op==='create')return{calculation:{...old,id:'fresh',revision:3,attachmentRevision:null,result:{...result,coverageEvidence:{version:1}}}};throw new Error('Unexpected request');}});
+    const output=await calculate(saved);
+    assert.equal(output.calculationJobId,version===1?'volume':'fresh');
+    assert.equal(calls.includes('create'),version!==1);assert.equal(calls.includes('cancel'),false);
+  }
+});
 test('all views fall back to original EPT only when no eligible DSM exists, without unit assertion',async()=>{
   for(const kind of ['mesh','pointCloud','glb','obj','ept','ortho','dsm','dtm']){
     const f=volumeFixture({capabilities:{...caps,calculationSources:[caps.calculationSources[0]]}});assert.equal((await f.calculate({...record,collection:['ortho','dsm','dtm'].includes(kind)?'map':'spatial3d',source:{kind}},{confirmMeters:true})).method,'point-surface-cut-fill');

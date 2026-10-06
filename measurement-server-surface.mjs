@@ -2,6 +2,7 @@ import {availableAdminSources,adminCalculationRequest} from './measurement-admin
 import {measurementGeometryHash} from './measurement-surface-client.mjs';
 import {validatePointSamplingGrid} from './measurement-native-profile.mjs';
 import {createSavedSurfacePreviewLoader as createPreviewLoader} from './measurement-saved-surface-preview.mjs';
+import {SURFACE_COVERAGE_EVIDENCE_VERSION} from './measurement-volume.mjs';
 
 const guidance=Object.freeze({
   measurement_source_crs_mismatch:'The survey coordinates for this model need to be checked by the model owner before volume can be calculated. Your outline and area are unchanged.',
@@ -76,7 +77,11 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
     };
     const matches=job=>job.revision===record.revision&&matchesParameters(job);
     const currentBasePolicy=job=>source.kind==='ept'||body.reference.type==='custom'||job?.result?.source?.boundaryElevationBasis==='native-raster';
-    const attachedMatch=job=>!temporary&&job?.status==='complete'&&currentBasePolicy(job)&&job.id===record.results?.calculationJobId&&Number.isSafeInteger(job.revision)&&job.revision<record.revision&&job.attachmentRevision===record.revision&&matchesParameters(job);
+    // Explicit Calculate may refresh a legacy producer result. Viewing its
+    // saved preview remains read-only; never patch historical numeric coverage.
+    const currentCoveragePolicy=job=>job?.result?.coverageEvidence?.version===SURFACE_COVERAGE_EVIDENCE_VERSION;
+    const reusableResult=job=>currentBasePolicy(job)&&currentCoveragePolicy(job);
+    const attachedMatch=job=>!temporary&&job?.status==='complete'&&reusableResult(job)&&job.id===record.results?.calculationJobId&&Number.isSafeInteger(job.revision)&&job.revision<record.revision&&job.attachmentRevision===record.revision&&matchesParameters(job);
     const exposeCancel=job=>onJob({cancel:()=>send('cancel',{measurementId:record.id,jobId:job.id})});
     const recover=async()=>{
       const response=await send('list',{measurementId:record.id});
@@ -84,7 +89,7 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       const relevant=response.calculations.filter(j=>j.measurementId===record.id&&j.revision===record.revision);
       const active=relevant.find(j=>['queued','running'].includes(j.status));
       if(active&&!matches(active)){exposeCancel(active);throw surfaceCalculationError({code:'measurement_calculation_already_active'});}
-      const existing=active||relevant.find(j=>j.status==='complete'&&currentBasePolicy(j)&&matches(j))||response.calculations.find(attachedMatch);
+      const existing=active||relevant.find(j=>j.status==='complete'&&reusableResult(j)&&matches(j))||response.calculations.find(attachedMatch);
       if(existing)return existing;
       if(!temporary&&record.results?.calculationJobId&&!response.calculations.some(j=>j.id===record.results.calculationJobId)){
         let attached;try{attached=(await send('status',{measurementId:record.id,jobId:record.results.calculationJobId}))?.calculation;}catch(error){if(error.code!=='measurement_calculation_not_found')throw error;}
@@ -94,10 +99,11 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
     };
     onProgress('Checking for an existing volume calculation…');
     let job=await recover();
+    let recoveredJob=Boolean(job);
     if(!job){
       onProgress('Starting your volume calculation…');
       try{job=(await send('create',{measurementId:record.id,request:body}))?.calculation;}
-      catch(error){if(error.code!=='measurement_calculation_already_active')throw error;job=await recover();if(!job)throw error;}
+      catch(error){if(error.code!=='measurement_calculation_already_active')throw error;job=await recover();if(!job)throw error;recoveredJob=true;}
     }
     const jobId=job?.id;
     if(typeof jobId!=='string'||!jobId)throw new Error('The calculation could not be identified. Check existing calculations before retrying.');
@@ -107,6 +113,7 @@ export function createServerSurfaceCalculator({request,isCurrent=()=>true,getRec
       if(job.status==='complete'){
         onJob(null);
         if(!currentBasePolicy(job))throw new Error('This calculation used an older ground reference. No new volume was saved. Choose Calculate volume again to use the updated survey surface; your outline and previously saved result are unchanged.');
+        if(recoveredJob&&!currentCoveragePolicy(job))throw new Error('This calculation used an older surface-coverage check. No new volume was saved. Choose Calculate volume again to calculate with the updated coverage check; your outline and previously saved result are unchanged.');
         const result=job.result;
         if(result?.method!==body.method||!['cutM3','fillM3','netM3','coverage'].every(key=>Number.isFinite(result[key]))||result.cutM3<0||result.fillM3<0||result.coverage<0||result.coverage>1)throw new Error('The surface result is unusable. No result was attached.');
         if(source.kind==='ept'){

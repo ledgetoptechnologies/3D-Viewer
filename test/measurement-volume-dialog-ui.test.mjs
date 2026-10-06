@@ -308,7 +308,7 @@ test('a cancellation response for previous settings cannot replace the newer cal
 });
 
 test('normal inspector retrieves a completed matching job with its preview without creating another job',async()=>{
-  const calls=[],complete={...queuedJob,status:'complete',result:{...result,method:'surface-cut-fill',source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:serverParameters.reference}};
+  const calls=[],complete={...queuedJob,status:'complete',result:{...result,coverageEvidence:{version:1},method:'surface-cut-fill',source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:serverParameters.reference}};
   const calculate=createServerSurfaceCalculator({request:async operation=>{calls.push(operation);if(operation==='capabilities')return serverCapabilities;if(operation==='list')return{calculations:[complete]};throw new Error('Unexpected duplicate create');}});
   const f=fixture(calculate,{execution:'server',record:serverRecord});await f.calculate();
   assert.deepEqual(calls,['capabilities','list']);assert.equal(f.saved(),1);assert.equal(f.dialog.querySelector('[data-preview-content]').hidden,false);assert.equal(f.dialog.querySelector('[data-cancel-job]').hidden,true);f.handle.close();

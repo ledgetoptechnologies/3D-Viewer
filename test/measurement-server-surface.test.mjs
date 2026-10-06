@@ -6,7 +6,7 @@ import {measurementGeometryHash} from '../measurement-surface-client.mjs';
 const record={id:'polygon',modelVersionId:'version',revision:2,kind:'polygon',source:{kind:'ortho'}};
 const options={reference:{type:'boundary-triangulated',offsetM:0},sourceKind:'auto'};
 const capabilities={capabilities:{serverCalculations:true},calculationSources:[{assetId:'dsm-source',kind:'dsm',methods:['surface-cut-fill']},{assetId:'dtm-source',kind:'dtm',methods:['surface-cut-fill']}]};
-const result={method:'surface-cut-fill',status:'calculated',cutM3:10,fillM3:2,netM3:8,coverage:1,source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:{type:'boundary-triangulated',offsetM:0},preview:{samples:[[1,2,3,0]]}};
+const result={method:'surface-cut-fill',status:'calculated',cutM3:10,fillM3:2,netM3:8,coverage:1,coverageEvidence:{version:1,gridPartitionCoversFootprint:true,invalidSurfaceIntersection:false,rawCoverage:1,numericalAreaResidualM2:0},source:{assetId:'dsm-source',kind:'dsm',modelVersionId:'version',boundaryElevationBasis:'native-raster'},reference:{type:'boundary-triangulated',offsetM:0},preview:{samples:[[1,2,3,0]]}};
 const job=(status='complete',extra={})=>({id:'job',measurementId:'polygon',revision:2,status,result,...extra});
 
 test('saved preview loads only the attached server result without capability/create/save work, including renamed revisions',async()=>{
@@ -147,6 +147,36 @@ test('legacy active raster work is observed without duplication and never attach
   const f=setup({existing:[job('running',{parameters})],responses:[job('complete',{result:legacyResult})]});
   await assert.rejects(f.calculate(record,options),/older ground reference.*No new volume was saved.*Calculate volume again/);
   assert.deepEqual(f.calls.map(([op])=>op),['capabilities','list','status']);
+});
+
+test('explicit same-settings calculate replaces legacy coverage contract without rewriting saved near-one totals',async()=>{
+  for(const coverageEvidence of [undefined,{version:0},{version:2}])for(const listed of [true,false]){
+    const legacy={...result,coverage:.9999999999760665,coverageEvidence};
+    const old=job('complete',{id:'old',revision:1,attachmentRevision:2,parameters,result:legacy});
+    const saved={...record,results:{...legacy,calculationJobId:'old'}},before=structuredClone(saved);
+    const f=setup({existing:listed?[old]:[],responses:listed?[job()]:[old,job()]});
+    const fresh=await f.calculate(saved,options);
+    assert.equal(f.calls.filter(([op])=>op==='create').length,1);
+    assert.equal(fresh.calculationJobId,'job');assert.equal(fresh.coverage,1);
+    assert.deepEqual(saved,before);assert.equal(old.result.coverage,.9999999999760665);
+    assert.equal(f.calls.some(([op])=>op==='cancel'),false);
+  }
+});
+
+test('current coverage contract preserves incomplete result reuse and never upgrades its coverage',async()=>{
+  const incomplete={...result,status:'incomplete',coverage:.8,coverageEvidence:{...result.coverageEvidence,invalidSurfaceIntersection:true,rawCoverage:.8}};
+  const f=setup({existing:[job('complete',{parameters,result:incomplete})]});
+  const received=await f.calculate(record,options);
+  assert.equal(received.coverage,.8);assert.equal(received.status,'incomplete');
+  assert.equal(f.calls.some(([op])=>op==='create'),false);
+});
+
+test('active legacy coverage work is observed to completion without a duplicate or replacing saved totals',async()=>{
+  const legacy={...result,coverage:.9999999999760665,coverageEvidence:undefined};
+  const saved={...record,results:{...legacy,calculationJobId:'prior'}},before=structuredClone(saved);
+  const f=setup({existing:[job('running',{parameters})],responses:[job('complete',{result:legacy})]});
+  await assert.rejects(f.calculate(saved,options),/older surface-coverage check.*No new volume was saved.*Calculate volume again/);
+  assert.deepEqual(f.calls.map(([op])=>op),['capabilities','list','status']);assert.deepEqual(saved,before);
 });
 test('reopening resumes the matching active job or retrieves its completed result without duplicate work',async()=>{
   for(const status of ['queued','complete']){
