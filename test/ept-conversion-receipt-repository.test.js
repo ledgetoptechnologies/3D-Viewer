@@ -135,7 +135,7 @@ test('v37 databases upgrade to v39 with no fabricated historical receipts', t =>
     db.exec(migration.sql);db.prepare('INSERT INTO schema_migrations VALUES(?,?,?)').run(migration.version, migration.name, 'now');
   }
   applyMigrations(db);applyMigrations(db);
-  assert.equal(db.prepare('SELECT MAX(version) n FROM schema_migrations').get().n, 40);
+  assert.equal(db.prepare('SELECT MAX(version) n FROM schema_migrations').get().n, 41);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM derivative_ept_conversion_receipts').get().n, 0);
 });
 

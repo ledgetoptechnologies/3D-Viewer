@@ -11,6 +11,7 @@ function harness({write=true,api=async()=>({providers:[],presets:[]})}={}){
     dateTime:value=>value,badge:value=>value,empty:value=>value,
     button:(action,id,label)=>`<button data-action="${action}">${label}</button>`};
   vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function providerHealthExplanation('),source.indexOf('function providerModal(')),context);
   vm.runInContext(source.slice(source.indexOf('const providerCapabilityRefreshes='),source.indexOf('function providerForm('))+'\nthis.subject={refreshProviderCapabilities,refreshOpenedProvider,providerDetail,providerCapabilityNotice};',context);
   return context;
 }
