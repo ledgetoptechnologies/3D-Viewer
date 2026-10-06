@@ -14,7 +14,7 @@ function deferred() { let resolve; const promise = new Promise(done => { resolve
 async function fixture(t, phase) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-process-interruption-'));
   const databasePath = path.join(root, 'viewer.sqlite'), db = openDatabase(databasePath), processing = new ProcessingRepository(db);
-  const paused = deferred(), remote = {initialize:0, upload:0, commit:0, remove:0, accepted:0, imagesCount:0};
+  const paused = deferred(), remote = {initialize:0, upload:0, commit:0, remove:0, accepted:0, imagesCount:0}, initializedUuids = [];
   let heldResponse;
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
@@ -23,7 +23,11 @@ async function fixture(t, phase) {
     if (url.pathname.endsWith('/info') && url.pathname.startsWith('/task/')) {
       if (!remote.accepted) { response.writeHead(404, {'content-type':'application/json'}); response.end(JSON.stringify({error:'missing'})); }
       else send({uuid:attempt.providerTaskId, status:{code:10}, progress:0, imagesCount:remote.imagesCount});
-    } else if (url.pathname === '/task/new/init') { remote.initialize++; send({uuid:request.headers['set-uuid']}); }
+    } else if (url.pathname === '/task/new/init') {
+      remote.initialize++; initializedUuids.push(request.headers['set-uuid']);
+      if (phase === 'initialize' && remote.initialize === 1) { heldResponse = response; paused.resolve(); }
+      else send({uuid:request.headers['set-uuid']});
+    }
     else if (url.pathname.startsWith('/task/new/upload/')) {
       remote.upload++; remote.imagesCount++;
       if (phase === 'upload') { heldResponse = response; paused.resolve(); } else send({success:true});
@@ -58,8 +62,22 @@ async function fixture(t, phase) {
   const job = () => db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(attempt.id);
   const expire = () => db.prepare("UPDATE processing_jobs SET lease_expires_at='2000-01-01T00:00:00Z' WHERE id=?").run(job().id);
   const release = () => { if (heldResponse && !heldResponse.destroyed) { heldResponse.writeHead(200,{'content-type':'application/json'}); heldResponse.end(JSON.stringify(phase === 'upload' ? {success:true} : {})); } };
-  return {processing,db,attempt,remote,paused:paused.promise,run,job,expire,release};
+  return {processing,db,attempt,remote,initializedUuids,paused:paused.promise,run,job,expire,release};
 }
+
+test('worker process death during initialization reclaims with the same UUID and one eventual accepted task', {timeout:8000}, async t => {
+  const f = await fixture(t,'initialize'), first = f.run('first-process'); await f.paused;
+  assert.equal(f.processing.getAttemptSubmission(f.attempt.id).submissionPhase,'initializing');
+  assert.equal(f.processing.getAttemptSubmission(f.attempt.id).uploadedFileCount,0);
+  first.child.kill(); await first.ended; f.expire();
+  const restarted = await f.run('restarted-process').ended; assert.equal(restarted.code,0,restarted.stderr);
+  assert.equal(f.processing.getAttempt(f.attempt.id).status,'queued_upstream');
+  assert.equal(f.processing.getAttempt(f.attempt.id).providerTaskId,f.attempt.providerTaskId);
+  assert.equal(f.processing.getAttemptSubmission(f.attempt.id).submissionPhase,'committed');
+  assert.deepEqual(f.initializedUuids,[f.attempt.providerTaskId,f.attempt.providerTaskId]);
+  assert.deepEqual(f.remote,{initialize:2,upload:1,commit:1,remove:0,accepted:1,imagesCount:1});
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(f.attempt.id).n,1);
+});
 
 test('worker process death after accepted commit preserves one queued remote task on restart', {timeout:8000}, async t => {
   const f = await fixture(t,'commit'), first = f.run('first-process'); await f.paused;

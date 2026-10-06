@@ -36,6 +36,7 @@ function providerResultEvidence(attempt,status,observedAt){
   const identity=value=>typeof value==='string'&&/^[A-Za-z0-9._+ -]{1,120}$/.test(value)?value:null;
   return{schemaVersion:1,observedAt,providerTaskId:status.uuid,status:'completed',statusCode:Number.isSafeInteger(status.statusCode)?status.statusCode:null,
     imagesCount:Number.isSafeInteger(status.imagesCount)&&status.imagesCount>=0?status.imagesCount:null,
+    processingDurationMs:require('./processingTiming').providerDurationMs(status.processingDurationMs),
     engine:identity(status.engine),engineVersion:identity(status.engineVersion),engineEvidence:'task-info-response',producingEngineVerified:false};
 }
 module.exports={submissionProvenance,providerResultEvidence,inputInventory};

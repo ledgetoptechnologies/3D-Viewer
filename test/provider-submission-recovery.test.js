@@ -36,6 +36,19 @@ test('lost commit response preserves accepted queued UUID without deletion or du
   assert.equal(c.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id).n,1);
 });
 
+test('lost commit response preserves accepted running UUID without deletion or duplicate submission',async t=>{
+  const c=fixture(t),uuid=c.attempt.providerTaskId;
+  c.adapter.commit=async()=>{c.remote.commit++;c.remote.accepted=true;c.remote.status='running';throw Object.assign(new Error('running commit response lost'),{code:'provider_unreachable'});};
+  await processOne(c.deps,'first');assert.equal(c.processing.getAttemptSubmission(c.attempt.id).submissionPhase,'committing');
+  c.retry();await processOne(c.deps,'recovered');
+  assert.equal(c.processing.getAttempt(c.attempt.id).status,'running');
+  assert.equal(c.processing.getAttempt(c.attempt.id).providerTaskId,uuid);
+  assert.equal(c.processing.getAttemptSubmission(c.attempt.id).submissionPhase,'committed');
+  assert.equal(c.processing.getAttemptSubmission(c.attempt.id).uploadedFileCount,2);
+  assert.equal(c.remote.initialize,1);assert.equal(c.remote.upload,1);assert.equal(c.remote.commit,1);assert.equal(c.remote.remove,0);assert.equal(c.remote.imagesCount,2);
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id).n,1);
+});
+
 test('lost init response safely resumes temp initialization with the same UUID',async t=>{
   const c=fixture(t),initialize=c.adapter.initialize;let lost=true;
   c.adapter.initialize=async()=>{const result=await initialize();if(lost){lost=false;throw Object.assign(new Error('init response lost'),{code:'provider_unreachable'});}return result;};
