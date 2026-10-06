@@ -36,6 +36,33 @@ test('lost commit response preserves accepted queued UUID without deletion or du
   assert.equal(c.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id).n,1);
 });
 
+test('queued upstream reconciliation reuses one durable job row and resets poll retry budget',async t=>{
+  const c=fixture(t);await processOne(c.deps,'submit');
+  const first=c.db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id);
+  assert.ok(first);
+  const firstOrder=c.db.prepare('SELECT sequence FROM processing_job_order WHERE job_id=?').get(first.id).sequence;
+  c.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01',attempt_count=37 WHERE id=?").run(first.id);
+  await processOne(c.deps,'poll-one');
+  const second=c.db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id);
+  assert.equal(second.id,first.id);assert.equal(second.status,'pending');assert.equal(second.attempt_count,0);
+  assert.equal(c.db.prepare('SELECT sequence FROM processing_job_order WHERE job_id=?').get(second.id).sequence,firstOrder);
+  c.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01',attempt_count=12 WHERE id=?").run(first.id);
+  await processOne(c.deps,'poll-two');
+  const third=c.db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").all(c.attempt.id);
+  assert.equal(third.length,1);assert.equal(third[0].id,first.id);assert.equal(third[0].attempt_count,0);
+  assert.equal(c.remote.remove,0);assert.equal(c.remote.commit,1);
+});
+
+test('reconcile requeue rejects wrong owner and expired lease without creating a successor',t=>{
+  const c=fixture(t);c.db.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=? AND job_type='submit'").run(c.attempt.id);const id=c.processing.enqueueJob(c.attempt.id,'reconcile'),job=c.processing.claimJob('right-owner');
+  assert.equal(job.id,id);
+  assert.equal(c.processing.completeAndEnqueueJob(id,'wrong-owner',c.attempt.id,'reconcile'),false);
+  c.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000-01-01' WHERE id=?").run(id);
+  assert.equal(c.processing.completeAndEnqueueJob(id,'right-owner',c.attempt.id,'reconcile'),false);
+  const row=c.db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id);
+  assert.equal(row.id,id);assert.equal(row.status,'leased');
+});
+
 test('lost commit response preserves accepted running UUID without deletion or duplicate submission',async t=>{
   const c=fixture(t),uuid=c.attempt.providerTaskId;
   c.adapter.commit=async()=>{c.remote.commit++;c.remote.accepted=true;c.remote.status='running';throw Object.assign(new Error('running commit response lost'),{code:'provider_unreachable'});};
