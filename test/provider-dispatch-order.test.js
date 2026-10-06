@@ -67,6 +67,14 @@ test('terminal attempts with leftover submit rows cannot block later submissions
   assert.equal(c.repository.claimJob('next').attempt_id,second.id);
 });
 
+test('ready-for-review attempts with orphaned submit rows cannot block the provider FIFO',t=>{
+  const c=fixture(t),p=c.provider(),first=c.attempt(p.id),second=c.attempt(p.id);
+  c.db.prepare("UPDATE processing_attempts SET status='ready_for_review' WHERE id=?").run(first.id);
+  assert.equal(c.job(first.id).status,'pending');
+  assert.equal(c.repository.getProvider(p.id).activeAttempts,1);
+  assert.equal(c.repository.claimJob('next').attempt_id,second.id);
+});
+
 test('many accepted queued/running jobs never consume a Viewer outstanding-job cap',t=>{
   for(const type of ['clusterodm','nodeodm']){
     const c=fixture(t),p=c.provider(type);
