@@ -18,6 +18,24 @@ test('tiny native Entwine LAS fixture has valid bounded point layout and CRS VLR
     'a510603464bbd65f9f9c4fd7c821f7149147f5a8fa7474b5357eaf754d21254f');
 });
 
+test('explicit metre height variant adds only VerticalUnitsGeoKey and preserves point bytes', () => {
+  const plain = makeEntwineLasFixture(), tagged = makeEntwineLasFixture({ explicitVerticalMetres: true });
+  const offset = tagged.readUInt32LE(96);
+  assert.equal(tagged.readUInt16LE(247), 48);
+  assert.equal(tagged.readUInt16LE(287), 5);
+  assert.equal(offset, plain.readUInt32LE(96) + 8);
+  assert.equal(tagged.length, offset + 27 * 34);
+  const keys = [];
+  for (let i = 0; i < tagged.readUInt16LE(287); i++) {
+    const start = 289 + i * 8;
+    keys.push([0, 2, 4, 6].map(delta => tagged.readUInt16LE(start + delta)));
+  }
+  assert.deepEqual(keys, [[1024, 0, 1, 1], [1025, 0, 1, 1], [3072, 0, 1, 32616],
+    [3076, 0, 1, 9001], [4099, 0, 1, 9001]]);
+  assert.equal(keys.some(([key]) => [4096, 4097, 4098].includes(key)), false);
+  assert.deepEqual(tagged.subarray(offset), plain.subarray(plain.readUInt32LE(96)));
+});
+
 for (const arch of ['amd64', 'arm64']) test(`Entwine ${arch} closure is exact SHA256 locked without foreign binaries`, () => {
   const lock = fs.readFileSync(new URL(`../third_party/entwine/${arch}.lock`, import.meta.url));
   assert.equal(crypto.createHash('sha256').update(lock).digest('hex'), ENTWINE_LOCK_SHA256[arch]);

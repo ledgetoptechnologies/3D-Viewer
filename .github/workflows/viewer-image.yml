@@ -148,6 +148,8 @@ jobs:
               test/measurement-point-surface.test.mjs \
               test/measurement-ept-crs.test.mjs \
               test/measurement-ept-vertical-units.test.mjs \
+              test/measurement-ept-unnamed-vertical.test.mjs \
+              test/ept-conversion-receipt.test.js \
               test/measurement-point-encoded-units.test.mjs \
               test/measurement-point-transect-request.test.js \
               test/ephemeral-point-measurements.test.js \

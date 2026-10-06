@@ -7,15 +7,16 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import identityModule from '../server/eptConverterIdentity.js';
 import { sealConverterFixture } from './lib/sealed-converter-fixture.mjs';
+import { resolveEptVerticalUnits } from '../server/measurementEptCrs.mjs';
 
 export const ENTWINE_LOCK_SHA256 = Object.freeze({
   amd64: '506dfc2612b98abb14e9e6c960d41e0c0a6ba14d3a3cf6675a45db5ea39aa938',
   arm64: '9ed422195426d090a0125ebdf040a08cdb7fef363f5b02da536bbd34b72ba566',
 });
 
-export function makeEntwineLasFixture() {
+export function makeEntwineLasFixture({ explicitVerticalMetres = false } = {}) {
   // LAS 1.2 / format 3, with GeoTIFF EPSG:32616 metre coordinates and RGB.
-  const count = 27, offset = 227 + 54 + 40;
+  const count = 27, vlrLength = explicitVerticalMetres ? 48 : 40, offset = 227 + 54 + vlrLength;
   const bytes = Buffer.alloc(offset + count * 34);
   bytes.write('LASF'); bytes[24] = 1; bytes[25] = 2;
   bytes.write('LTDS native EPT smoke', 26); bytes.write('LTDS fixture', 58);
@@ -25,8 +26,11 @@ export function makeEntwineLasFixture() {
   for (let axis = 0; axis < 3; axis++) bytes.writeDoubleLE(0.01, 131 + axis * 8);
   [500000, 4800000, 100].forEach((v, i) => bytes.writeDoubleLE(v, 155 + i * 8));
   [500002, 500000, 4800002, 4800000, 102, 100].forEach((v, i) => bytes.writeDoubleLE(v, 179 + i * 8));
-  bytes.write('LASF_Projection', 229); bytes.writeUInt16LE(34735, 245); bytes.writeUInt16LE(40, 247);
-  [1, 1, 0, 4, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 32616, 3076, 0, 1, 9001]
+  bytes.write('LASF_Projection', 229); bytes.writeUInt16LE(34735, 245); bytes.writeUInt16LE(vlrLength, 247);
+  // Encode height units only, never invent a vertical CRS/datum or citation.
+  const keys = [1, 1, 0, explicitVerticalMetres ? 5 : 4, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 32616, 3076, 0, 1, 9001];
+  if (explicitVerticalMetres) keys.push(4099, 0, 1, 9001);
+  keys
     .forEach((v, i) => bytes.writeUInt16LE(v, 281 + i * 2));
   let index = 0;
   for (let x = 0; x < 3; x++) for (let y = 0; y < 3; y++) for (let z = 0; z < 3; z++) {
@@ -71,17 +75,26 @@ export async function verifyEntwineRuntime() {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-entwine-runtime-'));
   try {
     const las = path.join(scratch, 'source.las'), laz = path.join(scratch, 'source.laz');
+    const verticalLas = path.join(scratch, 'source-vertical-metres.las');
     fs.writeFileSync(las, makeEntwineLasFixture());
     run(pdal, ['translate', las, laz, '--writers.las.compression=true']);
-    const unchanged = sealConverterFixture([las, laz]);
+    fs.writeFileSync(verticalLas, makeEntwineLasFixture({ explicitVerticalMetres: true }));
+    const unchanged = sealConverterFixture([las, laz, verticalLas]);
     const outputs = [];
-    for (const source of [las, laz]) {
-      const out = path.join(scratch, path.extname(source).slice(1));
+    for (const source of [las, laz, verticalLas]) {
+      const out = path.join(scratch, source === verticalLas ? 'vertical-metres' : path.extname(source).slice(1));
       // Exactly the worker's supported conversion contract; no reprojection.
       run(bin, ['build', '-i', source, '-o', out]);
       const ept = JSON.parse(fs.readFileSync(path.join(out, 'ept.json'), 'utf8'));
       assert.equal(ept.points, 27); assert.equal(ept.dataType, 'laszip');
       assert.equal(Number(ept.srs.horizontal), 32616);
+      const vertical = source === verticalLas ? resolveEptVerticalUnits(ept.srs, 32616) : null;
+      if (vertical) {
+        assert.equal(vertical.verticalFactor, 1);
+        assert.equal(vertical.verticalUnit, 'm');
+        assert.equal(vertical.verticalDatum, 'unknown');
+        assert.equal(vertical.verticalUnitBasis, 'ept-vertical-crs');
+      }
       const csv = path.join(scratch, `${path.basename(out)}.csv`);
       run(pdal, ['pipeline', '--stdin'], { input: JSON.stringify({ pipeline: [
         { type: 'readers.ept', filename: path.join(out, 'ept.json') },
@@ -96,7 +109,9 @@ export async function verifyEntwineRuntime() {
       assert.deepEqual(actual.map(JSON.stringify).sort(), expected.map(JSON.stringify).sort());
       assert.equal(JSON.parse(fs.readFileSync(path.join(out, 'ept-hierarchy', '0-0-0-0.json'), 'utf8'))['0-0-0-0'], 27);
       outputs.push({ sourceType: path.extname(source).slice(1), points: ept.points,
-        sourceSha256: digest(fs.readFileSync(source)), horizontalCrs: ept.srs.horizontal });
+        sourceSha256: digest(fs.readFileSync(source)), horizontalCrs: ept.srs.horizontal,
+        ...(vertical ? { explicitVerticalMetres: true, verticalFactor: vertical.verticalFactor,
+          verticalDatum: vertical.verticalDatum, verticalUnitBasis: vertical.verticalUnitBasis } : {}) });
       unchanged();
       await identityModule.assertEptConverterIdentity(identity);
     }
