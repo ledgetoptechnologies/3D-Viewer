@@ -21,6 +21,15 @@ test('disabled, unknown, stale, unavailable, unsupported nodes cannot be selecte
   }
   const busy=providerSubmissionState({...ready(),activeAttempts:3,capabilities:{options,taskQueueCount:9}},{now});assert.equal(busy.eligible,true);assert.equal(busy.status,'busy');
 });
+test('ClusterODM placeholder queue metrics are not exposed as live readiness or capacity',()=>{
+  for(const taskQueueCount of [0,7,99999999999]){
+    const result=providerSubmissionState({...ready(),type:'clusterodm',activeAttempts:0,capabilities:{options,taskQueueCount,maxParallelTasks:99999999999}},{now});
+    assert.equal(result.eligible,true);assert.equal(result.status,'provider_managed');assert.equal(result.label,'Cluster-managed scheduling');
+    assert.doesNotMatch(result.label,/ready|queued|capacity|slots/i);
+  }
+  const active=providerSubmissionState({...ready(),type:'clusterodm',activeAttempts:2,capabilities:{options,taskQueueCount:0}},{now});
+  assert.equal(active.eligible,true);assert.equal(active.status,'provider_managed');assert.match(active.label,/Viewer submissions active/);
+});
 test('freshest health observation wins: explicit recheck recovers old failure but new runtime failure blocks',()=>{
   const p={...ready(),runtimeHealth:'unhealthy',runtimeHealthAt:new Date(now-1000).toISOString()};assert.equal(providerSubmissionState(p,{now}).eligible,true);
   p.runtimeHealthAt=new Date(now).toISOString();assert.equal(providerSubmissionState(p,{now}).eligible,false);

@@ -1,5 +1,6 @@
-// Shared browser/server submission policy. Busy healthy nodes may queue work;
-// enabled alone is never evidence that a node can accept a new submission.
+// Shared browser/server submission policy. Busy healthy NodeODM nodes may
+// queue work. ClusterODM's /info queue fields are placeholders, so never treat
+// them as authoritative queue/capacity signals.
 export const PROVIDER_HEALTH_MAX_AGE_MS = 10 * 60_000;
 export function providerSubmissionState(provider, {now=Date.now(),maxHealthAgeMs=PROVIDER_HEALTH_MAX_AGE_MS}={}) {
   const blocked=(status,label,reason)=>({eligible:false,status,label,reason});
@@ -18,6 +19,10 @@ export function providerSubmissionState(provider, {now=Date.now(),maxHealthAgeMs
     return blocked('unknown','Health not checked','provider_health_required');
   if(now-at>maxHealthAgeMs)return blocked('stale','Health check needed','provider_health_stale');
   if(!['healthy','ready'].includes(health))return blocked('unavailable','Unavailable','provider_unavailable');
+  if(provider.type==='clusterodm'){
+    const active=Number(provider.activeAttempts)>0;
+    return {eligible:true,status:'provider_managed',label:active?'Cluster-managed scheduling · Viewer submissions active':'Cluster-managed scheduling',reason:null};
+  }
   const queued=Number(provider.capabilities.taskQueueCount)>0||Number(provider.activeAttempts)>0;
   return {eligible:true,status:queued?'busy':'ready',label:queued?'Available · queues work':'Ready',reason:null};
 }
