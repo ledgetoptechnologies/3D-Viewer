@@ -129,6 +129,7 @@
       failureCode = null;
       diagnostic('points_visible', null, 'nodes');
       clearWatchdog();
+      if (loadingText) loadingText.textContent = 'Point cloud ready';
       if (status) status.textContent = 'Point cloud ready';
       loading?.classList.add('hidden');
       loading?.classList.remove('failed');
