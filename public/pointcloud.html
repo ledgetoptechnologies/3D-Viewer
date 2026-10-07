@@ -574,7 +574,23 @@
         requestAnimationFrame(this._tick);
       }
 
-      _cam() { return this.viewer.scene.getActiveCamera(); }
+      _cam() {
+        const camera = this.viewer.scene.getActiveCamera();
+        const view = this.view;
+        // Wheel/pinch handlers can run more than once between Potree render
+        // frames. Potree normally copies View -> camera during renderDefault;
+        // after a dolly, however, view.position is already new while the
+        // active camera still describes the previous frame. Keep cursor-ray
+        // anchors and point picks on the same pose as the current View.
+        camera.position.copy(view.position);
+        camera.rotation.order = 'ZXY';
+        camera.rotation.x = Math.PI / 2 + view.pitch;
+        camera.rotation.z = view.yaw;
+        camera.updateMatrix();
+        camera.updateMatrixWorld(true);
+        if (camera.matrixWorldInverse) camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+        return camera;
+      }
       _px(e) { return { x: e.clientX, y: e.clientY }; }   // CSS px, DPR-independent
       _nms(px) {
         const r = this.dom.getBoundingClientRect();

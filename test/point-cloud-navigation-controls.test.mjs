@@ -14,10 +14,12 @@ const start = shell.indexOf('class PCPointerControls {');
 const end = shell.indexOf('// Replace Potree\'s EarthControls', start);
 assert.ok(start >= 0 && end > start);
 // Exercise the shipped controller methods, rather than a second implementation.
-const Controls = vm.runInNewContext(`${shell.slice(start, end)}\nPCPointerControls`, {
+const controlContext = {
   THREE, ...navigation, performance, Potree: { measureTimings: false },
   window: { LtdsPointCloudPerformance: pointCloudPerformance, LtdsMouseNavigationProfiles: mouseNavigationProfiles },
-});
+};
+const Controls = vm.runInNewContext(`${shell.slice(start, end)}\nPCPointerControls`, controlContext);
+controlContext.PCPointerControls = Controls;
 
 function fixture(position = new THREE.Vector3(0, -200, 150), origin = new THREE.Vector3()) {
   position = position.clone().add(origin);
@@ -58,6 +60,49 @@ function fixture(position = new THREE.Vector3(0, -200, 150), origin = new THREE.
 function pointer(button, x = 500, y = 500) {
   return { pointerId: 1, pointerType: 'mouse', button, clientX: x, clientY: y, preventDefault() {} };
 }
+
+test('active cloud camera is synchronized from the current view between render frames', () => {
+  // Run the whole fixture in the same VM realm as the shipped controller so
+  // Three.js objects are not cross-realm wrapped by Node's vm bridge.
+  const poses = JSON.parse(vm.runInNewContext(`(() => {
+    const controls = Object.create(PCPointerControls.prototype);
+    const view = { position: new THREE.Vector3(), pitch: 0, yaw: 0 };
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 100000);
+    controls.view = view;
+    controls.viewer = { scene: { getActiveCamera: () => camera } };
+    controls.dom = {
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 1000 }),
+    };
+    const results = [];
+    for (const pose of [
+      { position: [100, 200, 30], pitch: -0.4, yaw: 0.7 },
+      { position: [125, 180, 35], pitch: -0.2, yaw: 1.1 },
+    ]) {
+      view.position.set(...pose.position);
+      view.pitch = pose.pitch;
+      view.yaw = pose.yaw;
+      // Read a center-screen ray as if a second input event arrived before
+      // Potree's next render. The ray must use this pose, not the prior one.
+      const ray = controls._ray({ x: 500, y: 500 });
+      const expectedDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2 + pose.pitch, 0, pose.yaw, 'ZXY'))
+      );
+      results.push({
+        origin: ray.origin.toArray(),
+        direction: ray.direction.toArray(),
+        expectedDirection: expectedDirection.toArray(),
+      });
+    }
+    return JSON.stringify(results);
+  })()`, controlContext));
+
+  // Simulate sequential input events before Potree gets a render frame. Each
+  // ray must originate from the latest View position and track its orientation.
+  assert.deepEqual(poses.map(pose => pose.origin), [[100, 200, 30], [125, 180, 35]]);
+  for (const pose of poses) {
+    assert.ok(pose.direction.every((value, index) => Math.abs(value - pose.expectedDirection[index]) < 1e-12));
+  }
+});
 
 test('cloud alternate mode remaps all three actions and keeps default behavior intact', () => {
   for (const profile of ['default', 'alternate']) {
