@@ -4,6 +4,7 @@ import test from 'node:test';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import * as THREE from 'three';
 import {patchPotreeVisibilitySelection} from '../scripts/patch-potree-ept.mjs';
 import {assertInstalledPotreeVisibility} from '../scripts/verify-potree-visibility.mjs';
 // Source QA uses public; exact-image QA uses the same shipped static module in
@@ -68,6 +69,39 @@ function select(source,nodes,{budget=100000,cloudBudget=Infinity,maxLevel=Infini
   const result=run([pc],perspectiveDistance===null?{}:{isPerspectiveCamera:true,fov:60}, {domElement:{clientWidth:800,clientHeight:600}});
   return {points:result.numVisiblePoints,visited,drawn:result.visibleNodes.map(node=>node.id),demand:pc.ltdsBudgetDemand};
 }
+function spatialNode(id,points,bounds,children=[]){
+  const box=bounds.clone();
+  const sphere=box.getBoundingSphere(new THREE.Sphere());
+  const geometry={attributes:{position:{count:points}}};
+  return {
+    id,spacing:1,geometryNode:{geometry},sceneNode:{visible:false,geometry},_transformVersion:0,
+    getBoundingBox:()=>box,getBoundingSphere:()=>sphere,getLevel:()=>id.split('/').length-1,
+    getNumPoints:()=>points,isGeometryNode:()=>false,isTreeNode:()=>true,getChildren:()=>children,
+  };
+}
+function selectFromCamera(source,root,{camera,budget=10_000_000}={}){
+  const start=source.indexOf('function updateVisibility(pointclouds, camera, renderer){'),end=source.indexOf('\n\tclass PointCloudArena4DNode',start);
+  assert.ok(start>=0&&end>start);
+  const visited=[];
+  const pc={visible:true,visibleNodes:[],updateMatrixWorld(){},matrixWorld:new THREE.Matrix4(),material:{clipBoxes:[]},pointBudget:Infinity,maxLevel:Infinity,minimumNodePixelSize:30,numVisibleNodes:0,numVisiblePoints:0};
+  const Potree={pointBudget:budget,maxNodesLoading:0,_pointcloudTransformVersion:new Map([[pc,{number:0,transform:{equals:()=>true}}]])};
+  const queued=[{node:root,pointcloud:0,weight:100}];
+  const queue={size:()=>queued.length,pop:()=>{queued.sort((a,b)=>b.weight-a.weight);const item=queued.shift();visited.push(item.node.id);return item;},push:item=>queued.push(item)};
+  const frustum=new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse));
+  const structures=()=>({frustums:[frustum],camObjPositions:[camera.position],priorityQueue:queue});
+  const run=new Function('Potree','updateVisibilityStructures','exports',source.slice(start,end)+';return updateVisibility;')(Potree,structures,{lru:{touch(){}}});
+  const result=run([pc],camera,{domElement:{clientWidth:800,clientHeight:600}});
+  return {points:result.numVisiblePoints,visited,drawn:result.visibleNodes.map(node=>node.id),demand:pc.ltdsBudgetDemand};
+}
+function perspectiveCamera(position,target){
+  const camera=new THREE.PerspectiveCamera(60,800/600,0.1,1000);
+  camera.up.set(0,0,1);
+  camera.position.copy(position);
+  camera.lookAt(target);
+  camera.updateMatrixWorld(true);
+  camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+  return camera;
+}
 const installedOptions={skip:bundle?false:'Installed pinned Potree required; image QA supplies POTREE_BUNDLE.'};
 
 test('installed perspective selector refines on approach and releases detail on retreat at the same point budget',installedOptions,()=>{
@@ -78,6 +112,22 @@ test('installed perspective selector refines on approach and releases detail on 
   assert.deepEqual(close.drawn,['root','local-detail']);
   assert.equal(close.points,70000);
   assert.deepEqual(select(source,[root],{perspectiveDistance:100}).drawn,['root']);
+});
+
+test('installed selector uses real perspective frustum to retain the close-view child and prune the opposite branch',installedOptions,()=>{
+  const source=assertInstalledPotreeVisibility(bundle);
+  const eastFine=spatialNode('root/east/fine',180_000,new THREE.Box3(new THREE.Vector3(5,-2,-1),new THREE.Vector3(9,2,3)));
+  const east=spatialNode('root/east',160_000,new THREE.Box3(new THREE.Vector3(3,-4,-2),new THREE.Vector3(10,4,4)),[eastFine]);
+  const west=spatialNode('root/west',220_000,new THREE.Box3(new THREE.Vector3(-10,-4,-2),new THREE.Vector3(-3,4,4)));
+  const root=spatialNode('root',100_000,new THREE.Box3(new THREE.Vector3(-12,-8,-4),new THREE.Vector3(12,8,6)),[east,west]);
+  const fit=selectFromCamera(source,root,{camera:perspectiveCamera(new THREE.Vector3(0,-38,22),new THREE.Vector3(0,0,0))});
+  const close=selectFromCamera(source,root,{camera:perspectiveCamera(new THREE.Vector3(5,-9,5),new THREE.Vector3(7,0,1))});
+
+  assert.ok(fit.drawn.includes('root/east')&&fit.drawn.includes('root/west'),`fit view should cover both branches: ${JSON.stringify(fit)}`);
+  assert.ok(close.drawn.includes('root/east'),`close view must retain its intersecting child: ${JSON.stringify(close)}`);
+  assert.ok(!close.drawn.includes('root/west'),`close frustum should prune the opposite branch: ${JSON.stringify(close)}`);
+  assert.ok(close.drawn.includes('root/east/fine'),`close view should refine its visible child branch: ${JSON.stringify(close)}`);
+  assert.ok(close.points>fit.points/2,`close view unexpectedly collapsed to a tiny coarse selection: ${JSON.stringify({fit,close})}`);
 });
 
 test('installed selector is already patched in the actual image, not repaired by the test',installedOptions,()=>{
