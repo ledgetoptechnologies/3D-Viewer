@@ -50,7 +50,23 @@ async function discoverAssets(root) {
   for(const file of files){const integrity=await hashFileChunks(file.absolutePath);fileHashes.set(file.relativePath,integrity);file.sha256=integrity.sha256;file.chunks=integrity.chunks;}
   const assets = [];
   for (const [kind, pattern, format, contentType] of ASSET_RULES) {
-    const file = files.find((candidate) => pattern.test(candidate.relativePath) && (kind !== 'orthoCutline' || validateCutlineFile(candidate)));
+    let file = null;
+    if (kind === 'tiles') {
+      const matching = files.filter((candidate) => pattern.test(candidate.relativePath));
+      if (matching.length) {
+        const depth = (candidate) => candidate.relativePath.split('/').length;
+        const shallowestDepth = Math.min(...matching.map(depth));
+        const shallowest = matching.filter((candidate) => depth(candidate) === shallowestDepth);
+        const b3dmRoots = shallowest.filter((candidate) => /(^|\/)terra_b3dms\//i.test(candidate.relativePath));
+        const roots = b3dmRoots.length ? b3dmRoots : shallowest;
+        if (roots.length > 1) {
+          throw Object.assign(new Error('multiple equally shallow tileset manifests are ambiguous'), { code: 'catalog_asset_ambiguous' });
+        }
+        [file] = roots;
+      }
+    } else {
+      file = files.find((candidate) => pattern.test(candidate.relativePath) && (kind !== 'orthoCutline' || validateCutlineFile(candidate)));
+    }
     if (!file) continue;
     const integrity=fileHashes.get(file.relativePath);assets.push({ kind, relativePath: file.relativePath, format: format || path.extname(file.relativePath).slice(1).toLowerCase(), ...(contentType?{contentType}:{}), byteSize: file.byteSize, sha256: integrity.sha256, chunks:integrity.chunks });
   }
