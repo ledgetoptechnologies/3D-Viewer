@@ -3474,7 +3474,6 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
         tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
       });
       orthoLayers = { overlay, grid, ds };
-      if (epoch === modeEpoch) hideLoading();
     }
     if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
     orthoLayers.grid.setAbortSignal(signal);
@@ -3482,6 +3481,8 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
     orthoLayers.grid.addTo(map);
     if (!preserveView) restoreOrFit('ortho', orthoLayers.ds.llBounds);
     applyOrthoOpacity();
+    // Also dismiss an earlier aborted mode's overlay when reusing cached layers.
+    hideLoading();
   } catch (err) {
     if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== 'ortho') return;
     console.error('[viewer-runtime] orthophoto initialization failed');
@@ -3506,7 +3507,6 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
       });
       demLayers[type] = { overlay, grid, ds };
       syncMapVolumeAvailability();
-      if (epoch === modeEpoch) hideLoading();
     }
     if (epoch !== modeEpoch || state.activeMode !== type) return;
     const dl = demLayers[type];
@@ -3517,6 +3517,9 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
     dom.demLegend.style.display = 'flex';
     applyDemOpacity();
     refreshLegendFor(dl.ds);
+    // A cached raster can be ready even when an earlier aborted attempt left
+    // the global loading overlay visible. Clear it on every successful attach.
+    hideLoading();
   } catch (err) {
     if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== type) return;
     console.error(`[viewer-runtime] ${type.toUpperCase()} initialization failed`);

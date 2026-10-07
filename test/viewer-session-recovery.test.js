@@ -247,7 +247,7 @@ function tileFailureListener(f) {
 
 function rasterFixture(mode = 'dtm') {
   const f = fixture(), c = f.context;
-  const observations = { reads: [], attachments: [], views: [], errors: [], pending: [] };
+  const observations = { reads: [], attachments: [], views: [], errors: [], pending: [], hides: 0 };
   const center = { lat: 42, lng: -88 }, zoom = 22;
   Object.assign(c, {
     ORTHO_URL: '/old/ortho', DSM_URL: '/old/dsm', DTM_URL: '/old/dtm',
@@ -256,7 +256,7 @@ function rasterFixture(mode = 'dtm') {
     map: { getCenter: () => center, getZoom: () => zoom,
       setView: (p, z) => observations.views.push({ center: p, zoom: z }),
       fitBounds: () => observations.views.push('unexpected-fit') },
-    updateStatus() {}, updateLoading() {}, hideLoading() {},
+    updateStatus() {}, updateLoading() {}, hideLoading() { observations.hides++; },
     showError: message => observations.errors.push(message), console: { error() {} },
     getDataset: async (url, _isDem, { signal }) => {
       observations.reads.push(url);
@@ -281,6 +281,20 @@ function rasterFixture(mode = 'dtm') {
   const renew = suffix => c.applyViewerSession({ ...c.activeViewerSession, model: { ...c.PROJECT,
     assets: { ortho: `/renewed${suffix}/ortho`, dsm: `/renewed${suffix}/dsm`, dtm: `/renewed${suffix}/dtm` } } });
   return { ...f, observations, load, renew, center, zoom };
+}
+
+for (const mode of ['dsm', 'dtm', 'ortho']) {
+  test(`successful cached ${mode} activation clears a stale loading overlay`, async () => {
+    const f = rasterFixture(mode), c = f.context;
+    const ds = { llBounds: [[41, -89], [43, -87]] };
+    const overlay = { addTo() { f.observations.attachments.push('overlay'); } };
+    const grid = { setAbortSignal() {}, addTo() { f.observations.attachments.push('grid'); } };
+    if (mode === 'ortho') c.orthoLayers = { ds, overlay, grid };
+    else c.demLayers[mode] = { ds, overlay, grid };
+    await f.load();
+    assert.equal(f.observations.hides, 1);
+    assert.deepEqual(f.observations.attachments, ['overlay', 'grid']);
+  });
 }
 
 const settleRaster = () => new Promise(resolve => setImmediate(resolve));
