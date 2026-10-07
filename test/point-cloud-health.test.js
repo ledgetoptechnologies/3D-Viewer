@@ -87,6 +87,7 @@ test('visible points clear the watchdog and notify only the same-origin parent',
   value.health.pointsVisible();
   assert.equal(value.health.phase(), 'ready');
   assert.equal(value.timers.size, 0);
+  assert.equal(value.elements['pc-status'].textContent, 'Point cloud ready');
   assert.equal(value.elements['pc-loading'].classList.contains('hidden'), true);
   assert.deepEqual(value.messages, [{
     message: diagnosticMessage('ready', 'points_visible', 'nodes'),
