@@ -46,11 +46,26 @@ async function fixture(t, phase) {
   const task = processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Owned synthetic task'}), attempt = processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
   const children = [];
   const run = owner => {
-    const script = `const path=require('node:path');const {openDatabase}=require(${JSON.stringify(require.resolve('../server/database'))});const {ProcessingRepository}=require(${JSON.stringify(require.resolve('../server/processingRepository'))});const {processOne}=require(${JSON.stringify(require.resolve('../server/processingWorker'))});const db=openDatabase(process.argv[1]);processOne({processing:new ProcessingRepository(db),config:{processingProviderTransferTimeoutMs:3000},providerCredentials:{resolve:()=>''},storage:{resolve:(_key,relative)=>path.join(process.argv[2],relative),requireProcessingHeadroom:()=>({})}},process.argv[3]).then(()=>{db.close();}).catch(error=>{process.stderr.write(error.stack);db.close();process.exitCode=1;});`;
+    const script = `const path=require('node:path');const {openDatabase}=require(${JSON.stringify(require.resolve('../server/database'))});const {ProcessingRepository}=require(${JSON.stringify(require.resolve('../server/processingRepository'))});const {processOne}=require(${JSON.stringify(require.resolve('../server/processingWorker'))});process.stdout.write('child-started\\n');const db=openDatabase(process.argv[1]);process.stdout.write('database-opened\\n');processOne({processing:new ProcessingRepository(db),config:{processingProviderTransferTimeoutMs:3000},providerCredentials:{resolve:()=>''},storage:{resolve:(_key,relative)=>path.join(process.argv[2],relative),requireProcessingHeadroom:()=>({})}},process.argv[3]).then(()=>{db.close();}).catch(error=>{process.stderr.write(error.stack);db.close();process.exitCode=1;});`;
     const child = spawn(process.execPath,['-e',script,databasePath,root,owner],{windowsHide:true}); children.push(child);
-    let stderr = ''; child.stderr.on('data', chunk => { stderr += chunk; });
-    const ended = new Promise((resolve,reject) => { child.once('error',reject); child.once('exit',(code,signal)=>resolve({code,signal,stderr})); });
-    return {child,ended};
+    let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; });
+    const ended = new Promise(resolve => {
+      child.once('error', error => resolve({error,stdout,stderr}));
+      child.once('exit',(code,signal)=>resolve({code,signal,stdout,stderr}));
+    });
+    const waitUntilPaused = async () => {
+      let timer;
+      const outcome = await Promise.race([
+        paused.promise.then(() => ({kind:'paused'})),
+        ended.then(result => ({kind:'ended',result})),
+        new Promise(resolve => { timer = setTimeout(() => resolve({kind:'timeout'}),5000); }),
+      ]);
+      clearTimeout(timer);
+      if (outcome.kind === 'paused') return;
+      if (outcome.kind === 'ended') throw new Error(`worker exited before provider request: ${JSON.stringify(outcome.result)}; submitJob=${JSON.stringify(job())}; dispatch=${JSON.stringify(db.prepare('SELECT * FROM processing_job_order WHERE job_id=?').get(job()?.id))}; remote=${JSON.stringify(remote)}`);
+      throw new Error(`worker did not reach provider request within 5s; stdout=${JSON.stringify(stdout)} stderr=${JSON.stringify(stderr)}; submitJob=${JSON.stringify(job())}; remote=${JSON.stringify(remote)}`);
+    };
+    return {child,ended,waitUntilPaused};
   };
   t.after(async () => {
     await Promise.all(children.map(child => {
@@ -66,7 +81,7 @@ async function fixture(t, phase) {
 }
 
 test('worker process death during initialization reclaims with the same UUID and one eventual accepted task', {timeout:8000}, async t => {
-  const f = await fixture(t,'initialize'), first = f.run('first-process'); await f.paused;
+  const f = await fixture(t,'initialize'), first = f.run('first-process'); await first.waitUntilPaused();
   assert.equal(f.processing.getAttemptSubmission(f.attempt.id).submissionPhase,'initializing');
   assert.equal(f.processing.getAttemptSubmission(f.attempt.id).uploadedFileCount,0);
   first.child.kill(); await first.ended; f.expire();
@@ -80,7 +95,7 @@ test('worker process death during initialization reclaims with the same UUID and
 });
 
 test('worker process death after accepted commit preserves one queued remote task on restart', {timeout:8000}, async t => {
-  const f = await fixture(t,'commit'), first = f.run('first-process'); await f.paused;
+  const f = await fixture(t,'commit'), first = f.run('first-process'); await first.waitUntilPaused();
   assert.equal(f.processing.getAttemptSubmission(f.attempt.id).submissionPhase,'committing');
   first.child.kill(); await first.ended; f.expire();
   const restarted = await f.run('restarted-process').ended; assert.equal(restarted.code,0,restarted.stderr);
@@ -92,7 +107,7 @@ test('worker process death after accepted commit preserves one queued remote tas
 });
 
 test('worker process death after received temporary upload retains uncertainty without duplicate upload', {timeout:8000}, async t => {
-  const f = await fixture(t,'upload'), first = f.run('first-process'); await f.paused;
+  const f = await fixture(t,'upload'), first = f.run('first-process'); await first.waitUntilPaused();
   first.child.kill(); await first.ended; f.expire();
   const restarted = await f.run('restarted-process').ended; assert.equal(restarted.code,0,restarted.stderr);
   assert.equal(f.job().status,'pending'); assert.equal(f.job().error_code,'provider_submission_ambiguous');
@@ -103,7 +118,7 @@ test('worker process death after received temporary upload retains uncertainty w
 });
 
 test('late commit response from expired process cannot overwrite successor recovery', {timeout:8000}, async t => {
-  const f = await fixture(t,'commit'), first = f.run('old-process'); await f.paused; f.expire();
+  const f = await fixture(t,'commit'), first = f.run('old-process'); await first.waitUntilPaused(); f.expire();
   const replacement = await f.run('replacement-process').ended; assert.equal(replacement.code,0,replacement.stderr);
   f.release(); const stale = await first.ended; assert.equal(stale.code,0,stale.stderr);
   assert.equal(f.job().status,'complete');
@@ -113,7 +128,7 @@ test('late commit response from expired process cannot overwrite successor recov
 });
 
 test('late upload response from expired process cannot clear successor uncertainty or commit', {timeout:8000}, async t => {
-  const f = await fixture(t,'upload'), first = f.run('old-process'); await f.paused; f.expire();
+  const f = await fixture(t,'upload'), first = f.run('old-process'); await first.waitUntilPaused(); f.expire();
   const replacement = await f.run('replacement-process').ended; assert.equal(replacement.code,0,replacement.stderr);
   f.release(); const stale = await first.ended; assert.equal(stale.code,0,stale.stderr);
   assert.equal(f.job().status,'pending'); assert.equal(f.job().error_code,'provider_submission_ambiguous');
@@ -124,7 +139,7 @@ test('late upload response from expired process cannot clear successor uncertain
 });
 
 for (const phase of ['upload','commit']) test(`cancelling while ${phase} response is suspended fences the process and never resubmits`, {timeout:8000}, async t => {
-  const f = await fixture(t,phase), running = f.run('cancelled-process'); await f.paused;
+  const f = await fixture(t,phase), running = f.run('cancelled-process'); await running.waitUntilPaused();
   f.processing.cancelAttempt(f.attempt.id,'ops:isolated-test'); f.release();
   const exited = await running.ended; assert.equal(exited.code,0,exited.stderr);
   const next = await f.run('next-process').ended; assert.equal(next.code,0,next.stderr);

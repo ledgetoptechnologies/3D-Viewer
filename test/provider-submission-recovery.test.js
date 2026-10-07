@@ -106,6 +106,50 @@ test('missing task after uncertain commit waits rather than destroying or resubm
   assert.equal(c.submitJob().status,'pending');assert.equal(c.submitJob().error_code,'provider_submission_ambiguous');assert.equal(c.remote.commit,1);assert.equal(c.remote.upload,1);assert.equal(c.remote.remove,0);
 });
 
+test('ClusterODM route lost after provider restart stays queued for reconciliation without resubmission',async t=>{
+  const c=fixture(t),uuid=c.attempt.providerTaskId;
+  await processOne(c.deps,'submit');
+  assert.equal(c.processing.getAttempt(c.attempt.id).status,'queued_upstream');
+  assert.equal(c.processing.getAttemptSubmission(c.attempt.id).submissionPhase,'committed');
+  const initializeCalls=c.remote.initialize,uploadCalls=c.remote.upload,commitCalls=c.remote.commit;
+
+  // ClusterODX can lose its in-memory UUID→NodeODM route between returning a
+  // task UUID and persisting the downstream route. A task-info 404 in this
+  // window is not proof that downstream work was never accepted.
+  c.adapter.status=async requestedUuid=>{
+    assert.equal(requestedUuid,uuid);
+    throw Object.assign(new Error('ClusterODX task route not found after restart'),{code:'provider_task_not_found'});
+  };
+  c.retry();
+  await processOne(c.deps,'reconcile-during-route-loss');
+
+  const attempt=c.processing.getAttempt(c.attempt.id),reconcile=c.db.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile'").get(c.attempt.id);
+  assert.equal(attempt.status,'queued_upstream');
+  assert.equal(attempt.providerTaskId,uuid);
+  assert.equal(c.processing.getAttemptSubmission(c.attempt.id).submissionPhase,'committed');
+  assert.equal(reconcile.status,'pending');
+  assert.equal(reconcile.error_code,'provider_task_not_found');
+  assert.equal(c.db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='submit'").get(c.attempt.id).n,1);
+  assert.equal(c.remote.initialize,initializeCalls);
+  assert.equal(c.remote.upload,uploadCalls);
+  assert.equal(c.remote.commit,commitCalls);
+  assert.equal(c.remote.remove,0);
+
+  // Once the route is visible again, normal polling resumes on the same UUID.
+  c.adapter.status=async requestedUuid=>{
+    assert.equal(requestedUuid,uuid);
+    return{uuid,status:'queued_upstream',progress:0,imagesCount:c.remote.imagesCount};
+  };
+  c.retry();
+  await processOne(c.deps,'reconcile-after-route-returns');
+  assert.equal(c.processing.getAttempt(c.attempt.id).status,'queued_upstream');
+  assert.equal(c.processing.getAttempt(c.attempt.id).providerTaskId,uuid);
+  assert.equal(c.remote.initialize,initializeCalls);
+  assert.equal(c.remote.upload,uploadCalls);
+  assert.equal(c.remote.commit,commitCalls);
+  assert.equal(c.remote.remove,0);
+});
+
 test('accepted terminal statuses survive submit recovery and reconciliation',async t=>{
   for(const status of ['failed','cancelled','completed'])await t.test(status,async t=>{
     const c=fixture(t);c.remote.accepted=true;c.remote.status=status;c.remote.imagesCount=2;
