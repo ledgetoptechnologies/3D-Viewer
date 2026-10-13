@@ -11,7 +11,7 @@ import { createDelaunayReference } from './measurementDelaunayReference.mjs';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export const NATIVE_RASTER_BLOCK_LIMIT = 256 * 1024 * 1024;
 export function nativeRasterDefinition(image, request, { maxBlockBytes = NATIVE_RASTER_BLOCK_LIMIT, bandMetadata = null } = {}) {
-  const keys = image.getGeoKeys(), directory = image.getFileDirectory?.() || image.fileDirectory, epsg = Number(String(request.coordinateReference.crs).replace(/^EPSG:/i, ''));
+  const keys = image.getGeoKeys() ?? {}, directory = image.getFileDirectory?.() || image.fileDirectory, epsg = Number(String(request.coordinateReference.crs).replace(/^EPSG:/i, ''));
   const rasterCrs = Number(keys.ProjectedCSTypeGeoKey), metres = keys.ProjLinearUnitsGeoKey !== undefined ? Number(keys.ProjLinearUnitsGeoKey) === 9001 : ((rasterCrs >= 32601 && rasterCrs <= 32660)||(rasterCrs>=32701&&rasterCrs<=32760));
   if (!metres || rasterCrs !== epsg) fail('measurement_source_crs_mismatch');
   if (Number(keys.GTRasterTypeGeoKey || 1) !== 1) fail('measurement_pixel_is_point_unsupported');

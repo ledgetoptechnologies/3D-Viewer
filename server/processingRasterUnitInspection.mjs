@@ -20,7 +20,7 @@ export async function inspectProcessingRasterUnits(absolutePath, source, { signa
   const tiff = await fromFile(absolutePath);
   let result;
   try {
-    const image = await tiff.getImage(0), keys = image.getGeoKeys();
+    const image = await tiff.getImage(0), keys = image.getGeoKeys() ?? {};
     const horizontalEpsg = Number(keys.ProjectedCSTypeGeoKey);
     // This producer contract is native UTM. Other horizontal coordinates need
     // their own contract, not inference from a display CRS.
