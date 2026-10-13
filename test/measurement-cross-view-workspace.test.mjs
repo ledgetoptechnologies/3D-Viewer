@@ -8,6 +8,7 @@ import * as geometry from '../measurement-document.mjs';
 import {createMeasurementStore} from '../measurement-store.mjs';
 import {createMeasurementListLayout} from '../measurement-list-layout.mjs';
 import {retainedDisplayBoundary} from '../measurement-display-elevations.mjs';
+import {measurementMassSummary} from '../measurement-density-dialog.mjs';
 
 const source=readFileSync(new URL('../measurement-workspace.mjs',import.meta.url),'utf8');
 const {validateMeasurement}=createRequire(import.meta.url)('../server/measurementRepository.js');
@@ -37,22 +38,22 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
   const window=new Element(),document={defaultView:window,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   document.body=document.createElement('body');document.head=document.createElement('head');
   const panel=document.createElement('section'),canvas=document.createElement('canvas'),host=document.createElement('div');
-  const projected=[],downloads=[],mutations=[],calculationCalls=[],resolverCalls=[],renderedResolverCalls=[],focused=[];
+  const projected=[],downloads=[],mutations=[],calculationCalls=[],densityDialogs=[],resolverCalls=[],renderedResolverCalls=[],focused=[];
   let mode='model',permission=true,surfaceRevision=displaySurfaceRevision,surfaceRevisionReads=0,now=1000;
   const context=()=>{
     const view={mode,element:canvas,host,viewSignature:()=>mode,getDisplaySurfaceRevision:()=>{surfaceRevisionReads++;return surfaceRevision;},pick,project(point){projected.push({mode,point:Array.from(point)});return project(point);},focus(vertices){focused.push({mode,vertices:structuredClone(vertices)});}};
     if(resolveRenderedDisplayVertices)view.resolveRenderedDisplayVertices=(record,options)=>{renderedResolverCalls.push({record:structuredClone(record),options,mode});return resolveRenderedDisplayVertices(record,options);};
     return view;
   };
-  const scope=vm.createContext({...geometry,createMeasurementStore:storeFactory,createMeasurementListLayout,retainedDisplayBoundary,availableAdminSources:()=>[],document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
+  const scope=vm.createContext({...geometry,createMeasurementStore:storeFactory,createMeasurementListLayout,retainedDisplayBoundary,measurementMassSummary,availableAdminSources:()=>[],document,window,crypto,structuredClone,AbortController,DOMException,console,Blob,
     URL:{createObjectURL(blob){downloads.push(blob);return'blob:fixture';},revokeObjectURL(){}},
     setInterval:()=>1,clearInterval(){},setTimeout:()=>1,performance:{now:()=>now},
-    openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
+    openSurfaceDialog:options=>{calculationCalls.push(options);return{close(){}};},openMeasurementDensityDialog:options=>{densityDialogs.push(options);return{close(){}};},openAdminCalculationDialog:()=>{throw new Error('Unexpected server calculation dialog');}});
   vm.runInContext(source.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
   const workspace=scope.createMeasurementWorkspace({panel,context,token,permitted:()=>permission,toolChanged(){},onBeforeAccessLost,coordinateReference:()=>({crs:viewCrs,verticalUnit:'m'}),toLonLat:p=>p.slice(0,2),calculateSurface:calculateSurface||(()=>{calculationCalls.push('calculate');}),surfaceRequest,adminRequest,resolveDisplayVertices:(record,options)=>{resolverCalls.push({id:record.id,record:structuredClone(record),options});return resolveDisplayVertices(record,options);}});
   const controls=panel.children[0];workspace.tick();
   const action=(name,id)=>controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?{dataset:{m:name}}:selector==='[data-record]'&&id?{dataset:{record:id}}:null}});
-  return{workspace,controls,panel,canvas,window,projected,downloads,mutations,calculationCalls,resolverCalls,renderedResolverCalls,focused,action,
+  return{workspace,controls,panel,canvas,window,projected,downloads,mutations,calculationCalls,densityDialogs,resolverCalls,renderedResolverCalls,focused,action,
     svg:()=>host.children.find(node=>node.tagName==='svg'),list:()=>controls.querySelector('[data-m-list]').innerHTML,
     async switchTo(next){workspace.modeChanged();mode=next;workspace.tick();await flush();workspace.tick();},
     setSurfaceRevision(next,{advance=0}={}){surfaceRevision=next;now+=advance;},advance(ms){now+=ms;},
@@ -65,6 +66,31 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
 }
 
 const document=(collection,name)=>({id:crypto.randomUUID(),name,collection,kind:'distance',vertices:collection==='map'?[[250,200,0],[390,230,0]]:[[20,40,132.123456789],[100,60,139.987654321]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true,source:{kind:collection==='map'?'ortho':'mesh'},results:{status:'geometry-only',method:'vertex-geometry',...(collection==='map'?{elevationBasis:'not-sampled'}:{})}});
+
+for(const persistent of [true,false])test(`density save and removal notices reflect actual ${persistent?'persistent':'temporary'} store patches`,async t=>{
+  const writes=[],density={value:1000,unit:'kg/m3',basis:'as_fed'};
+  const f=fixture({token:()=>persistent?'fixture-session':null,storeFactory:options=>createMeasurementStore({...options,fetcher:async(_url,request)=>{
+    if(request.method==='GET')return{ok:true,status:200,json:async()=>({measurements:[],capabilities:{personalPersistence:true}})};
+    const measurement=JSON.parse(request.body);writes.push(measurement);return{ok:true,status:200,json:async()=>({measurement:{...measurement,revision:(measurement.revision||0)+1}})};
+  }})});t.after(()=>f.workspace.dispose());await flush();
+  const record={...document('map','Density notice fixture'),kind:'polygon',vertices:[[0,0,0],[2,0,0],[2,2,0]]};await f.workspace.store.save(record);
+  assert.equal(f.workspace.store.persistent(),persistent);
+  await f.action('density',record.id);assert.equal(f.densityDialogs.at(-1).temporary,!persistent);
+  await f.densityDialogs.at(-1).save(density);
+  assert.deepEqual(f.workspace.store.records.get(record.id).materialDensity,density);
+  assert.equal(f.panel.children[1].textContent,persistent?'Density saved with your measurement.':'Temporary density — resets when the page is refreshed or closed.');
+  await f.action('density',record.id);await f.densityDialogs.at(-1).save(null);
+  assert.equal(f.workspace.store.records.get(record.id).materialDensity,null);
+  assert.equal(f.panel.children[1].textContent,persistent?'Density removed from your measurement.':'Density removed from this temporary measurement. Changes reset when the page is refreshed or closed.');
+  if(persistent){assert.deepEqual(writes.at(-2).materialDensity,density);assert.equal(writes.at(-1).materialDensity,null);}else assert.equal(writes.length,0);
+  for(const change of [density,null]){
+    await f.action('density',record.id);const dialog=f.densityDialogs.at(-1),current=f.workspace.store.records.get(record.id),notice=f.panel.children[1].textContent;
+    f.workspace.store.records.set(record.id,{...current,revision:(current.revision||0)+1});
+    await assert.rejects(dialog.save(change),/measurement changed or was deleted/);
+    assert.equal(f.panel.children[1].textContent,notice,'rejected patch must not announce success');
+    assert.equal(f.workspace.store.records.get(record.id).materialDensity,null);
+  }
+});
 
 test('public same-page saved volume reopens memory preview without authenticated job reads and clears on view/access changes',async t=>{
   const preview={samples:[[0,0,2,0],[1,1,2,0]]},result={status:'calculated',method:'surface-cut-fill',cutM3:4,fillM3:0,netM3:4,coverage:1,source:{modelVersionId:'version',kind:'dsm'},reference:{type:'custom',elevationM:0},calculationJobId:'job',preview};

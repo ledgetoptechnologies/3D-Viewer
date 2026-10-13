@@ -275,7 +275,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     activeDialog=openMeasurementDensityDialog({record:structuredClone(record),units,temporary:!store.persistent(),save:async materialDensity=>{
       if(disposed||!allowed()||generation!==viewGeneration||dialogId!==dialogGeneration)throw new Error('Measurement access or view changed.');
       await store.patch(record,{materialDensity});
-      if(!disposed&&allowed()&&generation===viewGeneration)tell(store.persistent()?'Density saved with your measurement.':'Temporary density — resets when the page is refreshed or closed.');
+      if(!disposed&&allowed()&&generation===viewGeneration)tell(materialDensity===null?(store.persistent()?'Density removed from your measurement.':'Density removed from this temporary measurement. Changes reset when the page is refreshed or closed.'):(store.persistent()?'Density saved with your measurement.':'Temporary density — resets when the page is refreshed or closed.'));
     }});
   }
   function showSurface(record,{autoCalculate=false}={}){
