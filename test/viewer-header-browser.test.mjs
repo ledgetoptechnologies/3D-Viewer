@@ -34,6 +34,72 @@ window.showHost=id=>{for(const host of document.querySelectorAll('#three-contain
 document.body.dataset.ready='true';</script>`;}
 function page(){const logo=`data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="38" height="38"><rect width="38" height="38" fill="orange"/></svg>').toString('base64')}`;return `<!doctype html><meta name="viewport" content="width=device-width"><style>${css}</style><div id="app">${header.replace(/src="[^"]+"/,`src="${logo}"`)}<div id="main">Viewer fixture</div></div><script>document.querySelector('#brand-project').textContent=${JSON.stringify(project)};window.clicked=[];for(const button of document.querySelectorAll('.tab-btn'))button.onclick=()=>clicked.push(button.dataset.mode);document.body.dataset.ready='true';</script>`;}
 
+function mapOverlayPage(){return `<!doctype html><meta name="viewport" content="width=device-width"><link rel="stylesheet" href="/leaflet.css"><style>${css}\n${measurementCss}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script><div id="app">${header.replace(/src="[^"]+"/, 'src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27/%3E"')}<div id="main"><aside id="sidebar"><div id="sidebar-custom"><div class="panel" style="min-height:900px">Synthetic navigation and layer controls</div><div id="panel-measure"></div></div></aside><div id="viewer-wrap">${sidebarToggle}<div id="three-container"></div><div id="leaflet-map" style="display:block"></div></div></div></div><script src="/leaflet.js"></script><script type="module">
+import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
+import * as THREE from 'three';
+import {CSS2DRenderer} from 'three/addons/renderers/CSS2DRenderer.js';
+document.querySelector('#brand-project').textContent=${JSON.stringify(project)};
+const threeContainer=document.querySelector('#three-container'),camera=new THREE.PerspectiveCamera(60,1,.1,1000),renderer=new THREE.WebGLRenderer(),labelRenderer=new CSS2DRenderer();
+renderer.setSize(640,480);labelRenderer.setSize(640,480);threeContainer.append(renderer.domElement,labelRenderer.domElement);
+const element=document.querySelector('#leaflet-map'),map=L.map(element,{zoomControl:false,attributionControl:false}).setView([0,0],18);
+const image='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#542f67"/></svg>');L.imageOverlay(image,[[-1,-1],[1,1]]).addTo(map);
+const vertices=[[0,0],[0,.0006],[-.0006,.0006],[-.0006,0]].map(([lat,lng])=>[lng,lat,0]);
+const context={mode:'dsm',element,host:element,viewSignature(){const center=map.getCenter(),size=map.getSize();return[center.lat,center.lng,map.getZoom(),size.x,size.y].join(':');},project(p){const point=map.latLngToContainerPoint([p[1],p[0]]);return[point.x,point.y];},pick:()=>null};
+const workspace=createMeasurementWorkspace({panel:document.querySelector('#panel-measure'),context:()=>context,token:()=>null,permitted:()=>true,toolChanged:()=>{},coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p});
+await workspace.store.save({id:'11111111-1111-4111-8111-111111111111',name:'Retained map boundary',kind:'polygon',collection:'map',vertices,coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true});workspace.tick({force:true});
+const sidebar=document.querySelector('#sidebar');
+// Match main.onResize's hidden Three viewport guard and delayed Leaflet resize.
+let rendererResizeCount=0;const resize=()=>{const rect=threeContainer.getBoundingClientRect();if(rect.width>0){camera.aspect=rect.width/rect.height;camera.updateProjectionMatrix();renderer.setSize(rect.width,rect.height);labelRenderer.setSize(rect.width,rect.height);rendererResizeCount++;}setTimeout(()=>map.invalidateSize(),80);};
+sidebar.addEventListener('transitionend',event=>{if(event.target===sidebar&&event.propertyName==='width')resize();});
+document.querySelector('#sidebar-toggle').onclick=()=>{const collapsed=sidebar.classList.toggle('collapsed');sidebar.inert=collapsed;setTimeout(resize,300);};
+const sidebarScroll=document.querySelector('#sidebar-custom');sidebarScroll.scrollTop=sidebarScroll.scrollHeight;
+window.mapFixture={pan:()=>map.panBy([10,0],{animate:false}),state:()=>({headerHeight:document.querySelector('#topbar').getBoundingClientRect().height,scrollTop:sidebarScroll.scrollTop,rendererResizeCount,threeWidth:threeContainer.getBoundingClientRect().width})};document.body.dataset.ready='true';
+</script>`;}
+
+test('real Leaflet retains painted measurement boundaries through narrow and desktop sidebar transitions',{timeout:60000},async t=>{
+  const executable=binary();if(!executable){t.skip('Chromium-family browser required for painted Leaflet regression.');return;}
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
+  try{
+    server=createServer((req,res)=>{
+      const pathname=new URL(req.url,'http://fixture.invalid').pathname;
+      if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(mapOverlayPage());}
+      let file;
+      if(pathname==='/leaflet.js'||pathname==='/leaflet.css')file=path.join(root,'node_modules','leaflet','dist',pathname.slice(1));
+      else if(/^\/[a-z0-9-]+\.(mjs|css)$/.test(pathname))file=path.join(root,pathname.slice(1));
+      else if(pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(pathname)){const base=path.join(root,'node_modules','three'),candidate=path.resolve(base,pathname.slice(8));if(candidate.startsWith(base+path.sep))file=candidate;}
+      if(!file||!existsSync(file)){res.statusCode=404;return res.end();}
+      if(file.endsWith('.css')&&req.headers['sec-fetch-dest']==='script'){res.setHeader('Content-Type','application/javascript');return res.end(`const style=document.createElement('style');style.textContent=${JSON.stringify(readFileSync(file,'utf8'))};document.head.append(style);`);}
+      res.setHeader('Content-Type',file.endsWith('.css')?'text/css':'application/javascript');res.end(readFileSync(file));
+    });await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-leaflet-sidebar-'));
+    browser=spawn(executable,['--headless=new','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(50);assert.ok(existsSync(active));
+    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);await client.command('Page.enable');
+    const painted=async()=>{
+      const geometry=await client.evaluate(`(()=>{const svg=document.querySelector('.measurement-overlay'),circle=svg.querySelector('circle'),r=svg.getBoundingClientRect();return{x:r.left+Number(circle.getAttribute('cx')),y:r.top+Number(circle.getAttribute('cy')),count:svg.querySelectorAll('circle').length};})()`);
+      assert.equal(geometry.count,4,'saved geometry remains present');
+      const screenshot=await client.command('Page.captureScreenshot',{format:'png',fromSurface:true});
+      // Decode actual compositor pixels, rather than asserting DOM or hit-test order.
+      const count=await client.evaluate(`(async()=>{const image=new Image();image.src='data:image/png;base64,${screenshot.data}';await image.decode();const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);const pixels=ctx.getImageData(${Math.round(geometry.x)-6},${Math.round(geometry.y)-6},13,13).data;let orange=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>180&&pixels[i+1]>40&&pixels[i+1]<160&&pixels[i+2]<60)orange++;return orange;})()`);
+      assert.ok(count>=10,`retained endpoint must be painted (orange pixels=${count}, ${JSON.stringify(geometry)})`);
+    };
+    for(const width of [864,1440])await t.test(`${width}px`,async()=>{
+      await client.command('Emulation.setDeviceMetricsOverride',{width,height:884,deviceScaleFactor:1,mobile:false});await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/?width=${width}`});
+      const ready=Date.now()+8000;while(Date.now()<ready){if(await client.evaluate("document.body?.dataset.ready==='true'"))break;await delay(30);}assert.equal(await client.evaluate("document.body?.dataset.ready"),'true',await client.evaluate('document.body.innerText'));await delay(450);await painted();
+      const state=await client.evaluate('mapFixture.state()');assert.ok(state.scrollTop>0,'sidebar begins scrolled to its measurement controls');assert.equal(state.threeWidth,0,'inactive mesh container is hidden');if(width===864)assert.ok(state.headerHeight>60,'narrow layout has a wrapped two-row header');
+      for(let repeat=0;repeat<2;repeat++)for(const collapsed of [true,false]){
+        const point=await client.evaluate("(()=>{const r=document.querySelector('#sidebar-toggle').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2};})()");
+        for(const type of ['mousePressed','mouseReleased'])await client.command('Input.dispatchMouseEvent',{type,...point,button:'left',clickCount:1});await delay(500);
+        assert.equal(await client.evaluate("document.querySelector('#sidebar').classList.contains('collapsed')"),collapsed);await painted();
+      }
+      assert.equal((await client.evaluate('mapFixture.state()')).rendererResizeCount,0,'main.onResize does not resize display:none Three renderers');
+    });
+  }finally{
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-leaflet-sidebar-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained isolated temporary profile lock: ${absolute}`);}}
+  }
+});
+
 test('shipped Viewer header fits phone, narrow desktop and full desktop with named navigation',{timeout:60000},async t=>{
   const executable=binary();if(!executable){t.skip('Chromium-family browser required for isolated header regression.');return;}
   const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;

@@ -453,16 +453,25 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function cancelGesture(){if(gesture?.index>=0&&draft){draft.vertices=gesture.original;draftDisplayVertices=gesture.originalDisplay;}gesture=null;pendingPick=null;}
   function blur(){cancelGesture();space=false;shift=false;cursor=null;updateCursor();}
   const contextMenu=e=>{if(draft&&!editing&&!e.shiftKey)stop(e);};
+  let keyboardWindows=[];
   function bind(next){
     if(bound?.element===next?.element){bound=next;return;}
-    if(bound){for(const [event,fn]of handlers)bound.element.removeEventListener(event,fn,true);bound.element.ownerDocument.defaultView.removeEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.removeEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.removeEventListener('blur',blur);}
+    for(const view of keyboardWindows){view.removeEventListener('keydown',keyDown,true);view.removeEventListener('keyup',keyUp,true);}
+    keyboardWindows=[];
+    if(bound){for(const [event,fn]of handlers)bound.element.removeEventListener(event,fn,true);bound.element.ownerDocument.defaultView.removeEventListener('blur',blur);}
     bound?.element.classList.remove('measurement-placing','measurement-navigating','measurement-editing');
     releaseCursor();svg.remove();svg.innerHTML='';bound=next;lastSvg=null;pendingPick=null;
     if(!bound)return;
     bound.host.append(svg);
     updateCursor();
     for(const [event,fn]of handlers)bound.element.addEventListener(event,fn,true);
-    bound.element.ownerDocument.defaultView.addEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.addEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.addEventListener('blur',blur);
+    // Cloud handles live in an iframe while Edit/Finish live in this panel.
+    // Handle gestures consume pointerdown before the cloud control can focus
+    // its canvas. Accept keys in either focused document without moving focus;
+    // DOM keyboard events do not bubble across iframe window boundaries.
+    keyboardWindows=[...new Set([panel.ownerDocument.defaultView,bound.element.ownerDocument.defaultView])];
+    for(const view of keyboardWindows){view.addEventListener('keydown',keyDown,true);view.addEventListener('keyup',keyUp,true);}
+    bound.element.ownerDocument.defaultView.addEventListener('blur',blur);
   }
   const handlers=[['pointerdown',pointerDown],['pointermove',pointerMove],['pointerup',pointerUp],['pointerleave',()=>{hoverHandle=false;updateCursor();}],['pointercancel',blur],['contextmenu',contextMenu],['dblclick',e=>{if(draft&&(!editing||overEditHandle(e)))stop(e);}]];
   function draw({force=false}={}){

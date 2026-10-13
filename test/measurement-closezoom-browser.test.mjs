@@ -42,7 +42,7 @@ async function fixture(){
   const server=createServer(async(req,res)=>{try{
     const url=new URL(req.url,'http://fixture.invalid');
     if(url.pathname.startsWith('/api/')){requests.push({method:req.method,path:url.pathname});res.setHeader('Content-Type','application/json');if(req.method!=='GET'||req.headers.authorization!==`Bearer ${token}`){res.statusCode=403;return res.end('{}');}return res.end(JSON.stringify({measurements:url.searchParams.get('collection')==='spatial3d'?[record]:[],capabilities:{personalPersistence:true}}));}
-    if(url.pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(url.searchParams.has('rendered')?renderedPage():url.searchParams.has('sidebar')?sidebarPage():url.searchParams.has('editor')?editorPage():page());}
+    if(url.pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(url.searchParams.has('iframe-editor')?iframeEditorPage():url.searchParams.has('rendered')?renderedPage():url.searchParams.has('sidebar')?sidebarPage():url.searchParams.has('editor')?editorPage():page());}
     let file;if(/^\/[a-z0-9-]+\.(mjs|css)$/.test(url.pathname))file=path.join(root,url.pathname.slice(1));
     if(url.pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(url.pathname)){const base=path.join(root,'node_modules','three'),candidate=path.resolve(base,url.pathname.slice(8));if(candidate.startsWith(base+path.sep))file=candidate;}
     if(!file||!existsSync(file)){res.statusCode=404;return res.end();}
@@ -155,6 +155,61 @@ test('real measurement overlay preserves original visible edges across close zoo
   }finally{
     client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
     if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-measurement-closezoom-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Browser retained an isolated temporary profile lock: ${absolute}`);}}
+  }
+});
+
+function iframeEditorPage(){return `<!doctype html><html><head><style>body{margin:0}#host,#model{position:relative;width:800px;height:600px}#host iframe{width:800px;height:600px;border:0}#panel{position:absolute;left:810px;top:0;width:300px}</style><script type="importmap">{"imports":{"three":"/vendor/build/three.module.js","three/addons/":"/vendor/examples/jsm/"}}</script></head><body><div id="host"><iframe id="cloud" srcdoc="<canvas width='800' height='600' tabindex='0'></canvas><style>body{margin:0}canvas{display:block}</style>"></iframe></div><div id="model" hidden tabindex="0"></div><aside id="panel"></aside><input id="typed" aria-label="Unrelated field"><script type="module">
+import {createMeasurementWorkspace} from '/measurement-workspace.mjs';
+const iframe=document.querySelector('#cloud');if(!iframe.contentDocument.querySelector('canvas'))await new Promise(resolve=>iframe.onload=resolve);
+const canvas=iframe.contentDocument.querySelector('canvas'),host=document.querySelector('#host'),model=document.querySelector('#model');let mode='cloud',saves=0,nativeDown=0;
+// Like PointCloudControls, ordinary canvas navigation focuses the iframe. A
+// measurement handle consumes the pointer first, so that focus path is skipped.
+canvas.addEventListener('pointerdown',()=>{nativeDown++;canvas.focus();});
+const record={id:'11111111-1111-4111-8111-111111111111',name:'Iframe pile',kind:'polygon',collection:'spatial3d',vertices:[[100,100,1],[300,100,1],[300,300,1],[100,300,1]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'},visible:true};
+const context=()=>({mode,element:mode==='cloud'?canvas:model,host:mode==='cloud'?host:model,pick:event=>[event.clientX,event.clientY,1],project:p=>p.slice(0,2),viewSignature:()=>mode});
+const workspace=createMeasurementWorkspace({panel:document.querySelector('#panel'),context,token:()=>null,permitted:()=>true,toolChanged:()=>{},coordinateReference:()=>record.coordinateReference,toLonLat:p=>p});
+await workspace.store.save(record);const save=workspace.store.save;workspace.store.save=async(...args)=>{saves++;return save(...args);};workspace.tick({force:true});
+window.iframeFixture={draft:()=>workspace.getDraft(),saved:()=>[...workspace.store.records.values()][0],saves:()=>saves,nativeDown:()=>nativeDown,switchToModel(){workspace.modeChanged();mode='model';host.hidden=true;model.hidden=false;workspace.tick();},dispose:()=>workspace.dispose()};document.body.dataset.ready='true';
+</script></body></html>`;}
+
+test('iframe measurement editor saves with parent or child keyboard focus and removes stale window bindings',{timeout:60000},async t=>{
+  const binary=browserPath();if(!binary){t.skip('Chromium-family browser required');return;}
+  const unlock=await acquireBrowserHarnessLock({root});let browser,client,profile,server;
+  try{
+    const f=await fixture();server=f.server;profile=mkdtempSync(path.join(tmpdir(),'ltds-iframe-editor-browser-'));
+    browser=spawn(binary,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const active=path.join(profile,'DevToolsActivePort'),until=Date.now()+10000;while(!existsSync(active)&&Date.now()<until)await delay(30);assert.ok(existsSync(active));
+    const port=readFileSync(active,'utf8').split(/\r?\n/)[0],tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();client=await Cdp.connect(tabs.find(tab=>tab.type==='page').webSocketDebuggerUrl);
+    await client.command('Runtime.enable');await client.command('Page.enable');await client.command('Emulation.setDeviceMetricsOverride',{width:1150,height:900,deviceScaleFactor:1,mobile:false});
+    await client.command('Page.navigate',{url:f.origin+'?iframe-editor=1'});await waitFor(client,"document.body?.dataset.ready==='true'");
+    const mouse=async(type,x,y)=>client.command('Input.dispatchMouseEvent',{type,x,y,button:'left',buttons:type==='mouseReleased'?0:1,clickCount:1});
+    const key=async(key)=>{await client.command('Input.dispatchKeyEvent',{type:'keyDown',key,code:key,windowsVirtualKeyCode:key==='Escape'?27:13});await client.command('Input.dispatchKeyEvent',{type:'keyUp',key,code:key,windowsVirtualKeyCode:key==='Escape'?27:13});};
+    const edit=async()=>{await client.evaluate("document.querySelector('[data-m=edit-record]').click();document.querySelector('[data-m=finish]').focus()");await waitFor(client,'!!iframeFixture.draft()');};
+    for(const exit of ['Escape','Enter']){
+      await edit();const before=await client.evaluate('iframeFixture.saved().vertices[0][0]');
+      await mouse('mousePressed',before,100);await mouse('mouseMoved',before+20,100);await mouse('mouseReleased',before+20,100);
+      assert.equal(await client.evaluate('document.activeElement===document.querySelector("#cloud")'),false,'handle drag must exercise parent keyboard focus');
+      assert.equal(await client.evaluate('iframeFixture.nativeDown()'),0,'measurement drag consumed the native focus handler');
+      await key(exit);await waitFor(client,'iframeFixture.draft()===null');
+      assert.equal(await client.evaluate('iframeFixture.saved().vertices[0][0]'),before+20);
+    }
+    assert.equal(await client.evaluate('iframeFixture.saves()'),2,'one save per exit');
+    await edit();await client.evaluate("document.querySelector('#typed').focus();document.querySelector('#typed').value='keep me'");
+    for(const exit of ['Escape','Enter']){await key(exit);assert.ok(await client.evaluate('!!iframeFixture.draft()'),'typing fields retain draft');}
+    assert.equal(await client.evaluate('document.querySelector("#typed").value'),'keep me');
+    await client.evaluate("document.querySelector('#cloud').contentDocument.querySelector('canvas').focus()");await key('Escape');await waitFor(client,'iframeFixture.draft()===null');
+    assert.equal(await client.evaluate('iframeFixture.saves()'),2,'unchanged geometry does not save again');
+    // Repeated binds deduplicate the parent window; departing iframe loses its
+    // keyboard handler rather than retaining authority over the new model edit.
+    await client.evaluate('iframeFixture.switchToModel()');await edit();
+    await client.evaluate("document.querySelector('#cloud').contentWindow.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))");
+    assert.ok(await client.evaluate('!!iframeFixture.draft()'),'old child window no longer handles edit keys');
+    await key('Enter');await waitFor(client,'iframeFixture.draft()===null');await edit();
+    await client.evaluate('iframeFixture.dispose()');await key('Escape');assert.ok(await client.evaluate('!!iframeFixture.draft()'),'disposed workspace removes parent keyboard handler');
+    assert.deepEqual(client.errors,[]);assert.deepEqual(f.requests,[],'synthetic keyboard acceptance uses no authenticated server mutations');
+  }finally{
+    client?.close();if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,delay(3000)]);}if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}unlock();
+    if(profile){const absolute=path.resolve(profile);assert.ok(absolute.startsWith(path.resolve(tmpdir(),'ltds-iframe-editor-browser-')));try{rmSync(absolute,{recursive:true,force:true,maxRetries:10,retryDelay:100});}catch(error){if(process.platform!=='win32'||!['EBUSY','EPERM','EACCES','ENOTEMPTY'].includes(error.code))throw error;t.diagnostic(`Isolated profile retained: ${absolute}`);}}
   }
 });
 
