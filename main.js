@@ -208,6 +208,7 @@ let lodPrefetchExitReason = null;
 let lodPrefetchSoftBudgetReported = false;
 let lodOverviewTiles = [];
 let restoreLodOverviewRetention = null;
+let restoreLodBootstrapShellDemand = null;
 let lodStarvationSamples = 0;
 let lodPressureClearSamples = 0;
 let lodPendingAdmissionTile = null;
@@ -1041,6 +1042,8 @@ function loadTiles() {
     rendererInstance,
     () => (tilesRenderer === rendererInstance ? retainedLodTiles() : []),
   );
+  if (restoreLodBootstrapShellDemand) restoreLodBootstrapShellDemand();
+  restoreLodBootstrapShellDemand = installLodBootstrapShellDemand(rendererInstance);
   rendererInstance.errorTarget = lodBootstrapRootTarget;
   rendererInstance.maxDepth = LOD_PREFETCH_MAX_DEPTH;
   state.lodRuntimeProfile = {
@@ -1218,6 +1221,8 @@ function disposeTiles() {
   lodTileRetryTimer = null;
   if (restoreLodOverviewRetention) restoreLodOverviewRetention();
   restoreLodOverviewRetention = null;
+  if (restoreLodBootstrapShellDemand) restoreLodBootstrapShellDemand();
+  restoreLodBootstrapShellDemand = null;
   if (!tilesRenderer) {
     lodResources?.dispose();
     lodResources = null;
@@ -4589,6 +4594,14 @@ function emitLodDebugSnapshot(reason = 'status', force = false) {
     }
     : null;
   const snapshot = lodDebugSnapshot(tilesRenderer, runtimeProfile, lodWarmupComplete);
+  const bootstrapShell = captureLodPrefetchShell(tilesRenderer?.root);
+  const rootScreenSpaceError = Number(tilesRenderer?.root?.traversal?.error);
+  snapshot.bootstrapShell = {
+    rootScreenSpaceError: Number.isFinite(rootScreenSpaceError) ? rootScreenSpaceError : null,
+    tileCount: bootstrapShell.shell.length,
+    readyCount: bootstrapShell.ready.length,
+    pendingCount: bootstrapShell.pending,
+  };
   snapshot.regionalFallback = lodRegionalFallback?.snapshot() ?? null;
   snapshot.admission = lodAdmissionThrottle?.snapshot() ?? null;
   snapshot.loadingBudget = lodLoadingBudget?.snapshot() ?? null;
@@ -4777,6 +4790,35 @@ function updateLodBranchBlockers() {
     tile.__ltdsBranchBlocker = true;
     lodBranchBlockers.add(tile);
   }
+}
+
+function installLodBootstrapShellDemand(rendererInstance) {
+  const prepare = rendererInstance.prepareForTraversal;
+  let installed = true;
+  const wrapped = function (...args) {
+    const result = prepare.apply(this, args);
+    if (!installed || tilesRenderer !== rendererInstance || lodBootstrapPhase !== 'prefetch') return result;
+    const root = rendererInstance.root;
+    if (!root) return result;
+    rendererInstance.ensureChildrenArePreprocessed(root, true);
+    const captured = captureLodPrefetchShell(root);
+    if (captured.unsupported || captured.overBudget) return result;
+    // Structural overview demand must not disappear when a camera move makes
+    // the root satisfy the frozen bootstrap SSE. This hook runs AFTER the
+    // renderer resets its used set, but BEFORE traversal, pending cancellation
+    // and its ordinary sorted admission loop. Queueing (not direct loading)
+    // preserves cache, download, loading-reservation and throttle checks.
+    retainLodOverviewTiles(rendererInstance, [root, ...captured.shell]);
+    for (const tile of captured.shell) rendererInstance.queueTileForDownload(tile);
+    return result;
+  };
+  rendererInstance.prepareForTraversal = wrapped;
+  return () => {
+    if (!installed) return false;
+    installed = false;
+    if (rendererInstance.prepareForTraversal === wrapped) rendererInstance.prepareForTraversal = prepare;
+    return true;
+  };
 }
 
 function captureLodPrefetchShell(root) {

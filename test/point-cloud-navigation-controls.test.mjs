@@ -118,6 +118,75 @@ test('cloud alternate mode remaps all three actions and keeps default behavior i
   }
 });
 
+test('cloud button profiles preserve orbit, ground-pan and screen-pan geometry', () => {
+  for (const profile of ['default', 'alternate']) {
+    for (const button of [0, 1, 2]) {
+      const { controls, view } = fixture();
+      controls._mouseProfile = profile;
+      const beforePosition = view.position.clone();
+      const beforePivot = view.getPivot();
+      const beforeForward = beforePivot.clone().sub(beforePosition).normalize();
+      const beforeRadius = view.radius;
+      controls._pointerDown(pointer(button));
+      controls._pointerMove(pointer(button, 520, 510));
+      const action = mouseNavigationProfiles.actionForButton(profile, button);
+      const delta = view.position.clone().sub(beforePosition);
+      const afterForward = view.getPivot().sub(view.position).normalize();
+      const label = `${profile} button ${button} (${action})`;
+      assert.ok(delta.length() > 0, `${label}: movement is nonzero`);
+      if (action === 'orbit') {
+        assert.ok(afterForward.distanceTo(beforeForward) > 1e-3, `${label}: changes heading`);
+        assert.ok(view.getPivot().distanceTo(beforePivot) < 1e-9, `${label}: retains selected pivot`);
+        assert.ok(Math.abs(view.radius - beforeRadius) < 1e-9, `${label}: retains radius`);
+      } else {
+        assert.ok(afterForward.distanceTo(beforeForward) < 1e-12, `${label}: preserves heading`);
+        assert.ok(view.getPivot().sub(beforePivot).distanceTo(delta) < 1e-9, `${label}: translates pivot with camera`);
+        if (action === 'pan') {
+          assert.ok(Math.abs(delta.z) < 1e-9, `${label}: stays on ground plane`);
+        } else {
+          assert.ok(Math.abs(delta.dot(beforeForward)) < 1e-9, `${label}: stays in screen plane`);
+          assert.ok(Math.abs(delta.z) > 1e-3, `${label}: vertical drag changes elevation`);
+        }
+      }
+    }
+  }
+});
+
+test('held cloud right and middle gestures release without cancelling measurements in either profile', () => {
+  // Unit coverage of shipped controller methods, not trusted browser input:
+  // native context menus, middle-button autoscroll and iframe delivery still
+  // require browser acceptance. Navigation here is outside active insertion.
+  const previousApi = controlContext.window.__pcApi;
+  let cancellations = 0;
+  controlContext.window.__pcApi = { cancel() { cancellations++; } };
+  try {
+    for (const profile of ['default', 'alternate']) {
+      for (const button of [1, 2]) {
+        const { controls, view } = fixture();
+        controls._mouseProfile = profile;
+        controls._inserting = () => false;
+        controls._pointerDown(pointer(button));
+        controls._pointerMove(pointer(button, 520, 510));
+        const action = mouseNavigationProfiles.actionForButton(profile, button);
+        const label = `${profile} button ${button} (${action})`;
+        controls._pointerUp({ ...pointer(button, 520, 510), pointerId: 2 });
+        assert.equal(controls._mode, action, `${label}: unrelated pointer cannot release held drag`);
+        assert.equal(controls._pointerId, 1);
+        controls._pointerUp(pointer(button, 520, 510));
+        assert.equal(controls._mode, 'none', `${label}: release ends drag`);
+        assert.equal(controls._pointerId, null, `${label}: release clears pointer ownership`);
+        assert.equal(cancellations, 0, `${label}: held drag does not finish/cancel measurement`);
+        const releasedPosition = view.position.clone();
+        controls._pointerMove(pointer(button, 540, 520));
+        assert.deepEqual(view.position.toArray(), releasedPosition.toArray(), `${label}: later move cannot continue released drag`);
+      }
+    }
+  } finally {
+    if (previousApi === undefined) delete controlContext.window.__pcApi;
+    else controlContext.window.__pcApi = previousApi;
+  }
+});
+
 test('cloud mode changes release active capture and discard drag/inertia without camera movement', () => {
   const { controls, view } = fixture();
   controls._touch = { mode: 'none', pts: new Map() };
