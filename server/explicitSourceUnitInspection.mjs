@@ -37,7 +37,7 @@ export async function inspectExplicitSourceUnits(absolutePath, source, { signal 
       await validateMeasurementTiffHeader(absolutePath);
       const tiff = await fromFile(absolutePath);
       try {
-        const image = await tiff.getImage(0), keys = image.getGeoKeys();
+        const image = await tiff.getImage(0), keys = image.getGeoKeys() ?? {};
         const epsg = Number(keys.ProjectedCSTypeGeoKey);
         if (!Number.isInteger(epsg) || epsg < 1000 || epsg > 999999 || epsg === 32767 || image.getSamplesPerPixel() !== 1) return null;
         crs = `EPSG:${epsg}`;

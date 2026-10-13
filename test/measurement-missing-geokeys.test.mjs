@@ -8,6 +8,8 @@ import { fromArrayBuffer } from 'geotiff';
 import { nativeTiffFixture } from './helpers/native-tiff-fixture.mjs';
 import { nativeRasterDefinition, preflightNativeRaster, calculateNativeRaster } from '../server/measurementRasterCalculation.mjs';
 import { inspectProcessingRasterUnits } from '../server/processingRasterUnitInspection.mjs';
+import { inspectExplicitSourceUnits } from '../server/explicitSourceUnitInspection.mjs';
+import importedSourceUnits from '../server/importSourceUnitEvidence.js';
 
 function unreferencedFixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'measurement-no-geokeys-'));
@@ -49,6 +51,12 @@ test('a genuine TIFF without GeoKeys cannot acquire CRS or metre evidence from i
     assert.deepEqual(image.getOrigin(), [0, 2, 0]);
   } finally { await tiff.close(); }
   assert.equal(await inspectProcessingRasterUnits(f.file, f.source), null);
+  assert.equal(await inspectExplicitSourceUnits(f.file, f.source), null);
+  const pending = await importedSourceUnits.inspectRegisteredSourceUnits({
+    repository: { getModelVersion: () => ({ activeVersion: { assets: [{ ...f.source, rootKey: 'models', relativePath: 'unreferenced-dsm.tif' }] } }) },
+    storage: { resolve: () => f.file }, modelId: 'model', modelVersionId: 'v',
+  });
+  assert.deepEqual(pending, [], 'import inspection skips the unreferenced raster without inventing evidence or failing display ingestion');
   await assert.rejects(preflightNativeRaster(f.file, f.request), { code: 'measurement_source_crs_mismatch' });
   await assert.rejects(calculateNativeRaster(f.file, f.request), { code: 'measurement_source_crs_mismatch' });
 });
@@ -56,6 +64,8 @@ test('a genuine TIFF without GeoKeys cannot acquire CRS or metre evidence from i
 test('missing GeoKeys do not bypass source-integrity or cancellation checks', async t => {
   const f = unreferencedFixture(t);
   await assert.rejects(inspectProcessingRasterUnits(f.file, { ...f.source, sha256: '0'.repeat(64) }), { code: 'source_changed' });
+  await assert.rejects(inspectExplicitSourceUnits(f.file, { ...f.source, sha256: '0'.repeat(64) }), { code: 'source_changed' });
   const controller = new AbortController(); controller.abort();
   await assert.rejects(inspectProcessingRasterUnits(f.file, f.source, { signal: controller.signal }), { name: 'AbortError' });
+  await assert.rejects(inspectExplicitSourceUnits(f.file, f.source, { signal: controller.signal }), { name: 'AbortError' });
 });
