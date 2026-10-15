@@ -72,3 +72,7 @@
 .share-form,#client-grant-form{min-width:0;grid-template-columns:minmax(0,1fr)}
 .share-form label,.share-form input,.share-form select,
 #client-grant-form label,#client-grant-form input,#client-grant-form select{min-width:0}
+
+/* Task rows: a fixed-width action column keeps every row's stats, status and
+   buttons on the same vertical lines, whether or not a row has a report. */
+@media(min-width:1101px){.task-summary{grid-template-columns:minmax(0,1fr) minmax(19.5rem,auto)}.task-quick-actions{justify-content:flex-end}}
