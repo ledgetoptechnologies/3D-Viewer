@@ -52,3 +52,15 @@ they remain open, but renewal may pause while the workspace owner is absent.
 They reconnect only through the authenticated restored controller; this does
 not promise server persistence of unsaved drafts. Inner-model current-tab
 launch/iframe fallback is outside this change.
+
+## Workspace navigation evidence fields
+
+`createWorkspaceRecovery.getNavigationState()` now receives an ephemeral workspace-only snapshot from `workspaceNavigationState`:
+
+- `pendingUpload`: existing New Task transfer flag OR the reachable legacy Import upload loop is still running.
+- `selectedFileCount`: New Task selected count plus legacy selected artifacts. An in-progress legacy upload retains its count if the modal disappears; the same modal/operation files are counted once. These are selected references, not a count of server-unacknowledged photos; legacy artifacts can be models/GCP files as well as photos.
+- `unsavedTaskDraft`: existing New Task controller flag, unchanged.
+- `unsavedGcpMark`: current valid GCP draft has no exact saved correspondence, or its pixel X/Y differ from that correspondence. Saved seeds and reverted edits are clean. Acknowledged saves update the local correspondence baseline before optional refresh, so a refresh failure does not make an acknowledged mark look unsaved.
+- `pendingGcpSave`: specifically a GCP save request is pending, independent of generic workspace busy state. It resets on success, rejection and synchronous failure. The request may already have reached the server; check saved marks after renewal before retrying.
+
+These fields grant no access, persist no File handles, and report no inner-model measurement state. They do not preserve arbitrary form input. Claude owns warning wording/layout and acknowledgement gating for the two new GCP fields; the existing UI does not consume them until that follow-up lands. Full HTTPS recovery remains a separate acceptance check.
