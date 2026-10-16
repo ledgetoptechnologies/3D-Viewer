@@ -20,7 +20,7 @@ export function describeDiscardedWork(state = {}) {
 
 export function renderCurrentTabRecoveryOffer({
   documentRef = document, windowRef = window, container, navigationState = {}, continueInCurrentTab,
-  resetDelayMs = 2_000,
+  resetDelayMs = 6_000,
 }) {
   if (!container || typeof continueInCurrentTab !== 'function') return null;
   container.querySelector(`.${OFFER_CLASS}`)?.remove();
@@ -61,8 +61,6 @@ export function renderCurrentTabRecoveryOffer({
   button.type = 'button';
   button.className = 'primary-button';
   button.textContent = 'Renew in this tab';
-  const hint = documentRef.createElement('small');
-  hint.textContent = 'Allowing pop-ups for this site lets renewal finish without leaving the page.';
   const sync = () => { button.disabled = Boolean(confirm && !confirm.checked); };
   confirm?.addEventListener('change', sync);
   sync();
@@ -83,19 +81,20 @@ export function renderCurrentTabRecoveryOffer({
       status.textContent = 'This tab could not start renewal. Open Viewer from Operations again.';
       return;
     }
-    // If the browser's leave-page prompt was cancelled, nothing navigated:
-    // restore the button so the person can try again or keep working.
+    // The page can't tell a cancelled leave-page prompt from a slow redirect,
+    // so after a pause it re-enables the button with neutral wording instead
+    // of claiming the renewal was cancelled.
     windowRef.setTimeout(() => {
       if (leaving || !section.isConnected) return;
       button.textContent = 'Renew in this tab';
       sync();
-      status.textContent = 'Renewal was cancelled. Your work in this tab is unchanged.';
+      status.textContent = "Still on this page? Renewal hasn't started yet. You can try again; nothing in this tab has changed.";
     }, resetDelayMs);
   });
 
   const actions = documentRef.createElement('div');
   actions.className = 'recovery-current-tab-actions';
-  actions.append(button, hint);
+  actions.append(button);
   section.append(actions, status);
   container.append(section);
   return section;

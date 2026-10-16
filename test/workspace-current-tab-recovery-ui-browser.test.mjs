@@ -144,7 +144,8 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
       await open(client, origin, `busy=1&state=${encodeURIComponent(JSON.stringify({ pendingUpload: true, selectedFileCount: 3, unsavedTaskDraft: true }))}`);
       const view = await client.evaluate(`(() => { const s = document.querySelector('.recovery-current-tab'); return {
         title: s.querySelector('h3').textContent, items: [...s.querySelectorAll('.recovery-current-tab-loss li')].map(li => li.textContent),
-        alert: Boolean(s.querySelector('[role="alert"]')), disabled: s.querySelector('button').disabled }; })()`);
+        alert: Boolean(s.querySelector('[role="alert"]')), disabled: s.querySelector('button').disabled, text: s.textContent }; })()`);
+      assert.doesNotMatch(view.text, /pop-up|popup/i, 'the fallback offers an action, not advice to allow pop-ups');
       assert.equal(view.title, 'Renew in this tab instead');
       assert.equal(view.items.length, 3);
       assert.ok(view.alert);
@@ -167,7 +168,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
         acknowledged: document.querySelector('.recovery-current-tab-loss input').checked,
         status: document.querySelector('.recovery-current-tab-status').textContent })`);
       assert.deepEqual(afterCancel, { path: '/harness.html', calls: 1, disabled: false, acknowledged: true,
-        status: 'Renewal was cancelled. Your work in this tab is unchanged.' }, 'Cancel must leave the page, acknowledgement and guard intact with no automatic reissue');
+        status: "Still on this page? Renewal hasn't started yet. You can try again; nothing in this tab has changed." }, 'Cancel must leave the page, acknowledgement and guard intact with no automatic reissue');
       await new Promise(resolve => setTimeout(resolve, 600));
       assert.equal(await client.evaluate('window.__calls'), 1, 'no automatic retry after Cancel');
 
