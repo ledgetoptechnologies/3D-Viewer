@@ -9,6 +9,7 @@ import { synchronizeOrthophotoPreviews } from './workspace-orthophoto-preview-st
 import { createStorageUsagePoll } from './storage-usage-poll.mjs';
 import { createWorkspaceDialogs } from './workspace-dialogs.mjs';
 import { mountNewTask } from './workspace-new-task.mjs';
+import { renderCurrentTabRecoveryOffer } from './workspace-current-tab-recovery-ui.mjs';
 import { mountTaskOptions } from './workspace-task-options.mjs';
 import { createWorkspaceRecovery, relayWorkspaceRecoveryGrant } from './workspace-recovery.mjs';
 import { resumeCurrentTabWorkspaceRecovery } from './workspace-current-tab-recovery.mjs';
@@ -49,7 +50,7 @@ const workspaceController=window.opener&&!window.opener.closed?window.opener:nul
 const reviewSessionController=new ReviewSessionController({origin:location.origin,storage:sessionStorage,issueGrant:({sessionMode,attemptId,outputId},{signal}={})=>api(sessionMode==='published'?`/api/v1/processing/outputs/${encodeURIComponent(outputId)}/view-sessions`:`/api/v1/attempts/${encodeURIComponent(attemptId)}/review-sessions`,{method:'POST',body:{},signal}),measurementRequest:createMeasurementCalculationBroker({origin:location.origin,getAuthorization:()=>({accessToken:state.token,session:state.adminSession})})});
 let workspaceRenewal=null;
 let workspaceAuthorizationClearing=false;
-const workspaceRecovery=createWorkspaceRecovery({getSession:()=>({session:state.adminSession,accessToken:state.token,controllerOrigin:sessionStorage.getItem(OPS_ORIGIN_KEY)}),getView:workspaceView,getNavigationState:()=>activeNewTask?.navigationState||{pendingUpload:false,selectedFileCount:0,unsavedTaskDraft:false},install:installWorkspaceSession,onFatal:()=>{workspaceAuthorizationClearing=false;clearWorkspaceAuthorization('revoked');},onPaused:()=>{reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);state.logTimer=null;clearTimeout(state.operationTimer);},onResumed:()=>{workspaceAuthorizationClearing=false;storageUsagePoll.sync();scheduleOperationRefresh();toast('Access restored. Your workspace and upload can continue.');}});
+const workspaceRecovery=createWorkspaceRecovery({getSession:()=>({session:state.adminSession,accessToken:state.token,controllerOrigin:sessionStorage.getItem(OPS_ORIGIN_KEY)}),getView:workspaceView,getNavigationState:()=>activeNewTask?.navigationState||{pendingUpload:false,selectedFileCount:0,unsavedTaskDraft:false},onPopupBlocked:({continueInCurrentTab,navigationState})=>renderCurrentTabRecoveryOffer({container:document.querySelector('dialog.workspace-recovery[open]'),navigationState,continueInCurrentTab}),install:installWorkspaceSession,onFatal:()=>{workspaceAuthorizationClearing=false;clearWorkspaceAuthorization('revoked');},onPaused:()=>{reviewSessionController.suspend({preserve:true});storageUsagePoll.stop();clearInterval(state.logTimer);state.logTimer=null;clearTimeout(state.operationTimer);},onResumed:()=>{workspaceAuthorizationClearing=false;storageUsagePoll.sync();scheduleOperationRefresh();toast('Access restored. Your workspace and upload can continue.');}});
 let orthophotoPool=null;
 const storageUsagePoll=createStorageUsagePoll({
   shouldPoll:()=>Boolean(state.token&&state.section==='diagnostics'&&!document.hidden&&(state.storage?.usage?.status==='pending'||state.storage?.usage?.refreshing)),
