@@ -168,7 +168,7 @@ test('"Renew in this tab" gates on discarded work and honours the real beforeunl
         acknowledged: document.querySelector('.recovery-current-tab-loss input').checked,
         status: document.querySelector('.recovery-current-tab-status').textContent })`);
       assert.deepEqual(afterCancel, { path: '/harness.html', calls: 1, disabled: false, acknowledged: true,
-        status: "Still on this page? Renewal hasn't started yet. You can try again; nothing in this tab has changed." }, 'Cancel must leave the page, acknowledgement and guard intact with no automatic reissue');
+        status: 'Still on this page? You can try again or return to Operations.' }, 'Cancel must leave the page, acknowledgement and guard intact with no automatic reissue');
       await new Promise(resolve => setTimeout(resolve, 600));
       assert.equal(await client.evaluate('window.__calls'), 1, 'no automatic retry after Cancel');
 

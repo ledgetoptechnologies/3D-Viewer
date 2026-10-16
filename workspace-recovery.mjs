@@ -48,9 +48,9 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
         windowRef.sessionStorage.setItem(STATE_KEY,JSON.stringify({nonce:record.nonce,createdAt:record.createdAt}));
         stored=true;
         record.popup=windowRef.open(`${origin.origin}/viewer/reauthorize?state=${encodeURIComponent(record.nonce)}`,'_blank');
-        if(!record.popup){resetLaunch(record);status.textContent='Your browser blocked the sign-in tab. Allow pop-ups, then try again.';offerCurrentTabRecovery();return;}
+        if(!record.popup){resetLaunch(record);status.textContent='The sign-in tab did not open. You can try again.';offerCurrentTabRecovery();return;}
         status.textContent='Complete sign-in in the new tab. This tab will resume automatically.';
-      }catch{resetLaunch(record);status.textContent='Unable to open sign-in. Allow pop-ups and browser storage, then try again. Your work is still here.';if(stored)offerCurrentTabRecovery();}
+      }catch{resetLaunch(record);status.textContent='Unable to open sign-in. Your work is still here; you can try again.';if(stored)offerCurrentTabRecovery();}
     };
     documentRef.body.append(dialog);dialog.showModal();onPaused();return promise;
   }

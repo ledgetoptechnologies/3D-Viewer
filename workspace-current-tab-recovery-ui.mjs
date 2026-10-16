@@ -88,7 +88,7 @@ export function renderCurrentTabRecoveryOffer({
       if (leaving || !section.isConnected) return;
       button.textContent = 'Renew in this tab';
       sync();
-      status.textContent = "Still on this page? Renewal hasn't started yet. You can try again; nothing in this tab has changed.";
+      status.textContent = 'Still on this page? You can try again or return to Operations.';
     }, resetDelayMs);
   });
 
