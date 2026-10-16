@@ -793,7 +793,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     if (viewport.name === 'desktop') {
       const grantsBeforeBlockedPopup = runtime.requests.filter(item => item.method === 'POST' && item.path === '/api/v1/attempts/attempt-quarry/review-sessions').length;
       await client.evaluate(`(() => { window.__blockNextLauncher=true; document.querySelector('.task-quick-actions [data-action="open-review"]').click(); return true; })()`);
-      await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('Viewer popup was blocked or failed to initialize')", `${viewport.name}: blocked popup did not fail through the bounded launcher timeout`, 10_000);
+      await waitFor(client, "document.querySelector('#workspace-toast')?.textContent.includes('Allow pop-ups for this site, then try again')", `${viewport.name}: blocked popup did not fail through the bounded launcher timeout`, 10_000);
       const grantsAfterBlockedPopup = runtime.requests.filter(item => item.method === 'POST' && item.path === '/api/v1/attempts/attempt-quarry/review-sessions').length;
       assert.equal(grantsAfterBlockedPopup, grantsBeforeBlockedPopup, `${viewport.name}: blocked popup minted a review grant before readiness`);
     }

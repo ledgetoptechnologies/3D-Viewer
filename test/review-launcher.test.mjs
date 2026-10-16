@@ -12,7 +12,7 @@ test('workspace launches Viewer tabs with noopener and an unguessable isolated c
   const launchers = workspace.slice(workspace.indexOf('async function viewPublishedOutput'), workspace.indexOf('async function downloadOutputAsset'));
   const review = workspace.slice(workspace.indexOf('async function openReview'), workspace.indexOf('async function publishAttempt'));
   assert.match(workspace, /import \{ beginIsolatedViewerLaunch \} from '\.\/isolated-viewer-launch\.mjs'/);
-  assert.match(workspace, /async function readyViewerLauncher\(\)\{const launch=beginIsolatedViewerLaunch\(\);if\(!await launch\.waitUntilReady\(\)\)throw new Error\('Viewer popup was blocked or failed to initialize'\)/);
+  assert.match(workspace, /async function readyViewerLauncher\(\)\{const launch=beginIsolatedViewerLaunch\(\);if\(!await launch\.waitUntilReady\(\)\)throw new Error\('The Viewer window was blocked or did not open\. Allow pop-ups for this site, then try again\.'\)/);
   assert.ok(review.indexOf('launch=await readyViewerLauncher()') < review.indexOf('await api('), 'review API is not called before launcher readiness');
   assert.match(workspace, /reviewSessionController\.track\(launch\.channelId,\{attemptId:result\.attemptId,modelId:result\.modelId,modelVersionId:result\.modelVersionId,sessionTtlSeconds:result\.sessionTtlSeconds\}\)/);
   assert.match(workspace, /launch\.navigate\(result\.embedUrl,\{renewable:true\}\)/);
