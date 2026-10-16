@@ -8,13 +8,17 @@
 const OFFER_CLASS = 'recovery-current-tab';
 
 /** Plain-language list of what a full navigation discards, from the
- * workspace's navigation state ({pendingUpload, selectedFileCount, unsavedTaskDraft}). */
+ * workspace's navigation state ({pendingUpload, selectedFileCount, unsavedTaskDraft,
+ * unsavedGcpMark, pendingGcpSave}). Selected files may be photos, models or GCP
+ * files, so the copy says "files". */
 export function describeDiscardedWork(state = {}) {
   const items = [];
   const count = Number.isSafeInteger(state.selectedFileCount) && state.selectedFileCount > 0 ? state.selectedFileCount : 0;
   if (state.pendingUpload) items.push('The upload in progress. Check its status after renewing before you start it again.');
-  if (count) items.push(`${count} selected photo${count === 1 ? '' : 's'} not uploaded yet. You'll need to select ${count === 1 ? 'it' : 'them'} again.`);
+  if (count) items.push(`${count} selected file${count === 1 ? '' : 's'} not uploaded yet. You'll need to select ${count === 1 ? 'it' : 'them'} again.`);
   if (state.unsavedTaskDraft) items.push("The new task form you haven't submitted.");
+  if (state.pendingGcpSave) items.push('The GCP mark being saved. Check the saved marks after renewing before you save it again.');
+  else if (state.unsavedGcpMark) items.push("The GCP mark you placed but haven't saved.");
   return items;
 }
 

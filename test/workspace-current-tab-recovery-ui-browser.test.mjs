@@ -17,9 +17,13 @@ test('discarded-work copy names exactly what a same-tab navigation loses', () =>
   const all = describeDiscardedWork({ pendingUpload: true, selectedFileCount: 3, unsavedTaskDraft: true });
   assert.equal(all.length, 3);
   assert.match(all[0], /upload in progress.*Check its status/);
-  assert.match(all[1], /^3 selected photos not uploaded yet\. You'll need to select them again\.$/);
+  assert.match(all[1], /^3 selected files not uploaded yet\. You'll need to select them again\.$/);
   assert.match(all[2], /new task form/);
-  assert.match(describeDiscardedWork({ selectedFileCount: 1 })[0], /^1 selected photo not uploaded yet\. You'll need to select it again\.$/);
+  assert.match(describeDiscardedWork({ selectedFileCount: 1 })[0], /^1 selected file not uploaded yet\. You'll need to select it again\.$/);
+  assert.deepEqual(describeDiscardedWork({ unsavedGcpMark: true }), ["The GCP mark you placed but haven't saved."]);
+  const saving = describeDiscardedWork({ unsavedGcpMark: true, pendingGcpSave: true });
+  assert.equal(saving.length, 1, 'a mark being saved is described once, as pending');
+  assert.match(saving[0], /^The GCP mark being saved\. Check the saved marks after renewing/);
   assert.deepEqual(describeDiscardedWork({ selectedFileCount: -2 }), []);
 });
 
